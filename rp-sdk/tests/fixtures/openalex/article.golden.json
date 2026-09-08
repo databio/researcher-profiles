@@ -1,0 +1,44 @@
+{
+  "parse_work": {
+    "@id": "https://doi.org/10.1101/gr.example.2021",
+    "@type": "ScholarlyArticle",
+    "abstract": "We profiled chromatin accessibility across many chromatin states",
+    "cited_by_count": 128,
+    "datePublished": "2021",
+    "doi": "10.1101/gr.example.2021",
+    "first_author": "Redacted",
+    "isPartOf": {
+      "@type": "Periodical",
+      "name": "Genome Research"
+    },
+    "name": "Chromatin accessibility maps of a redacted cell type",
+    "openalex_id": "W2100000001",
+    "pdf_url": "https://genome.example.org/content/31/6/1000.full.pdf",
+    "pmcid": "PMC8000001",
+    "pmid": "34000001",
+    "status": "pending",
+    "type": "article"
+  },
+  "to_normalized_dict": {
+    "abstract": "We profiled chromatin accessibility across many chromatin states",
+    "authors": [
+      "Jane Q Redacted",
+      "John Redacted"
+    ],
+    "doi": "10.1101/GR.EXAMPLE.2021",
+    "openalex_id": "https://openalex.org/W2100000001",
+    "title": "  Chromatin accessibility maps of a redacted cell type  ",
+    "year": 2021
+  },
+  "to_work_dict": {
+    "abstract": "We profiled chromatin accessibility across many chromatin states",
+    "coauthors": [
+      "Jane Q Redacted",
+      "John Redacted"
+    ],
+    "doi": "10.1101/GR.EXAMPLE.2021",
+    "openalex_id": "https://openalex.org/W2100000001",
+    "title": "  Chromatin accessibility maps of a redacted cell type  ",
+    "year": 2021
+  }
+}

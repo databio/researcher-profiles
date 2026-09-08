@@ -1,0 +1,32 @@
+{
+  "@context": "https://profiles.databio.org/context/v1.jsonld",
+  "@type": "Collection",
+  "conformsTo": "https://profiles.databio.org/context/v1.jsonld",
+  "about": {
+    "@id": "https://orcid.org/0000-0005-5555-0007"
+  },
+  "hasPart": [
+    {
+      "@id": "#paper/alden2020atlas",
+      "@type": "ScholarlyArticle",
+      "name": "A cross-species chromatin state reference atlas for twelve mammalian genomes",
+      "paper_id": "alden2020atlas",
+      "datePublished": "2020",
+      "isPartOf": {
+        "@type": "Periodical",
+        "name": "Genome Biology and Evolution"
+      }
+    },
+    {
+      "@id": "#paper/alden2017segment",
+      "@type": "ScholarlyArticle",
+      "name": "Single-species chromatin state segmentation with a hidden Markov model",
+      "paper_id": "alden2017segment",
+      "datePublished": "2017",
+      "isPartOf": {
+        "@type": "Periodical",
+        "name": "Genome Biology and Evolution"
+      }
+    }
+  ]
+}

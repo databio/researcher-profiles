@@ -1,0 +1,42 @@
+{
+  "build": {
+    "completed_phases": [
+      "1",
+      "2",
+      "3",
+      "4"
+    ],
+    "coverage": "selective",
+    "mode": "synthesize",
+    "phase_retries": {
+      "3": 1
+    }
+  },
+  "inputs": {
+    "reporter_supplement": false,
+    "websites": []
+  },
+  "papers": {
+    "noor2019cohort": {
+      "status": "pending",
+      "contaminated": false
+    },
+    "smith2010robust": {
+      "status": "downloaded",
+      "contaminated": false
+    },
+    "smith2015association": {
+      "status": "downloaded",
+      "contaminated": false
+    },
+    "smith2020integration": {
+      "status": "manual",
+      "contaminated": false
+    },
+    "vale2023structure": {
+      "status": "downloaded",
+      "contaminated": false
+    }
+  },
+  "schema_version": 1
+}

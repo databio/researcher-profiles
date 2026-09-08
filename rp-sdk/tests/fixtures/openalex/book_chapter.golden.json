@@ -1,0 +1,34 @@
+{
+  "parse_work": {
+    "@id": "https://openalex.org/W2200000002",
+    "@type": "ScholarlyArticle",
+    "abstract": "",
+    "cited_by_count": 3,
+    "datePublished": "2018",
+    "first_author": "",
+    "isPartOf": {
+      "@type": "Periodical",
+      "name": "Handbook of Redacted Methods"
+    },
+    "name": "A Redacted Chapter on Methods",
+    "openalex_id": "W2200000002",
+    "status": "pending",
+    "type": "book-chapter"
+  },
+  "to_normalized_dict": {
+    "abstract": null,
+    "authors": [],
+    "doi": null,
+    "openalex_id": "https://openalex.org/W2200000002",
+    "title": "A Redacted Chapter on Methods",
+    "year": 2018
+  },
+  "to_work_dict": {
+    "abstract": null,
+    "coauthors": [],
+    "doi": null,
+    "openalex_id": "https://openalex.org/W2200000002",
+    "title": "A Redacted Chapter on Methods",
+    "year": 2018
+  }
+}

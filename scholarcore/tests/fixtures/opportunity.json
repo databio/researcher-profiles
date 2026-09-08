@@ -1,0 +1,13 @@
+{
+  "opportunity_number": "PA-25-168",
+  "agency": "National Institute of Cracked Pot Studies",
+  "title": "Research Project Grant (R01 Clinical Trial Not Allowed)",
+  "url": "https://example.org/opportunity/PA-25-168",
+  "document_type": "PA",
+  "activity_codes": ["R01", "R21"],
+  "posted_date": "2025-01-15",
+  "expiration_date": "2028-01-15",
+  "budget_max": 500000,
+  "purpose": "Support investigator-initiated research in psychoceramics.",
+  "keywords": ["psychoceramics", "cracked pots"]
+}

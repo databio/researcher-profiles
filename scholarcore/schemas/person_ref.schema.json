@@ -1,0 +1,27 @@
+{
+  "additionalProperties": true,
+  "description": "A lightweight pointer to a person: the join key plus a cached name.\n\nUse this when referencing a person without needing their full record,\nfor authorship lists, grant co-investigators, collaborator mentions. The\n``rid`` is the join key; ``name`` is cached for display without a lookup.\n\nAttributes:\n    rid: The canonical researcher id, an ORCID or a ``local:`` id.\n    name: A cached display name. Not authoritative; the full Person/Researcher\n        record is.",
+  "properties": {
+    "name": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Name"
+    },
+    "rid": {
+      "title": "Rid",
+      "type": "string"
+    }
+  },
+  "required": [
+    "rid"
+  ],
+  "title": "PersonRef",
+  "type": "object"
+}

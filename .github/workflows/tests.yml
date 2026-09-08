@@ -1,0 +1,284 @@
+name: Tests
+
+# The full test suite: the rp-sdk Python tree, the scholarcore Python tree, the
+# browser app's vitest suite and bundle build (whose typecheck also covers
+# rp-ui-lib/src via the @rp/ui-lib alias, see the browser app job's Typecheck
+# step), and a scoped Python lint.
+#
+# Path-filtered: the rp-sdk job runs on rp-sdk/** changes, the scholarcore jobs
+# on scholarcore/** changes, Explorer on rp-browser/** or rp-ui-lib/** changes,
+# lint on any Python file. Tradeoff: a change nobody predicted (workflow tweak,
+# config file) might slip through.
+#
+# The Python jobs call scripts/test-all.sh rather than spelling out the pytest
+# invocation here. That script is the single source of truth for how the suites
+# are run, so a developer running it locally and CI running it here execute the
+# same code and cannot drift. Each job passes the script its own suite name.
+# Each job installs only its own package, so running the other suite there
+# would fail on imports rather than on a real defect.
+#
+# Not run here: the `integration` and `llm` markers (deselected by rp-sdk's
+# addopts). Those hit real embeddings and the real Anthropic API. Use
+# scripts/test-integration.sh by hand for those.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      python: ${{ steps.filter.outputs.python }}
+      scholarcore: ${{ steps.filter.outputs.scholarcore }}
+      explorer: ${{ steps.filter.outputs.explorer }}
+      lint: ${{ steps.filter.outputs.lint }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            python:
+              - 'rp-sdk/**'
+              - 'scripts/**'
+              - '.github/workflows/tests.yml'
+            scholarcore:
+              - 'scholarcore/**'
+              - 'scripts/**'
+              - '.github/workflows/tests.yml'
+            explorer:
+              - 'rp-browser/**'
+              - 'rp-ui-lib/**'
+              - '.github/workflows/tests.yml'
+            lint:
+              - '**/*.py'
+              - 'ruff.toml'
+              - '.github/workflows/tests.yml'
+
+  python:
+    name: rp-sdk suite (${{ matrix.python-version }})
+    needs: changes
+    if: ${{ needs.changes.outputs.python == 'true' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Minimum and maximum supported, nothing in between: the two ends
+        # bracket the range, and the middle is covered by implication. The
+        # floor must match rp-sdk's `requires-python` (3.12) or pip refuses
+        # the install.
+        python-version: ['3.12', '3.14']
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            rp-sdk/pyproject.toml
+            scholarcore/pyproject.toml
+
+      - name: Install scholarcore
+        # scholarcore is not on PyPI, so it must be installed from this checkout
+        # before rp-sdk: researcher_profiles.schema imports it at module scope.
+        run: pip install -e ./scholarcore
+
+      - name: Install rp-sdk
+        # [dev] pulls the api/vectors/client/signing/validate tiers plus
+        # hatchling, all imported at module scope by the suite.
+        #
+        # [topics] and [sql] are here on purpose. Without them, scikit-learn and
+        # sqlmodel are absent and four tests skip: topic clustering and the
+        # SQLModel relational mirror would go unexercised in CI. They cost ~190 MB
+        # and all four pass. Still deliberately absent: [st], because
+        # sentence-transformers drags in torch (~6 GB, mostly CUDA), and the tests
+        # that need a real encoder are `integration`-marked and deselected anyway.
+        run: pip install -e "./rp-sdk[dev,topics,sql]"
+
+      - name: Python suite
+        # scripts/test-all.sh runs the rp-sdk suite via pytest. It passes an
+        # absolute test path, so the run's rootdir resolves to rp-sdk's
+        # pyproject.toml and its addopts (-m 'not integration and not llm')
+        # apply. This is verified. The packaging guardrails in test_packaging.py
+        # carry no marker at all and so always run: they build real wheels/sdists
+        # through hatchling's Python API, offline, in well under a second, and
+        # they are the only guard on what actually ships.
+        #
+        # Expected: no skips. A new skip means an optional dependency stopped
+        # resolving. That is a silent loss of coverage, not a pass.
+        #
+        # Do NOT add -W error here. Every run emits one StarletteDeprecationWarning
+        # from fastapi/testclient.py (a dependency-version artifact, not repo code);
+        # warnings-as-errors would turn both matrix legs red on day one.
+        run: ./scripts/test-all.sh rp-sdk -ra
+
+  scholarcore:
+    name: scholarcore suite (${{ matrix.python-version }})
+    needs: changes
+    if: ${{ needs.changes.outputs.scholarcore == 'true' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Floor and ceiling of scholarcore's `requires-python`, nothing in
+        # between. Both packages in this repo share the 3.12 floor.
+        python-version: ['3.12', '3.14']
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            scholarcore/pyproject.toml
+
+      - name: Install scholarcore
+        # [test] pulls pytest and jsonschema. jsonschema is not optional in
+        # practice: without it tests/test_schema_export.py fails to import, and
+        # the JSON Schema drift guard, which protects non-Python consumers,
+        # silently stops running.
+        run: pip install -e "./scholarcore[test]"
+
+      - name: Suite
+        # Expected: no skips. A new skip means a dependency stopped resolving,
+        # which is a silent loss of coverage rather than a pass.
+        #
+        # The `scholarcore` selector runs only this package's suite; the
+        # rp-sdk half of the script would fail on imports here, since this job
+        # installs only scholarcore.
+        run: ./scripts/test-all.sh scholarcore -ra
+
+  scholarcore-build:
+    name: scholarcore distributions
+    needs: changes
+    if: ${{ needs.changes.outputs.scholarcore == 'true' }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: scholarcore
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Install build
+        run: pip install build
+
+      - name: Build sdist and wheel
+        # "Installable from a checkout" is this package's entire deliverable
+        # right now, and `pip install -e .` does not prove it: the editable
+        # path skips the sdist/wheel construction where a bad
+        # [tool.hatch.build] target or a missing LICENSE actually shows up.
+        run: python -m build
+
+      - name: Install the wheel and run the suite against it
+        # Installing the built wheel (not the source tree) is what proves the
+        # package ships everything it needs. pytest still runs from the
+        # checkout, so tests/ and schemas/ come from the repo while `import
+        # scholarcore` resolves to the installed wheel. That is exactly the
+        # arrangement a consumer gets.
+        run: |
+          pip install "$(ls dist/*.whl)[test]"
+          pytest -ra
+
+  explorer:
+    name: Explorer suite
+    needs: changes
+    if: ${{ needs.changes.outputs.explorer == 'true' }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rp-browser
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            rp-browser/package-lock.json
+            rp-ui-lib/package-lock.json
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Install rp-ui-lib deps
+        # The typecheck and build below pull rp-ui-lib/src in through
+        # tsconfig.json's @rp/ui-lib path alias, and those sources import react,
+        # marked and dompurify. Under moduleResolution "bundler", resolution for
+        # an aliased file walks up from rp-ui-lib/, not rp-browser/, so those
+        # imports only resolve if rp-ui-lib has its own node_modules. A sibling
+        # package's install is never consulted. Without this step every rp-ui-lib
+        # import fails (TS2307/TS2875) and both steps below go red.
+        working-directory: rp-ui-lib
+        run: npm ci
+
+      - name: Vitest suite
+        run: npm test
+
+      - name: Typecheck
+        # vitest transpiles without type-checking; tsc --noEmit is the only
+        # thing standing between a type error and a broken deployed SPA. This
+        # also type-checks all of rp-ui-lib/src: every module in src/lib/ is
+        # re-exported by src/lib/index.ts, which tsconfig.json's @rp/ui-lib
+        # alias pulls in, plus src/types.ts. rp-ui-lib therefore has no job of
+        # its own; do not add one back. The only thing not carried over is
+        # rp-ui-lib's noUnusedLocals/noUnusedParameters (this project sets both
+        # false), which are style rules, not type checking.
+        # See the "Install rp-ui-lib deps" step above for why that sibling
+        # package must still be npm ci'd.
+        if: ${{ !cancelled() }}
+        run: npm run typecheck
+
+      - name: Build
+        # Typecheck is not a build. `npm run build` also runs copy-skills.mjs and
+        # the vite bundle, either of which can fail on something tsc never sees:
+        # a missing asset, a bad import path, a plugin error. The deployed
+        # artifact is the bundle, so the bundle is what has to be provable.
+        if: ${{ !cancelled() }}
+        run: npm run build
+
+  lint:
+    name: Python lint
+    needs: changes
+    if: ${{ needs.changes.outputs.lint == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.14'
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Ruff
+        # The rule set is codified in ruff.toml (`[lint] select = ["E", "F",
+        # "I"]` at line-length 100), not spelled out here, so config and CI
+        # cannot drift. A developer running `ruff check .` locally hits the
+        # exact same gate. That file documents the house standard: style-
+        # enforcing E,F,I with the formatter owning wrapping (E501 ignored).
+        run: ruff check .
+
+      - name: Ruff format
+        # The house standard runs both: `ruff check` for lint rules and
+        # `ruff format --check` to prove the tree is already formatted. The
+        # formatter owns line wrapping (which is why E501 is ignored above),
+        # so this is the gate that actually enforces line-length 100.
+        run: ruff format --check .

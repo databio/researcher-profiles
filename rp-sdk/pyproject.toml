@@ -1,0 +1,223 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "researcher-profiles"
+version = "0.3.0"
+description = "Portable, validated representation of on-disk researcher profiles."
+readme = "README.md"
+requires-python = ">=3.12"
+# PEP 639. `license-files` is what actually puts LICENSE into the built
+# distribution's dist-info; without it the published wheel carried no license
+# at all once hatchling's project root moved from the repo root down to
+# rp-sdk/. rp-sdk/LICENSE is a byte-identical copy of the monorepo's root
+# LICENSE; the root one is canonical (it covers every component) and this
+# copy exists only because `license-files` cannot reach above the project
+# root. Keep them identical.
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Nathan Sheffield" },
+]
+keywords = ["researcher", "profile", "schema", "validation", "json-schema"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+    "pydantic>=2.6",
+    "pyyaml>=6",
+    "scholarcore>=0.1.0",
+]
+
+[project.optional-dependencies]
+# Serving the API additionally needs a vector tier (and, for the remote client
+# used by tests/tooling, `client`) at runtime. The full server install with a
+# local encoder is `researcher-profiles[api,vectors,st]`.
+#
+# The encoder tiers are split from the store because `st` pulls
+# sentence-transformers -> torch, which is ~6 GB installed (and ~4.4 GB of that
+# is NVIDIA CUDA libraries that do nothing on a CPU-only server). In a
+# container, install the CPU wheel first or dependency resolution drags the
+# CUDA build back in:
+#
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+#   pip install -e "./rp-sdk[api,vectors,st]"
+#
+# A deployment that embeds remotely instead installs [api,vectors,openai]
+# (or [...,voyage]) and never touches torch. A CPU-only deployment that wants
+# a local encoder without torch installs [api,vectors,fastembed] instead of
+# [...,st] with the same weights and no CUDA libraries. Index vectors are
+# tied to the backend that built them; switching encoders means reindexing.
+api = [
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+]
+# On-disk vector store + registry math: `sqlite-vec` backs the chunk index,
+# `numpy` is needed by registry.py, calibration.py, and embeddings/*. This is
+# the floor for any indexed use (search, match, rank_against) regardless of
+# which encoder backend supplies the vectors.
+vectors = [
+    "sqlite-vec",
+    "numpy>=1.24",
+]
+# Local sentence-transformers encoder. See the torch note above.
+st = [
+    "researcher-profiles[vectors]",
+    "sentence-transformers",
+]
+# Local ONNX encoder: same models as [st], via onnxruntime instead of torch.
+# ~175 MB installed against ~6 GB, which is the difference between a local
+# encoder fitting in a container and not. Prefer this over [st] for any
+# CPU-only deployment.
+fastembed = [
+    "researcher-profiles[vectors]",
+    "fastembed>=0.7.4",
+]
+# HTTP client tier: RemoteResearcherProfile, remote rank_against, and the
+# ManagementClient behind `rp agent` and `rp profile`.
+client = [
+    "httpx>=0.27",
+]
+openai = [
+    "openai>=1",
+]
+voyage = [
+    "voyageai",
+]
+llm = [
+    "anthropic>=0.40",
+]
+# The SQL profile store (researcher_profiles.db + dbprofile): a peer backing
+# store a whole profile can live in, not a projection of a directory.
+sql = [
+    "sqlmodel>=0.0.16",
+]
+# Postgres is the server backend this extra targets. SQLite is the backend
+# the test suite runs the store on, and it is enough for everything except
+# type portability and NULL-in-unique-constraint semantics: the
+# RESEARCHER_PROFILES_TEST_DATABASE_URL integration test in tests/integration/ catches those.
+# `psycopg2-binary` is the driver the integration test assumes.
+postgres = [
+    "researcher-profiles[sql]",
+    "psycopg2-binary",
+]
+# KMeans clustering: store.match.cluster() and topics.py only. It is not
+# part of the server tiers: the match/search path never clusters, and
+# scikit-learn drags in scipy (~190 MB together). Both call sites gate the
+# import and name this extra in their error message. topics.py also uses
+# `hdbscan` when it happens to be importable, but does not require it, so it
+# is not listed here.
+topics = [
+    "scikit-learn>=1.3",
+]
+# Cryptographic signing/verification of profiles (the key_signature proof).
+# Opt-in: nothing on the profile load path imports researcher_profiles.signing,
+# so a bare install stays free of the cryptography dependency.
+signing = [
+    "cryptography>=41",
+]
+# scripts/render_python_api.py: renders docs/rp-sdk/reference/python-api.md
+# from `::: module.Class` directives via griffe. It is needed only to
+# regenerate the Python API reference after a docstring change, not to
+# install, test, or run the SDK. See docs/rp-sdk/reference/python-api.md's own
+# note and AGENTS.md.
+docs = [
+    "griffe>=1.0",
+]
+# The supported test install. It pulls in the api / vectors / client tiers
+# because the SDK test suite exercises the real FastAPI app, the sqlite-vec /
+# numpy registry, and the httpx remote client at module scope. A bare
+# `.[dev]` would error during collection.
+# `sql` is in here so the suite exercises the profile store on SQLite by
+# default, with no find_spec() skip guards. `topics` is in here for the same
+# reason: the match/rank tests cluster expertise via scikit-learn, and without
+# it they fail at collection rather than skip.
+# `jsonschema` is a test-only dependency: nothing under src/ imports it, but
+# the schema and spec-doc tests validate documents with it.
+dev = [
+    "researcher-profiles[api,vectors,client,signing,sql,topics]",
+    "jsonschema>=4.21",
+    "pytest",
+    "pytest-cov",
+    "ruff",
+    # The declared build backend, installed so tests/test_packaging.py can
+    # build a real wheel offline and assert the consumer skill is inside it.
+    "hatchling",
+]
+
+[project.urls]
+Homepage = "https://github.com/databio/researcher-profiles"
+Repository = "https://github.com/databio/researcher-profiles"
+Issues = "https://github.com/databio/researcher-profiles/issues"
+
+[project.scripts]
+rp = "researcher_profiles.cli:main"
+
+# `rp` discovers extra subcommands from the `researcher_profiles.cli_plugins`
+# entry-point group (see cli/__init__.py::CLI_PLUGIN_GROUP). Out-of-tree distributions
+# register their verbs there; this package declares no plugins of its own.
+
+# The sdist must carry only the SDK's own files: an explicit include list, so
+# a stray folder landing next to pyproject.toml can never ship by accident
+# (hatchling does not honour nested .gitignore files, so without the list the
+# sdist would swallow the whole repo, 35 MB and 10,000+ node_modules files).
+# Enforced by tests/test_packaging.py::TestDistributionsAreSdkOnly.
+#
+# `tests/` is not here. The suite reads two things that live at
+# the monorepo root and are therefore not SDK files, at module scope: the
+# conformance corpus (spec/conformance/) and the spec prose (docs/rp-spec/).
+# A shipped suite is not merely incomplete: it is a hard collection error for
+# anyone who unpacks the sdist and runs pytest. The tests run from a git
+# checkout.
+#
+# `docs/` is out for the same reason: every doc in it links across to spec/,
+# which is not in the distribution, so shipping it means shipping a
+# documentation tree whose links all dangle. The docs live in the repo.
+#
+# `scripts/` is out for the same reason: the docs and tests it serves live in
+# the repo, not in the distribution.
+[tool.hatch.build.targets.sdist]
+only-include = [
+    "src",
+    "schemas",
+    "skills",
+    "LICENSE",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/researcher_profiles"]
+# Package data: the consumer skill. It lives at src/researcher_profiles/skill/
+# so it is inside the importable package and can be read with
+# importlib.resources instead of by walking up from __file__ into a repo
+# checkout (which would ship nothing and work only under `pip install -e`).
+#
+# Being inside the package dir is what actually makes hatchling ship these;
+# this line states the intent and pins it against a future ignore/exclude
+# rule. The real guarantee is tests/test_packaging.py, which builds a wheel
+# and asserts the skill tree and context/v1.jsonld are in the zip. The
+# context/ entry is the single canonical copy of the frozen JSON-LD @context
+# (jsonld.context_document_text() loads it via importlib.resources; the
+# freeze/lock guardrail reads it here too).
+artifacts = [
+    "src/researcher_profiles/skill/**",
+    "src/researcher_profiles/context/**",
+]
+
+[tool.pytest.ini_options]
+addopts = "-m 'not integration and not llm'"
+# The rp-sdk suite is tests/. Other suites in this monorepo have their own
+# runners; see scripts/test-all.sh at the repo root, which is also what
+# .github/workflows/tests.yml invokes.
+testpaths = ["tests"]
+markers = [
+    "integration: real embeddings / real profiles / a real database; deselected by default, run with -m integration",
+    "llm: hits real Anthropic API; requires RUN_LLM_TESTS=true and ANTHROPIC_API_KEY",
+]

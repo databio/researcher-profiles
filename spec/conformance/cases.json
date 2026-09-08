@@ -1,0 +1,83 @@
+{
+  "description": "Shared conformance corpus. Every case is a source-layout profile directory built around a single profile.jsonld (a schema:Person ProfileDocument whose hasPart/subjectOf arrays are the file manifest). Both validators run over each case: the Python CLI validate_profile_dir and the explorer runValidation. Each harness asserts the verdict matches `cli` / `explorer` here. Cases valid for one validator but not the other document a deliberate division of labor (env-specific checks), not a bug.",
+  "cases": [
+    {
+      "dir": "valid/ada-lovelace",
+      "description": "Valid source-layout profile, full level: Person profile.jsonld with an accurate hasPart/subjectOf manifest, sources/papers.jsonld, per-paper summaries, and SOUL/expertise persona docs.",
+      "cli": {
+        "valid": true
+      },
+      "explorer": {
+        "valid": true
+      }
+    },
+    {
+      "dir": "valid/ada-lovelace-cited",
+      "description": "Valid source-layout profile that also carries a citation graph: hasCitationGraph true plus a `citations` manifest entry (sources/citations.json) that must resolve.",
+      "cli": {
+        "valid": true
+      },
+      "explorer": {
+        "valid": true
+      }
+    },
+    {
+      "dir": "invalid/profile-missing-name",
+      "description": "profile.jsonld omits the required `name`, so ProfileDocument validation fails with a Pydantic `missing` error.",
+      "cli": {
+        "valid": false,
+        "expect_fail": [
+          "missing"
+        ]
+      },
+      "explorer": {
+        "valid": false,
+        "expect_fail": [
+          "profile-schema"
+        ]
+      }
+    },
+    {
+      "dir": "invalid/profile-bad-conformsTo",
+      "description": "profile.jsonld carries the wrong `conformsTo` IRI. This is the format gate: ProfileDocument's field validator raises a `value_error`.",
+      "cli": {
+        "valid": false,
+        "expect_fail": [
+          "value_error"
+        ]
+      },
+      "explorer": {
+        "valid": false,
+        "expect_fail": [
+          "profile-schema"
+        ]
+      }
+    },
+    {
+      "dir": "invalid/papers-bad-node",
+      "description": "sources/papers.jsonld has a ScholarlyArticle node missing its required `name`/`title`, so PapersDocument validation fails with a `missing` error. The explorer fetches papers.jsonld for reachability but does not re-validate every node, so it does not flag this.",
+      "cli": {
+        "valid": false,
+        "expect_fail": [
+          "missing"
+        ]
+      },
+      "explorer": {
+        "valid": true
+      }
+    },
+    {
+      "dir": "invalid/dangling-artifact",
+      "description": "profile.jsonld's manifest declares a hasPart entry (a paper_fulltext) whose contentUrl file does not exist on disk. The CLI's cross-artifact checks flag it (manifest_drift + content_url_missing); the explorer's artifact-reachability check flags the unresolvable contentUrl.",
+      "cli": {
+        "valid": false
+      },
+      "explorer": {
+        "valid": false,
+        "expect_fail": [
+          "artifact-reachable"
+        ]
+      }
+    }
+  ]
+}

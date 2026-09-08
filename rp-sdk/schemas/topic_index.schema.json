@@ -1,0 +1,30 @@
+{
+  "additionalProperties": true,
+  "properties": {
+    "computed_at": {
+      "title": "Computed At",
+      "type": "string"
+    },
+    "index": {
+      "additionalProperties": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "title": "Index",
+      "type": "object"
+    },
+    "version": {
+      "default": 1,
+      "title": "Version",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "computed_at",
+    "index"
+  ],
+  "title": "TopicIndexDocument",
+  "type": "object"
+}

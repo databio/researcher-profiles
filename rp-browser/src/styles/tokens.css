@@ -1,0 +1,248 @@
+/**
+ * Design tokens for rp-browser.
+ *
+ * Colors are RGB triplets so callers can wrap them in rgb()/rgba():
+ *     color: rgb(var(--color-text));
+ *     box-shadow: 0 0 0 3px rgba(var(--color-focus), 0.18);
+ * Spacing is a 4px grid (--space-1 = 0.25rem = 4px).
+ *
+ * ---------------------------------------------------------------------------
+ * One dark-mode query.
+ *
+ * The @media (prefers-color-scheme: dark) block below is the one dark query
+ * in the whole app. The acceptance gate greps for exactly one. To add a dark
+ * value, override its triplet inside that block rather than adding a second
+ * query. Every non-triplet token forwards through a triplet, so a single
+ * triplet override recolors it in both this file's tokens and the bridge
+ * names below.
+ *
+ * Every rule that sets `background` also sets `color`, both from tokens,
+ * never a bare hex. Values live here and only here; no other CSS file
+ * contains a raw hex/rgb literal.
+ * ---------------------------------------------------------------------------
+ */
+
+:root {
+  color-scheme: light dark;
+
+  /* === COLOR TRIPLETS (light) ============================================ */
+
+  /* Surfaces */
+  --color-background: 255, 255, 255;
+  --color-surface: 255, 255, 255;
+  --color-surface-raised: 250, 250, 250;
+  --color-surface-sunken: 243, 244, 246;
+  --color-gray-100: 243, 244, 246; /* modal close-button hover */
+
+  /* Text */
+  --color-text: 26, 26, 26;
+  --color-text-subtle: 75, 85, 99;
+  --color-text-muted: 107, 114, 128;
+
+  /* Lines */
+  --color-border: 229, 231, 235;
+  --color-border-strong: 209, 213, 219;
+  --color-border-subtle: 243, 244, 246;
+
+  /* Controls */
+  --color-control-bg: 255, 255, 255;
+  --color-control-hover-bg: 243, 244, 246;
+
+  /* Accent: blue. `accent` inverts for dark; `accent-solid` (button fills)
+     keeps the same value in both modes. */
+  --color-accent: 37, 99, 235;
+  --color-accent-hover: 29, 78, 216;
+  --color-accent-solid: 37, 99, 235;
+  --color-accent-solid-hover: 29, 78, 216;
+  --color-accent-fg: 255, 255, 255; /* text on a solid accent fill */
+  --color-on-solid: 255, 255, 255;
+  --color-tag-bg: 239, 246, 255;
+
+  /* Accent-alt: indigo (used by the top-nav active pill). */
+  --color-accent-alt: 79, 70, 229;
+  --color-accent-alt-hover: 67, 56, 202;
+  --color-accent-alt-solid: 79, 70, 229;
+  --color-accent-alt-bg: 224, 231, 255;
+  --color-accent-alt-on-bg: 55, 48, 163;
+
+  /* Focus */
+  --color-focus: 99, 102, 241;
+
+  /* Status. Danger/warn TEXT and the accent fills do not invert; their
+     backgrounds do. `-text` variants carry the theme's inverting danger/warn
+     text values (they differ from the non-inverting `danger`/`warn`). */
+  --color-danger: 220, 38, 38;
+  --color-danger-text: 220, 38, 38;
+  --color-danger-bg: 254, 242, 242;
+  --color-danger-border: 254, 202, 202;
+  --color-warn: 217, 119, 6;
+  --color-warn-text: 180, 83, 9;
+  --color-warn-bg: 255, 251, 235;
+  --color-success: 22, 163, 74;
+  --color-success-bg: 240, 253, 244;
+  --color-success-border: 187, 247, 208;
+  --color-success-fg: 22, 101, 52;
+
+  /* === SPACING (4px grid) ================================================ */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.25rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+  --space-10: 2.5rem;
+  --space-12: 3rem;
+  --space-16: 4rem;
+
+  /* === TYPOGRAPHY ======================================================== */
+  --font-family-base: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-family-serif: Georgia, Cambria, "Times New Roman", serif;
+  --font-family-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    monospace;
+
+  --font-size-xs: 0.75rem;
+  --font-size-sm: 0.875rem;
+  --font-size-base: 1rem;
+  --font-size-lg: 1.125rem;
+  --font-size-xl: 1.25rem;
+  --font-size-2xl: 1.5rem;
+  --font-size-3xl: 1.875rem;
+  --font-size-4xl: 2.25rem;
+
+  --font-weight-normal: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
+  --font-weight-bold: 700;
+
+  /* === BORDER RADIUS ===================================================== */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-full: 9999px;
+
+  /* === SHADOWS =========================================================== */
+  --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+  --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
+  --shadow-xl: 0 20px 25px -5px rgba(0, 0, 0, 0.1);
+
+  /* =======================================================================
+     BRIDGE NAMES
+     -----------------------------------------------------------------------
+     rp-browser's per-component CSS Modules (and the vendored viewer) read
+     the --rp-color-* and short --rp-* token names. Those names are thin
+     forwards onto the triplets above, so every color resolves from one
+     source of truth. The viewer's contract is the first two --rp-color-* names;
+     it maps them onto its own short --rp-* inside its `.viewer` class, and the
+     short names are also supplied here for hosts (like this one) that never
+     render <ResearcherProfileViewer>. Do not add colors here. Add a triplet
+     above and forward it.
+     ======================================================================= */
+
+  --rp-color-bg: rgb(var(--color-background));
+  --rp-color-surface: rgb(var(--color-surface));
+  --rp-color-surface-raised: rgb(var(--color-surface-raised));
+  --rp-color-surface-sunken: rgb(var(--color-surface-sunken));
+
+  --rp-color-fg: rgb(var(--color-text));
+  --rp-color-fg-subtle: rgb(var(--color-text-subtle));
+  --rp-color-muted: rgb(var(--color-text-muted));
+
+  --rp-color-border: rgb(var(--color-border));
+  --rp-color-border-strong: rgb(var(--color-border-strong));
+  --rp-color-border-subtle: rgb(var(--color-border-subtle));
+
+  --rp-color-control-bg: rgb(var(--color-control-bg));
+  --rp-color-control-hover-bg: rgb(var(--color-control-hover-bg));
+
+  --rp-color-accent: rgb(var(--color-accent));
+  --rp-color-tag-bg: rgb(var(--color-tag-bg));
+  --rp-color-accent-solid: rgb(var(--color-accent-solid));
+  --rp-color-accent-solid-hover: rgb(var(--color-accent-solid-hover));
+  --rp-color-on-solid: rgb(var(--color-on-solid));
+
+  --rp-color-accent-alt: rgb(var(--color-accent-alt));
+  --rp-color-accent-alt-solid: rgb(var(--color-accent-alt-solid));
+  --rp-color-accent-alt-solid-hover: rgb(var(--color-accent-alt-hover));
+  --rp-color-accent-alt-bg: rgb(var(--color-accent-alt-bg));
+  --rp-color-accent-alt-on-bg: rgb(var(--color-accent-alt-on-bg));
+
+  --rp-color-focus-border: rgb(var(--color-focus));
+  --rp-color-focus-ring: rgba(var(--color-focus), 0.18);
+
+  --rp-color-danger: rgb(var(--color-danger));
+  --rp-color-danger-bg: rgb(var(--color-danger-bg));
+  --rp-color-danger-border: rgb(var(--color-danger-border));
+  --rp-color-warn: rgb(var(--color-warn));
+  --rp-color-success: rgb(var(--color-success));
+  --rp-color-success-bg: rgb(var(--color-success-bg));
+  --rp-color-success-border: rgb(var(--color-success-border));
+  --rp-color-success-fg: rgb(var(--color-success-fg));
+
+  /* Short --rp-* names (the viewer reads them when its .viewer class is
+     absent). The --rp-*-muted names resolve to safe muted values so a rule
+     that reads them never falls through to nothing. */
+  --rp-fg: rgb(var(--color-text));
+  --rp-fg-muted: rgb(var(--color-text-muted));
+  --rp-muted: rgb(var(--color-text-muted));
+  --rp-border: rgb(var(--color-border));
+  --rp-accent: rgb(var(--color-accent));
+  --rp-accent-fg: rgb(var(--color-accent-fg));
+  --rp-accent-bg: rgb(var(--color-tag-bg));
+  --rp-tag-bg: rgb(var(--color-tag-bg));
+  --rp-surface: rgb(var(--color-surface));
+  --rp-surface-2: rgb(var(--color-surface-sunken));
+  --rp-bg: rgb(var(--color-background));
+  --rp-bg-muted: rgb(var(--color-surface-sunken));
+  --rp-danger: rgb(var(--color-danger-text));
+  --rp-danger-bg: rgb(var(--color-danger-bg));
+  --rp-warn: rgb(var(--color-warn-text));
+  --rp-warn-bg: rgb(var(--color-warn-bg));
+  --rp-ok: rgb(var(--color-success));
+}
+
+/* === THE ONE DARK QUERY ================================================== */
+/* Only the triplets whose dark value differs are restated. Solid button
+   fills, focus, danger/warn text-on-nothing (the non-`-text` danger/warn) and
+   accent-solid keep their light values. */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-background: 17, 24, 39;
+    --color-surface: 17, 24, 39;
+    --color-surface-raised: 31, 41, 55;
+    --color-surface-sunken: 55, 65, 81;
+    --color-gray-100: 55, 65, 81;
+
+    --color-text: 229, 231, 235;
+    --color-text-subtle: 209, 213, 219;
+    --color-text-muted: 156, 163, 175;
+
+    --color-border: 55, 65, 81;
+    --color-border-strong: 75, 85, 99;
+    --color-border-subtle: 31, 41, 55;
+
+    --color-control-bg: 55, 65, 81;
+    --color-control-hover-bg: 75, 85, 99;
+
+    --color-accent: 96, 165, 250;
+    --color-accent-fg: 15, 23, 42;
+    --color-tag-bg: 30, 58, 95;
+
+    --color-accent-alt: 165, 180, 252;
+    --color-accent-alt-bg: 49, 46, 129;
+    --color-accent-alt-on-bg: 199, 210, 254;
+
+    --color-danger-text: 248, 113, 113;
+    --color-danger-bg: 69, 10, 10;
+    --color-danger-border: 127, 29, 29;
+
+    --color-warn-text: 251, 191, 36;
+    --color-warn-bg: 69, 26, 3;
+
+    --color-success: 74, 222, 128;
+    --color-success-bg: 5, 46, 22;
+    --color-success-border: 22, 101, 52;
+    --color-success-fg: 134, 239, 172;
+  }
+}

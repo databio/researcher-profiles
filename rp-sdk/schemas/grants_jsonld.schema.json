@@ -1,0 +1,263 @@
+{
+  "$defs": {
+    "GrantRecord": {
+      "additionalProperties": true,
+      "description": "One award: a ``schema:MonetaryGrant`` node.\n\nschema.org has no crisp \"this person received this grant\" relation, so the\nperson->grant link is ``rp:heldGrant``. That is an ``rp:``\ndecision, not an oversight (see ``context/README.md``).",
+      "properties": {
+        "@context": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "@Context"
+        },
+        "@id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "@Id"
+        },
+        "@type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "MonetaryGrant",
+          "title": "@Type"
+        },
+        "abstract": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Abstract"
+        },
+        "activity_code": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Activity Code"
+        },
+        "end": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "End"
+        },
+        "funder": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Funder"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "identifier": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Identifier"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "role": {
+          "anyOf": [
+            {
+              "enum": [
+                "pi",
+                "co_pi",
+                "co_i",
+                "other"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Role"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "enum": [
+                "grants-data",
+                "manual",
+                "reporter"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source"
+        },
+        "start": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Start"
+        },
+        "status": {
+          "anyOf": [
+            {
+              "enum": [
+                "funded",
+                "pending",
+                "completed"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Status"
+        },
+        "url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Url"
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ],
+      "title": "GrantRecord",
+      "type": "object"
+    }
+  },
+  "additionalProperties": true,
+  "description": "Top-level model for ``sources/grants.jsonld``.\n\nAny profile level may carry one: grant history feeds eligibility\nevaluation, which is not a deep-profile-only concern.",
+  "properties": {
+    "@context": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": "https://profiles.databio.org/context/v1.jsonld",
+      "title": "@Context"
+    },
+    "@id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "@Id"
+    },
+    "@type": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": "Collection",
+      "title": "@Type"
+    },
+    "about": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "About"
+    },
+    "conformsTo": {
+      "default": "https://profiles.databio.org/context/v1.jsonld",
+      "title": "Conformsto",
+      "type": "string"
+    },
+    "hasPart": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/GrantRecord"
+      },
+      "title": "Haspart",
+      "type": "array"
+    }
+  },
+  "title": "GrantsDocument",
+  "type": "object"
+}

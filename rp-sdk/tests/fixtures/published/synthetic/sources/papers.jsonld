@@ -1,0 +1,9 @@
+{
+  "@context": "https://profiles.databio.org/context/v1.jsonld",
+  "@type": "Collection",
+  "conformsTo": "https://profiles.databio.org/context/v1.jsonld",
+  "about": {
+    "@id": "https://example.org/profiles/synth-agent/profile.jsonld#me"
+  },
+  "hasPart": []
+}

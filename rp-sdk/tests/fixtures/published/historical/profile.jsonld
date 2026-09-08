@@ -1,0 +1,52 @@
+{
+  "@context": "https://profiles.databio.org/context/v1.jsonld",
+  "@id": "https://example.org/profiles/hist-darwin/profile.jsonld#me",
+  "@type": "Person",
+  "conformsTo": "https://profiles.databio.org/context/v1.jsonld",
+  "name": "Charles Darwin",
+  "rid": "local:hist-darwin-def456",
+  "provenance": "historical",
+  "license": "CC-BY-4.0",
+  "level": "full",
+  "dateModified": "2026-01-01T00:00:00Z",
+  "affiliation": "Down House",
+  "field": "Natural history and evolutionary biology",
+  "summary": "Charles Darwin (1809-1882) developed the theory of evolution by natural selection, drawing on observations from the voyage of HMS Beagle, artificial selection in domesticated species, and comparative anatomy.",
+  "expertise": [
+    "evolution by means of natural selection",
+    "artificial selection in domesticated plants and animals",
+    "biogeography of island species",
+    "comparative anatomy and homology"
+  ],
+  "not_interests": [
+    "molecular mechanisms of heredity, unknown in his lifetime"
+  ],
+  "expertiseCitesPaperIds": false,
+  "hasCitationGraph": false,
+  "hasEmbeddingIndex": false,
+  "hasPart": [
+    {
+      "@type": "Collection",
+      "name": "Works",
+      "role": "works",
+      "encodingFormat": "application/ld+json",
+      "contentUrl": "sources/papers.jsonld"
+    }
+  ],
+  "subjectOf": [
+    {
+      "@type": "DigitalDocument",
+      "name": "SOUL",
+      "role": "soul",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "personality/SOUL.md"
+    },
+    {
+      "@type": "DigitalDocument",
+      "name": "Expertise",
+      "role": "expertise",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "personality/expertise.md"
+    }
+  ]
+}

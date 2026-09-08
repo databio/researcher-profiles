@@ -1,0 +1,11 @@
+# Nav for the scholarcore docs. The docs site build reads this file and
+# generates the sidebar group from it, so the nav lives here, with the pages it
+# describes.
+site_name: scholarcore
+nav:
+  - Overview: index.md
+  - Canonical identifiers: identifiers.md
+  - How-to guides:
+      - Extend the models: how-to/extend-the-models.md
+  - Reference:
+      - Models: reference/models.md

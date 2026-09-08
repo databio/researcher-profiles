@@ -1,0 +1,39 @@
+{
+  "title": "Psychoceramics: The Study of Cracked Pots",
+  "authors": [
+    {
+      "person": { "rid": "0000-0002-1825-0097", "name": "Josiah Carberry" },
+      "position": 0,
+      "corresponding": true,
+      "equal_contribution": false,
+      "affiliations": [
+        {
+          "organization": { "name": "Brown University", "ror_id": "05gq02987", "type": "university" },
+          "department": "Psychoceramics"
+        }
+      ],
+      "credit_roles": ["conceptualization", "writing-original-draft"]
+    },
+    {
+      "person": { "rid": "local:sadie-hawkins-a3f19c", "name": "Sadie Hawkins" },
+      "position": 1,
+      "corresponding": false,
+      "equal_contribution": true,
+      "affiliations": [
+        {
+          "organization": { "name": "Brown University", "ror_id": "05gq02987", "type": "university" },
+          "department": "Psychoceramics"
+        }
+      ],
+      "credit_roles": ["data-curation", "formal-analysis"]
+    }
+  ],
+  "year": 1958,
+  "venue": "Journal of Psychoceramics",
+  "doi": "10.1234/example.doi",
+  "pmid": "12345678",
+  "pmcid": "PMC1234567",
+  "openalex_id": "W1234567890",
+  "arxiv_id": null,
+  "abstract": "A foundational study of cracked pot theory."
+}

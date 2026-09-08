@@ -1,0 +1,51 @@
+{
+  "additionalProperties": true,
+  "description": "An institution: a university, funder, or other organization.\n\nAttributes:\n    name: The organization's name.\n    ror_id: The organization's Research Organization Registry id.\n    type: The kind of organization (e.g. \"university\", \"funder\",\n        \"nonprofit\").\n    address: The organization's free-text address.",
+  "properties": {
+    "address": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Address"
+    },
+    "name": {
+      "title": "Name",
+      "type": "string"
+    },
+    "ror_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Ror Id"
+    },
+    "type": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Type"
+    }
+  },
+  "required": [
+    "name"
+  ],
+  "title": "Organization",
+  "type": "object"
+}

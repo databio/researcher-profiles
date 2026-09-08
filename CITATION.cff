@@ -1,0 +1,24 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: researcher-profiles
+abstract: >-
+  A portable, file-based format for structured researcher profiles. It uses
+  JSON-LD metadata, publication records, expertise descriptions, and an
+  optional embedding index. This package includes the Published Researcher
+  Profile (PRP) specification and an SDK that validates, queries, and serves
+  conforming profiles.
+type: software
+authors:
+  - family-names: Sheffield
+    given-names: Nathan
+    orcid: "https://orcid.org/0000-0001-5643-4068"
+repository-code: "https://github.com/databio/researcher-profiles"
+url: "https://github.com/databio/researcher-profiles"
+license: MIT
+version: 0.3.0
+keywords:
+  - researcher profile
+  - JSON-LD
+  - schema
+  - validation
+  - scholarly metadata

@@ -1,0 +1,79 @@
+{
+  "@context": "https://profiles.databio.org/context/v1.jsonld",
+  "@id": "https://orcid.org/0000-0008-2222-0003",
+  "@type": "Person",
+  "conformsTo": "https://profiles.databio.org/context/v1.jsonld",
+  "name": "Kwame Boateng",
+  "rid": "0000-0008-2222-0003",
+  "provenance": "third_party",
+  "license": "CC-BY-4.0",
+  "level": "full",
+  "dateModified": "2026-06-01T00:00:00Z",
+  "affiliation": "Example Institute for Structural Biology",
+  "field": "Cryo-EM structural biology",
+  "summary": "Kwame Boateng develops cryo-electron microscopy methods for resolving flexible multi-subunit protein complexes.",
+  "expertise": [
+    "Cryo-EM reconstruction of conformationally heterogeneous complexes",
+    "Flexible fitting of atomic models into low-resolution density",
+    "Multi-state classification for single-particle cryo-EM"
+  ],
+  "not_interests": [
+    "X-ray crystallography as a primary method"
+  ],
+  "expertiseCitesPaperIds": true,
+  "hasCitationGraph": false,
+  "hasEmbeddingIndex": false,
+  "customScore": 87,
+  "labUrl": "https://example.edu/~boateng-lab",
+  "fundingSources": [
+    "Example Structural Biology Foundation"
+  ],
+  "hasPart": [
+    {
+      "@type": "Collection",
+      "name": "Works",
+      "role": "works",
+      "encodingFormat": "application/ld+json",
+      "contentUrl": "sources/papers.jsonld"
+    },
+    {
+      "@type": "DigitalDocument",
+      "name": "Summary: boateng2019hetero",
+      "role": "paper_summary",
+      "paperId": "boateng2019hetero",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "sources/summaries/boateng2019hetero.summary.md"
+    },
+    {
+      "@type": "DigitalDocument",
+      "name": "Summary: boateng2022fit",
+      "role": "paper_summary",
+      "paperId": "boateng2022fit",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "sources/summaries/boateng2022fit.summary.md"
+    },
+    {
+      "@type": "DigitalDocument",
+      "name": "Lab metrics report",
+      "role": "customReport",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "sources/custom_report.md"
+    }
+  ],
+  "subjectOf": [
+    {
+      "@type": "DigitalDocument",
+      "name": "SOUL",
+      "role": "soul",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "personality/SOUL.md"
+    },
+    {
+      "@type": "DigitalDocument",
+      "name": "Expertise",
+      "role": "expertise",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "personality/expertise.md"
+    }
+  ]
+}

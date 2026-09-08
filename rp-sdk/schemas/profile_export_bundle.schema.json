@@ -1,0 +1,242 @@
+{
+  "$defs": {
+    "ExportPaperRef": {
+      "additionalProperties": false,
+      "description": "One paper whose prose is inside the rendered text.",
+      "properties": {
+        "body_source": {
+          "enum": [
+            "summary",
+            "abstract"
+          ],
+          "title": "Body Source",
+          "type": "string"
+        },
+        "doi": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Doi"
+        },
+        "paper_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Paper Id"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "year": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Year"
+        }
+      },
+      "required": [
+        "paper_id",
+        "doi",
+        "title",
+        "year",
+        "body_source"
+      ],
+      "title": "ExportPaperRef",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "One profile, rendered for a knowledge base: the text plus what travels with it.\n\n``dois`` and ``papers`` are different things and must not be conflated.\n``dois`` is the profile's full corpus DOI list: every paper in\n``sources/papers.jsonld``, normalized and de-duplicated, in document order.\nA KB uses it to link this profile to works it already holds, whether or not\ntheir prose is in this export. ``papers`` is the much smaller subset whose\nprose is actually inside :attr:`text`.\n\n``content_hash`` is the idempotency key. It covers every field except\nitself and :attr:`built_at` (including :attr:`summary`, which is real\ncontent, so an edited summary triggers a refresh), hence two builds seconds\napart hash identically and a KB upserts only when the hash changes.",
+  "properties": {
+    "affiliation": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Affiliation"
+    },
+    "built_at": {
+      "title": "Built At",
+      "type": "string"
+    },
+    "conforms_to": {
+      "title": "Conforms To",
+      "type": "string"
+    },
+    "content_hash": {
+      "title": "Content Hash",
+      "type": "string"
+    },
+    "dois": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Dois",
+      "type": "array"
+    },
+    "explore_url": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Explore Url"
+    },
+    "export_version": {
+      "title": "Export Version",
+      "type": "integer"
+    },
+    "field": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Field"
+    },
+    "level": {
+      "title": "Level",
+      "type": "string"
+    },
+    "license": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "License"
+    },
+    "name": {
+      "title": "Name",
+      "type": "string"
+    },
+    "orcid": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Orcid"
+    },
+    "paper_count": {
+      "title": "Paper Count",
+      "type": "integer"
+    },
+    "papers": {
+      "items": {
+        "$ref": "#/$defs/ExportPaperRef"
+      },
+      "title": "Papers",
+      "type": "array"
+    },
+    "profile_url": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Profile Url"
+    },
+    "provenance": {
+      "title": "Provenance",
+      "type": "string"
+    },
+    "rid": {
+      "title": "Rid",
+      "type": "string"
+    },
+    "sdk_version": {
+      "title": "Sdk Version",
+      "type": "string"
+    },
+    "slug": {
+      "title": "Slug",
+      "type": "string"
+    },
+    "summary": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Summary"
+    },
+    "text": {
+      "title": "Text",
+      "type": "string"
+    },
+    "text_chars": {
+      "title": "Text Chars",
+      "type": "integer"
+    },
+    "visibility": {
+      "title": "Visibility",
+      "type": "string"
+    }
+  },
+  "required": [
+    "export_version",
+    "sdk_version",
+    "conforms_to",
+    "rid",
+    "name",
+    "slug",
+    "orcid",
+    "affiliation",
+    "field",
+    "summary",
+    "level",
+    "provenance",
+    "license",
+    "visibility",
+    "profile_url",
+    "explore_url",
+    "dois",
+    "paper_count",
+    "papers",
+    "text",
+    "text_chars",
+    "content_hash",
+    "built_at"
+  ],
+  "title": "ProfileExportBundle",
+  "type": "object"
+}

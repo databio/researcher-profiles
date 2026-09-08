@@ -1,0 +1,5 @@
+node_modules/
+# Throwaway intermediate written and read back by scripts/gen-types.mjs.
+schemas/
+dist/
+*.tsbuildinfo

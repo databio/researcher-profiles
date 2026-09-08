@@ -1,0 +1,114 @@
+{
+  "$defs": {
+    "EmbeddingProbe": {
+      "additionalProperties": true,
+      "properties": {
+        "text": {
+          "title": "Text",
+          "type": "string"
+        },
+        "vector": {
+          "items": {
+            "type": "number"
+          },
+          "title": "Vector",
+          "type": "array"
+        }
+      },
+      "required": [
+        "text",
+        "vector"
+      ],
+      "title": "EmbeddingProbe",
+      "type": "object"
+    }
+  },
+  "additionalProperties": true,
+  "properties": {
+    "backend_spec": {
+      "title": "Backend Spec",
+      "type": "string"
+    },
+    "byte_order": {
+      "const": "little",
+      "default": "little",
+      "title": "Byte Order",
+      "type": "string"
+    },
+    "count": {
+      "title": "Count",
+      "type": "integer"
+    },
+    "dim": {
+      "title": "Dim",
+      "type": "integer"
+    },
+    "dtype": {
+      "const": "float32",
+      "default": "float32",
+      "title": "Dtype",
+      "type": "string"
+    },
+    "file": {
+      "title": "File",
+      "type": "string"
+    },
+    "layout": {
+      "const": "row_major",
+      "default": "row_major",
+      "title": "Layout",
+      "type": "string"
+    },
+    "metric": {
+      "default": "cosine",
+      "title": "Metric",
+      "type": "string"
+    },
+    "normalized": {
+      "default": true,
+      "title": "Normalized",
+      "type": "boolean"
+    },
+    "probe": {
+      "$ref": "#/$defs/EmbeddingProbe"
+    },
+    "row_key": {
+      "enum": [
+        "chunk_index",
+        "slug"
+      ],
+      "title": "Row Key",
+      "type": "string"
+    },
+    "rows": {
+      "items": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "integer"
+          }
+        ]
+      },
+      "title": "Rows",
+      "type": "array"
+    },
+    "sha256": {
+      "title": "Sha256",
+      "type": "string"
+    }
+  },
+  "required": [
+    "backend_spec",
+    "file",
+    "dim",
+    "count",
+    "row_key",
+    "rows",
+    "sha256",
+    "probe"
+  ],
+  "title": "EmbeddingIndex",
+  "type": "object"
+}

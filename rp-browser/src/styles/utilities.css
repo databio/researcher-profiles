@@ -1,0 +1,102 @@
+/*
+ * Reset, base element styles, and the utility classes rp-browser uses.
+ * Requires tokens.css to define CSS variables (--color-*, --space-*, etc.)
+ *
+ * Only classes referenced from a component are kept here. Add a class when
+ * a component needs it; drop it when the last use goes.
+ */
+
+/* === RESET & BASE === */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  font-family: var(--font-family-base, system-ui, -apple-system, sans-serif);
+  font-size: var(--font-size-base, 1rem);
+  line-height: 1.5;
+  color: rgb(var(--color-text, 17, 24, 39));
+  background: rgb(var(--color-background, 255, 255, 255));
+}
+
+/* === FOCUS STYLES === */
+
+:focus-visible {
+  outline: 2px solid rgb(var(--color-accent, 0, 123, 255));
+  outline-offset: 2px;
+}
+
+/* === REDUCED MOTION === */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* === SPACING === */
+
+/* Each unit = 0.25rem (4px) */
+.my-2 { margin-top: var(--space-2, 0.5rem); margin-bottom: var(--space-2, 0.5rem); }
+
+.mt-4 { margin-top: var(--space-4, 1rem); }
+.mt-5 { margin-top: var(--space-5, 1.25rem); }
+
+.mb-1 { margin-bottom: var(--space-1, 0.25rem); }
+.mb-2 { margin-bottom: var(--space-2, 0.5rem); }
+.mb-4 { margin-bottom: var(--space-4, 1rem); }
+.mb-6 { margin-bottom: var(--space-6, 1.5rem); }
+.mb-8 { margin-bottom: var(--space-8, 2rem); }
+
+.ml-2 { margin-left: var(--space-2, 0.5rem); }
+
+.p-4 { padding: var(--space-4, 1rem); }
+.p-6 { padding: var(--space-6, 1.5rem); }
+
+.px-6 { padding-left: var(--space-6, 1.5rem); padding-right: var(--space-6, 1.5rem); }
+
+.py-3 { padding-top: var(--space-3, 0.75rem); padding-bottom: var(--space-3, 0.75rem); }
+
+.pb-2 { padding-bottom: var(--space-2, 0.5rem); }
+
+.pl-6 { padding-left: var(--space-6, 1.5rem); }
+
+.gap-1 { gap: var(--space-1, 0.25rem); }
+.gap-2 { gap: var(--space-2, 0.5rem); }
+.gap-3 { gap: var(--space-3, 0.75rem); }
+.gap-4 { gap: var(--space-4, 1rem); }
+
+/* === TYPOGRAPHY === */
+
+.text-sm { font-size: var(--font-size-sm, 0.875rem); }
+.text-base { font-size: var(--font-size-base, 1rem); }
+
+/* === LAYOUT === */
+
+.flex { display: flex; }
+.flex-col { flex-direction: column; }
+.flex-wrap { flex-wrap: wrap; }
+.flex-1 { flex: 1 1 0%; }
+
+.items-center { align-items: center; }
+.justify-between { justify-content: space-between; }
+
+.min-h-0 { min-height: 0; }
+.min-h-screen { min-height: 100vh; }

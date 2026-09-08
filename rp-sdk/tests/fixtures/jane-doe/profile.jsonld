@@ -1,0 +1,219 @@
+{
+  "@context": "https://profiles.databio.org/context/v1.jsonld",
+  "@id": "https://orcid.org/0000-0002-1825-0097",
+  "@type": "Person",
+  "conformsTo": "https://profiles.databio.org/context/v1.jsonld",
+  "name": "Jane A. Doe",
+  "rid": "0000-0002-1825-0097",
+  "provenance": "third_party",
+  "license": "https://creativecommons.org/licenses/by/4.0/",
+  "level": "full",
+  "affiliation": "Example University",
+  "field": "Computational Biology",
+  "subfields": [
+    "synthetic data science",
+    "example region analysis",
+    "reproducible workflows",
+    "widget embeddings"
+  ],
+  "summary": "Jane Doe is a computational biologist who develops synthetic methods and standards for analyzing example region data. Her group builds infrastructure for reproducible analysis including a sample metadata standard, a reference asset manager, and analysis pipelines, with recent emphasis on vector representations of example regions.",
+  "sameAs": [
+    "https://scholar.example.edu/citations?user=EXAMPLE01"
+  ],
+  "identifier": [
+    {
+      "@type": "PropertyValue",
+      "propertyID": "openalex",
+      "value": "A0000000001"
+    }
+  ],
+  "training": [
+    {
+      "advisor": "Alex Mentor",
+      "degree": "PhD",
+      "institution": "Example University",
+      "kind": "degree",
+      "year_end": 2013
+    },
+    {
+      "advisor": "Robin Advisor",
+      "degree": "Postdoc",
+      "institution": "Placeholder Research Institute",
+      "kind": "postdoc",
+      "year_end": 2016
+    }
+  ],
+  "career": [
+    {
+      "role": "Associate Professor, Example Sciences",
+      "institution": "Example University",
+      "start_year": 2022
+    },
+    {
+      "role": "Assistant Professor, Center for Example Genomics",
+      "end_year": 2022,
+      "institution": "Example University",
+      "start_year": 2016
+    }
+  ],
+  "expertise": [
+    "example-region-set-analysis",
+    "example-pipeline-development",
+    "sample-metadata-standardization",
+    "reference-asset-management",
+    "widget-embeddings-for-genomics",
+    "reproducible-workflow-design"
+  ],
+  "interests": [
+    "vector-representations-of-example-regions",
+    "sample-metadata-interoperability",
+    "consensus-region-construction",
+    "ai-readiness-of-example-data"
+  ],
+  "not_interests": [
+    "wet-lab-protocol-development",
+    "single-sample-routine-analysis"
+  ],
+  "methodological_commitments": [
+    "portable-encapsulated-project-standards",
+    "content-addressable-reference-assets",
+    "principled-consensus-over-naive-union"
+  ],
+  "recurring_positions": [
+    "metadata-sharing-is-as-important-as-data-sharing",
+    "naive-union-consensus-loses-boundary-information"
+  ],
+  "intellectual_lineage": [
+    "example-consortium",
+    "foundational-peak-calling-methods"
+  ],
+  "critiques": [
+    "inconsistent-metadata-impedes-data-reuse",
+    "ad-hoc-universe-selection-harms-analysis"
+  ],
+  "researchOutputs": [
+    {
+      "name": "WidgetTool",
+      "url": "https://widgettool.example.org",
+      "type": "software"
+    },
+    {
+      "name": "ExamplePipeline",
+      "url": "https://examplepipeline.example.org",
+      "type": "software"
+    },
+    {
+      "name": "Portable Example Projects (PEP)",
+      "url": "https://pep.example.org",
+      "type": "standard"
+    }
+  ],
+  "collaborators": [
+    "John B. Smith",
+    "Robin Roe",
+    "Casey Poe",
+    "Morgan Noor"
+  ],
+  "anchor": {
+    "confidence": "high",
+    "disambiguation_evidence": "Synthetic disambiguation record. The fake ORCID 0000-0002-1825-0097 is used here only to exercise the schema; it does not refer to any real researcher. All names, affiliations, and identifiers in this fixture are invented for testing purposes."
+  },
+  "paper_stats": {
+    "corresponding": 3,
+    "first": 4,
+    "last": 3,
+    "middle": 1,
+    "total": 8,
+    "unknown": 0,
+    "year_max": 2025,
+    "year_min": 2016
+  },
+  "hasPart": [
+    {
+      "@type": "Collection",
+      "name": "Works",
+      "role": "works",
+      "encodingFormat": "application/ld+json",
+      "contentUrl": "sources/papers.jsonld"
+    },
+    {
+      "@type": "DigitalDocument",
+      "name": "Citations",
+      "role": "citations",
+      "encodingFormat": "application/json",
+      "contentUrl": "sources/citations.json"
+    },
+    {
+      "@type": "DigitalDocument",
+      "name": "Summary: doe2016example",
+      "role": "paper_summary",
+      "paperId": "doe2016example",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "sources/summaries/doe2016example.summary.md"
+    },
+    {
+      "@type": "DigitalDocument",
+      "name": "Summary: doe2019methods",
+      "role": "paper_summary",
+      "paperId": "doe2019methods",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "sources/summaries/doe2019methods.summary.md"
+    },
+    {
+      "@type": "DigitalDocument",
+      "name": "Summary: doe2021widgets",
+      "role": "paper_summary",
+      "paperId": "doe2021widgets",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "sources/summaries/doe2021widgets.summary.md"
+    },
+    {
+      "@type": "DigitalDocument",
+      "name": "Summary: doe2023framework",
+      "role": "paper_summary",
+      "paperId": "doe2023framework",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "sources/summaries/doe2023framework.summary.md"
+    },
+    {
+      "@type": "DigitalDocument",
+      "name": "Summary: doe2024atlas",
+      "role": "paper_summary",
+      "paperId": "doe2024atlas",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "sources/summaries/doe2024atlas.summary.md"
+    },
+    {
+      "@type": "DigitalDocument",
+      "name": "Full text: doe2016example",
+      "role": "paper_fulltext",
+      "paperId": "doe2016example",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "sources/papers/doe2016example.md"
+    },
+    {
+      "@type": "DigitalDocument",
+      "name": "Full text: doe2019methods",
+      "role": "paper_fulltext",
+      "paperId": "doe2019methods",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "sources/papers/doe2019methods.md"
+    }
+  ],
+  "subjectOf": [
+    {
+      "@type": "DigitalDocument",
+      "name": "SOUL",
+      "role": "soul",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "personality/SOUL.md"
+    },
+    {
+      "@type": "DigitalDocument",
+      "name": "Expertise",
+      "role": "expertise",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "personality/expertise.md"
+    }
+  ]
+}

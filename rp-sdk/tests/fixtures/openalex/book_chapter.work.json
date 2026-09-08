@@ -1,0 +1,29 @@
+{
+  "id": "https://openalex.org/W2200000002",
+  "doi": null,
+  "title": "A Redacted Chapter on Methods",
+  "display_name": "A Redacted Chapter on Methods",
+  "publication_year": 2018,
+  "publication_date": "2018-01-01",
+  "type": "book-chapter",
+  "type_crossref": "book-chapter",
+  "cited_by_count": 3,
+  "language": "en",
+  "ids": {
+    "openalex": "https://openalex.org/W2200000002"
+  },
+  "primary_location": {
+    "is_oa": false,
+    "landing_page_url": "https://link.example.org/chapter/10.1000/redacted",
+    "pdf_url": null,
+    "source": null
+  },
+  "best_oa_location": null,
+  "host_venue": {
+    "id": "https://openalex.org/S0000003",
+    "display_name": "Handbook of Redacted Methods"
+  },
+  "abstract_inverted_index": null,
+  "authorships": [],
+  "locations": []
+}

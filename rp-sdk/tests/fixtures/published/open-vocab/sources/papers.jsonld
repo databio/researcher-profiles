@@ -1,0 +1,32 @@
+{
+  "@context": "https://profiles.databio.org/context/v1.jsonld",
+  "@type": "Collection",
+  "conformsTo": "https://profiles.databio.org/context/v1.jsonld",
+  "about": {
+    "@id": "https://orcid.org/0000-0008-2222-0003"
+  },
+  "hasPart": [
+    {
+      "@id": "#paper/boateng2019hetero",
+      "@type": "ScholarlyArticle",
+      "name": "Multi-state classification resolves conformational heterogeneity in a flexible multi-subunit complex",
+      "paper_id": "boateng2019hetero",
+      "datePublished": "2019",
+      "isPartOf": {
+        "@type": "Periodical",
+        "name": "Structure Methods Journal"
+      }
+    },
+    {
+      "@id": "#paper/boateng2022fit",
+      "@type": "ScholarlyArticle",
+      "name": "Molecular-dynamics flexible fitting into multi-state cryo-EM density maps",
+      "paper_id": "boateng2022fit",
+      "datePublished": "2022",
+      "isPartOf": {
+        "@type": "Periodical",
+        "name": "Structure Methods Journal"
+      }
+    }
+  ]
+}

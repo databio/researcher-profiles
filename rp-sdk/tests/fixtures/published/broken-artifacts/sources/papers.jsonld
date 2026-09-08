@@ -1,0 +1,32 @@
+{
+  "@context": "https://profiles.databio.org/context/v1.jsonld",
+  "@type": "Collection",
+  "conformsTo": "https://profiles.databio.org/context/v1.jsonld",
+  "about": {
+    "@id": "https://orcid.org/0000-0006-4444-0002"
+  },
+  "hasPart": [
+    {
+      "@id": "#paper/voss2019signal",
+      "@type": "ScholarlyArticle",
+      "name": "Population-level modeling of immune cell signaling states",
+      "paper_id": "voss2019signal",
+      "datePublished": "2019",
+      "isPartOf": {
+        "@type": "Periodical",
+        "name": "Journal of Systems Immunology"
+      }
+    },
+    {
+      "@id": "#paper/voss2021screen",
+      "@type": "ScholarlyArticle",
+      "name": "A single-cell perturbation screen of cytokine signaling networks",
+      "paper_id": "voss2021screen",
+      "datePublished": "2021",
+      "isPartOf": {
+        "@type": "Periodical",
+        "name": "Journal of Systems Immunology"
+      }
+    }
+  ]
+}

@@ -1,0 +1,32 @@
+{
+  "@context": "https://profiles.databio.org/context/v1.jsonld",
+  "@id": "https://orcid.org/0000-0004-6666-0001",
+  "@type": "Person",
+  "conformsTo": "https://profiles.databio.org/context/v1.jsonld",
+  "name": "Priya Anand",
+  "rid": "0000-0004-6666-0001",
+  "provenance": "orcid_verified",
+  "url": "https://example.org/profiles/priya-anand/",
+  "verifiedAt": "2026-05-01T00:00:00Z",
+  "license": "CC-BY-4.0",
+  "level": "lite",
+  "dateModified": "2026-05-01T00:00:00Z",
+  "affiliation": "Example Marine Sciences Center",
+  "field": "Marine microbial ecology",
+  "summary": "Priya Anand studies microbial community structure in coastal marine sediments.",
+  "expertise": [],
+  "not_interests": [],
+  "expertiseCitesPaperIds": false,
+  "hasCitationGraph": false,
+  "hasEmbeddingIndex": false,
+  "hasPart": [
+    {
+      "@type": "Collection",
+      "name": "Works",
+      "role": "works",
+      "encodingFormat": "application/ld+json",
+      "contentUrl": "sources/papers.jsonld"
+    }
+  ],
+  "subjectOf": []
+}

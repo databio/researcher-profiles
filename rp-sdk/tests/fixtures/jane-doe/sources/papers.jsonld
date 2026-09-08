@@ -1,0 +1,178 @@
+{
+  "@context": "https://profiles.databio.org/context/v1.jsonld",
+  "@type": "Collection",
+  "conformsTo": "https://profiles.databio.org/context/v1.jsonld",
+  "about": {
+    "@id": "https://orcid.org/0000-0002-1825-0097"
+  },
+  "hasPart": [
+    {
+      "@id": "#paper/doe2016example",
+      "@type": "ScholarlyArticle",
+      "name": "ExampleOverlap: enrichment analysis of example region sets",
+      "summary": "Introduces ExampleOverlap, a method for enrichment analysis of example region sets against curated reference collections.",
+      "paper_id": "doe2016example",
+      "datePublished": "2016",
+      "isPartOf": {
+        "@type": "Periodical",
+        "name": "Journal of Synthetic Genomics"
+      },
+      "type": "authored",
+      "first_author": "Doe",
+      "author_position": "first",
+      "author_index": 1,
+      "total_authors": 4,
+      "is_corresponding": true,
+      "citation": "Doe et al., Journal of Synthetic Genomics (2016)",
+      "full_text_link": "https://examplepipeline.example.org/papers/doe2016example.pdf",
+      "access": "open"
+    },
+    {
+      "@id": "#paper/roe2018toolkit",
+      "@type": "ScholarlyArticle",
+      "name": "A toolkit for reproducible example workflows",
+      "summary": "Describes a toolkit supporting reproducible example workflows across heterogeneous compute environments.",
+      "paper_id": "roe2018toolkit",
+      "datePublished": "2018",
+      "isPartOf": {
+        "@type": "Periodical",
+        "name": "Synthetic Methods"
+      },
+      "type": "authored",
+      "first_author": "Roe",
+      "author_position": "middle",
+      "author_index": 3,
+      "total_authors": 6,
+      "is_corresponding": false,
+      "citation": "Roe et al., Synthetic Methods (2018)",
+      "full_text_link": "https://examplepipeline.example.org/papers/roe2018toolkit.pdf",
+      "access": "open"
+    },
+    {
+      "@id": "#paper/doe2019methods",
+      "@type": "ScholarlyArticle",
+      "name": "Consensus example regions: methods for constructing region universes",
+      "summary": "Presents methods for constructing consensus example region universes using coverage cutoffs and probabilistic models.",
+      "paper_id": "doe2019methods",
+      "datePublished": "2019",
+      "isPartOf": {
+        "@type": "Periodical",
+        "name": "Journal of Synthetic Genomics"
+      },
+      "type": "authored",
+      "first_author": "Doe",
+      "author_position": "first",
+      "author_index": 1,
+      "total_authors": 5,
+      "is_corresponding": true,
+      "citation": "Doe et al., Journal of Synthetic Genomics (2019)",
+      "full_text_link": "https://examplepipeline.example.org/papers/doe2019methods.pdf",
+      "access": "open"
+    },
+    {
+      "@id": "#paper/doe2021widgets",
+      "@type": "ScholarlyArticle",
+      "name": "A framework for widget embeddings of example regions",
+      "summary": "Proposes a framework for embedding example region sets into vector spaces for downstream machine learning.",
+      "paper_id": "doe2021widgets",
+      "datePublished": "2021",
+      "isPartOf": {
+        "@type": "Periodical",
+        "name": "Synthetic Machine Learning"
+      },
+      "type": "authored",
+      "first_author": "Doe",
+      "author_position": "first",
+      "author_index": 1,
+      "total_authors": 4,
+      "is_corresponding": true,
+      "citation": "Doe et al., Synthetic Machine Learning (2021)",
+      "full_text_link": "https://examplepipeline.example.org/papers/doe2021widgets.pdf",
+      "access": "open"
+    },
+    {
+      "@id": "#paper/poe2022survey",
+      "@type": "ScholarlyArticle",
+      "name": "A survey of sample metadata standards",
+      "summary": "Surveys the landscape of sample metadata standards and interoperability challenges.",
+      "paper_id": "poe2022survey",
+      "datePublished": "2022",
+      "isPartOf": {
+        "@type": "Periodical",
+        "name": "Reviews in Synthetic Data Science"
+      },
+      "type": "authored",
+      "first_author": "Poe",
+      "author_position": "middle",
+      "author_index": 4,
+      "total_authors": 7,
+      "is_corresponding": false,
+      "citation": "Poe et al., Reviews in Synthetic Data Science (2022)",
+      "full_text_link": "https://examplepipeline.example.org/papers/poe2022survey.pdf",
+      "access": "likely_paywalled"
+    },
+    {
+      "@id": "#paper/doe2023framework",
+      "@type": "ScholarlyArticle",
+      "name": "PlaceholderScape: provenance metadata for AI-ready example datasets",
+      "summary": "Describes a provenance metadata framework for preparing example datasets for machine learning.",
+      "paper_id": "doe2023framework",
+      "datePublished": "2023",
+      "isPartOf": {
+        "@type": "Periodical",
+        "name": "Journal of Synthetic Genomics"
+      },
+      "type": "authored",
+      "first_author": "Doe",
+      "author_position": "last",
+      "author_index": 8,
+      "total_authors": 8,
+      "is_corresponding": true,
+      "citation": "Doe et al., Journal of Synthetic Genomics (2023)",
+      "full_text_link": "https://examplepipeline.example.org/papers/doe2023framework.pdf",
+      "access": "open"
+    },
+    {
+      "@id": "#paper/doe2024atlas",
+      "@type": "ScholarlyArticle",
+      "name": "An atlas of example accessibility across synthetic tissues",
+      "summary": "Reports an atlas of example accessibility profiles spanning many synthetic tissue types.",
+      "paper_id": "doe2024atlas",
+      "datePublished": "2024",
+      "isPartOf": {
+        "@type": "Periodical",
+        "name": "Synthetic Genome Research"
+      },
+      "type": "authored",
+      "first_author": "Doe",
+      "author_position": "last",
+      "author_index": 11,
+      "total_authors": 11,
+      "is_corresponding": true,
+      "citation": "Doe et al., Synthetic Genome Research (2024)",
+      "full_text_link": "https://examplepipeline.example.org/papers/doe2024atlas.pdf",
+      "access": "open"
+    },
+    {
+      "@id": "#paper/doe2025recent",
+      "@type": "ScholarlyArticle",
+      "name": "A transformer model for example region sequences",
+      "summary": "Introduces a transformer-based foundation model for analysis of example region sequences.",
+      "paper_id": "doe2025recent",
+      "datePublished": "2025",
+      "isPartOf": {
+        "@type": "Periodical",
+        "name": "bioRxiv (synthetic preprint server)"
+      },
+      "type": "authored",
+      "first_author": "Doe",
+      "author_position": "last",
+      "author_index": 6,
+      "total_authors": 6,
+      "is_corresponding": true,
+      "citation": "Doe et al., bioRxiv (2025)",
+      "full_text_link": "https://examplepipeline.example.org/papers/doe2025recent.pdf",
+      "access": "open"
+    }
+  ]
+}

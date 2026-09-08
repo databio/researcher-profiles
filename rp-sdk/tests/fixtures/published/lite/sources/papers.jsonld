@@ -1,0 +1,43 @@
+{
+  "@context": "https://profiles.databio.org/context/v1.jsonld",
+  "@type": "Collection",
+  "conformsTo": "https://profiles.databio.org/context/v1.jsonld",
+  "about": {
+    "@id": "https://orcid.org/0000-0004-6666-0001"
+  },
+  "hasPart": [
+    {
+      "@id": "#paper/anand2017sediment",
+      "@type": "ScholarlyArticle",
+      "name": "Community structure of coastal sediment microbiomes across a salinity gradient",
+      "paper_id": "anand2017sediment",
+      "datePublished": "2017",
+      "isPartOf": {
+        "@type": "Periodical",
+        "name": "Marine Microbial Ecology Letters"
+      }
+    },
+    {
+      "@id": "#paper/anand2020nutrient",
+      "@type": "ScholarlyArticle",
+      "name": "Nutrient pulses reshape sediment microbial community composition",
+      "paper_id": "anand2020nutrient",
+      "datePublished": "2020",
+      "isPartOf": {
+        "@type": "Periodical",
+        "name": "Marine Microbial Ecology Letters"
+      }
+    },
+    {
+      "@id": "#paper/anand2023seasonal",
+      "@type": "ScholarlyArticle",
+      "name": "Seasonal turnover in coastal sediment microbiomes: a five-year time series",
+      "paper_id": "anand2023seasonal",
+      "datePublished": "2023",
+      "isPartOf": {
+        "@type": "Periodical",
+        "name": "Journal of Marine Systems"
+      }
+    }
+  ]
+}

@@ -1,0 +1,43 @@
+{
+  "@context": "https://profiles.databio.org/context/v1.jsonld",
+  "@type": "Collection",
+  "conformsTo": "https://profiles.databio.org/context/v1.jsonld",
+  "about": {
+    "@id": "https://orcid.org/0000-0004-9999-0007"
+  },
+  "hasPart": [
+    {
+      "@id": "#paper/doe2019methods",
+      "@type": "ScholarlyArticle",
+      "name": "A standardized workflow for imaging mass cytometry: panel design, segmentation, and uncertainty propagation",
+      "paper_id": "doe2019methods",
+      "datePublished": "2019",
+      "isPartOf": {
+        "@type": "Periodical",
+        "name": "Journal of Spatial Tissue Methods"
+      }
+    },
+    {
+      "@id": "#paper/doe2020spatial",
+      "@type": "ScholarlyArticle",
+      "name": "Graph-based unsupervised discovery of tissue domains from multiplexed spatial proteomics",
+      "paper_id": "doe2020spatial",
+      "datePublished": "2020",
+      "isPartOf": {
+        "@type": "Periodical",
+        "name": "Nature Methods in Spatial Biology"
+      }
+    },
+    {
+      "@id": "#paper/smith2021review",
+      "@type": "ScholarlyArticle",
+      "name": "Null models in spatial tissue imaging: a field-facing review",
+      "paper_id": "smith2021review",
+      "datePublished": "2021",
+      "isPartOf": {
+        "@type": "Periodical",
+        "name": "Annual Review of Spatial Statistics"
+      }
+    }
+  ]
+}

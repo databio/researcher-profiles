@@ -1,0 +1,43 @@
+{
+  "@context": "https://profiles.databio.org/context/v1.jsonld",
+  "@type": "Collection",
+  "conformsTo": "https://profiles.databio.org/context/v1.jsonld",
+  "about": {
+    "@id": "https://orcid.org/0000-0001-8888-0003"
+  },
+  "hasPart": [
+    {
+      "@id": "#paper/wright2015gwas",
+      "@type": "ScholarlyArticle",
+      "name": "Quality control shortcuts and false positives in genome-wide association studies",
+      "paper_id": "wright2015gwas",
+      "datePublished": "2015",
+      "isPartOf": {
+        "@type": "Periodical",
+        "name": "Journal of Statistical Genetics"
+      }
+    },
+    {
+      "@id": "#paper/wright2017assoc",
+      "@type": "ScholarlyArticle",
+      "name": "Ancestry-stratified calibration for mixed-model association testing",
+      "paper_id": "wright2017assoc",
+      "datePublished": "2017",
+      "isPartOf": {
+        "@type": "Periodical",
+        "name": "Journal of Statistical Genetics"
+      }
+    },
+    {
+      "@id": "#paper/wright2019meta",
+      "@type": "ScholarlyArticle",
+      "name": "Inconsistent per-cohort QC as a source of meta-analytic bias",
+      "paper_id": "wright2019meta",
+      "datePublished": "2019",
+      "isPartOf": {
+        "@type": "Periodical",
+        "name": "Journal of Statistical Genetics"
+      }
+    }
+  ]
+}

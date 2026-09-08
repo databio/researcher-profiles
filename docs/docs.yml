@@ -1,0 +1,36 @@
+site_name: Researcher Profiles
+nav:
+  - Overview: index.md
+  - Specification:
+    - Specification: rp-spec/index.md
+    - Privacy: rp-spec/privacy.md
+    - Embeddings: rp-spec/embeddings.md
+    - Static API: rp-spec/static-api.md
+    - Dynamic API: rp-spec/dynamic-api.md
+    - Authentication: rp-spec/authentication.md
+    - Changelog: rp-spec/CHANGELOG.md
+  - Python SDK:
+    - Overview: rp-sdk/index.md
+    - Tutorial: rp-sdk/tutorial.md
+    - Profile format: rp-sdk/profile-format.md
+    - Host a profile: rp-sdk/publishing.md
+    - How-to guides:
+      - Create a profile: rp-sdk/how-to/create-a-profile.md
+      - Validate a profile: rp-sdk/how-to/validate-a-profile.md
+      - Store profiles in a database: rp-sdk/how-to/sql-layer.md
+      - Serve a profile API: rp-sdk/how-to/serve-a-profile-api.md
+      - Access profiles over HTTP: rp-sdk/how-to/access-profiles-over-http.md
+      - Consume profiles efficiently: rp-sdk/how-to/consume-profiles.md
+      - Build and search the embeddings index: rp-sdk/how-to/embeddings-index.md
+      - Link researcher connections: rp-sdk/how-to/link-researcher-connections.md
+      - Use the persona methods: rp-sdk/how-to/persona-methods.md
+    - Reference:
+      - Python API: rp-sdk/reference/python-api.md
+      - HTTP API: rp-sdk/reference/api.md
+      - CLI: rp-sdk/reference/cli.md
+      - JSON Schemas: rp-sdk/reference/schemas.md
+      - AI Skill Reference: rp-sdk/skill.md
+  - React UI Library:
+    - Overview: rp-ui-lib/index.md
+  - Browser App:
+    - Overview: rp-browser/index.md

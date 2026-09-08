@@ -1,0 +1,22 @@
+{
+  "rid": "0000-0002-1825-0097",
+  "name": "Josiah Carberry",
+  "given_name": "Josiah",
+  "family_name": "Carberry",
+  "affiliations": [
+    {
+      "organization": { "name": "Brown University", "ror_id": "05gq02987", "type": "university" },
+      "department": "Psychoceramics",
+      "title": "Professor",
+      "start": "1929-01-01"
+    },
+    {
+      "organization": { "name": "Wesleyan University", "type": "university" },
+      "department": "Philosophy",
+      "title": "Instructor",
+      "start": "1920-09-01",
+      "end": "1928-06-30"
+    }
+  ],
+  "email": "josiah.carberry@example.org"
+}

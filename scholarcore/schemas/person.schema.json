@@ -1,0 +1,195 @@
+{
+  "$defs": {
+    "Affiliation": {
+      "additionalProperties": true,
+      "description": "A person's relationship to an organization: appointment or byline affiliation.\n\nOne model serves two uses: biographical (Person employment/education, with\ntitle + dates) and byline (Authorship, usually just organization + department).\nThe paper-scoped rendering (superscript order, cross-author dedup) is a\nconsumer's job, not this model's.\n\nAttributes:\n    organization: The institution (the identity, keyed on ror_id).\n    department: The sub-unit within the organization (free text; most\n        departments have no ROR, so this is not a nested Organization).\n    title: The role/appointment (e.g. \"Professor\", \"Postdoc\"); mainly\n        biographical.\n    start: Appointment start (ISO 8601), when known.\n    end: Appointment end; absent means current (see :attr:`current`).",
+      "properties": {
+        "department": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Department"
+        },
+        "end": {
+          "anyOf": [
+            {
+              "format": "date",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "End"
+        },
+        "organization": {
+          "$ref": "#/$defs/Organization"
+        },
+        "start": {
+          "anyOf": [
+            {
+              "format": "date",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Start"
+        },
+        "title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Title"
+        }
+      },
+      "required": [
+        "organization"
+      ],
+      "title": "Affiliation",
+      "type": "object"
+    },
+    "Organization": {
+      "additionalProperties": true,
+      "description": "An institution: a university, funder, or other organization.\n\nAttributes:\n    name: The organization's name.\n    ror_id: The organization's Research Organization Registry id.\n    type: The kind of organization (e.g. \"university\", \"funder\",\n        \"nonprofit\").\n    address: The organization's free-text address.",
+      "properties": {
+        "address": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Address"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "ror_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ror Id"
+        },
+        "type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Type"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "Organization",
+      "type": "object"
+    }
+  },
+  "additionalProperties": true,
+  "description": "A person with schema.org-like biographical fields.\n\nExtends :class:`PersonRef` with fields common to any person in an academic\ncontext, not researcher-specific. For research-specific fields (training,\ncareer, field of study), see :class:`Researcher`.\n\nAttributes:\n    given_name: The person's given (first) name.\n    family_name: The person's family (last) name.\n    affiliations: Institutional affiliations, appointments and roles.\n    email: The person's email address.",
+  "properties": {
+    "affiliations": {
+      "anyOf": [
+        {
+          "items": {
+            "$ref": "#/$defs/Affiliation"
+          },
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Affiliations"
+    },
+    "email": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Email"
+    },
+    "family_name": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Family Name"
+    },
+    "given_name": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Given Name"
+    },
+    "name": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Name"
+    },
+    "rid": {
+      "title": "Rid",
+      "type": "string"
+    }
+  },
+  "required": [
+    "rid"
+  ],
+  "title": "Person",
+  "type": "object"
+}

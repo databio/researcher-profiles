@@ -1,0 +1,29 @@
+{
+  "total_papers_analyzed": 5,
+  "total_references_found": 31,
+  "frequently_cited": [
+    {
+      "author": "Smith",
+      "year": "2010",
+      "title_fragment": "Robust relationship inference from synthetic genotype data",
+      "cited_by": [
+        "smith2015association",
+        "smith2020integration",
+        "vale2023structure"
+      ],
+      "citation_count": 3,
+      "already_in_yaml": true
+    },
+    {
+      "author": "Foundational",
+      "year": "2008",
+      "title_fragment": "A foundational interval-mapping method",
+      "cited_by": [
+        "smith2010robust",
+        "smith2015association"
+      ],
+      "citation_count": 2,
+      "already_in_yaml": false
+    }
+  ]
+}

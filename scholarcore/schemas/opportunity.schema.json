@@ -1,0 +1,129 @@
+{
+  "additionalProperties": true,
+  "description": "A published funding opportunity (a call for applications).\n\nAttributes:\n    opportunity_number: The funder-assigned opportunity number, the\n        canonical join key.\n    agency: The funding agency's name.\n    title: The opportunity's title.\n    url: A link to the opportunity's published announcement.\n    document_type: The kind of announcement (e.g. \"NOFO\", \"RFA\", \"PA\").\n    activity_codes: The activity/mechanism codes this opportunity\n        supports.\n    posted_date: The date the opportunity was posted.\n    expiration_date: The date the opportunity closes.\n    budget_max: The maximum budget an application may request.\n    purpose: A short statement of the opportunity's purpose.\n    keywords: Keywords describing the opportunity's scope.",
+  "properties": {
+    "activity_codes": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Activity Codes",
+      "type": "array"
+    },
+    "agency": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Agency"
+    },
+    "budget_max": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Budget Max"
+    },
+    "document_type": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Document Type"
+    },
+    "expiration_date": {
+      "anyOf": [
+        {
+          "format": "date",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Expiration Date"
+    },
+    "keywords": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Keywords",
+      "type": "array"
+    },
+    "opportunity_number": {
+      "title": "Opportunity Number",
+      "type": "string"
+    },
+    "posted_date": {
+      "anyOf": [
+        {
+          "format": "date",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Posted Date"
+    },
+    "purpose": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Purpose"
+    },
+    "title": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Title"
+    },
+    "url": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Url"
+    }
+  },
+  "required": [
+    "opportunity_number"
+  ],
+  "title": "Opportunity",
+  "type": "object"
+}

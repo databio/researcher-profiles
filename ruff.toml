@@ -1,0 +1,31 @@
+# Ruff configuration for the researcher-profiles monorepo.
+#
+# House Python lint standard: style-enforcing E,F,I plus the ruff formatter, at
+# line-length 100 (the width for new/standardized repos; 88 is also allowed for
+# legacy repos). E501 (line-too-long) is ignored by the linter because the
+# formatter owns wrapping; F403/F405 allow deliberate star re-exports. CI runs
+# both `ruff check .` and `ruff format --check .`.
+#
+# ARG (unused arguments) is on because a parameter a function accepts and never
+# reads is a lie told to every caller: `catalog_jsonld(..., base_url=...)` and
+# `undeclared_terms(doc, schema_name)` both had live call sites passing a value
+# that changed nothing. Signatures fixed by a framework (argparse's
+# Action.__call__, sqlite callbacks) carry a site-local `# noqa`, not a
+# file-wide exemption, so the rule keeps working everywhere else in the file.
+
+line-length = 100
+
+[lint]
+select = ["E", "F", "I", "ARG"]
+ignore = ["F403", "F405", "E501"]
+
+[lint.per-file-ignores]
+# Test doubles are the one place an ignored parameter is the point: a fake
+# backend, a monkeypatch stub, or a lambda standing in for a callback has to
+# accept the real signature and is free to read none of it. ARG in the suite
+# reports 53 of these and nothing else, so it only trains people to skip the
+# output.
+"rp-sdk/tests/**" = ["ARG"]
+
+[lint.isort]
+known-first-party = ["researcher_profiles", "scholarcore"]

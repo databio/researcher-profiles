@@ -1,0 +1,39 @@
+name: Docs links
+
+# Every relative link in every tracked .md file must resolve. The docs trees
+# sit at different depths and reference each other across component
+# boundaries, so a move breaks links nothing else catches, and a broken doc
+# link is invisible until a reader hits it.
+#
+# Deliberately NOT part of the test workflow: a rotted link is a docs failure,
+# not a test failure, and it should not turn a test matrix red.
+
+# Path-filtered to reduce CI runs. Tradeoff: a renamed directory or moved
+# non-.md file could break links without triggering this check.
+on:
+  push:
+    paths:
+      - '**/*.md'
+      - 'docs/**'
+      - 'docs-dev/**'
+      - 'spec/**'
+      - '.github/workflows/docs-links.yml'
+  pull_request:
+    paths:
+      - '**/*.md'
+      - 'docs/**'
+      - 'docs-dev/**'
+      - 'spec/**'
+  workflow_dispatch:
+
+jobs:
+  links:
+    name: Relative markdown links resolve
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Check links
+        run: python scripts/check_links.py

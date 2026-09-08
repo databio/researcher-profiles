@@ -1,0 +1,55 @@
+name: Conformance corpus (both validators)
+
+# Runs the shared conformance corpus (spec/conformance/) through both
+# validators, the Python CLI validate_profile_dir and the explorer's
+# runValidation, and asserts each verdict matches cases.json. This is what
+# keeps the two validators from silently drifting: a change that makes one
+# accept an invalid profile (or reject a valid one) fails here.
+
+on:
+  push:
+    paths:
+      - 'spec/conformance/**'
+      - 'rp-sdk/src/researcher_profiles/validate.py'
+      - 'rp-sdk/src/researcher_profiles/published_models.py'
+      - 'rp-sdk/src/researcher_profiles/schema_export.py'
+      - 'rp-sdk/tests/test_validate.py'
+      - 'rp-browser/src/**'
+      - 'rp-browser/tests/conformance.test.ts'
+      - '.github/workflows/conformance.yml'
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  cli:
+    name: CLI validator over corpus
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Install scholarcore
+        # scholarcore is not on PyPI, so it must be installed from this checkout
+        # before rp-sdk: researcher_profiles.schema imports it at module scope.
+        run: pip install -e ./scholarcore
+      - name: Install package
+        run: pip install -e "./rp-sdk[dev]"
+      - name: Run CLI conformance test
+        run: python -m pytest rp-sdk/tests/test_validate.py -k TestConformanceCorpus -v
+
+  explorer:
+    name: Explorer validator over corpus
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rp-browser
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+      - name: Install deps
+        run: npm ci
+      - name: Run explorer conformance test
+        run: npx vitest run tests/conformance.test.ts

@@ -1,0 +1,167 @@
+{
+  "@context": "https://profiles.databio.org/context/v1.jsonld",
+  "@id": "https://orcid.org/0000-0004-4600-113X",
+  "@type": "Person",
+  "conformsTo": "https://profiles.databio.org/context/v1.jsonld",
+  "name": "John B. Smith",
+  "rid": "0000-0004-4600-113X",
+  "provenance": "third_party",
+  "license": "https://creativecommons.org/licenses/by/4.0/",
+  "level": "full",
+  "affiliation": "Example Institute (Center for Applied Example Statistics)",
+  "field": "Applied Statistics",
+  "subfields": [
+    "association studies",
+    "multi-source data integration",
+    "population structure methods"
+  ],
+  "summary": "John Smith is an applied statistician at the Example Institute who develops and applies methods for association studies in diverse synthetic populations. His research focuses on multi-source data integration and relationship inference, with contributions to robust estimation independent of population structure.",
+  "sameAs": [
+    "https://scholar.example.edu/citations?user=EXAMPLE02"
+  ],
+  "identifier": [
+    {
+      "@type": "PropertyValue",
+      "propertyID": "openalex",
+      "value": "A0000000002"
+    }
+  ],
+  "training": [
+    {
+      "advisor": "Pat Broman-Like",
+      "degree": "PhD",
+      "institution": "Placeholder University",
+      "kind": "degree",
+      "year_end": 2007
+    }
+  ],
+  "career": [
+    {
+      "role": "Associate Professor",
+      "institution": "Example Institute, Center for Applied Example Statistics",
+      "start_year": 2010
+    },
+    {
+      "role": "Assistant Professor",
+      "end_year": 2010,
+      "institution": "Example Institute",
+      "start_year": 2008
+    }
+  ],
+  "expertise": [
+    "association-studies",
+    "relationship-inference",
+    "population-structure-analysis",
+    "multi-source-integration",
+    "robust-estimation",
+    "statistical-methods-development"
+  ],
+  "interests": [
+    "diverse-ancestry-methods",
+    "multi-source-biomarker-discovery",
+    "cohort-scale-association-methods"
+  ],
+  "not_interests": [
+    "single-modality-only-analysis",
+    "ad-hoc-uncalibrated-methods"
+  ],
+  "methodological_commitments": [
+    "principled statistical methods with proper calibration",
+    "inclusion of diverse ancestries in association studies",
+    "integration of multiple data sources"
+  ],
+  "recurring_positions": [
+    "studies must include diverse ancestries",
+    "multi-source integration reveals biology missed by single-modality studies"
+  ],
+  "intellectual_lineage": [
+    "foundational interval-mapping methodology",
+    "permutation-testing frameworks"
+  ],
+  "critiques": [
+    "ad hoc statistical methods without proper false positive control",
+    "ignoring population structure in cohort studies"
+  ],
+  "researchOutputs": [
+    {
+      "name": "KinTool",
+      "url": "https://kintool.example.org",
+      "type": "software"
+    }
+  ],
+  "collaborators": [
+    "Jane A. Doe",
+    "Morgan Noor",
+    "Casey Vale"
+  ],
+  "anchor": {
+    "confidence": "high",
+    "disambiguation_evidence": "Synthetic disambiguation record. The fake ORCID 0000-0004-4600-113X is used here only to exercise the schema; it does not refer to any real researcher."
+  },
+  "paper_stats": {
+    "corresponding": 2,
+    "first": 3,
+    "last": 1,
+    "middle": 1,
+    "total": 5,
+    "unknown": 0,
+    "year_max": 2023,
+    "year_min": 2010
+  },
+  "hasPart": [
+    {
+      "@type": "Collection",
+      "name": "Works",
+      "role": "works",
+      "encodingFormat": "application/ld+json",
+      "contentUrl": "sources/papers.jsonld"
+    },
+    {
+      "@type": "DigitalDocument",
+      "name": "Citations",
+      "role": "citations",
+      "encodingFormat": "application/json",
+      "contentUrl": "sources/citations.json"
+    },
+    {
+      "@type": "DigitalDocument",
+      "name": "Summary: smith2010robust",
+      "role": "paper_summary",
+      "paperId": "smith2010robust",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "sources/summaries/smith2010robust.summary.md"
+    },
+    {
+      "@type": "DigitalDocument",
+      "name": "Summary: smith2020integration",
+      "role": "paper_summary",
+      "paperId": "smith2020integration",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "sources/summaries/smith2020integration.summary.md"
+    },
+    {
+      "@type": "DigitalDocument",
+      "name": "Full text: smith2010robust",
+      "role": "paper_fulltext",
+      "paperId": "smith2010robust",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "sources/papers/smith2010robust.md"
+    }
+  ],
+  "subjectOf": [
+    {
+      "@type": "DigitalDocument",
+      "name": "SOUL",
+      "role": "soul",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "personality/SOUL.md"
+    },
+    {
+      "@type": "DigitalDocument",
+      "name": "Expertise",
+      "role": "expertise",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "personality/expertise.md"
+    }
+  ]
+}

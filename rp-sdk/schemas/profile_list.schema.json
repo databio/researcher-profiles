@@ -1,0 +1,90 @@
+{
+  "$defs": {
+    "ProfileListLink": {
+      "additionalProperties": false,
+      "properties": {
+        "list": {
+          "title": "List",
+          "type": "string"
+        }
+      },
+      "required": [
+        "list"
+      ],
+      "title": "ProfileListLink",
+      "type": "object"
+    },
+    "ProfileListRef": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
+        },
+        "url": {
+          "title": "Url",
+          "type": "string"
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "title": "ProfileListRef",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "name": {
+      "title": "Name",
+      "type": "string"
+    },
+    "profiles": {
+      "items": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "$ref": "#/$defs/ProfileListRef"
+          },
+          {
+            "$ref": "#/$defs/ProfileListLink"
+          }
+        ]
+      },
+      "title": "Profiles",
+      "type": "array"
+    },
+    "rp:profileList": {
+      "const": "0.1",
+      "title": "Rp:Profilelist",
+      "type": "string"
+    },
+    "updated": {
+      "title": "Updated",
+      "type": "string"
+    },
+    "url": {
+      "title": "Url",
+      "type": "string"
+    }
+  },
+  "required": [
+    "rp:profileList",
+    "name",
+    "url",
+    "updated",
+    "profiles"
+  ],
+  "title": "ProfileListDocument",
+  "type": "object"
+}

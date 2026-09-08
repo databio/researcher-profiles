@@ -1,0 +1,45 @@
+{
+  "@context": "https://profiles.databio.org/context/v1.jsonld",
+  "@id": "https://orcid.org/0000-0004-9876-5430",
+  "@type": "Person",
+  "conformsTo": "https://profiles.databio.org/context/v1.jsonld",
+  "name": "Robin Vale",
+  "rid": "0000-0004-9876-5430",
+  "provenance": "third_party",
+  "license": "CC-BY-4.0",
+  "level": "full",
+  "dateModified": "2026-02-10T00:00:00Z",
+  "affiliation": "Example Institute of Cell Biology",
+  "field": "Developmental genomics",
+  "summary": "Robin Vale studies developmental gene regulation.",
+  "expertise": [],
+  "not_interests": [],
+  "expertiseCitesPaperIds": false,
+  "hasCitationGraph": false,
+  "hasEmbeddingIndex": false,
+  "hasPart": [
+    {
+      "@type": "Collection",
+      "name": "Works",
+      "role": "works",
+      "encodingFormat": "application/ld+json",
+      "contentUrl": "sources/papers.jsonld"
+    }
+  ],
+  "subjectOf": [
+    {
+      "@type": "DigitalDocument",
+      "name": "SOUL",
+      "role": "soul",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "personality/SOUL.md"
+    },
+    {
+      "@type": "DigitalDocument",
+      "name": "Expertise",
+      "role": "expertise",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "personality/expertise.md"
+    }
+  ]
+}

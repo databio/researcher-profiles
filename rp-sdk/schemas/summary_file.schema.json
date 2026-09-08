@@ -1,0 +1,41 @@
+{
+  "additionalProperties": false,
+  "description": "Frontmatter shape for sources/summaries/<paper_id>.summary.md.\n\nOn-disk file is markdown with a YAML frontmatter block. This model\nvalidates the frontmatter only - the body is plain markdown.",
+  "properties": {
+    "paper_id": {
+      "title": "Paper Id",
+      "type": "string"
+    },
+    "source_hash": {
+      "title": "Source Hash",
+      "type": "string"
+    },
+    "source_kind": {
+      "enum": [
+        "fulltext",
+        "abstract"
+      ],
+      "title": "Source Kind",
+      "type": "string"
+    },
+    "written_at": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Written At"
+    }
+  },
+  "required": [
+    "paper_id",
+    "source_kind",
+    "source_hash"
+  ],
+  "title": "SummaryFile",
+  "type": "object"
+}

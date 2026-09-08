@@ -1,0 +1,204 @@
+{
+  "$defs": {
+    "ArtifactLink": {
+      "additionalProperties": true,
+      "properties": {
+        "bytes": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bytes"
+        },
+        "href": {
+          "title": "Href",
+          "type": "string"
+        },
+        "media_type": {
+          "title": "Media Type",
+          "type": "string"
+        },
+        "rel": {
+          "title": "Rel",
+          "type": "string"
+        },
+        "sha256": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sha256"
+        }
+      },
+      "required": [
+        "rel",
+        "href",
+        "media_type"
+      ],
+      "title": "ArtifactLink",
+      "type": "object"
+    },
+    "ProfileCard": {
+      "additionalProperties": true,
+      "properties": {
+        "affiliation": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Affiliation"
+        },
+        "base": {
+          "title": "Base",
+          "type": "string"
+        },
+        "field": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Field"
+        },
+        "fulltext_pct": {
+          "default": 0.0,
+          "title": "Fulltext Pct",
+          "type": "number"
+        },
+        "level": {
+          "title": "Level",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "paper_count": {
+          "default": 0,
+          "title": "Paper Count",
+          "type": "integer"
+        },
+        "rid": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rid"
+        },
+        "slug": {
+          "title": "Slug",
+          "type": "string"
+        },
+        "summary_count": {
+          "default": 0,
+          "title": "Summary Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "slug",
+        "name",
+        "level",
+        "base"
+      ],
+      "title": "ProfileCard",
+      "type": "object"
+    }
+  },
+  "additionalProperties": true,
+  "properties": {
+    "@context": {
+      "title": "@Context",
+      "type": "string"
+    },
+    "@id": {
+      "title": "@Id",
+      "type": "string"
+    },
+    "artifacts": {
+      "items": {
+        "$ref": "#/$defs/ArtifactLink"
+      },
+      "title": "Artifacts",
+      "type": "array"
+    },
+    "backend_spec": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Backend Spec"
+    },
+    "cards": {
+      "items": {
+        "$ref": "#/$defs/ProfileCard"
+      },
+      "title": "Cards",
+      "type": "array"
+    },
+    "count": {
+      "title": "Count",
+      "type": "integer"
+    },
+    "dim": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Dim"
+    },
+    "generated_at": {
+      "title": "Generated At",
+      "type": "string"
+    },
+    "generator": {
+      "title": "Generator",
+      "type": "string"
+    }
+  },
+  "required": [
+    "@context",
+    "@id",
+    "generated_at",
+    "generator",
+    "count",
+    "cards",
+    "artifacts"
+  ],
+  "title": "ProfileCollection",
+  "type": "object"
+}

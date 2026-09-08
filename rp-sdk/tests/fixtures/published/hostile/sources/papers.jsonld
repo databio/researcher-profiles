@@ -1,0 +1,21 @@
+{
+  "@context": "https://profiles.databio.org/context/v1.jsonld",
+  "@type": "Collection",
+  "conformsTo": "https://profiles.databio.org/context/v1.jsonld",
+  "about": {
+    "@id": "https://orcid.org/0000-0009-1111-0009"
+  },
+  "hasPart": [
+    {
+      "@id": "#paper/marchetti2020potential",
+      "@type": "ScholarlyArticle",
+      "name": "Machine-learned interatomic potentials for non-equilibrium cathode phase transitions",
+      "paper_id": "marchetti2020potential",
+      "datePublished": "2020",
+      "isPartOf": {
+        "@type": "Periodical",
+        "name": "Journal of Computational Materials"
+      }
+    }
+  ]
+}

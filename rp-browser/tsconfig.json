@@ -1,0 +1,27 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "useDefineForClassFields": true,
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "strict": true,
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+    "noFallthroughCasesInSwitch": true,
+    "paths": {
+      "@rp/ui-lib": ["../rp-ui-lib/src/lib/index.ts"],
+      "@rp/ui-lib/*": ["../rp-ui-lib/src/lib/*"],
+      "@rp/ui-lib/types": ["../rp-ui-lib/src/types.ts"],
+      "@rp/schemas/*": ["../rp-sdk/schemas/*"]
+    }
+  },
+  "include": ["src", "scripts"]
+}

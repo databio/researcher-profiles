@@ -1,0 +1,56 @@
+{
+  "@context": "https://profiles.databio.org/context/v1.jsonld",
+  "@id": "https://orcid.org/0000-0009-1111-0009",
+  "@type": "Person",
+  "conformsTo": "https://profiles.databio.org/context/v1.jsonld",
+  "name": "Ines Marchetti",
+  "rid": "0000-0009-1111-0009",
+  "provenance": "third_party",
+  "license": "CC-BY-4.0",
+  "level": "full",
+  "dateModified": "2026-05-18T00:00:00Z",
+  "affiliation": "Example Institute for Materials Science",
+  "field": "Computational materials science",
+  "summary": "Ines Marchetti develops machine-learned interatomic potentials for simulating phase transitions in battery cathode materials.",
+  "expertise": [
+    "machine-learned interatomic potentials for battery cathode materials",
+    "simulation of phase transitions under cycling conditions"
+  ],
+  "not_interests": [],
+  "expertiseCitesPaperIds": true,
+  "hasCitationGraph": false,
+  "hasEmbeddingIndex": false,
+  "hasPart": [
+    {
+      "@type": "Collection",
+      "name": "Works",
+      "role": "works",
+      "encodingFormat": "application/ld+json",
+      "contentUrl": "sources/papers.jsonld"
+    },
+    {
+      "@type": "DigitalDocument",
+      "name": "Summary: marchetti2020potential",
+      "role": "paper_summary",
+      "paperId": "marchetti2020potential",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "sources/summaries/marchetti2020potential.summary.md"
+    }
+  ],
+  "subjectOf": [
+    {
+      "@type": "DigitalDocument",
+      "name": "SOUL",
+      "role": "soul",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "personality/SOUL.md"
+    },
+    {
+      "@type": "DigitalDocument",
+      "name": "Expertise",
+      "role": "expertise",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "personality/expertise.md"
+    }
+  ]
+}

@@ -1,0 +1,115 @@
+{
+  "@context": "https://profiles.databio.org/context/v1.jsonld",
+  "@type": "Collection",
+  "conformsTo": "https://profiles.databio.org/context/v1.jsonld",
+  "about": {
+    "@id": "https://orcid.org/0000-0004-4600-113X"
+  },
+  "hasPart": [
+    {
+      "@id": "#paper/smith2010robust",
+      "@type": "ScholarlyArticle",
+      "name": "Robust relationship inference from synthetic genotype data",
+      "summary": "Introduces a robust method for inferring relationships from synthetic genotype data, independent of population structure.",
+      "paper_id": "smith2010robust",
+      "datePublished": "2010",
+      "isPartOf": {
+        "@type": "Periodical",
+        "name": "Journal of Applied Example Statistics"
+      },
+      "type": "authored",
+      "first_author": "Smith",
+      "author_position": "first",
+      "author_index": 1,
+      "total_authors": 3,
+      "is_corresponding": true,
+      "citation": "Smith et al., Journal of Applied Example Statistics (2010)",
+      "full_text_link": "https://kintool.example.org/papers/smith2010robust.pdf",
+      "access": "open"
+    },
+    {
+      "@id": "#paper/smith2015association",
+      "@type": "ScholarlyArticle",
+      "name": "Association mapping in diverse synthetic populations",
+      "summary": "Presents an association-mapping approach validated across diverse synthetic ancestry groups.",
+      "paper_id": "smith2015association",
+      "datePublished": "2015",
+      "isPartOf": {
+        "@type": "Periodical",
+        "name": "Synthetic Genetics"
+      },
+      "type": "authored",
+      "first_author": "Smith",
+      "author_position": "first",
+      "author_index": 1,
+      "total_authors": 5,
+      "is_corresponding": true,
+      "citation": "Smith et al., Synthetic Genetics (2015)",
+      "full_text_link": "https://kintool.example.org/papers/smith2015association.pdf",
+      "access": "open"
+    },
+    {
+      "@id": "#paper/noor2019cohort",
+      "@type": "ScholarlyArticle",
+      "name": "A multi-source cohort for example biomarker discovery",
+      "summary": "Describes a multi-source cohort resource for example biomarker discovery.",
+      "paper_id": "noor2019cohort",
+      "datePublished": "2019",
+      "isPartOf": {
+        "@type": "Periodical",
+        "name": "Synthetic Epidemiology"
+      },
+      "type": "authored",
+      "first_author": "Noor",
+      "author_position": "middle",
+      "author_index": 4,
+      "total_authors": 9,
+      "is_corresponding": false,
+      "citation": "Noor et al., Synthetic Epidemiology (2019)",
+      "full_text_link": "https://kintool.example.org/papers/noor2019cohort.pdf",
+      "access": "likely_paywalled"
+    },
+    {
+      "@id": "#paper/smith2020integration",
+      "@type": "ScholarlyArticle",
+      "name": "Integrating multiple data sources for association analysis",
+      "summary": "Develops a framework integrating multiple synthetic data sources to improve association analysis power.",
+      "paper_id": "smith2020integration",
+      "datePublished": "2020",
+      "isPartOf": {
+        "@type": "Periodical",
+        "name": "Journal of Applied Example Statistics"
+      },
+      "type": "authored",
+      "first_author": "Smith",
+      "author_position": "first",
+      "author_index": 1,
+      "total_authors": 6,
+      "is_corresponding": true,
+      "citation": "Smith et al., Journal of Applied Example Statistics (2020)",
+      "full_text_link": "https://kintool.example.org/papers/smith2020integration.pdf",
+      "access": "open"
+    },
+    {
+      "@id": "#paper/vale2023structure",
+      "@type": "ScholarlyArticle",
+      "name": "Population structure corrections for example cohorts",
+      "summary": "Evaluates population structure corrections across example cohort designs.",
+      "paper_id": "vale2023structure",
+      "datePublished": "2023",
+      "isPartOf": {
+        "@type": "Periodical",
+        "name": "Synthetic Genetics"
+      },
+      "type": "authored",
+      "first_author": "Vale",
+      "author_position": "last",
+      "author_index": 7,
+      "total_authors": 7,
+      "is_corresponding": false,
+      "citation": "Vale et al., Synthetic Genetics (2023)",
+      "full_text_link": "https://kintool.example.org/papers/vale2023structure.pdf",
+      "access": "open"
+    }
+  ]
+}

@@ -1,0 +1,367 @@
+{
+  "$defs": {
+    "Affiliation": {
+      "additionalProperties": true,
+      "description": "A person's relationship to an organization: appointment or byline affiliation.\n\nOne model serves two uses: biographical (Person employment/education, with\ntitle + dates) and byline (Authorship, usually just organization + department).\nThe paper-scoped rendering (superscript order, cross-author dedup) is a\nconsumer's job, not this model's.\n\nAttributes:\n    organization: The institution (the identity, keyed on ror_id).\n    department: The sub-unit within the organization (free text; most\n        departments have no ROR, so this is not a nested Organization).\n    title: The role/appointment (e.g. \"Professor\", \"Postdoc\"); mainly\n        biographical.\n    start: Appointment start (ISO 8601), when known.\n    end: Appointment end; absent means current (see :attr:`current`).",
+      "properties": {
+        "department": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Department"
+        },
+        "end": {
+          "anyOf": [
+            {
+              "format": "date",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "End"
+        },
+        "organization": {
+          "$ref": "#/$defs/Organization"
+        },
+        "start": {
+          "anyOf": [
+            {
+              "format": "date",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Start"
+        },
+        "title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Title"
+        }
+      },
+      "required": [
+        "organization"
+      ],
+      "title": "Affiliation",
+      "type": "object"
+    },
+    "Authorship": {
+      "additionalProperties": true,
+      "description": "One person's authorship of one work: the shared fact, not a rendering.\n\nThe paper-scoped byline *rendering* (superscript numbering, dedup of\naffiliations across authors, capability-URL edit graph, per-author verify\nflags) belongs to the consumer. This carries only what is a durable fact\nabout the authorship itself.\n\nAttributes:\n    person: The author, as a ref (``rid`` where known, else a\n        locally-minted one; see :func:`scholarcore.identity.mint_local_rid`).\n    position: The byline order. A consumer picks 0- or 1-based\n        numbering; scholarcore carries it consistently.\n    corresponding: Whether this author is a corresponding author.\n    equal_contribution: Whether this author shares equal contribution\n        with at least one co-author.\n    affiliations: The institutions (and departments) this author is\n        affiliated with, for this work. See\n        :class:`scholarcore.affil.Affiliation`.\n    credit_roles: The NISO CRediT roles this author contributed.",
+      "properties": {
+        "affiliations": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Affiliation"
+          },
+          "title": "Affiliations",
+          "type": "array"
+        },
+        "corresponding": {
+          "default": false,
+          "title": "Corresponding",
+          "type": "boolean"
+        },
+        "credit_roles": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/CreditRole"
+          },
+          "title": "Credit Roles",
+          "type": "array"
+        },
+        "equal_contribution": {
+          "default": false,
+          "title": "Equal Contribution",
+          "type": "boolean"
+        },
+        "person": {
+          "$ref": "#/$defs/PersonRef"
+        },
+        "position": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Position"
+        }
+      },
+      "required": [
+        "person"
+      ],
+      "title": "Authorship",
+      "type": "object"
+    },
+    "CreditRole": {
+      "description": "The 14 NISO CRediT contributor roles (credit.niso.org).\n\nValues are the hyphenated slugs NISO publishes, not the enum member\nspelling. Python identifiers can't hold hyphens, but the wire form should\nmatch the standard.",
+      "enum": [
+        "conceptualization",
+        "data-curation",
+        "formal-analysis",
+        "funding-acquisition",
+        "investigation",
+        "methodology",
+        "project-administration",
+        "resources",
+        "software",
+        "supervision",
+        "validation",
+        "visualization",
+        "writing-original-draft",
+        "writing-review-editing"
+      ],
+      "title": "CreditRole",
+      "type": "string"
+    },
+    "Organization": {
+      "additionalProperties": true,
+      "description": "An institution: a university, funder, or other organization.\n\nAttributes:\n    name: The organization's name.\n    ror_id: The organization's Research Organization Registry id.\n    type: The kind of organization (e.g. \"university\", \"funder\",\n        \"nonprofit\").\n    address: The organization's free-text address.",
+      "properties": {
+        "address": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Address"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "ror_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ror Id"
+        },
+        "type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Type"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "Organization",
+      "type": "object"
+    },
+    "PersonRef": {
+      "additionalProperties": true,
+      "description": "A lightweight pointer to a person: the join key plus a cached name.\n\nUse this when referencing a person without needing their full record,\nfor authorship lists, grant co-investigators, collaborator mentions. The\n``rid`` is the join key; ``name`` is cached for display without a lookup.\n\nAttributes:\n    rid: The canonical researcher id, an ORCID or a ``local:`` id.\n    name: A cached display name. Not authoritative; the full Person/Researcher\n        record is.",
+      "properties": {
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
+        },
+        "rid": {
+          "title": "Rid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "rid"
+      ],
+      "title": "PersonRef",
+      "type": "object"
+    }
+  },
+  "additionalProperties": true,
+  "description": "One scholarly work.\n\nAttributes:\n    title: The work's title.\n    authors: The work's authors, as authorship facts (byline position,\n        corresponding/equal-contribution flags, affiliations, CRediT\n        roles).\n    year: The publication year.\n    venue: The journal or conference the work appeared in.\n    doi: The work's DOI, normalized on load (resolver prefix stripped,\n        case preserved) so it can be compared directly across systems. See\n        :func:`scholarcore.identity.normalize_doi`.\n    pmid: The work's PMID, normalized on load (bare digits, prefix\n        stripped). A value carrying no digits loads as None rather than\n        raising. See :func:`scholarcore.identity.normalize_pmid`.\n    pmcid: The PubMed Central id.\n    openalex_id: The OpenAlex work id.\n    arxiv_id: The arXiv id.\n    abstract: The work's abstract.",
+  "properties": {
+    "abstract": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Abstract"
+    },
+    "arxiv_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Arxiv Id"
+    },
+    "authors": {
+      "anyOf": [
+        {
+          "items": {
+            "$ref": "#/$defs/Authorship"
+          },
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Authors"
+    },
+    "description": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Description"
+    },
+    "doi": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Doi"
+    },
+    "openalex_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Openalex Id"
+    },
+    "pmcid": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Pmcid"
+    },
+    "pmid": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Pmid"
+    },
+    "title": {
+      "title": "Title",
+      "type": "string"
+    },
+    "url": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Url"
+    },
+    "venue": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Venue"
+    },
+    "year": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Year"
+    }
+  },
+  "required": [
+    "title"
+  ],
+  "title": "Paper",
+  "type": "object"
+}

@@ -1,0 +1,209 @@
+{
+  "@context": {
+    "@version": 1.1,
+
+    "@vocab": "https://profiles.databio.org/context/v1.jsonld#",
+    "rp": "https://profiles.databio.org/context/v1.jsonld#",
+    "schema": "https://schema.org/",
+    "dcterms": "http://purl.org/dc/terms/",
+    "xsd": "http://www.w3.org/2001/XMLSchema#",
+
+    "conformsTo": { "@id": "dcterms:conformsTo", "@type": "@id" },
+
+    "name": "schema:name",
+    "url": { "@id": "schema:url", "@type": "@id" },
+    "email": "schema:email",
+    "jobTitle": "schema:jobTitle",
+    "summary": "schema:description",
+    "description": "schema:description",
+    "abstract": "schema:abstract",
+    "dateModified": "schema:dateModified",
+    "license": { "@id": "schema:license", "@type": "@id" },
+    "about": { "@id": "schema:about", "@type": "@id" },
+
+    "sameAs": { "@id": "schema:sameAs", "@type": "@id", "@container": "@set" },
+    "identifier": {
+      "@id": "schema:identifier",
+      "@container": "@set",
+      "@context": {
+        "propertyID": "schema:propertyID",
+        "value": "schema:value"
+      }
+    },
+
+    "affiliation": "schema:affiliation",
+    "award": { "@id": "schema:award", "@container": "@set" },
+    "knowsAbout": { "@id": "schema:knowsAbout", "@container": "@set" },
+    "knows": { "@id": "schema:knows", "@container": "@set" },
+
+    "hasPart": { "@id": "schema:hasPart", "@container": "@set" },
+    "subjectOf": { "@id": "schema:subjectOf", "@container": "@set" },
+    "encodingFormat": "schema:encodingFormat",
+    "contentUrl": { "@id": "schema:contentUrl", "@type": "@id" },
+    "contentSize": "schema:contentSize",
+    "role": "rp:role",
+    "paperId": "rp:paperId",
+    "visibility": "rp:visibility",
+    "derivedFrom": "rp:derivedFrom",
+    "bytes": "rp:bytes",
+    "sha256": "rp:sha256",
+    "hasCitationGraph": "rp:hasCitationGraph",
+    "hasEmbeddingIndex": "rp:hasEmbeddingIndex",
+    "expertiseCitesPaperIds": "rp:expertiseCitesPaperIds",
+
+    "rid": "rp:rid",
+    "level": "rp:level",
+    "provenance": "rp:provenance",
+    "verifiedAt": "rp:verifiedAt",
+
+    "proof": "rp:proof",
+    "kind": "rp:kind",
+    "issuer": "rp:issuer",
+    "verificationMethod": "rp:verificationMethod",
+    "alg": "rp:alg",
+    "signatureValue": "rp:signatureValue",
+    "challenge": "rp:challenge",
+    "token": "rp:token",
+    "matchedUrl": "rp:matchedUrl",
+    "field": "rp:field",
+    "subfields": { "@id": "rp:subfield", "@container": "@set" },
+    "expertise": { "@id": "schema:knowsAbout", "@container": "@set" },
+    "interests": { "@id": "rp:interest", "@container": "@set" },
+    "not_interests": { "@id": "rp:notInterest", "@container": "@set" },
+    "methodological_commitments": {
+      "@id": "rp:methodologicalCommitment",
+      "@container": "@set"
+    },
+    "recurring_positions": { "@id": "rp:recurringPosition", "@container": "@set" },
+    "intellectual_lineage": { "@id": "rp:intellectualLineage", "@container": "@set" },
+    "critiques": { "@id": "rp:critique", "@container": "@set" },
+    "collaborators": { "@id": "schema:knows", "@container": "@set" },
+    "heldGrant": { "@id": "rp:heldGrant", "@container": "@set" },
+
+    "training": {
+      "@id": "rp:training",
+      "@container": "@set",
+      "@context": {
+        "kind": "rp:trainingKind",
+        "degree": "rp:degree",
+        "institution": "rp:institution",
+        "year_start": "rp:yearStart",
+        "year_end": "rp:yearEnd",
+        "advisor": "rp:advisor"
+      }
+    },
+    "career": {
+      "@id": "rp:career",
+      "@container": "@set",
+      "@context": {
+        "role": "rp:careerRole",
+        "institution": "rp:institution",
+        "start_year": "rp:startYear",
+        "end_year": "rp:endYear"
+      }
+    },
+    "researchOutputs": {
+      "@id": "rp:researchOutput",
+      "@container": "@set",
+      "@context": {
+        "type": "rp:researchOutputType",
+        "name": "schema:name",
+        "url": { "@id": "schema:url", "@type": "@id" }
+      }
+    },
+    "anchor": {
+      "@id": "rp:anchor",
+      "@context": {
+        "disambiguation_evidence": "rp:disambiguationEvidence",
+        "confidence": "rp:confidence",
+        "sources": { "@id": "rp:anchorSource", "@type": "@id", "@container": "@set" },
+        "created_at": "rp:anchorCreatedAt"
+      }
+    },
+    "paper_stats": {
+      "@id": "rp:paperStats",
+      "@context": {
+        "first": "rp:statFirstAuthor",
+        "last": "rp:statLastAuthor",
+        "middle": "rp:statMiddleAuthor",
+        "unknown": "rp:statUnknownPosition",
+        "corresponding": "rp:statCorresponding",
+        "total": "rp:statTotal",
+        "year_min": "rp:statYearMin",
+        "year_max": "rp:statYearMax"
+      }
+    },
+    "career_stage": {
+      "@id": "rp:careerStage",
+      "@context": {
+        "as_of": "rp:asOf",
+        "terminal_degree_year": "rp:terminalDegreeYear",
+        "terminal_degree_type": "rp:terminalDegreeType",
+        "clinical_training_end_year": "rp:clinicalTrainingEndYear",
+        "first_independent_appointment_year": "rp:firstIndependentAppointmentYear",
+        "current_rank": "rp:currentRank",
+        "tenure_status": "rp:tenureStatus",
+        "independence": "rp:independence",
+        "first_r01_equivalent_year": "rp:firstR01EquivalentYear",
+        "notes": "rp:notes",
+        "evidence": "rp:evidence",
+        "confidence": "rp:confidence"
+      }
+    },
+
+    "type": "rp:resourceType",
+    "source": "rp:source",
+    "citation": "schema:citation",
+    "venue": "rp:venue",
+    "access": "rp:access",
+    "paper_id": "rp:paperId",
+    "doi": "rp:doi",
+    "pmid": "rp:pmid",
+    "pmcid": "rp:pmcid",
+    "openalex_id": "rp:openalexId",
+    "datePublished": { "@id": "schema:datePublished", "@type": "xsd:gYear" },
+    "isPartOf": "schema:isPartOf",
+    "author": { "@id": "schema:author", "@container": "@set" },
+    "first_author": "rp:firstAuthor",
+    "last_author": "rp:lastAuthor",
+    "author_position": "rp:authorPosition",
+    "author_index": "rp:authorIndex",
+    "total_authors": "rp:totalAuthors",
+    "is_corresponding": "rp:isCorresponding",
+    "cited_by_count": "rp:citedByCount",
+    "open_access": "rp:openAccess",
+    "is_oa": "schema:isAccessibleForFree",
+    "oa_status": "rp:oaStatus",
+    "oa_url": { "@id": "rp:oaUrl", "@type": "@id" },
+    "pdf_url": { "@id": "rp:pdfUrl", "@type": "@id" },
+    "full_text_link": { "@id": "rp:fullTextLink", "@type": "@id" },
+
+    "ScholarlyArticle": {
+      "@id": "schema:ScholarlyArticle",
+      "@context": {
+        "summary": "rp:summary"
+      }
+    },
+    "MonetaryGrant": {
+      "@id": "schema:MonetaryGrant",
+      "@context": {
+        "id": "rp:grantId",
+        "funder": "schema:funder",
+        "activity_code": "rp:activityCode",
+        "role": "rp:grantRole",
+        "status": "rp:grantStatus",
+        "start": "rp:startDate",
+        "end": "rp:endDate",
+        "abstract": "rp:abstract"
+      }
+    },
+
+    "Person": "schema:Person",
+    "Organization": "schema:Organization",
+    "Periodical": "schema:Periodical",
+    "PropertyValue": "schema:PropertyValue",
+    "DigitalDocument": "schema:DigitalDocument",
+    "DataDownload": "schema:DataDownload",
+    "Collection": "schema:Collection"
+  }
+}

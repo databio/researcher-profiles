@@ -1,0 +1,1 @@
+This is a translation of Menabrea's memoir on the Analytical Engine, expanded with the translator's own notes. It sets out the machine's structure (store, mill, and card-driven control) and distinguishes the engine from earlier calculating devices by its capacity for conditional, repeatable operation.

@@ -1,0 +1,12 @@
+/**
+ * The one stylesheet entry point for rp-browser. Imported once, from main.tsx.
+ *
+ * Fixed import order (later layers win the cascade on equal specificity):
+ *   1. tokens: CSS custom properties (colors, spacing, fonts, radii)
+ *   2. utilities: reset + base element styles + the utility classes in use
+ *   3. components: BEM components (themed chrome, buttons, shared patterns)
+ */
+
+@import "./tokens.css";
+@import "./utilities.css";
+@import "./components.css";

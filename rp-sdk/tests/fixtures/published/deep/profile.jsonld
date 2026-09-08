@@ -1,0 +1,80 @@
+{
+  "@context": "https://profiles.databio.org/context/v1.jsonld",
+  "@id": "https://orcid.org/0000-0005-5555-0007",
+  "@type": "Person",
+  "conformsTo": "https://profiles.databio.org/context/v1.jsonld",
+  "name": "Marcus Alden",
+  "rid": "0000-0005-5555-0007",
+  "provenance": "self_published",
+  "license": "CC-BY-4.0",
+  "level": "deep",
+  "dateModified": "2026-07-01T00:00:00Z",
+  "affiliation": "Example University Department of Genome Sciences",
+  "field": "Comparative epigenomics",
+  "summary": "Marcus Alden studies chromatin state evolution across mammalian species and builds comparative epigenomic reference atlases.",
+  "expertise": [
+    "Cross-species chromatin state annotation and alignment",
+    "Comparative epigenomic reference atlas construction",
+    "Regulatory element turnover across mammalian phylogenies"
+  ],
+  "not_interests": [
+    "de novo genome assembly methods"
+  ],
+  "expertiseCitesPaperIds": true,
+  "hasCitationGraph": false,
+  "hasEmbeddingIndex": false,
+  "hasPart": [
+    {
+      "@type": "Collection",
+      "name": "Works",
+      "role": "works",
+      "encodingFormat": "application/ld+json",
+      "contentUrl": "sources/papers.jsonld"
+    },
+    {
+      "@type": "Collection",
+      "name": "Grants",
+      "role": "grants",
+      "encodingFormat": "application/ld+json",
+      "contentUrl": "sources/grants.jsonld"
+    },
+    {
+      "@type": "DigitalDocument",
+      "name": "CV",
+      "role": "cv",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "sources/cv.md"
+    },
+    {
+      "@type": "DigitalDocument",
+      "name": "Web page: lab site",
+      "role": "web",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "sources/web/1-example-edu.md"
+    },
+    {
+      "@type": "DigitalDocument",
+      "name": "Summary: alden2020atlas",
+      "role": "paper_summary",
+      "paperId": "alden2020atlas",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "sources/summaries/alden2020atlas.summary.md"
+    }
+  ],
+  "subjectOf": [
+    {
+      "@type": "DigitalDocument",
+      "name": "SOUL",
+      "role": "soul",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "personality/SOUL.md"
+    },
+    {
+      "@type": "DigitalDocument",
+      "name": "Expertise",
+      "role": "expertise",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "personality/expertise.md"
+    }
+  ]
+}

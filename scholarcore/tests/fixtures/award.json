@@ -1,0 +1,21 @@
+{
+  "application_id": "APP-2026-000123",
+  "title": "Foundational Studies in Psychoceramics",
+  "funder": "National Institute of Cracked Pot Studies",
+  "number": "1R01AB123456-01",
+  "activity_code": "R01",
+  "pi": { "rid": "0000-0002-1825-0097", "name": "Josiah Carberry" },
+  "co_investigators": [
+    { "rid": "local:sadie-hawkins-a3f19c", "name": "Sadie Hawkins" }
+  ],
+  "role": "pi",
+  "status": "active",
+  "submission_type": "new",
+  "start": "2026-01-01",
+  "end": "2029-12-31",
+  "effort": 0.2,
+  "directs": 250000,
+  "indirects": 125000,
+  "total": 375000,
+  "abstract": "A five-year study of psychoceramic phenomena."
+}

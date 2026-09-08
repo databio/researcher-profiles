@@ -1,0 +1,27 @@
+{
+  "total_papers_analyzed": 2,
+  "total_references_found": 3,
+  "frequently_cited": [
+    {
+      "author": "Babbage",
+      "year": "1837",
+      "title_fragment": "On the mathematical powers of the calculating engine",
+      "cited_by": [
+        "lovelace1843notes",
+        "lovelace1843translation"
+      ],
+      "citation_count": 2,
+      "already_in_yaml": false
+    },
+    {
+      "author": "Menabrea",
+      "year": "1842",
+      "title_fragment": "Notions sur la machine analytique",
+      "cited_by": [
+        "lovelace1843translation"
+      ],
+      "citation_count": 1,
+      "already_in_yaml": true
+    }
+  ]
+}

@@ -1,0 +1,64 @@
+{
+  "@context": "https://profiles.databio.org/context/v1.jsonld",
+  "@id": "https://orcid.org/0000-0006-4444-0002",
+  "@type": "Person",
+  "conformsTo": "https://profiles.databio.org/context/v1.jsonld",
+  "name": "Elena Voss",
+  "rid": "0000-0006-4444-0002",
+  "provenance": "third_party",
+  "license": "CC-BY-4.0",
+  "level": "full",
+  "dateModified": "2026-04-12T00:00:00Z",
+  "affiliation": "Example Institute for Systems Immunology",
+  "field": "Systems immunology",
+  "summary": "Elena Voss studies immune cell signaling networks using computational modeling.",
+  "expertise": [
+    "computational modeling of immune cell signaling networks",
+    "single-cell perturbation screens"
+  ],
+  "not_interests": [],
+  "expertiseCitesPaperIds": true,
+  "hasCitationGraph": false,
+  "hasEmbeddingIndex": false,
+  "hasPart": [
+    {
+      "@type": "Collection",
+      "name": "Works",
+      "role": "works",
+      "encodingFormat": "application/ld+json",
+      "contentUrl": "sources/papers.jsonld"
+    },
+    {
+      "@type": "DigitalDocument",
+      "name": "Summary: voss2019signal",
+      "role": "paper_summary",
+      "paperId": "voss2019signal",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "sources/summaries/voss2019signal.summary.md"
+    },
+    {
+      "@type": "DigitalDocument",
+      "name": "Summary: voss2021screen",
+      "role": "paper_summary",
+      "paperId": "voss2021screen",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "sources/summaries/voss2021screen.summary.md"
+    }
+  ],
+  "subjectOf": [
+    {
+      "@type": "DigitalDocument",
+      "name": "SOUL",
+      "role": "soul",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "personality/SOUL.md"
+    },
+    {
+      "@type": "DigitalDocument",
+      "name": "Expertise",
+      "role": "expertise",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "personality/expertise.md"
+    }
+  ]
+}

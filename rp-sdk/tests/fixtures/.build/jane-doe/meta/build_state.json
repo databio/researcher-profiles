@@ -1,0 +1,51 @@
+{
+  "build": {
+    "completed_phases": [
+      "1",
+      "2",
+      "3",
+      "4"
+    ],
+    "mode": "synthesize",
+    "phase_retries": {}
+  },
+  "inputs": {
+    "reporter_supplement": false,
+    "websites": []
+  },
+  "papers": {
+    "doe2016example": {
+      "status": "downloaded",
+      "contaminated": false
+    },
+    "doe2019methods": {
+      "status": "downloaded",
+      "contaminated": false
+    },
+    "doe2021widgets": {
+      "status": "manual",
+      "contaminated": false
+    },
+    "doe2023framework": {
+      "status": "downloaded",
+      "contaminated": false
+    },
+    "doe2024atlas": {
+      "status": "identity_unverified",
+      "contaminated": false
+    },
+    "doe2025recent": {
+      "status": "skipped",
+      "contaminated": false
+    },
+    "poe2022survey": {
+      "status": "pending",
+      "contaminated": false
+    },
+    "roe2018toolkit": {
+      "status": "downloaded",
+      "contaminated": false
+    }
+  },
+  "schema_version": 1
+}

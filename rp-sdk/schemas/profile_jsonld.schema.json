@@ -1,0 +1,1251 @@
+{
+  "$defs": {
+    "Anchor": {
+      "additionalProperties": true,
+      "description": "Disambiguation evidence (``rp:anchor``).\n\n``sources`` and ``created_at`` are part of the evidence, not bookkeeping:\nthe anchor's claim is \"these public records were consulted and found\nconsistent\", which is unverifiable without knowing which records and when.",
+      "properties": {
+        "confidence": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Confidence"
+        },
+        "created_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Created At"
+        },
+        "disambiguation_evidence": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Disambiguation Evidence"
+        },
+        "sources": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Sources",
+          "type": "array"
+        }
+      },
+      "title": "Anchor",
+      "type": "object"
+    },
+    "ArtifactRef": {
+      "additionalProperties": true,
+      "description": "One manifest entry: a typed link to one artifact (file) inside the profile.\n\n``contentUrl`` is always a relative path, so a profile stays portable\nacross servers. Copying the directory to a different host cannot break a\nsingle link.",
+      "properties": {
+        "@context": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "@Context"
+        },
+        "@id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "@Id"
+        },
+        "@type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "DigitalDocument",
+          "title": "@Type"
+        },
+        "bytes": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bytes"
+        },
+        "contentUrl": {
+          "title": "Contenturl",
+          "type": "string"
+        },
+        "derivedFrom": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Derivedfrom",
+          "type": "array"
+        },
+        "encodingFormat": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Encodingformat"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
+        },
+        "paperId": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Paperid"
+        },
+        "role": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Role"
+        },
+        "sha256": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sha256"
+        },
+        "visibility": {
+          "default": "public",
+          "enum": [
+            "public",
+            "internal",
+            "restricted"
+          ],
+          "title": "Visibility",
+          "type": "string"
+        }
+      },
+      "required": [
+        "contentUrl"
+      ],
+      "title": "ArtifactRef",
+      "type": "object"
+    },
+    "CareerEntry": {
+      "additionalProperties": true,
+      "description": "One career or employment entry.\n\n``end_year`` of ``None`` on a held position means \"to present\"; use\n``None`` for ``start_year`` only when the start is genuinely unknown.\n\nAttributes:\n    role: The position title.\n    institution: The employing institution.\n    start_year: Year the position started; null if unknown.\n    end_year: Year the position ended; null means the position is still held.",
+      "properties": {
+        "end_year": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Year the position ended; null means the position is still held.",
+          "title": "End Year"
+        },
+        "institution": {
+          "title": "Institution",
+          "type": "string"
+        },
+        "role": {
+          "title": "Role",
+          "type": "string"
+        },
+        "start_year": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Year the position started; null if unknown.",
+          "title": "Start Year"
+        }
+      },
+      "required": [
+        "role",
+        "institution"
+      ],
+      "title": "CareerEntry",
+      "type": "object"
+    },
+    "CareerStage": {
+      "additionalProperties": true,
+      "description": "Date-anchored career-stage and eligibility facts (``rp:careerStage``).\n\nStores anchor facts, not verdicts. Eligibility (NIH ESI, K99, NSF CAREER,\n...) is always evaluated relative to an application due date, so the\nprofile never records \"is_esi: true\". It records the dated facts an\nevaluator applies a NOFO's rule to at evaluation time. ``as_of`` is when\nthe facts were assessed (distinct from the profile build date). ``None``\nand ``\"unknown\"`` are legal everywhere so an evaluator can say \"can't\ndetermine\" instead of guessing. ``sources_checked`` disambiguates the\nnulls: a null fact whose source category was checked is an established\nabsence; a null fact whose category was never checked is unknown.\n\nOut of scope (use ``notes`` or ask the human): citizenship /\nvisa status, postdoc research-months accounting, ESI extensions.",
+      "properties": {
+        "as_of": {
+          "description": "ISO date on which these facts were assessed. not the profile build date. Every fact below is a claim as of this date.",
+          "title": "As Of",
+          "type": "string"
+        },
+        "clinical_training_end_year": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Year residency/fellowship clinical training ended; null when the person had none or it is unknown.",
+          "title": "Clinical Training End Year"
+        },
+        "confidence": {
+          "description": "Overall confidence in the facts recorded here.",
+          "enum": [
+            "high",
+            "medium",
+            "low"
+          ],
+          "title": "Confidence",
+          "type": "string"
+        },
+        "current_rank": {
+          "anyOf": [
+            {
+              "enum": [
+                "assistant_professor",
+                "associate_professor",
+                "professor",
+                "research_faculty",
+                "staff_scientist",
+                "postdoc",
+                "student",
+                "other"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Current academic rank; null if unknown.",
+          "title": "Current Rank"
+        },
+        "evidence": {
+          "description": "One sentence naming the sources these facts came from, e.g. which ORCID employment records and training entries were used.",
+          "title": "Evidence",
+          "type": "string"
+        },
+        "first_independent_appointment_year": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Year of the first independent faculty/PI appointment.",
+          "title": "First Independent Appointment Year"
+        },
+        "first_r01_equivalent_year": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "First year as PD/PI of a substantial independent NIH award (R01, DP1, DP2, DP5, R37, RF1, RL1, U01, some R35). null means none found as of as_of (see sources_checked). K, R00, R03, R21, F and T awards and a one-year R56 do not count and must not be recorded here.",
+          "title": "First R01 Equivalent Year"
+        },
+        "independence": {
+          "description": "Whether the researcher currently runs an independent program, works under a mentor, or is still a trainee. Use 'unknown' when unclear.",
+          "enum": [
+            "independent",
+            "mentored",
+            "trainee",
+            "unknown"
+          ],
+          "title": "Independence",
+          "type": "string"
+        },
+        "notes": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Free text for anything the fields cannot carry: eligibility extensions, career gaps, MPI nuances, or citizenship if the researcher volunteered it.",
+          "title": "Notes"
+        },
+        "sources_checked": {
+          "default": [],
+          "description": "Source categories consulted when these facts were assessed, from 'grants', 'publications', 'training', 'employment'. Disambiguates nulls: a null field whose category is listed here means the source was checked and nothing was found (established absence); a null field whose category is not listed means nobody looked. E.g. first_r01_equivalent_year null with 'grants' listed means no R01-equivalent award exists; null without 'grants' means grant records were never consulted.",
+          "items": {
+            "enum": [
+              "grants",
+              "publications",
+              "training",
+              "employment"
+            ],
+            "type": "string"
+          },
+          "title": "Sources Checked",
+          "type": "array"
+        },
+        "tenure_status": {
+          "description": "Tenure status. Use 'unknown' unless the evidence states it. Do not infer it from rank, since assistant professors may be off the tenure track and research faculty usually are.",
+          "enum": [
+            "tenured",
+            "untenured_tenure_track",
+            "non_tenure_track",
+            "unknown"
+          ],
+          "title": "Tenure Status",
+          "type": "string"
+        },
+        "terminal_degree_type": {
+          "anyOf": [
+            {
+              "enum": [
+                "research",
+                "clinical"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Whether the terminal degree is a research or clinical degree. NIH ESI runs from the later of terminal research degree and end of clinical training, so the distinction matters.",
+          "title": "Terminal Degree Type"
+        },
+        "terminal_degree_year": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Year the terminal degree was completed; null if unknown.",
+          "title": "Terminal Degree Year"
+        }
+      },
+      "required": [
+        "as_of",
+        "tenure_status",
+        "independence",
+        "evidence",
+        "confidence"
+      ],
+      "title": "CareerStage",
+      "type": "object"
+    },
+    "Identifier": {
+      "additionalProperties": true,
+      "description": "A ``schema:PropertyValue`` identifier node.\n\nUsed for the identifiers that are not the profile's ``@id``: OpenAlex,\nScopus, and whatever an older ``external_ids`` block carried.",
+      "properties": {
+        "@context": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "@Context"
+        },
+        "@id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "@Id"
+        },
+        "@type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "PropertyValue",
+          "title": "@Type"
+        },
+        "propertyID": {
+          "title": "Propertyid",
+          "type": "string"
+        },
+        "value": {
+          "title": "Value",
+          "type": "string"
+        }
+      },
+      "required": [
+        "propertyID",
+        "value"
+      ],
+      "title": "Identifier",
+      "type": "object"
+    },
+    "PaperStats": {
+      "additionalProperties": true,
+      "description": "Author position statistics (``rp:paperStats``).",
+      "properties": {
+        "corresponding": {
+          "default": 0,
+          "title": "Corresponding",
+          "type": "integer"
+        },
+        "first": {
+          "default": 0,
+          "title": "First",
+          "type": "integer"
+        },
+        "last": {
+          "default": 0,
+          "title": "Last",
+          "type": "integer"
+        },
+        "middle": {
+          "default": 0,
+          "title": "Middle",
+          "type": "integer"
+        },
+        "total": {
+          "default": 0,
+          "title": "Total",
+          "type": "integer"
+        },
+        "unknown": {
+          "default": 0,
+          "title": "Unknown",
+          "type": "integer"
+        },
+        "year_max": {
+          "default": 0,
+          "title": "Year Max",
+          "type": "integer"
+        },
+        "year_min": {
+          "default": 0,
+          "title": "Year Min",
+          "type": "integer"
+        }
+      },
+      "title": "PaperStats",
+      "type": "object"
+    },
+    "Proof": {
+      "additionalProperties": true,
+      "description": "One verification proof attached to a profile (``rp:proof``).\n\nThe format standardizes the *envelope*: what is asserted (``kind``), who\nvouches (``issuer``), when it was last confirmed (``verifiedAt``), and,\nfor checkable proofs, how to check it. It stays neutral on the identity\n*source*. A profile may carry zero, one, or many proofs at once; a\nconsumer picks its own trust threshold over the proofs whose ``kind`` it\nunderstands.\n\n``extra=\"allow\"`` (inherited from :class:`JsonLdModel`) matters here:\ndifferent kinds carry different members, and future kinds add members\nthis version does not model. Unknown members are preserved, never\nrejected.",
+      "properties": {
+        "@context": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "@Context"
+        },
+        "@id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "@Id"
+        },
+        "@type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "@Type"
+        },
+        "alg": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Alg"
+        },
+        "challenge": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Challenge"
+        },
+        "issuer": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Issuer"
+        },
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "matchedUrl": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Matchedurl"
+        },
+        "signatureValue": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Signaturevalue"
+        },
+        "token": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Token"
+        },
+        "verificationMethod": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Verificationmethod"
+        },
+        "verifiedAt": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Verifiedat"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "Proof",
+      "type": "object"
+    },
+    "ResearchOutput": {
+      "additionalProperties": true,
+      "description": "The base type for every research output a researcher produces.\n\nAn entry in the ``researchOutputs`` list (``rp:researchOutput``) is a\n``ResearchOutput`` directly: software, a dataset, a protocol, a reagent, or\nanother non-paper output. Papers are not stored here \u2014 they live in\n``sources/papers.jsonld`` \u2014 but :class:`~.PaperRecord` is a *specialization*\nof this class, and future output kinds (grants, abstracts, presentations,\npatents, standards) are expected to specialize it too, adding their own\ntype-specific fields on top of this shared core.\n\nIt is a :class:`~.JsonLdModel`, not a plain nested value object, because a\nresearch output is a citable thing with an identity: a DOI, a repository\nURL, a grant number. ``@id`` and ``@type`` are therefore available on every\noutput; both are optional, and a generic output needs neither.\n\n``type`` is free text, not a closed enum. The recommended vocabulary is\n``software``, ``dataset``, ``protocol``, ``reagent``, ``model``, ``grant``,\n``abstract``, ``presentation``, ``patent``, ``standard`` (see\n``docs/rp-spec/index.md``); a publisher may use any other value.",
+      "properties": {
+        "@context": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "@Context"
+        },
+        "@id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "@Id"
+        },
+        "@type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "@Type"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "type": {
+          "title": "Type",
+          "type": "string"
+        },
+        "url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Url"
+        }
+      },
+      "required": [
+        "type",
+        "name"
+      ],
+      "title": "ResearchOutput",
+      "type": "object"
+    },
+    "Training": {
+      "additionalProperties": true,
+      "description": "One training or education entry.\n\n``kind`` separates degrees from postdocs and clinical training. A postdoc\nis a span, not a degree. ``year_start``/``year_end`` express spans; a\nsingle-year degree may set only ``year_end`` (completion year).\n\nAttributes:\n    kind: What kind of training this was.\n    degree: The degree or training title (e.g. \"PhD\", \"Postdoctoral Fellow\").\n    institution: The institution where the training occurred.\n    year_start: Start year; optional for a degree.\n    year_end: End year. For a degree this is the completion year.\n    advisor: The advisor or mentor.\n    field: Field of study (e.g. \"Electrical and Computer Engineering\").",
+      "properties": {
+        "advisor": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Advisor"
+        },
+        "degree": {
+          "title": "Degree",
+          "type": "string"
+        },
+        "field": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Field"
+        },
+        "institution": {
+          "title": "Institution",
+          "type": "string"
+        },
+        "kind": {
+          "description": "What kind of training this was. A postdoc is a 'postdoc' span entry, never a degree.",
+          "enum": [
+            "degree",
+            "postdoc",
+            "clinical_training"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "year_end": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "End year. For a degree this is the completion year.",
+          "title": "Year End"
+        },
+        "year_start": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Start year; optional for a degree.",
+          "title": "Year Start"
+        }
+      },
+      "required": [
+        "kind",
+        "degree",
+        "institution"
+      ],
+      "title": "Training",
+      "type": "object"
+    }
+  },
+  "additionalProperties": true,
+  "description": "Top-level model for ``profile.jsonld``, a ``schema:Person`` node.\n\nThis single document is simultaneously the format, the manifest, the\ncrawler payload, and the LLM entry point.",
+  "properties": {
+    "@context": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": "https://profiles.databio.org/context/v1.jsonld",
+      "title": "@Context"
+    },
+    "@id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "@Id"
+    },
+    "@type": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": "Person",
+      "title": "@Type"
+    },
+    "affiliation": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Affiliation"
+    },
+    "affiliation_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Affiliation Id"
+    },
+    "anchor": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Anchor"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "career": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/CareerEntry"
+      },
+      "title": "Career",
+      "type": "array"
+    },
+    "career_stage": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CareerStage"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "collaborators": {
+      "default": [],
+      "items": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "additionalProperties": true,
+            "type": "object"
+          }
+        ]
+      },
+      "title": "Collaborators",
+      "type": "array"
+    },
+    "conformsTo": {
+      "default": "https://profiles.databio.org/context/v1.jsonld",
+      "title": "Conformsto",
+      "type": "string"
+    },
+    "critiques": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Critiques",
+      "type": "array"
+    },
+    "dateModified": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Datemodified"
+    },
+    "email": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Email"
+    },
+    "expertise": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Expertise",
+      "type": "array"
+    },
+    "expertiseCitesPaperIds": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Expertisecitespaperids"
+    },
+    "field": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Field"
+    },
+    "hasCitationGraph": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Hascitationgraph"
+    },
+    "hasEmbeddingIndex": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Hasembeddingindex"
+    },
+    "hasPart": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ArtifactRef"
+      },
+      "title": "Haspart",
+      "type": "array"
+    },
+    "identifier": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Identifier"
+      },
+      "title": "Identifier",
+      "type": "array"
+    },
+    "intellectual_lineage": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Intellectual Lineage",
+      "type": "array"
+    },
+    "interests": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Interests",
+      "type": "array"
+    },
+    "jobTitle": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Jobtitle"
+    },
+    "level": {
+      "default": "full",
+      "enum": [
+        "lite",
+        "full",
+        "deep"
+      ],
+      "title": "Level",
+      "type": "string"
+    },
+    "license": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "License"
+    },
+    "methodological_commitments": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Methodological Commitments",
+      "type": "array"
+    },
+    "name": {
+      "minLength": 1,
+      "title": "Name",
+      "type": "string"
+    },
+    "not_interests": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Not Interests",
+      "type": "array"
+    },
+    "paper_stats": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PaperStats"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "proof": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Proof"
+      },
+      "title": "Proof",
+      "type": "array"
+    },
+    "provenance": {
+      "title": "Provenance",
+      "type": "string"
+    },
+    "recurring_positions": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Recurring Positions",
+      "type": "array"
+    },
+    "researchOutputs": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ResearchOutput"
+      },
+      "title": "Researchoutputs",
+      "type": "array"
+    },
+    "rid": {
+      "description": "Researcher id: a canonical ORCID or a local: id",
+      "title": "Rid",
+      "type": "string"
+    },
+    "sameAs": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Sameas",
+      "type": "array"
+    },
+    "subfields": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Subfields",
+      "type": "array"
+    },
+    "subjectOf": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ArtifactRef"
+      },
+      "title": "Subjectof",
+      "type": "array"
+    },
+    "summary": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Summary"
+    },
+    "training": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Training"
+      },
+      "title": "Training",
+      "type": "array"
+    },
+    "url": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Url"
+    },
+    "verifiedAt": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Verifiedat"
+    },
+    "visibility": {
+      "default": "public",
+      "enum": [
+        "public",
+        "internal",
+        "restricted"
+      ],
+      "title": "Visibility",
+      "type": "string"
+    }
+  },
+  "required": [
+    "name",
+    "rid",
+    "provenance"
+  ],
+  "title": "ProfileDocument",
+  "type": "object"
+}

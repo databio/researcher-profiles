@@ -1,0 +1,11 @@
+{
+  "@context": "https://profiles.databio.org/context/v1.jsonld",
+  "@id": "#me",
+  "@type": "Person",
+  "conformsTo": "https://profiles.databio.org/context/v1.jsonld",
+  "name": "Incomplete Persona",
+  "rid": "local:incomplete-persona-3192cf",
+  "provenance": "synthetic",
+  "license": "https://creativecommons.org/licenses/by/4.0/",
+  "level": "full"
+}

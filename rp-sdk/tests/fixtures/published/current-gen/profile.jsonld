@@ -1,0 +1,86 @@
+{
+  "@context": "https://profiles.databio.org/context/v1.jsonld",
+  "@id": "https://orcid.org/0000-0004-9999-0007",
+  "@type": "Person",
+  "conformsTo": "https://profiles.databio.org/context/v1.jsonld",
+  "name": "Andrea Rivas-Keller",
+  "rid": "0000-0004-9999-0007",
+  "provenance": "third_party",
+  "license": "CC-BY-4.0",
+  "level": "full",
+  "dateModified": "2026-06-15T00:00:00Z",
+  "affiliation": "Example Institute for Tissue Systems",
+  "field": "Spatial and single-cell genomics",
+  "summary": "Andrea Rivas-Keller develops computational methods for reconstructing tissue architecture from multiplexed imaging and single-cell sequencing data, with a recurring emphasis on graph-based domain discovery and honest uncertainty reporting in spatial statistics.",
+  "expertise": [
+    "Unsupervised graph-based tissue domain discovery from multiplexed spatial proteomics",
+    "Imaging mass cytometry (IMC) panel design, segmentation, and single-cell quantification",
+    "Spatial statistics for cell-cell neighborhood enrichment with honest null models",
+    "Scalable whole-slide image processing pipelines for multiplexed tissue imaging",
+    "Integration of spatial transcriptomics with protein-level imaging assays"
+  ],
+  "not_interests": [
+    "wet-lab antibody conjugation chemistry",
+    "clinical trial design and endpoint selection",
+    "bulk RNA-seq differential expression as a primary method"
+  ],
+  "expertiseCitesPaperIds": true,
+  "hasCitationGraph": false,
+  "hasEmbeddingIndex": false,
+  "hasPart": [
+    {
+      "@type": "Collection",
+      "name": "Works",
+      "role": "works",
+      "encodingFormat": "application/ld+json",
+      "contentUrl": "sources/papers.jsonld"
+    },
+    {
+      "@type": "DigitalDocument",
+      "name": "Summary: doe2019methods",
+      "role": "paper_summary",
+      "paperId": "doe2019methods",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "sources/summaries/doe2019methods.summary.md"
+    },
+    {
+      "@type": "DigitalDocument",
+      "name": "Summary: doe2020spatial",
+      "role": "paper_summary",
+      "paperId": "doe2020spatial",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "sources/summaries/doe2020spatial.summary.md"
+    },
+    {
+      "@type": "DigitalDocument",
+      "name": "Summary: smith2021review",
+      "role": "paper_summary",
+      "paperId": "smith2021review",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "sources/summaries/smith2021review.summary.md"
+    },
+    {
+      "@type": "DigitalDocument",
+      "name": "Agent entry point",
+      "role": "agent_entry_point",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "SKILL.md"
+    }
+  ],
+  "subjectOf": [
+    {
+      "@type": "DigitalDocument",
+      "name": "SOUL",
+      "role": "soul",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "personality/SOUL.md"
+    },
+    {
+      "@type": "DigitalDocument",
+      "name": "Expertise",
+      "role": "expertise",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "personality/expertise.md"
+    }
+  ]
+}

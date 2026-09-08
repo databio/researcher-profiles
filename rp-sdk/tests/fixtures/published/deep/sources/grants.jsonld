@@ -1,0 +1,37 @@
+{
+  "@context": "https://profiles.databio.org/context/v1.jsonld",
+  "@type": "Collection",
+  "conformsTo": "https://profiles.databio.org/context/v1.jsonld",
+  "about": {
+    "@id": "https://orcid.org/0000-0005-5555-0007"
+  },
+  "hasPart": [
+    {
+      "@id": "#grant/nih-r01-atlas",
+      "id": "nih-r01-atlas",
+      "@type": "MonetaryGrant",
+      "name": "A comparative epigenomic reference atlas for mammalian genomes",
+      "identifier": "R01HG000111",
+      "funder": {
+        "@type": "Organization",
+        "name": "NIH"
+      },
+      "role": "pi",
+      "status": "funded",
+      "start": "2023-01-01",
+      "end": "2027-12-31"
+    },
+    {
+      "@id": "#grant/foundation-turnover",
+      "id": "foundation-turnover",
+      "@type": "MonetaryGrant",
+      "name": "Regulatory element turnover across mammalian phylogenies",
+      "funder": {
+        "@type": "Organization",
+        "name": "Example Genomics Foundation"
+      },
+      "role": "co_pi",
+      "status": "pending"
+    }
+  ]
+}

@@ -1,0 +1,282 @@
+/*
+ * Presentational styles for the canonical researcher-profile viewer.
+ *
+ * CSS modules: every class is locally scoped, so nothing leaks into a host app
+ * when these components are vendored. Colors use CSS custom properties with
+ * sensible fallbacks so a host (e.g. a vendoring consumer's Tailwind theme)
+ * can override them by setting the variables on an ancestor; standalone, the
+ * fallbacks apply.
+ */
+
+.viewer {
+  --rp-fg: var(--rp-color-fg);
+  --rp-muted: var(--rp-color-muted);
+  --rp-border: var(--rp-color-border);
+  --rp-accent: var(--rp-color-accent);
+  --rp-tag-bg: var(--rp-color-tag-bg);
+  --rp-surface: var(--rp-color-surface);
+
+  color: var(--rp-fg);
+  font-size: 15px;
+  line-height: 1.55;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.sectionTitle {
+  font-size: 0.8rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--rp-muted);
+  margin: 0;
+}
+
+/* Header ------------------------------------------------------------- */
+.header {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.name {
+  font-size: 1.5rem;
+  font-weight: 700;
+  margin: 0;
+}
+
+.subline {
+  color: var(--rp-muted);
+  margin: 0;
+}
+
+.headerMeta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.25rem;
+}
+
+.badge {
+  display: inline-block;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  background: var(--rp-tag-bg);
+  color: var(--rp-fg);
+}
+
+.summaryText {
+  margin: 0.35rem 0 0;
+}
+
+.link {
+  color: var(--rp-accent);
+  text-decoration: none;
+}
+.link:hover {
+  text-decoration: underline;
+}
+
+/* Metadata panel ----------------------------------------------------- */
+.metaGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 1rem;
+}
+
+.metaList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.metaItem {
+  display: flex;
+  flex-direction: column;
+}
+
+.metaPrimary {
+  font-weight: 600;
+}
+
+.metaSecondary {
+  color: var(--rp-muted);
+  font-size: 0.85rem;
+}
+
+.tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.tag {
+  padding: 0.12rem 0.5rem;
+  border-radius: 6px;
+  background: var(--rp-tag-bg);
+  font-size: 0.8rem;
+}
+
+/* Papers ------------------------------------------------------------- */
+.papers {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.paperGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.paperGroupYear {
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: var(--rp-muted);
+  margin: 0.75rem 0 0.15rem;
+}
+
+.paperRow {
+  border: 1px solid var(--rp-border);
+  border-radius: 8px;
+  padding: 0.6rem 0.75rem;
+  background: var(--rp-surface);
+}
+
+.paperHead {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  justify-content: space-between;
+}
+
+.paperTitle {
+  font-weight: 600;
+  margin: 0;
+}
+
+.paperMeta {
+  color: var(--rp-muted);
+  font-size: 0.85rem;
+  margin: 0.15rem 0 0;
+}
+
+.paperActions {
+  display: flex;
+  gap: 0.5rem;
+  flex-shrink: 0;
+  align-items: center;
+}
+
+.expandBtn {
+  background: none;
+  border: 1px solid var(--rp-border);
+  border-radius: 6px;
+  padding: 0.15rem 0.5rem;
+  font-size: 0.78rem;
+  cursor: pointer;
+  color: var(--rp-accent);
+}
+.expandBtn:hover {
+  background: var(--rp-tag-bg);
+}
+.expandBtn:disabled {
+  cursor: default;
+  color: var(--rp-muted);
+}
+
+.paperSummary {
+  margin-top: 0.5rem;
+  padding-top: 0.5rem;
+  border-top: 1px dashed var(--rp-border);
+}
+
+.empty {
+  color: var(--rp-muted);
+  font-style: italic;
+}
+
+.controls {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+/* Rendered markdown -------------------------------------------------- */
+.prose {
+  max-width: 68ch;
+}
+.prose :first-child {
+  margin-top: 0;
+}
+.prose :last-child {
+  margin-bottom: 0;
+}
+.prose p {
+  margin: 0 0 0.75rem;
+}
+.prose h1,
+.prose h2,
+.prose h3,
+.prose h4 {
+  margin: 1.1rem 0 0.5rem;
+  line-height: 1.3;
+}
+.prose h1 {
+  font-size: 1.25rem;
+}
+.prose h2 {
+  font-size: 1.1rem;
+}
+.prose h3 {
+  font-size: 1rem;
+}
+.prose ul,
+.prose ol {
+  margin: 0 0 0.75rem;
+  padding-left: 1.4rem;
+}
+.prose li {
+  margin: 0.15rem 0;
+}
+.prose code {
+  background: var(--rp-tag-bg);
+  padding: 0.05rem 0.3rem;
+  border-radius: 4px;
+  font-size: 0.9em;
+}
+.prose pre {
+  background: var(--rp-tag-bg);
+  padding: 0.75rem;
+  border-radius: 8px;
+  overflow-x: auto;
+}
+.prose pre code {
+  background: none;
+  padding: 0;
+}
+.prose a {
+  color: var(--rp-accent);
+}
+.prose blockquote {
+  margin: 0 0 0.75rem;
+  padding-left: 0.9rem;
+  border-left: 3px solid var(--rp-border);
+  color: var(--rp-muted);
+}

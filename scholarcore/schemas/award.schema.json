@@ -1,0 +1,291 @@
+{
+  "$defs": {
+    "AwardStatus": {
+      "description": "An award's lifecycle stage.",
+      "enum": [
+        "planning",
+        "submitted",
+        "pending",
+        "funded",
+        "active",
+        "completed",
+        "rejected",
+        "withdrawn"
+      ],
+      "title": "AwardStatus",
+      "type": "string"
+    },
+    "GrantRole": {
+      "description": "A person's role on a funded award.",
+      "enum": [
+        "pi",
+        "co_pi",
+        "co_i",
+        "other"
+      ],
+      "title": "GrantRole",
+      "type": "string"
+    },
+    "PersonRef": {
+      "additionalProperties": true,
+      "description": "A lightweight pointer to a person: the join key plus a cached name.\n\nUse this when referencing a person without needing their full record,\nfor authorship lists, grant co-investigators, collaborator mentions. The\n``rid`` is the join key; ``name`` is cached for display without a lookup.\n\nAttributes:\n    rid: The canonical researcher id, an ORCID or a ``local:`` id.\n    name: A cached display name. Not authoritative; the full Person/Researcher\n        record is.",
+      "properties": {
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
+        },
+        "rid": {
+          "title": "Rid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "rid"
+      ],
+      "title": "PersonRef",
+      "type": "object"
+    },
+    "SubmissionType": {
+      "description": "The kind of submission an award application represents.",
+      "enum": [
+        "new",
+        "renewal",
+        "resubmission",
+        "supplement"
+      ],
+      "title": "SubmissionType",
+      "type": "string"
+    }
+  },
+  "additionalProperties": true,
+  "description": "A funded or proposed award of financial support for research.\n\nAttributes:\n    application_id: The canonical join key for this award, assigned by\n        whatever external system of record tracks the application.\n    title: The award's title.\n    funder: The funding organization's name.\n    number: The award or grant number (an identifier distinct from\n        ``application_id``).\n    activity_code: The funder's activity/mechanism code (e.g. an NIH\n        code like \"R01\", \"U01\", \"K99\").\n    pi: The principal investigator.\n    co_investigators: The award's co-investigators.\n    role: The role of the person the record is scoped to, when the\n        record represents one person's participation rather than the\n        award as a whole.\n    status: The award's lifecycle stage. An unrecognized value loads as\n        None rather than raising, so a consumer with a finer-grained\n        vocabulary can layer it in an extra field instead of breaking.\n    submission_type: The kind of submission (new, renewal, resubmission,\n        supplement). An unrecognized value loads as None rather than\n        raising, for the same reason as ``status``.\n    start: The award's start date.\n    end: The award's end date.\n    effort: The PI's (or the person the record is scoped to) effort, as\n        an FTE fraction (0-1). A person-months figure is a derived,\n        tool-specific representation, not a second base field.\n    directs: Direct costs, in whole US dollars.\n    indirects: Indirect costs, in whole US dollars.\n    total: Total costs, in whole US dollars.\n    abstract: The award's abstract or project summary.",
+  "properties": {
+    "abstract": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Abstract"
+    },
+    "activity_code": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Activity Code"
+    },
+    "application_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Application Id"
+    },
+    "co_investigators": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/PersonRef"
+      },
+      "title": "Co Investigators",
+      "type": "array"
+    },
+    "description": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Description"
+    },
+    "directs": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Directs"
+    },
+    "effort": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Effort"
+    },
+    "end": {
+      "anyOf": [
+        {
+          "format": "date",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "End"
+    },
+    "funder": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Funder"
+    },
+    "indirects": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Indirects"
+    },
+    "number": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Number"
+    },
+    "pi": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PersonRef"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "role": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/GrantRole"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "start": {
+      "anyOf": [
+        {
+          "format": "date",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Start"
+    },
+    "status": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AwardStatus"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "submission_type": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SubmissionType"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "title": {
+      "title": "Title",
+      "type": "string"
+    },
+    "total": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Total"
+    },
+    "url": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Url"
+    }
+  },
+  "required": [
+    "title"
+  ],
+  "title": "Award",
+  "type": "object"
+}

@@ -1,0 +1,32 @@
+{
+  "@context": "https://profiles.databio.org/context/v1.jsonld",
+  "@type": "Collection",
+  "conformsTo": "https://profiles.databio.org/context/v1.jsonld",
+  "about": {
+    "@id": "https://orcid.org/0000-0004-9876-5430"
+  },
+  "hasPart": [
+    {
+      "@id": "#paper/chu2018pattern",
+      "@type": "ScholarlyArticle",
+      "name": "Regulatory patterning of early developmental gene expression",
+      "paper_id": "chu2018pattern",
+      "datePublished": "2018",
+      "isPartOf": {
+        "@type": "Periodical",
+        "name": "Developmental Genomics Reports"
+      }
+    },
+    {
+      "@id": "#paper/chu2021lineage",
+      "@type": "ScholarlyArticle",
+      "name": "Lineage-specific chromatin state transitions during differentiation",
+      "paper_id": "chu2021lineage",
+      "datePublished": "2021",
+      "isPartOf": {
+        "@type": "Periodical",
+        "name": "Developmental Genomics Reports"
+      }
+    }
+  ]
+}

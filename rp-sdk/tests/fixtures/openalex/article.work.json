@@ -1,0 +1,98 @@
+{
+  "id": "https://openalex.org/W2100000001",
+  "doi": "https://doi.org/10.1101/GR.EXAMPLE.2021",
+  "title": "  Chromatin accessibility maps of a redacted cell type  ",
+  "display_name": "Chromatin accessibility maps of a redacted cell type",
+  "publication_year": 2021,
+  "publication_date": "2021-06-15",
+  "type": "Article",
+  "type_crossref": "journal-article",
+  "cited_by_count": 128,
+  "language": "en",
+  "ids": {
+    "openalex": "https://openalex.org/W2100000001",
+    "doi": "https://doi.org/10.1101/gr.example.2021",
+    "pmid": "https://pubmed.ncbi.nlm.nih.gov/34000001"
+  },
+  "primary_location": {
+    "is_oa": true,
+    "landing_page_url": "https://genome.example.org/content/31/6/1000",
+    "pdf_url": "https://genome.example.org/content/31/6/1000.full.pdf",
+    "source": {
+      "id": "https://openalex.org/S0000001",
+      "display_name": "Genome Research",
+      "type": "journal"
+    }
+  },
+  "best_oa_location": {
+    "is_oa": true,
+    "landing_page_url": "https://www.ncbi.nlm.nih.gov/pmc/articles/8000001",
+    "pdf_url": "https://europepmc.org/articles/PMC8000001?pdf=render",
+    "source": {
+      "id": "https://openalex.org/S0000002",
+      "display_name": "PubMed Central",
+      "type": "repository"
+    }
+  },
+  "host_venue": {
+    "id": "https://openalex.org/S0000001",
+    "display_name": "Genome Research (legacy host_venue)"
+  },
+  "abstract_inverted_index": {
+    "We": [0],
+    "profiled": [1],
+    "chromatin": [2, 6],
+    "accessibility": [3],
+    "across": [4],
+    "many": [5],
+    "states": [7]
+  },
+  "authorships": [
+    {
+      "author_position": "first",
+      "author": {
+        "id": "https://openalex.org/A0000001",
+        "display_name": "Jane Q Redacted",
+        "orcid": "https://orcid.org/0000-0002-0000-0001"
+      },
+      "raw_affiliation_strings": ["Department of Genomics, Redacted University"],
+      "institutions": [
+        {
+          "id": "https://openalex.org/I0000001",
+          "display_name": "Redacted University",
+          "country_code": "US",
+          "type": "education"
+        }
+      ]
+    },
+    {
+      "author_position": "middle",
+      "author": {
+        "id": "https://openalex.org/A0000002",
+        "display_name": "John Redacted",
+        "orcid": null
+      },
+      "raw_affiliation_strings": ["Redacted Institute"],
+      "institutions": [
+        {
+          "id": "https://openalex.org/I0000002",
+          "display_name": "Redacted Institute",
+          "country_code": "US",
+          "type": "facility"
+        }
+      ]
+    }
+  ],
+  "locations": [
+    {
+      "id": "pmh:oai:pubmedcentral.nih.gov:8000001",
+      "is_oa": true,
+      "landing_page_url": "https://www.ncbi.nlm.nih.gov/pmc/articles/8000001",
+      "source": {
+        "id": "https://openalex.org/S0000002",
+        "display_name": "PubMed Central",
+        "type": "repository"
+      }
+    }
+  ]
+}

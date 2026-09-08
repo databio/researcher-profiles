@@ -1,0 +1,49 @@
+{
+  "@context": "https://example.com/dead-context/v1",
+  "@id": "https://orcid.org/0000-0007-3333-0008",
+  "@type": "Person",
+  "conformsTo": "https://profiles.databio.org/context/v1.jsonld",
+  "name": "Renata Oduya",
+  "rid": "0000-0007-3333-0008",
+  "provenance": "third_party",
+  "license": "CC-BY-4.0",
+  "level": "full",
+  "dateModified": "2026-03-20T00:00:00Z",
+  "affiliation": "Example Institute for Plant Genomics",
+  "field": "Plant stress genomics",
+  "summary": "Renata Oduya studies transcriptional responses to drought stress in staple crop species.",
+  "expertise": [
+    "transcriptional response to drought stress in staple crops",
+    "cross-species comparison of stress-response regulatory networks"
+  ],
+  "not_interests": [],
+  "expertiseCitesPaperIds": true,
+  "hasCitationGraph": false,
+  "hasEmbeddingIndex": false,
+  "hasPart": [
+    {
+      "@type": "DigitalDocument",
+      "name": "Summary: oduya2018drought",
+      "role": "paper_summary",
+      "paperId": "oduya2018drought",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "sources/summaries/oduya2018drought.summary.md"
+    }
+  ],
+  "subjectOf": [
+    {
+      "@type": "DigitalDocument",
+      "name": "SOUL",
+      "role": "soul",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "personality/SOUL.md"
+    },
+    {
+      "@type": "DigitalDocument",
+      "name": "Expertise",
+      "role": "expertise",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "personality/expertise.md"
+    }
+  ]
+}

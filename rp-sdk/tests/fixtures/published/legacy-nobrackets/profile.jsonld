@@ -1,0 +1,65 @@
+{
+  "@context": "https://profiles.databio.org/context/v1.jsonld",
+  "@id": "https://orcid.org/0000-0001-8888-0003",
+  "@type": "Person",
+  "conformsTo": "https://profiles.databio.org/context/v1.jsonld",
+  "name": "Sewall Wright",
+  "rid": "0000-0001-8888-0003",
+  "provenance": "third_party",
+  "license": "CC-BY-4.0",
+  "level": "full",
+  "dateModified": "2022-11-02T00:00:00Z",
+  "affiliation": "Example College of Medicine",
+  "field": "Statistical genetics",
+  "summary": "Sewall Wright works on genome-wide association study design and quality control, with a focus on population structure correction and calibrated association testing.",
+  "expertise": [
+    "genome-wide association study quality control",
+    "population structure correction",
+    "calibrated association testing across ancestries"
+  ],
+  "not_interests": [],
+  "expertiseCitesPaperIds": false,
+  "hasCitationGraph": false,
+  "hasEmbeddingIndex": false,
+  "hasPart": [
+    {
+      "@type": "Collection",
+      "name": "Works",
+      "role": "works",
+      "encodingFormat": "application/ld+json",
+      "contentUrl": "sources/papers.jsonld"
+    },
+    {
+      "@type": "DigitalDocument",
+      "name": "Summary: wright2015gwas",
+      "role": "paper_summary",
+      "paperId": "wright2015gwas",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "sources/summaries/wright2015gwas.summary.md"
+    },
+    {
+      "@type": "DigitalDocument",
+      "name": "Summary: wright2017assoc",
+      "role": "paper_summary",
+      "paperId": "wright2017assoc",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "sources/summaries/wright2017assoc.summary.md"
+    }
+  ],
+  "subjectOf": [
+    {
+      "@type": "DigitalDocument",
+      "name": "SOUL",
+      "role": "soul",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "personality/SOUL.md"
+    },
+    {
+      "@type": "DigitalDocument",
+      "name": "Expertise",
+      "role": "expertise",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "personality/expertise.md"
+    }
+  ]
+}
