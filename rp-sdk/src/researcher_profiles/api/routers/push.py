@@ -232,9 +232,14 @@ async def _put_profile_tarball(
     )
 
 
+# Gated on `read`, not `push`, even though this route lives in the push router
+# as the inverse of PUT. Nothing here writes, and WHAT a caller gets is decided
+# by `get_viewer_tier` + `build_viewer_archive`, not by the scope -- so gating a
+# download on a write scope checked the wrong axis and forced every read-only
+# consumer (a CI job pulling profile context, say) to hold push rights.
 @router.get(
     "/profiles/{slug}/archive",
-    dependencies=[Depends(require_scope("push"))],
+    dependencies=[Depends(require_scope("read"))],
 )
 def get_profile_archive(
     slug: str,
