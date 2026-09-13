@@ -48,11 +48,13 @@ key names its own family on sight. Two families are defined.
 | `rpk_` | app | An application, a script, or a person's own command line | Read, push, and other whole-application powers |
 | `rpa_` | agent | An assistant acting for one person, on one profile | Narrow, named write scopes |
 
-A single key MUST NOT mix families. An `rpa_` key MUST NOT carry app scopes, and
-an `rpk_` key MUST NOT carry agent scopes. A server MUST reject a mint request
-that mixes them, and MUST refuse a key presented at an endpoint belonging to the
-other family with `400` rather than `401`, naming the endpoint that would have
-worked.
+A single key MUST NOT mix family-exclusive write scopes. An `rpa_` key MUST NOT
+carry app-only scopes (match, persona, push, etc.), and an `rpk_` key MUST NOT
+carry agent write scopes (profile:metadata, profile:narrative, etc.). The `read`
+scope is family-neutral and MAY appear on either prefix. A server MUST reject a
+mint request that mixes exclusive scopes, and MUST refuse a key presented at an
+endpoint belonging to the other family with `400` rather than `401`, naming the
+endpoint that would have worked.
 
 A key's plaintext MUST be shown exactly once, at mint time. A server MUST store
 only a hash of it, never the plaintext. A server SHOULD store a non-secret
@@ -62,13 +64,20 @@ A server MUST reject a key that is unknown, revoked, or past its expiry, and
 MUST make those three cases indistinguishable in the response, so an attacker
 learns nothing from probing.
 
+### Shared scopes
+
+These are family-neutral and MAY appear on either `rpk_` or `rpa_` keys.
+
+| Scope | Grants |
+|-------|--------|
+| `read` | Read profiles at the key's viewer tier |
+
 ### App scopes
 
 These attach to `rpk_` keys. A server MAY define others.
 
 | Scope | Grants |
 |-------|--------|
-| `read` | Read profiles at the key's viewer tier |
 | `match` | Cross-profile matching |
 | `persona` | The persona endpoints |
 | `push` | Upload any profile |
@@ -88,7 +97,6 @@ family implies the other.
 
 | Scope | Covers | Fields | Dangerous | Default |
 |-------|--------|--------|-----------|---------|
-| `profile:read` | Read this profile in full, including internal and restricted content. Grants no ability to change anything. | | no | on |
 | `profile:metadata` | `PATCH /profiles/{slug}/metadata` | `field`, `subfields`, `summary`, `expertise`, `interests`, `not_interests` | no | on |
 | `profile:history` | `PATCH /profiles/{slug}/metadata` | `training`, `career` | no | on |
 | `profile:identity` | `PATCH /profiles/{slug}/metadata` | `name`, `affiliation`, `job_title`, `same_as` | no | off |
