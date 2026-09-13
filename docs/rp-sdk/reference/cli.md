@@ -879,7 +879,7 @@ $ rp agent whoami
 Agent:   laptop-assistant (rpa_7f3a91c2b40e)
 Owner:   Jane Doe (0000-0002-1825-0097)
 Tier:    restricted
-Scopes:  profile:history, profile:metadata, profile:narrative, profile:read
+Scopes:  profile:history, profile:metadata, profile:narrative, read
 Missing: profile:identity, profile:visibility
 Profile: jane-doe (editor)
 ```

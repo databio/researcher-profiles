@@ -42,15 +42,15 @@ rp agent whoami
 
 ## Scopes: read this before asking for a key
 
-Six scopes. All but `profile:read` are write scopes. No wildcard. Neither
-family implies the other. A single key may not hold scopes from both families
-(app and agent). The normative source for this table is
+Six scopes. All but `read` are write scopes. No wildcard. Neither
+family implies the other. A single key may not mix the two families' write
+scopes; `read` is shared with app (`rpk_`) keys. The normative source for this table is
 [Agent scopes](../../../docs/rp-spec/authentication.md#agent-scopes); when the
 two disagree, the spec wins.
 
 | Scope | What it covers | Default |
 |---|---|---|
-| `profile:read` | reading this profile in full, including internal and restricted content; grants no writes | on |
+| `read` | reading this profile in full, including internal and restricted content; grants no writes | on |
 | `profile:metadata` | field, subfields, summary, expertise, interests, not_interests | on |
 | `profile:history` | training, career | on |
 | `profile:identity` | name, affiliation, job_title, same_as | off |

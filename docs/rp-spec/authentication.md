@@ -52,9 +52,12 @@ A single key MUST NOT mix family-exclusive write scopes. An `rpa_` key MUST NOT
 carry app-only scopes (match, persona, push, etc.), and an `rpk_` key MUST NOT
 carry agent write scopes (profile:metadata, profile:narrative, etc.). The `read`
 scope is family-neutral and MAY appear on either prefix. A server MUST reject a
-mint request that mixes exclusive scopes, and MUST refuse a key presented at an
-endpoint belonging to the other family with `400` rather than `401`, naming the
-endpoint that would have worked.
+mint request that mixes exclusive scopes. On data endpoints the prefix is a
+label, never an authorization input: scopes and grants decide, and a key of
+either family is judged by what it holds. Only on the management surfaces (such
+as [`GET /api/manage/agent/whoami`](dynamic-api.md#get-apimanageagentwhoami))
+MUST a server refuse a key of the other family with `400` rather than `401`,
+naming the endpoint that would have worked.
 
 A key's plaintext MUST be shown exactly once, at mint time. A server MUST store
 only a hash of it, never the plaintext. A server SHOULD store a non-secret
@@ -92,8 +95,8 @@ key that escapes can still only touch profiles that person already controls.
 
 These attach to `rpa_` keys. They are the vocabulary published by
 [`GET /api/manage/agent/scopes`](dynamic-api.md#get-apimanageagentscopes). Every
-one except `profile:read` is a write scope. There is no wildcard, and neither
-family implies the other.
+one is a write scope; the read capability is the shared `read` scope above.
+There is no wildcard, and neither family implies the other.
 
 | Scope | Covers | Fields | Dangerous | Default |
 |-------|--------|--------|-----------|---------|
