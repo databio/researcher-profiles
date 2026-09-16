@@ -1,0 +1,28 @@
+name: Notify village docs
+
+# When docs change on master, tell the village repo to rebuild and redeploy
+# village.databio.org (which pulls these docs at build time). Needs a
+# fine-grained PAT (DOCS_DISPATCH_TOKEN) scoped to databio/village with
+# Contents: read+write, which is what repository_dispatch requires.
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'docs/**'
+      - 'scholarcore/docs/**'
+      - '.github/workflows/notify-docs.yml'
+  workflow_dispatch:
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send repository_dispatch to databio/village
+        env:
+          GH_TOKEN: ${{ secrets.DOCS_DISPATCH_TOKEN }}
+        run: |
+          gh api repos/databio/village/dispatches \
+            -f event_type=docs-updated \
+            -f 'client_payload[source]=researcher-profiles' \
+            -f 'client_payload[sha]=${{ github.sha }}'
