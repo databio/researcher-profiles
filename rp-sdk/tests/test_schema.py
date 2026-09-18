@@ -190,7 +190,7 @@ class TestSchemaExport:
         from researcher_profiles.validate import schema_fingerprint
 
         assert schema_fingerprint() == (
-            "9c4f79c3848fb83c7d1bbee413fde015c4b12908561c454aa6494081769f0b48"
+            "fc06cb57de508e86ce794e1454c0089992024fb0a727e3f91097cfc161427e0f"
         )
 
     # ---- Fixture parity: Pydantic + JSON Schema agree on fixtures ----
@@ -256,6 +256,16 @@ class TestProvenance:
             "domain_verified"
         )
         assert _provenance_doc(provenance="key_signed", url=URL).provenance == "key_signed"
+
+    def test_provenance_note_round_trips(self):
+        """An interview-built profile says how it was produced, in one sentence."""
+        note = "self-reported via a structured interview on 2026-09-10; unverified"
+        doc = _provenance_doc(provenance="self_published", provenanceNote=note)
+        assert doc.provenance_note == note
+        data = doc.model_dump(by_alias=True)
+        assert data["provenanceNote"] == note
+        assert ProfileDocument.model_validate(data).provenance_note == note
+        assert list(data).index("provenanceNote") == list(data).index("provenance") + 1
 
     def test_unknown_provenance_is_tolerated_not_rejected(self):
         """profile-document.md §4: consumers must ignore unknown enum values.

@@ -49,6 +49,10 @@ ROLE_DEFAULT_VISIBILITY: dict[str, Visibility] = {
     "paper_fulltext": "restricted",
     "cv": "restricted",
     "web": "restricted",
+    # The interview digest is the researcher's own private account of their
+    # work; the public documents derived from it carry a disclosure line
+    # instead, so the digest itself never needs to leave the machine.
+    "interview": "restricted",
     # Grant-derived embedding text (title + abstract) is restricted. This is the
     # singular chunk source_type produced by ``chunk_grant``; the manifest
     # collection role for grants is the plural ``grants`` (a public bibliographic

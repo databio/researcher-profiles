@@ -79,6 +79,7 @@ KEY_ORDER: tuple[str, ...] = (
     "name",
     "rid",
     "provenance",
+    "provenanceNote",
     "verifiedAt",
     "proof",
     "license",

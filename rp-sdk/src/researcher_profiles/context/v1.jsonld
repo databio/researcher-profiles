@@ -54,6 +54,7 @@
     "rid": "rp:rid",
     "level": "rp:level",
     "provenance": "rp:provenance",
+    "provenanceNote": "rp:provenanceNote",
     "verifiedAt": "rp:verifiedAt",
 
     "proof": "rp:proof",

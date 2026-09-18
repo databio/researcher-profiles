@@ -137,6 +137,7 @@ _PART_SPECS: tuple[_FileSpec, ...] = (
     _FileSpec("sources/grants.jsonld", "Grants", "grants", JSONLD, type_="Collection"),
     _FileSpec("sources/citations.json", "Citations", "citations", JSON),
     _FileSpec("sources/cv.md", "CV", "cv", MARKDOWN),
+    _FileSpec("sources/interview.md", "Interview digest", "interview", MARKDOWN),
 )
 
 _DIR_SPECS: tuple[_DirSpec, ...] = (

@@ -171,8 +171,10 @@ export async function profileChecks(
   // `@id` identifies the researcher, not the host. When it is an ORCID URL its
   // ORCID must agree with `rid` (a copy-pasted document carrying someone else's
   // identity is a real, silent failure mode). Any other absolute IRI, a bare
-  // relative id that is the tail of the fetched base, or an absent `@id` all
-  // pass. None of those misidentify the subject.
+  // relative id that is the tail of the fetched base, a fragment-only id
+  // (`#me`, the SDK's default for an unpublished profile, which resolves against
+  // the fetched document itself), or an absent `@id` all pass. None of those
+  // misidentify the subject.
   const orcidMatch = /orcid\.org\/([0-9]{4}-[0-9]{4}-[0-9]{4}-[0-9]{3}[0-9X])/i.exec(
     rawId,
   );
@@ -187,7 +189,7 @@ export async function profileChecks(
     identityMessage = identityPassed
       ? `@id ORCID matches rid (${rid}).`
       : `@id ORCID (${idOrcid}) does not match rid (${rid}). A copy-pasted document carrying someone else's identity is a real and silent failure mode.`;
-  } else if (rawId && !/^https?:\/\//i.test(rawId)) {
+  } else if (rawId && !/^https?:\/\//i.test(rawId) && !rawId.startsWith("#")) {
     // A relative @id must be the tail of the base we fetched.
     identityPassed = base.endsWith(rawId);
     identityMessage = identityPassed

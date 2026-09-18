@@ -64,6 +64,7 @@ node type.
 | `name` | `schema:name` | |
 | `rid` | `rp:rid` | researcher id: an ORCID or a `local:` id |
 | `provenance` | `rp:provenance` | `orcid_verified` \| `self_published` \| `third_party` \| `synthetic` \| `historical` |
+| `provenanceNote` | `rp:provenanceNote` | one sentence on how the document was produced (interview-built profiles) |
 | `verifiedAt` | `rp:verifiedAt` | required when `provenance` is `orcid_verified` |
 | `license` | `schema:license` (`@id`) | reuse terms |
 | `url` | `schema:url` (`@id`) | the published profile URL |

@@ -192,8 +192,9 @@ def test_known_terms_is_scoped_per_schema():
     [
         ({"bogus_field": "surprise"}, {"bogus_field"}),
         ({"rid": "0000-0002-1825-0097"}, set()),
+        ({"provenanceNote": "self-reported via a structured interview"}, set()),
     ],
-    ids=["unknown-field-reported", "known-field-ignored"],
+    ids=["unknown-field-reported", "known-field-ignored", "provenance-note-declared"],
 )
 def test_undeclared_terms_reports_exactly_the_unknown_fields(extra_fields: dict, expected: set):
     doc = {

@@ -34,6 +34,11 @@ class ProfileDocument(JsonLdModel):
     rid: str = Field(..., description="Researcher id: a canonical ORCID or a local: id")
     #: Who asserted this and on what basis. No default; see :data:`Provenance`.
     provenance: Provenance
+    #: A human sentence saying how this document was produced when the answer is
+    #: not obvious from ``provenance`` alone. Set by interview-based builds
+    #: ("self-reported via a structured interview on 2026-09-12; unverified").
+    #: Consumers SHOULD display it next to the summary.
+    provenance_note: str | None = Field(default=None, alias="provenanceNote")
     #: ISO-8601 timestamp of the ORCID round-trip check. Required by, and only
     #: meaningful for, ``provenance == "orcid_verified"``. Retained as the
     #: ``orcid_roundtrip`` proof's timestamp under the multi-proof model.
@@ -283,6 +288,7 @@ DOCUMENT_FIELDS: frozenset[str] = frozenset(
         "type_",
         "conforms_to",
         "provenance",
+        "provenance_note",
         "verified_at",
         "proof",
         "license_",

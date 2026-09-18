@@ -348,6 +348,27 @@ def test_grant_role_defaults_to_restricted():
     assert role_default_visibility("grants") == "public"
 
 
+def test_interview_role_defaults_to_restricted():
+    """The digest is the researcher's own private account; it never leaves the machine."""
+    assert ROLE_DEFAULT_VISIBILITY["interview"] == "restricted"
+    assert role_default_visibility("interview") == "restricted"
+    ref = ArtifactRef(content_url="sources/interview.md", role="interview")
+    assert ref.visibility == "restricted"
+    # The derived public documents are not held back by the digest: there is
+    # no derivedFrom link, only the disclosure line inside them.
+    prof = _profile(
+        hasPart=[{"contentUrl": "sources/interview.md", "role": "interview"}],
+        subjectOf=[
+            {"contentUrl": "personality/expertise.md", "role": "expertise"},
+            {"contentUrl": "personality/SOUL.md", "role": "soul"},
+        ],
+    )
+    tiers = privacy.effective_tiers(prof)
+    assert tiers["sources/interview.md"] == "restricted"
+    assert tiers["personality/expertise.md"] == "public"
+    assert tiers["personality/SOUL.md"] == "public"
+
+
 def test_chunk_source_tiers_tolerates_missing_profile():
     # None profile: default treated as public, role defaults still filter.
     tiers = privacy.chunk_source_tiers(None, [("cv", "cv"), ("soul", "soul")])

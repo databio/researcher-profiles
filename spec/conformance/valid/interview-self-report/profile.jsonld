@@ -1,0 +1,83 @@
+{
+  "@context": "https://profiles.databio.org/context/v1.jsonld",
+  "@id": "#me",
+  "@type": "Person",
+  "conformsTo": "https://profiles.databio.org/context/v1.jsonld",
+  "name": "Mara Okonkwo",
+  "rid": "local:okonkwo-mara-7f3a1c",
+  "provenance": "self_published",
+  "provenanceNote": "self-reported via a structured interview on 2026-09-10; unverified",
+  "dateModified": "2026-09-12T14:00:00+00:00",
+  "visibility": "public",
+  "level": "full",
+  "affiliation": "Example University",
+  "jobTitle": "PhD student",
+  "field": "plant biology",
+  "subfields": [
+    "desiccation tolerance",
+    "transcriptional regulation"
+  ],
+  "summary": "Mara Okonkwo is a third-year PhD student in the Vance lab at Example University studying which regulators switch on in the first hours after a dried moss cell rehydrates. All content is self-reported from a structured interview and has not been checked against publications or records.",
+  "expertise": [
+    "RNA-seq",
+    "qPCR",
+    "R"
+  ],
+  "interests": [
+    "stress recovery in non-model plants",
+    "conservation of the early rehydration program"
+  ],
+  "not_interests": [
+    "crop yield as a direct target"
+  ],
+  "anchor": {
+    "confidence": "local",
+    "created_at": "2026-09-12T14:00:00+00:00",
+    "disambiguation_evidence": "Synthetic fixture. Self-reported via structured interview; short corpus acknowledged; identity not externally verified.",
+    "sources": []
+  },
+  "hasPart": [
+    {
+      "@type": "Collection",
+      "name": "Works",
+      "visibility": "public",
+      "role": "works",
+      "encodingFormat": "application/ld+json",
+      "contentUrl": "sources/papers.jsonld",
+      "bytes": 210,
+      "sha256": "0b1bdf102ef13d60a591ed79c74050ccb57f5b3f56e13a1db401d5413a6ab570"
+    },
+    {
+      "@type": "DigitalDocument",
+      "name": "Interview digest",
+      "visibility": "restricted",
+      "role": "interview",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "sources/interview.md",
+      "bytes": 3324,
+      "sha256": "757133a2007981f8a9d8db912a70ef59cc0e39769f4f5eadfe3fc4e45363e0a1"
+    }
+  ],
+  "subjectOf": [
+    {
+      "@type": "DigitalDocument",
+      "name": "SOUL",
+      "visibility": "public",
+      "role": "soul",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "personality/SOUL.md",
+      "bytes": 1196,
+      "sha256": "1331e0fda6511a9c6700b32454b98907ea2f66af471e83d8aba1338f40a8d3ff"
+    },
+    {
+      "@type": "DigitalDocument",
+      "name": "Expertise",
+      "visibility": "public",
+      "role": "expertise",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "personality/expertise.md",
+      "bytes": 1621,
+      "sha256": "b65439eca5bd18cabf24813414c01a4257b670defac9e84749a9fd00254b6648"
+    }
+  ]
+}

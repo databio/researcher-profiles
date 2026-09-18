@@ -16,6 +16,7 @@ export const ROLE_LABELS: Record<string, string> = {
   grants: "Grants",
   citations: "Citations",
   cv: "CV",
+  interview: "Interview digest",
   paper_summary: "Paper summary",
   paper_fulltext: "Paper full text",
   web: "Web page",

@@ -170,6 +170,7 @@ class TestManifest:
         (p / "sources" / "web").mkdir(parents=True)
         (p / "sources" / "web" / "1-lab.md").write_text("w")
         (p / "sources" / "cv.md").write_text("cv")
+        (p / "sources" / "interview.md").write_text("digest")
         (p / "sources" / "citations.json").write_text("{}")
         (p / "embeddings").mkdir()
         (p / "embeddings" / "index.json").write_text("{}")
@@ -184,6 +185,7 @@ class TestManifest:
             "works",
             "citations",
             "cv",
+            "interview",
             "paper_summary",
             "paper_fulltext",
             "web",

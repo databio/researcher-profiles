@@ -141,6 +141,7 @@ conformant document once loaded and re-saved.
 | `name` | REQUIRED | Non-empty display name |
 | `rid` | REQUIRED | Canonical ORCID or `local:<slug>-<hex6>` |
 | `provenance` | REQUIRED | `orcid_verified`, `self_published`, `third_party`, `synthetic`, or `historical` |
+| `provenanceNote` | optional | One human sentence saying how the document was produced when `provenance` alone does not say (e.g. "self-reported via a structured interview on 2026-09-12; unverified"). Consumers SHOULD display it next to the summary |
 | `@context` | required on the wire, defaulted on load | `"https://profiles.databio.org/context/v1.jsonld"` (exact string); absent is filled in with this value |
 | `@type` | required on the wire, defaulted on load | `"Person"`; absent is filled in |
 | `conformsTo` | required on the wire, defaulted on load | Equals the `@context` IRI; a present but wrong value fails to load, an absent value is filled in |
@@ -363,6 +364,7 @@ by `role` (or `paperId`) and read its `contentUrl`.
 | `paper_summary` | hasPart | `sources/summaries/<paper_id>.summary.md` |
 | `paper_fulltext` | hasPart | `sources/papers/<paper_id>.md` |
 | `cv` | hasPart | `sources/cv.md` |
+| `interview` | hasPart | `sources/interview.md` (tier `restricted`) |
 | `web` | hasPart | `sources/web/<n>-<host>.md` |
 | `embedding_index` | hasPart | `embeddings/index.json` |
 | `embedding_index_sqlite` | hasPart | `.cache/embeddings.sqlite` (tier `restricted`) |
@@ -382,6 +384,10 @@ Consumers MUST ignore unknown `role` values.
 | `third_party` | Published by someone other than the subject |
 | `synthetic` | Not a natural person (AI agent, test fixture) |
 | `historical` | Real person who cannot hold an ORCID |
+
+A profile built from a structured interview with the subject (no or few
+publications) uses `self_published` and carries a `provenanceNote` saying so;
+nothing in such a profile has been checked against publications or records.
 
 The optional `proof` array carries fine-grained verification:
 

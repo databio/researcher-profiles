@@ -90,6 +90,9 @@ class BuildInputs(_Sidecar):
     grants_source: GrantsSource | None = None
     reporter_supplement: bool = False
     cv_source: str | None = None
+    #: Path to the interview digest that seeded this profile; set by
+    #: ``rp interview import``. Not deep-only: a ``full`` build re-ingests it.
+    interview_source: str | None = None
     websites: list[str] = []
 
     #: Search hints for the identity-resolution step, such as ``department``,

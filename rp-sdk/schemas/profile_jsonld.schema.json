@@ -1141,6 +1141,18 @@
       "title": "Provenance",
       "type": "string"
     },
+    "provenanceNote": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Provenancenote"
+    },
     "recurring_positions": {
       "default": [],
       "items": {
