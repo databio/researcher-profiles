@@ -389,10 +389,21 @@ Upload a built profile directory to a remote API server
 server; the profile is immediately listable, and matchable when it includes a
 built `.cache/embeddings.sqlite`.
 
-Every push first diffs the archive against the server's manifest and refuses
-to delete anything the server holds unless you pass `--force`. Files the
-archive builder leaves out (withheld fulltext, anything under the retired
-`cache/` directory, paths outside the spec) are reported on stderr.
+Every push first diffs the server's manifest against the manifest this push
+would commit, and refuses to delete anything the server holds unless you pass
+`--force`. That includes a push whose manifest merely *shrinks*: fewer entries
+means fewer artifacts a reader can fetch, even when no single file was named
+for deletion. Files the archive builder leaves out (withheld fulltext, anything
+under the retired `cache/` directory, paths outside the spec) are reported on
+stderr.
+
+A push also refuses outright when the local manifest names files this directory
+does not have. That is the signature of a partial copy of the profile, not of
+drift to be tidied up, and re-indexing the server from an incomplete directory
+is how artifacts get deleted. Use [`rp where`](#where) to see which root is in
+force. Every command that resolves a slug or rid now prints the directory it
+resolved to on stderr, and warns when the same slug also exists under another
+root in the resolution order.
 
 ```
 rp push <profile> [--root DIR] [--url BASE_URL] [--slug SLUG] [--token TOKEN]
@@ -409,7 +420,7 @@ rp push <profile> [--root DIR] [--url BASE_URL] [--slug SLUG] [--token TOKEN]
 | `--token` | Bearer token. Default: `RESEARCHER_PROFILES_TOKEN`, else the stored login's key for that server. |
 | `--dry-run` | Print what the push would add, change, remove, and keep, then stop. Uploads nothing. |
 | `--force` | Push even though it removes files the server holds. |
-| `--only PATH ...` | Send only these profile-relative files (plus `profile.jsonld`). Implies `--merge`. |
+| `--only PATH ...` | Send only these profile-relative files. `profile.jsonld` travels too, but its manifest is taken from the server, so nothing else changes. Inline sections (name, expertise) still come from the local document; to change one field only, use [`rp work patch`](#work). Implies `--merge`. |
 | `--merge` | Keep every server-side file this push does not carry. |
 | `--prune` | Delete every server-side file this push does not carry, including withheld fulltext and the index. Cannot combine with `--only` or `--merge`. |
 | `--include-fulltext` | Also upload `sources/papers/` extracted fulltext. Off by default. |
@@ -427,20 +438,44 @@ $ rp push profiles/jane-doe --url http://localhost:8109
 pushed jane-doe: +12 ~3 -0 (kept 2) name=Jane A. Doe, level=lite, indexed=True
 
 $ rp push profiles/jane-doe --only sources/papers.jsonld --dry-run
+source: /home/me/researcher-profiles/jane-doe
+target: http://localhost:8109/api/v1/profiles/jane-doe (mode: merge)
 dry run: push jane-doe -> http://localhost:8109 (update, merge)
+manifest: 11 entries on server -> 11 after push (0 removed)
   added        0
   changed      1  works 1
   unchanged    0
   removed      0
   kept        10  citations 1, expertise 1, paper_fulltext 2, paper_summary 5, soul 1
+  respliced    0
 changed (1):
   sources/papers.jsonld
 ```
 
+`respliced` counts entries the server keeps that the **local** manifest no
+longer lists. The server adds them back, so they survive -- but only a server
+advertising the `manifest_splice` feature (see
+[`GET /api/v1/capabilities`](api.md#get-apiv1capabilities)) does that. Against
+one that does not, the same paths are counted as `removed` and the push
+refuses. A push also asks for the server's `push_modes` before it writes, so
+`--merge` or `--prune` against a server that predates `?mode=` is a refusal
+rather than a silent replace.
+
+After a real push, the server's own post-commit count is printed, and a count
+that fell is a warning on stderr:
+
+```console
+$ rp push profiles/jane-doe --only sources/papers.jsonld
+pushed jane-doe: +0 ~1 -0 (kept 10) name=Jane A. Doe, level=lite, indexed=True
+server now holds 11 artifacts: citations 1, expertise 1, paper_fulltext 2, paper_summary 5, soul 1, works 1
+```
+
 **Exit codes.** `0` ok · `1` the server could not be reached or would not
 answer · `2` no server URL resolved, the directory is unreadable, the push
-would remove server files and `--force` was not given, `--prune` was combined
-with `--only`/`--merge`, or the target refused the upload. See the
+would remove server files (or shrink the manifest) and `--force` was not given,
+the local manifest names files that are not on disk, `--prune` was combined
+with `--only`/`--merge`, the server does not support the requested mode, or the
+target refused the upload. See the
 [API reference](api.md#put-apiv1profilesslug) for validation rules.
 
 ---
@@ -685,19 +720,24 @@ entries in `profile.jsonld` that enumerate every artifact the directory
 contains.
 
 ```
-rp manifest <profile> [--root DIR] [--write] [--check] [--json]
+rp manifest <profile> [--root DIR] [--write] [--force] [--check] [--json]
 ```
 
 | Flag | Description |
 |---|---|
 | (none) | Print one line per manifest entry (`role` and `contentUrl`). |
-| `--write` | Regenerate the manifest by walking the directory and store it back into `profile.jsonld`. |
+| `--write` | Regenerate the manifest by walking the directory and store it back into `profile.jsonld`. Prints the diff first and refuses to drop entries. |
+| `--force` | With `--write`, write even though the new manifest drops entries. |
 | `--check` | Exit `4` when the recorded manifest disagrees with what is on disk. |
-| `--json` | Emit the manifest entries and any drift as JSON. |
+| `--json` | Emit the manifest entries and any drift as JSON (with `--write`, also `before`, `after`, `added`, `dropped`). |
 
 Drift is reported in both directions: files on disk that the manifest does not
-list, and manifest entries whose file is gone. A manifest that has silently
-drifted is worse than no manifest at all, because a consumer trusts it.
+list (`manifest_unlisted`), and manifest entries whose file is gone
+(`manifest_stale`). They want opposite actions. An unlisted file wants the
+manifest regenerated. A dangling entry may mean this directory is a partial
+copy of the profile, and regenerating there deletes the missing artifacts for
+good -- so `--write` names every entry it would drop and refuses without
+`--force`.
 
 ```console
 $ rp manifest profiles/jane-doe
@@ -705,6 +745,12 @@ soul             personality/SOUL.md
 expertise        personality/expertise.md
 works            sources/papers.jsonld
 paper_summary    sources/summaries/doe2019methods.summary.md
+
+$ rp manifest profiles/jane-doe-partial --write
+manifest: 141 -> 88 entries (+0 -53)
+  would drop: sources/papers/doe2016example.md
+  ...
+refusing to drop 53 entries; re-run with --force if these files are really gone.
 ```
 
 ---

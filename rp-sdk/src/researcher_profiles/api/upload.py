@@ -218,11 +218,76 @@ def _normalize(ti: tarfile.TarInfo) -> tarfile.TarInfo:
     return ti
 
 
+def _remote_entry(raw: dict) -> "ArtifactRef":
+    """One served manifest entry back into an :class:`ArtifactRef`.
+
+    ``GET /profiles/{slug}`` stamps ``effective_visibility`` onto every entry
+    for the benefit of a reader. The model allows extra keys, so leaving it in
+    would write a derived field back into a published document; drop it.
+    """
+    from ..schema import ArtifactRef
+
+    return ArtifactRef.model_validate({k: v for k, v in raw.items() if k != "effective_visibility"})
+
+
+def _project_only_manifest(
+    src: Path, only: Sequence[str], remote_manifest: dict[str, dict]
+) -> tuple[list["ArtifactRef"], list["ArtifactRef"]]:
+    """``(hasPart, subjectOf)`` for an ``only=`` push: the server's index, refreshed.
+
+    ``only=`` means "send these files and change nothing else". The document
+    has to travel regardless (the server loads staging through it), and the
+    manifest inside it is the index the server commits -- so taking that
+    manifest from the local directory is what turns "send one file" into
+    "replace the whole index". Here the manifest comes from the server, with
+    only the named files' size and digest restamped from disk.
+
+    A named file the server does not know about is added from the local
+    manifest, or from a freshly built entry when the local manifest has not
+    caught up either.
+    """
+    import hashlib
+
+    from ..schema import ProfileDocument
+    from ..schema.manifest import SUBJECT_ROLES, build_manifest
+
+    doc = ProfileDocument.model_validate_json((src / PROFILE_DOCUMENT).read_bytes())
+    local = {p.content_url: p for p in (*doc.has_part, *doc.subject_of)}
+    entries = {url: _remote_entry(raw) for url, raw in remote_manifest.items()}
+
+    named = sorted({Path(n).as_posix() for n in only} - {PROFILE_DOCUMENT})
+    generated: dict[str, ArtifactRef] | None = None
+    for rel in named:
+        entry = entries.get(rel) or local.get(rel)
+        if entry is None:
+            if generated is None:
+                parts, subjects = build_manifest(src)
+                generated = {p.content_url: p for p in (*parts, *subjects)}
+            entry = generated.get(rel)
+        if entry is None:
+            # Nothing anywhere describes this file. It still ships (the caller
+            # named it), it simply gets no manifest entry from here.
+            continue
+        data = (src / rel).read_bytes()
+        refreshed = entry.model_copy(deep=True)
+        refreshed.bytes = len(data)
+        refreshed.sha256 = hashlib.sha256(data).hexdigest()
+        entries[rel] = refreshed
+
+    has_part: list[ArtifactRef] = []
+    subject_of: list[ArtifactRef] = []
+    for url in sorted(entries):
+        entry = entries[url]
+        (subject_of if entry.role in SUBJECT_ROLES else has_part).append(entry)
+    return has_part, subject_of
+
+
 def build_profile_archive(
     profile_dir: str | os.PathLike,
     *,
     include_fulltext: bool = False,
     only: Sequence[str] | None = None,
+    only_manifest_from_remote: dict[str, dict] | None = None,
 ) -> ProfileArchive:
     """Tar+gzip a profile directory's contents (``profile.jsonld`` at the root).
 
@@ -250,6 +315,13 @@ def build_profile_archive(
     profile-relative paths. The document is not optional: the server loads the
     staged directory through it. Nothing is dropped in this mode -- a named
     path either ships or raises ``ValueError``.
+
+    ``only_manifest_from_remote`` is the server's current manifest
+    (``{contentUrl: entry}``). With it, the ``only=`` archive's
+    ``profile.jsonld`` is built in memory from that manifest rather than read
+    off disk, so a local copy whose manifest has fallen behind cannot shrink
+    the server's index. See :func:`_project_only_manifest`. Inline sections
+    (name, expertise, affiliations) still come from the local document.
     """
     src = Path(profile_dir).expanduser().resolve()
     if not (src / PROFILE_DOCUMENT).is_file():
@@ -260,9 +332,23 @@ def build_profile_archive(
     else:
         members, dropped = _only_members(src, only, include_fulltext=include_fulltext), {}
 
+    document: bytes | None = None
+    if only is not None and only_manifest_from_remote is not None:
+        from ..schema import ProfileDocument
+        from ..schema.jsonld import canonical_dumps
+
+        doc = ProfileDocument.model_validate_json((src / PROFILE_DOCUMENT).read_bytes())
+        doc.has_part, doc.subject_of = _project_only_manifest(src, only, only_manifest_from_remote)
+        document = canonical_dumps(doc.model_dump(mode="json")).encode("utf-8")
+
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tf:
         for rel in members:
+            if rel == PROFILE_DOCUMENT and document is not None:
+                info = tarfile.TarInfo(PROFILE_DOCUMENT)
+                info.size = len(document)
+                tf.addfile(_normalize(info), io.BytesIO(document))
+                continue
             tf.add(src / rel, arcname=rel, filter=_normalize)
     return ProfileArchive(data=buf.getvalue(), members=frozenset(members), dropped=dropped)
 

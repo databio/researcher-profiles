@@ -293,13 +293,25 @@ def test_validate_profile_dir_cross_artifact_manifest_drift(tmp_path: Path):
     (profile_dir / "sources" / "papers.jsonld").write_text(json.dumps(papers_doc), encoding="utf-8")
 
     report = validate_profile_dir(profile_dir)
-    # The ghost contentUrl should produce a cross_artifact violation
+    # The ghost contentUrl should produce a cross_artifact violation, under the
+    # keyword that means "a manifest entry with no file" specifically: it wants
+    # a different fix from an unlisted file, so it cannot share a keyword.
     stale_violations = [
-        v for v in report.cross_artifact if v.keyword in ("manifest_drift", "content_url_missing")
+        v for v in report.cross_artifact if v.keyword in ("manifest_stale", "content_url_missing")
     ]
     assert len(stale_violations) >= 1, (
         f"Expected a cross-artifact violation for the missing file, got: {report.cross_artifact}"
     )
+    stale = [v for v in report.cross_artifact if v.keyword == "manifest_stale"]
+    assert stale, f"Expected a manifest_stale violation, got: {report.cross_artifact}"
+    # And it must not advise the destructive fix: regenerating in a partial
+    # copy is what drops the entries for good.
+    assert "would drop these entries" in stale[0].fix
+    # The papers.jsonld on disk that the manifest never listed is the OTHER
+    # condition, and it is reported separately.
+    unlisted = [v for v in report.cross_artifact if v.keyword == "manifest_unlisted"]
+    assert unlisted, f"Expected a manifest_unlisted violation, got: {report.cross_artifact}"
+    assert "sources/papers.jsonld" in unlisted[0].message
 
 
 def test_validate_profile_dir_flags_legacy_cache_dirname(tmp_path: Path):
@@ -345,7 +357,7 @@ def test_validate_profile_dir_flags_legacy_cache_dirname(tmp_path: Path):
 
     # Not double-reported under the generic drift message.
     generic_stale = [
-        v for v in report.cross_artifact if v.keyword == "manifest_drift" and "no file" in v.message
+        v for v in report.cross_artifact if v.keyword == "manifest_stale" and "no file" in v.message
     ]
     assert generic_stale == [], f"Should not also appear as generic drift: {generic_stale}"
 

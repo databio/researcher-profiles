@@ -137,6 +137,12 @@ _SUBJECT_SPECS: tuple[_FileSpec, ...] = (
     _FileSpec("personality/topics.json", "Research topics", "topics", JSON),
 )
 
+#: The roles that live in ``subjectOf`` rather than ``hasPart``. Derived from
+#: the specs above so the two cannot drift: anything that has to place a
+#: manifest entry in a slot (an ``--only`` push projecting the server's
+#: manifest, an ingest splicing a kept entry back) asks here.
+SUBJECT_ROLES: frozenset[str] = frozenset(spec.role for spec in _SUBJECT_SPECS)
+
 #: The record and its sources, carried in ``hasPart``.
 _PART_SPECS: tuple[_FileSpec, ...] = (
     _FileSpec("index.html", "Profile page", "html", "text/html"),
@@ -261,6 +267,7 @@ def manifest_drift(profile_dir: str | Path, recorded: list[ArtifactRef]) -> dict
 
 __all__ = [
     "PUBLISHED_CACHE",
+    "SUBJECT_ROLES",
     "TEXT_FORMATS",
     "build_manifest",
     "is_text_artifact",

@@ -112,8 +112,10 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
         default=None,
         metavar="PATH",
         help=(
-            "Send only these profile-relative files (plus profile.jsonld). "
-            "Everything else on the server is kept."
+            "Send only these profile-relative files. profile.jsonld travels "
+            "too, but its manifest is taken from the server, so nothing else "
+            "changes. Inline sections (name, expertise) still come from the "
+            "local document; to change one field only, use `rp work patch`."
         ),
     )
     p_push.add_argument(
@@ -230,8 +232,25 @@ def _push_mode(args: argparse.Namespace) -> str | None:
     return "replace"
 
 
+def _manifest_line(plan) -> str:
+    """The one line that says whether the profile is about to get smaller.
+
+    First, before the group counts, because it is the answer to the question a
+    reader actually has. ``removed 0`` was true of the push that deleted 53
+    artifacts; ``141 entries -> 88`` would not have been.
+    """
+    counts = plan.counts()
+    detail = f"{counts['removed']} removed"
+    if counts["respliced"]:
+        detail += f", {counts['respliced']} respliced"
+    return (
+        f"manifest: {plan.manifest_before} entries on server -> "
+        f"{plan.manifest_after} after push ({detail})"
+    )
+
+
 def _plan_report(plan, url: str, mode: str) -> list[str]:
-    """The human dry-run report: counts for every group, then the paths.
+    """The human dry-run report: the manifest line, counts, then the paths.
 
     ``unchanged`` and ``kept`` get a count and no listing: they are the part of
     the profile nothing is about to happen to, and listing them would bury the
@@ -240,9 +259,9 @@ def _plan_report(plan, url: str, mode: str) -> list[str]:
     from ..client import PLAN_GROUPS
 
     state = "update" if plan.exists else "create"
-    lines = [f"dry run: push {plan.slug} -> {url} ({state}, {mode})"]
+    lines = [f"dry run: push {plan.slug} -> {url} ({state}, {mode})", _manifest_line(plan)]
     lines += [_count_line(g, getattr(plan, g)) for g in PLAN_GROUPS]
-    for group in ("changed", "added", "removed"):
+    for group in ("changed", "added", "removed", "respliced"):
         lines += _path_block(group, plan.paths(group))
     return lines
 
@@ -294,6 +313,12 @@ def _cmd_push(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return EXIT_USAGE
+    # Both halves of "what is about to overwrite what", named before anything
+    # moves and on every run, dry or not. A push that turned out to have read
+    # the wrong directory is only obvious afterwards if it said which one.
+    slug = args.slug or target.name
+    print(f"source: {target}", file=sys.stderr)
+    print(f"target: {url}/api/v1/profiles/{slug} (mode: {mode})", file=sys.stderr)
     try:
         result = push_profile(
             url,
@@ -309,8 +334,20 @@ def _cmd_push(args: argparse.Namespace) -> int:
     except PushWouldRemove as e:
         _warn_dropped(e.plan.dropped)
         print(f"push refused: {e}", file=sys.stderr)
+        print(_manifest_line(e.plan), file=sys.stderr)
         for line in _path_block("removed", e.plan.paths("removed")):
             print(line, file=sys.stderr)
+        if e.plan.shrinks and not e.plan.paths("removed"):
+            # Nothing landed in ``removed``, so the usual three-flag hint is
+            # the wrong advice: the manifest being pushed is the problem.
+            print(
+                "The local manifest lists fewer artifacts than the server does. "
+                "That is usually a\npartial copy of the profile, not a deletion "
+                "you meant: check `rp where` and push\nfrom the directory that "
+                "built it, or --force if the entries really should go.",
+                file=sys.stderr,
+            )
+            return EXIT_USAGE
         print(
             "re-run with --merge to keep them, --force to remove them, "
             "or --prune to also drop kept fulltext/index",
@@ -357,13 +394,39 @@ def _cmd_push(args: argparse.Namespace) -> int:
         f"+{counts['added']} ~{counts['changed']} -{counts['removed']}"
     )
     kept = sum((summary.get("kept") or {}).values())
-    if kept:
-        line += f" (kept {kept})"
+    spliced = summary.get("spliced") or 0
+    notes = [f"kept {kept}"] if kept else []
+    if spliced:
+        notes.append(f"respliced {spliced}")
+    if notes:
+        line += f" ({', '.join(notes)})"
     print(
         f"{line} name={summary.get('name')}, level={summary.get('level')}, "
         f"indexed={summary.get('indexed')}"
     )
+    _report_manifest_counts(summary, result.plan)
     return EXIT_OK
+
+
+def _report_manifest_counts(summary: dict, plan) -> None:
+    """Say what the server holds now, and shout if that is less than before.
+
+    The server's own post-commit count, not the client's prediction: the point
+    is to catch the case where the two disagree. A push whose artifact count
+    fell is reported on stderr as well, because by this point the bytes are
+    already gone and a line buried in stdout is not a warning.
+    """
+    counts = summary.get("manifest_counts") or {}
+    if not counts:
+        return
+    total = sum(counts.values())
+    roles = ", ".join(f"{role} {n}" for role, n in sorted(counts.items()))
+    if plan.exists and total < plan.manifest_before:
+        print(
+            f"warning: artifact count fell from {plan.manifest_before} to {total}",
+            file=sys.stderr,
+        )
+    print(f"server now holds {total} artifacts: {roles}")
 
 
 COMMANDS: dict[str, Callable[[argparse.Namespace], int]] = {

@@ -1872,6 +1872,143 @@ class TestPushKeepsWithheld:
         for rel in (*_JANE_FULLTEXT, "personality/SOUL.md"):
             assert store.artifact_bytes(SLUG, rel)
 
+    def _served_manifest(self, http) -> dict[str, dict]:
+        """``{contentUrl: entry}`` from ``GET /profiles/{slug}``: the committed index."""
+        resp = http.get(f"/api/v1/profiles/{SLUG}")
+        assert resp.status_code == 200, resp.text
+        return {e["contentUrl"]: e for e in resp.json()["manifest"]}
+
+    @staticmethod
+    def _drop_from_manifest(payload: bytes, prefix: str) -> bytes:
+        """Rebuild ``payload`` with every ``prefix`` entry cut from its manifest.
+
+        What a partial local copy sends: the bytes of the named file, and a
+        ``profile.jsonld`` whose index no longer mentions the artifacts the
+        server holds. Nothing else in the archive changes.
+        """
+        import io
+        import json as _json
+        import tarfile
+
+        with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as tf:
+            members = {m.name: tf.extractfile(m).read() for m in tf.getmembers() if m.isfile()}
+        doc = _json.loads(members["profile.jsonld"])
+        for slot in ("hasPart", "subjectOf"):
+            doc[slot] = [e for e in (doc.get(slot) or []) if not e["contentUrl"].startswith(prefix)]
+        members["profile.jsonld"] = _json.dumps(doc).encode("utf-8")
+
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+            for name, data in members.items():
+                info = tarfile.TarInfo(name)
+                info.size = len(data)
+                tf.addfile(info, io.BytesIO(data))
+        return buf.getvalue()
+
+    @pytest.mark.parametrize("backend", ["files", "sql"], ids=["filesystem", "sql"])
+    def test_merge_splices_kept_files_into_the_manifest(
+        self, make_api_client, server_root, full_push, only_push, backend
+    ):
+        """A kept file keeps its manifest entry, or it is not kept at all.
+
+        The regression this closes: ``--only`` shipped a ``profile.jsonld``
+        whose manifest had lost 53 fulltext entries. The bytes were kept, the
+        entries were not, and the SQL store -- which writes rows BY the
+        recorded manifest -- persisted nothing for them.
+        """
+        from researcher_profiles.store.sql import SqlProfileStore
+
+        if backend == "sql":
+            store = SqlProfileStore("sqlite://")
+            store.create_all()
+            target = store
+        else:
+            target = server_root
+        http = make_api_client(target, accept_fulltext=True)
+        assert _put_archive(http, full_push).status_code == 200
+        before = self._served_manifest(http)
+        assert set(_JANE_FULLTEXT) <= set(before)
+
+        partial = self._drop_from_manifest(only_push, "sources/papers/")
+        r = _put_archive(http, partial, mode="merge")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["spliced"] == len(_JANE_FULLTEXT)
+
+        after = self._served_manifest(http)
+        assert set(_JANE_FULLTEXT) <= set(after), "the kept fulltext lost its manifest entries"
+        assert set(after) == set(before)
+        assert body["manifest_counts"]["paper_fulltext"] == len(_JANE_FULLTEXT)
+        assert sum(body["manifest_counts"].values()) == len(after)
+
+        if backend == "sql":
+            for rel in _JANE_FULLTEXT:
+                assert target.artifact_bytes(SLUG, rel)
+        else:
+            for rel in _JANE_FULLTEXT:
+                assert (server_root / SLUG / rel).is_file()
+
+    def test_replace_splices_withheld_classes(
+        self, make_api_client, server_root, full_push, bare_push
+    ):
+        """The default mode keeps the withheld classes, entries included."""
+        http = make_api_client(server_root, accept_fulltext=True)
+        assert _put_archive(http, full_push).status_code == 200
+        before = self._served_manifest(http)
+
+        partial = self._drop_from_manifest(bare_push, "sources/papers/")
+        r = _put_archive(http, partial)
+        assert r.status_code == 200, r.text
+        assert r.json()["mode"] == "replace"
+        assert r.json()["spliced"] == len(_JANE_FULLTEXT)
+        assert set(self._served_manifest(http)) == set(before)
+
+    def test_prune_drops_entries_and_reports_counts(
+        self, make_api_client, server_root, full_push, bare_push
+    ):
+        """Nothing is kept, so nothing is spliced, and the counts say so.
+
+        The archive is the whole profile under ``prune``, manifest included,
+        so the fulltext entries are cut from the document as well as the
+        tarball: a pruning push that left them in the index would leave the
+        server advertising files it had just deleted.
+        """
+        http = make_api_client(server_root, accept_fulltext=True)
+        assert _put_archive(http, full_push).status_code == 200
+        before = self._served_manifest(http)
+
+        pruning = self._drop_from_manifest(bare_push, "sources/papers/")
+        r = _put_archive(http, pruning, mode="prune")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["kept"] == {} and body["spliced"] == 0
+        counts = body["manifest_counts"]
+        assert "paper_fulltext" not in counts
+        assert sum(counts.values()) < len(before)
+        assert sum(counts.values()) == len(self._served_manifest(http))
+
+    def test_a_new_profile_reports_its_manifest_counts(
+        self, make_api_client, server_root, full_push
+    ):
+        """No live copy to keep anything from, but the counts still describe it."""
+        http = make_api_client(server_root, accept_fulltext=True)
+        r = _put_archive(http, full_push)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["kept"] == {} and body["spliced"] == 0
+        assert sum(body["manifest_counts"].values()) == len(self._served_manifest(http))
+
+    def test_capabilities_route_lists_push_modes(self, make_api_client, server_root):
+        """The pre-check a client makes before it trusts ``?mode=``."""
+        from researcher_profiles.api.upload import PUSH_MODES
+
+        http = make_api_client(server_root)
+        r = http.get("/api/v1/capabilities")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert set(body["push_modes"]) == set(PUSH_MODES)
+        assert "manifest_splice" in body["features"]
+
     def test_index_html_round_trips_through_the_archive(self, fixture_profile):
         """``index.html`` is a manifest part (role ``html``), so it ships."""
         from researcher_profiles.api.upload import build_profile_archive

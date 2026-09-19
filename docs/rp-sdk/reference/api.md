@@ -236,6 +236,30 @@ empty list forever.
 
 ---
 
+### GET /api/v1/capabilities
+
+What this server can be asked for. Unauthenticated: it says nothing about any
+profile, and a push client needs the answer before it has decided whether to
+authenticate.
+
+**Response 200** (`CapabilitiesResponse`):
+
+| Field | Type | Notes |
+|---|---|---|
+| `version` | string | API version served (`v1`). |
+| `push_modes` | array | The `?mode=` values `PUT /profiles/{slug}` accepts. |
+| `features` | array | Named behaviours a client can require. `manifest_splice`: the server adds a manifest entry back for every file it keeps, so a partial incoming manifest cannot delete artifacts the server holds. |
+
+```json
+{"version": "v1", "push_modes": ["replace", "merge", "prune"], "features": ["manifest_splice"]}
+```
+
+A `404` here means a build that predates this route, which is itself the
+answer: `rp push` refuses `--merge` and `--prune` against such a server rather
+than sending a request it would answer `200` to and run as a `replace`.
+
+---
+
 ### GET /api/v1/profiles
 
 List every profile the caller may see, in the `rp:profileList` envelope a
@@ -400,6 +424,17 @@ file the archive does not carry. Any other value is a `400`.
 
 A file the archive does carry is always written, in every mode.
 
+**Keeping a file means keeping its manifest entry.** The manifest inside
+`profile.jsonld` is the index every reader works from, and the SQL backend
+writes artifact rows *by that manifest*, not by what is in staging. So a kept
+file the incoming manifest does not list is a file nobody can fetch and the SQL
+store never even persists: keeping the bytes alone is a silent delete. Under
+`merge` and `replace` the committed manifest is therefore **the incoming
+manifest plus an entry for every kept file**, taken from the live profile. The
+`spliced` field counts how many entries were added back; a nonzero value means
+the pushed `profile.jsonld` was not the whole index. Under `prune` nothing is
+kept, so nothing is spliced.
+
 `GET /api/v1/profiles/{slug}/archive` uses a different builder,
 `build_viewer_archive`, which projects the profile through the caller's privacy
 tier and never ships full text to anyone. See
@@ -431,6 +466,8 @@ without a restart.
 | `level` | string | Profile depth tier (`lite`, `full`, ...). |
 | `indexed` | boolean | True when the push carried `.cache/embeddings.sqlite`, i.e. the profile is immediately matchable. Always `false` for a JSON body. |
 | `kept` | object | Count of live files the archive omitted but the server kept, keyed by class (`fulltext`, `index`, or `other` under `merge`). Empty for a JSON body. |
+| `spliced` | integer | Manifest entries the server added back for kept files the incoming manifest did not list. Nonzero means the pushed document's manifest was incomplete. |
+| `manifest_counts` | object | `{role: count}` over the manifest the server holds *after* the commit: what a reader can now fetch. |
 | `mode` | string | The push mode that was applied: `replace`, `merge`, or `prune`. |
 
 ```bash

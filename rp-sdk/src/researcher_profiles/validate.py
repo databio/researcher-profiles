@@ -621,7 +621,8 @@ def _split_legacy_cache_stale(
                 expected=f"{CACHE_DIRNAME}/",
                 fix=(
                     f"move the file(s) from {LEGACY_CACHE_DIRNAME}/ to {CACHE_DIRNAME}/ "
-                    "and run `rp manifest --write` to regenerate"
+                    "and run `rp manifest --write` (it will show what changes and "
+                    "refuse to drop entries)"
                 ),
             )
         )
@@ -637,7 +638,7 @@ def _check_manifest_drift(root: Path, profile_doc: dict, report: ProfileValidati
         report.cross_artifact.append(
             Violation(
                 json_pointer="/hasPart",
-                keyword="manifest_drift",
+                keyword="manifest_unlisted",
                 message=(
                     f"{len(drift['missing'])} file(s) on disk not in manifest: "
                     f"{drift['missing'][:5]}"
@@ -649,14 +650,22 @@ def _check_manifest_drift(root: Path, profile_doc: dict, report: ProfileValidati
         )
     stale = _split_legacy_cache_stale(root, drift["stale"], report)
     if stale:
+        # Distinct keyword from ``manifest_unlisted``, because the two want
+        # opposite actions. An unlisted file wants the manifest regenerated;
+        # a dangling entry may mean this directory is a partial copy, and
+        # regenerating there is what deletes the missing artifacts for good.
         report.cross_artifact.append(
             Violation(
                 json_pointer="/hasPart",
-                keyword="manifest_drift",
+                keyword="manifest_stale",
                 message=f"{len(stale)} manifest entry(ies) with no file: {stale[:5]}",
                 found=f"{len(stale)} dangling entries",
                 expected="every manifest entry has a file on disk",
-                fix="run `rp manifest --write` to regenerate",
+                fix=(
+                    "either restore the files, or if this copy is intentionally "
+                    "partial, do not run `rp manifest --write` here: it would drop "
+                    "these entries"
+                ),
             )
         )
 

@@ -20,8 +20,10 @@ __all__ = [
     "PROFILES_ROOT_ENV_VAR",
     "ConfigError",
     "DatabaseUrlNotConfigured",
+    "candidate_roots",
     "resolve_database_url",
     "resolve_profiles_root",
+    "root_source",
 ]
 
 #: Environment variable naming the local profile cache. Also the API server's
@@ -71,6 +73,38 @@ def resolve_profiles_root(explicit: str | Path | None = None) -> Path:
         return Path(from_env).expanduser().resolve()
 
     return Path(DEFAULT_CACHE_DIR).expanduser().resolve()
+
+
+def root_source(explicit: str | Path | None = None) -> str:
+    """Which layer :func:`resolve_profiles_root` took its answer from.
+
+    A path on its own does not say where it came from, and "the default" is
+    exactly the answer a caller needs when a command turns out to have run
+    against a directory they forgot about.
+    """
+    if explicit:
+        return "--root"
+    if os.environ.get(PROFILES_ROOT_ENV_VAR):
+        return f"${PROFILES_ROOT_ENV_VAR}"
+    return f"default {DEFAULT_CACHE_DIR}"
+
+
+def candidate_roots(explicit: str | Path | None = None) -> list[Path]:
+    """Every root in the resolution order that exists, highest precedence first.
+
+    Deduplicated and order-preserving. Callers use it to notice that the slug
+    they asked for is also sitting under a root they did not choose: one stale
+    copy under a second root is how a partial profile gets pushed over a whole
+    one, and the only cheap defence is saying out loud that both exist.
+    """
+    ordered: list[Path] = []
+    for value in (explicit, os.environ.get(PROFILES_ROOT_ENV_VAR), DEFAULT_CACHE_DIR):
+        if not value:
+            continue
+        path = Path(value).expanduser().resolve()
+        if path not in ordered and path.is_dir():
+            ordered.append(path)
+    return ordered
 
 
 def resolve_database_url(explicit: str | None = None) -> str:

@@ -84,6 +84,15 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
         action="store_true",
         help="Exit non-zero when the recorded manifest disagrees with the directory",
     )
+    p_manifest.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "Write even though the new manifest drops entries. Without it, "
+            "--write refuses: dropping entries is what a partial copy of a "
+            "profile looks like."
+        ),
+    )
     add_json(p_manifest, "Emit the manifest entries and any drift as JSON")
 
     p_where = add_subcommand(
@@ -188,18 +197,7 @@ def _cmd_manifest(args: argparse.Namespace) -> int:
         return EXIT_USAGE
     root = prof.require_directory("rp manifest")
     if args.write:
-        parts = prof.build_manifest(write=True)
-        target = root / "profile.jsonld"
-        if args.as_json:
-            print(
-                json.dumps(
-                    {"profile": str(root), "written": len(parts), "path": str(target)},
-                    indent=2,
-                )
-            )
-        else:
-            print(f"wrote {len(parts)} manifest entries to {target}")
-        return EXIT_OK
+        return _write_manifest(args, prof, root)
     entries = prof.manifest()
     drift = manifest_drift(root, entries)
     if args.as_json:
@@ -236,6 +234,73 @@ def _cmd_manifest(args: argparse.Namespace) -> int:
             )
             return EXIT_VALIDATION
         return EXIT_OK
+    return EXIT_OK
+
+
+#: Longest list of dropped manifest entries printed before summarizing. Same
+#: reasoning as the push report's cap: past twenty, ``--json`` is the answer.
+_DROPPED_CAP = 20
+
+
+def _write_manifest(args: argparse.Namespace, prof, root: Path) -> int:
+    """``rp manifest --write``: diff first, then write, and never drop silently.
+
+    Regenerating a manifest from a directory walk is only safe when the
+    directory is the whole profile. Run in a partial copy it is the
+    destructive step: it rewrote 141 entries down to 88, reported "wrote 88
+    manifest entries", and the next push deleted the difference. So the diff
+    is computed before anything is written, dropped entries are named, and a
+    drop needs ``--force``.
+    """
+    before = [e.content_url for e in prof.manifest()]
+    parts, subjects = prof.storage.build_manifest()
+    after = [e.content_url for e in (*parts, *subjects)]
+    dropped = sorted(set(before) - set(after))
+    added = sorted(set(after) - set(before))
+    target = root / "profile.jsonld"
+
+    if dropped and not args.force:
+        print(
+            f"manifest: {len(before)} -> {len(after)} entries (+{len(added)} -{len(dropped)})",
+            file=sys.stderr,
+        )
+        for rel in dropped[:_DROPPED_CAP]:
+            print(f"  would drop: {rel}", file=sys.stderr)
+        if len(dropped) > _DROPPED_CAP:
+            print(f"  ... and {len(dropped) - _DROPPED_CAP} more", file=sys.stderr)
+        print(
+            f"refusing to drop {len(dropped)} entries; re-run with --force if these "
+            "files are really gone.\n"
+            "A manifest that shrinks usually means this is a partial copy of the "
+            "profile:\n"
+            f"  rp where {args.profile}   # which root is in force",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+
+    written = prof.build_manifest(write=True)
+    if args.as_json:
+        print(
+            json.dumps(
+                {
+                    "profile": str(root),
+                    "written": len(written),
+                    "path": str(target),
+                    "before": before,
+                    "after": after,
+                    "added": added,
+                    "dropped": dropped,
+                },
+                indent=2,
+            )
+        )
+    else:
+        print(f"manifest: {len(before)} -> {len(after)} entries (+{len(added)} -{len(dropped)})")
+        for rel in dropped[:_DROPPED_CAP]:
+            print(f"  dropped: {rel}")
+        if len(dropped) > _DROPPED_CAP:
+            print(f"  ... and {len(dropped) - _DROPPED_CAP} more")
+        print(f"wrote {len(written)} manifest entries to {target}")
     return EXIT_OK
 
 
