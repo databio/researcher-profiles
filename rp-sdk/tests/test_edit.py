@@ -80,19 +80,20 @@ class TestEditHelpers:
         soul_ref = [p for p in reloaded.metadata.subject_of if p.role == "soul"][0]
         assert soul_ref.visibility == "internal"
 
-    def test_paper_fulltext_cannot_be_loosened(self, jane_doe_dir):
-        """The legal floor refuses rather than accepting and silently re-pinning.
+    def test_paper_fulltext_tier_is_choosable(self, jane_doe_dir):
+        """paper_fulltext is an ordinary role: the owner may raise it to public.
 
-        Returning success and letting the schema quietly re-pin the tier on
-        re-validation would make the API report a change it had not made. A
-        floor that lies about itself is worse than no floor.
+        It defaults to restricted, but that is a default, not a floor. Setting
+        it to public succeeds and the change survives a reload.
         """
         prof = ResearcherProfile.from_files(jane_doe_dir)
-        with pytest.raises(EditError, match="legal floor"):
-            prof.edit.set_visibility(artifacts=[{"role": "paper_fulltext", "visibility": "public"}])
+        _doc, changed = prof.edit.set_visibility(
+            artifacts=[{"role": "paper_fulltext", "visibility": "public"}]
+        )
+        assert changed >= 1
         reloaded = ResearcherProfile.from_files(jane_doe_dir)
         ft = [p for p in reloaded.metadata.has_part if p.role == "paper_fulltext"]
-        assert ft and all(p.visibility == "restricted" for p in ft)
+        assert ft and all(p.visibility == "public" for p in ft)
 
     def test_soul_section_retiers_the_soul_artifact(self, jane_doe_dir):
         """The `soul` section is the single owner-facing knob for SOUL.md.

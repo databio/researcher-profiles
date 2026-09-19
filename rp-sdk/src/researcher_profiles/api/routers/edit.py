@@ -321,8 +321,6 @@ def get_profile_visibility(
                 paper_id=entry.paper_id,
                 declared=entry.declared,
                 effective=entry.effective,
-                locked=entry.locked,
-                lock_reason=entry.lock_reason,
                 raised_by=list(entry.raised_by),
                 visible_to=visible_to,
             )
@@ -377,10 +375,8 @@ def patch_profile_visibility(
 
     A ``role`` selector re-tiers every artifact with that role, and the reply
     says how many (``artifacts_changed``); the number is what makes a
-    first-match-wins regression impossible to reintroduce quietly.
-
-    Asking to raise a legally-floored artifact (``paper_fulltext``) is a 400
-    quoting the floor, not a success followed by a silent re-pin.
+    first-match-wins regression impossible to reintroduce quietly. Every role's
+    tier is choosable, ``paper_fulltext`` included.
 
     ``base_hash`` works as on the metadata patch: supplied and stale, the
     request is a 409 and nothing is re-tiered.

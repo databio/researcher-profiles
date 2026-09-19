@@ -77,10 +77,11 @@ Two gates, in this order:
 Failing either is a 404, with a body byte-identical to a genuinely
 nonexistent profile or an artifact that is not in the manifest. Never a 403: a
 403 confirms the thing exists, which is the one fact a held-back profile is
-trying not to disclose. The one exception is the hard floors described in
-["What's always restricted"](../../../docs/rp-spec/privacy.md#whats-always-restricted)
-(`paper_fulltext`, `.cache/`, `.keys/`), which are `403`, because they are
-withheld from everyone and no caller learns anything from being told why.
+trying not to disclose. The one exception is the build-local hard floors
+described in
+["What's restricted by default"](../../../docs/rp-spec/privacy.md#whats-restricted-by-default)
+(`.cache/`, `.keys/`), which are `403`, because they are withheld from
+everyone and no caller learns anything from being told why.
 
 Every response carries `X-RP-Viewer-Tier`, so a client (or a test) can assert
 what it was shown *as* without parsing what it was shown.

@@ -288,9 +288,10 @@ def get_profile_archive(
     Projected through the caller's viewer tier by
     :func:`~researcher_profiles.api.upload.build_viewer_archive`, so the tarball
     contains exactly what the JSON read surface would serve the same caller: no
-    artifact above their tier, and never the hard floors (copyrighted full
-    text, ``.cache/``, ``.keys/``). The former ``serve_fulltext`` operator flag
-    is gone: the full-text floor is the schema's job now, in one place.
+    artifact above their tier, and never the build-local hard floors
+    (``.cache/``, ``.keys/``). Paper full text is an ordinary artifact governed
+    by its effective tier like any other, so it ships to a caller entitled to
+    its tier and is withheld from one who is not.
 
     The response carries ``X-RP-Archive-Digest`` (md5 of the body) so the
     client can verify the transfer before committing it to its cache, and

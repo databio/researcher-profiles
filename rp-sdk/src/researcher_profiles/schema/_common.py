@@ -45,7 +45,9 @@ _VISIBILITY_ORDER: tuple[Visibility, ...] = ("public", "internal", "restricted")
 #: Default tier by manifest ``role`` when the artifact does not declare its own.
 #: Everything unlisted defaults to ``public`` (authored, servable content).
 ROLE_DEFAULT_VISIBILITY: dict[str, Visibility] = {
-    # Supplied private inputs, never public by default.
+    # Supplied private inputs, restricted by default but freely re-tierable by
+    # the owner. ``paper_fulltext`` defaults to ``restricted`` so nothing
+    # silently becomes public; it is a default, not a floor.
     "paper_fulltext": "restricted",
     "cv": "restricted",
     "web": "restricted",
@@ -69,15 +71,15 @@ ROLE_DEFAULT_VISIBILITY: dict[str, Visibility] = {
     "trials": "internal",
 }
 
-#: Roles whose tier is a legal constraint, not a preference: extracted full text
-#: of copyrighted papers may never be lowered below ``restricted``.
-ALWAYS_RESTRICTED_ROLES: frozenset[str] = frozenset({"paper_fulltext"})
+#: No role carries a hard privacy floor: every artifact's tier is the owner's
+#: to choose. Kept as an (empty) name so the wire/schema exports and any
+#: consumer importing it stay stable; a role's *default* tier lives in
+#: :data:`ROLE_DEFAULT_VISIBILITY`.
+ALWAYS_RESTRICTED_ROLES: frozenset[str] = frozenset()
 
 
 def role_default_visibility(role: str | None) -> Visibility:
     """The default tier for a manifest ``role`` (``public`` when unlisted)."""
-    if role in ALWAYS_RESTRICTED_ROLES:
-        return "restricted"
     return ROLE_DEFAULT_VISIBILITY.get(role or "", "public")
 
 

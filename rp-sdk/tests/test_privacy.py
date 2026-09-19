@@ -79,20 +79,23 @@ def test_most_restrictive_order():
         ("sources/cv.md", "cv", None, "restricted"),
         ("w.md", "web", None, "restricted"),
         ("sources/papers.jsonld", "works", None, "public"),
-        ("sources/papers/p1.md", "paper_fulltext", "public", "restricted"),
+        ("sources/papers/p1.md", "paper_fulltext", None, "restricted"),
+        ("sources/papers/p1.md", "paper_fulltext", "public", "public"),
         ("w.md", "web", "internal", "internal"),
     ],
     ids=[
         "cv-role-default",
         "web-role-default",
         "works-role-default",
-        "fulltext-floor-cannot-be-lowered",
+        "fulltext-role-default",
+        "fulltext-tier-is-choosable",
         "explicit-tier-overrides-role-default",
     ],
 )
 def test_part_ref_visibility(content_url, role, declared, expected):
-    """Role defaults apply at model level; an explicit tier overrides them,
-    except `paper_fulltext`, which is `restricted` even if declared public.
+    """Role defaults apply at model level; an explicit tier overrides them for
+    every role, `paper_fulltext` included (its restricted default is a default,
+    not a floor).
     """
     data = {"contentUrl": content_url, "role": role}
     if declared is not None:
@@ -291,12 +294,19 @@ def test_an_unresolvable_derivedFrom_is_a_validation_error_not_a_public_default(
     assert privacy.explain_tiers(prof)["derived.json"].unresolved == ["nowhere"]
 
 
-def test_fulltext_is_locked_with_a_sentence_a_person_can_read():
+def test_fulltext_defaults_to_restricted_but_is_raisable():
+    # No role floor: paper_fulltext defaults to restricted and an explicit
+    # public declaration wins, resolving to public.
     prof = _profile(hasPart=[{"contentUrl": "sources/papers/p1.md", "role": "paper_fulltext"}])
     entry = privacy.explain_tiers(prof)["sources/papers/p1.md"]
-    assert entry.locked is True
-    assert entry.lock_reason == privacy.FULLTEXT_LOCK_REASON
-    assert "legal floor" in entry.lock_reason
+    assert entry.effective == "restricted"
+
+    raised = _profile(
+        hasPart=[
+            {"contentUrl": "sources/papers/p1.md", "role": "paper_fulltext", "visibility": "public"}
+        ]
+    )
+    assert privacy.explain_tiers(raised)["sources/papers/p1.md"].effective == "public"
 
 
 # ---------------------------------------------------------------------------

@@ -8,9 +8,10 @@ owner still reads their own ``restricted`` CV, because their viewer tier is
 
 What the route must do, and every assertion below says it:
 
-- serve an owner their own ``internal`` and ``restricted`` (non-floor) artifacts;
-- withhold the hard floors of ``spec/privacy-tiers.md`` section 4 even from the
-  owner (``paper_fulltext``, ``.cache/``/``.keys/``): a **403**, since those are
+- serve an owner their own ``internal`` and ``restricted`` artifacts, paper
+  full text included: ``paper_fulltext`` is an ordinary restricted-default role;
+- withhold the build-local hard floors of ``spec/privacy-tiers.md`` section 4
+  even from the owner (``.cache/``/``.keys/``): a **403**, since those are
   withheld from everyone and nothing is disclosed by saying so;
 - withhold an artifact above the caller's tier as a **404** indistinguishable
   from an artifact that is not in the manifest at all;
@@ -36,9 +37,9 @@ def _build_owned_profile(root):
     """Materialize a profile exercising every tier the route must distinguish.
 
     Public: paper summaries, works. Internal: the works list, re-tiered.
-    Restricted (default): ``sources/cv.md``, ``sources/web/*.md``. Hard floors:
-    a planted ``paper_fulltext`` and the ``.cache/embeddings.sqlite`` index.
-    Plus a ``public``-declared artifact ``derivedFrom`` the restricted CV, whose
+    Restricted (default): ``sources/cv.md``, ``sources/web/*.md``, and a planted
+    ``paper_fulltext``. Build-local hard floor: the ``.cache/embeddings.sqlite``
+    index. Plus a ``public``-declared artifact ``derivedFrom`` the restricted CV, whose
     effective tier is restricted: the derivation-rule probe.
     """
     pdir = root / SLUG
@@ -51,8 +52,8 @@ def _build_owned_profile(root):
         manifest=True,
     )
 
-    # A copyrighted-fulltext artifact (hard floor), added after the composite
-    # build, then re-recorded in the manifest.
+    # A paper-fulltext artifact (restricted by default, re-tierable), added
+    # after the composite build, then re-recorded in the manifest.
     (pdir / "sources" / "papers").mkdir(parents=True, exist_ok=True)
     (pdir / "sources" / "papers" / "p1.md").write_text("full text\n", encoding="utf-8")
     ResearcherProfile.from_files(pdir).build_manifest(write=True)
@@ -125,13 +126,22 @@ class TestOwnerReadsOwnPrivateArtifacts:
         assert r.status_code == 200, r.text
         assert r.headers["X-RP-Effective-Tier"] == "internal"
 
+    def test_owner_reads_restricted_fulltext(self, owned_client):
+        # paper_fulltext is an ordinary restricted-default artifact: the owner
+        # (restricted tier) reads it, like their CV. No role hard floor.
+        r = _get(owned_client, "sources/papers/p1.md")
+        assert r.status_code == 200, r.text
+        assert r.headers["X-RP-Effective-Tier"] == "restricted"
+
 
 class TestHardFloorsWithheldFromOwner:
-    """(b) Even the owner cannot read a hard-floor artifact."""
+    """(b) Even the owner cannot read a build-local hard-floor artifact."""
 
-    def test_paper_fulltext_denied(self, owned_client):
-        r = _get(owned_client, "sources/papers/p1.md")
-        assert r.status_code == 403, r.text
+    def test_fulltext_withheld_from_anonymous(self, owned_client):
+        # Restricted by default, so a public caller does not receive it: a 404,
+        # indistinguishable from an unknown path.
+        r = _get(owned_client, "sources/papers/p1.md", user=None)
+        assert r.status_code == 404, r.text
 
     def test_cache_index_denied(self, owned_client):
         r = _get(owned_client, ".cache/embeddings.sqlite")

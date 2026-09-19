@@ -32,7 +32,6 @@ from ..privacy import (
 )
 from ..profile.payloads import metadata_payload_dict, profile_summary_dict
 from ..schema import (
-    ALWAYS_RESTRICTED_ROLES,
     most_restrictive,
     role_default_visibility,
 )
@@ -191,11 +190,11 @@ def _gate_profile(request: Request, prof, viewer: ViewerTier, ref: str) -> None:
 def _is_hard_floor(content_url: str, role: str | None) -> bool:
     """Withheld from every viewer, owner included (spec section 4).
 
-    Copyrighted full text is a legal floor; ``.cache/``/``.keys/`` is build-local
-    derived state and key material, not a servable artifact.
+    ``.cache/``/``.keys/`` is build-local derived state and key material, not a
+    servable artifact. No manifest *role* is floored: every artifact's tier is
+    the owner's to choose, so this is a path-prefix test only. ``role`` is
+    accepted for a stable signature across callers.
     """
-    if role in ALWAYS_RESTRICTED_ROLES:
-        return True
     return any(content_url.startswith(prefix) for prefix in ALWAYS_RESTRICTED_PREFIXES)
 
 

@@ -533,8 +533,9 @@ curl -X PUT -H "Authorization: Bearer $TOKEN" \
 Download a profile as a gzipped tarball, the inverse of `PUT`. Requires the
 `push` scope. The archive is projected through the caller's viewer tier: it
 contains exactly what the JSON read surface would serve that caller. Nothing
-above their tier is included, and the hard floors (copyrighted full text,
-`.cache/`, `.keys/`) never are.
+above their tier is included, and the build-local hard floors (`.cache/`,
+`.keys/`) never are. Paper full text is an ordinary tier-governed artifact: it
+ships to a caller entitled to its effective tier.
 
 The response carries `X-RP-Archive-Digest` (MD5 of the body, so the client
 can verify the transfer before committing it to its cache),

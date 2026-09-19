@@ -10,7 +10,7 @@ from typing import Literal
 
 from pydantic import Field, model_validator
 
-from ._common import ALWAYS_RESTRICTED_ROLES, Visibility, _Base, role_default_visibility
+from ._common import Visibility, _Base, role_default_visibility
 from .jsonld import JsonLdModel
 
 
@@ -313,10 +313,10 @@ class ArtifactRef(JsonLdModel):
     sha256: str | None = None
     #: This artifact's declared privacy tier. When not explicitly set it
     #: defaults to the role default (:func:`role_default_visibility`); e.g. a
-    #: ``cv``/``web`` artifact is ``restricted``. A ``paper_fulltext`` artifact
-    #: is forced to ``restricted`` and cannot be lowered (a legal constraint).
-    #: The *effective* tier also folds in ``derived_from``; see
-    #: :func:`researcher_profiles.privacy.effective_tiers`.
+    #: ``cv``/``web``/``paper_fulltext`` artifact defaults to ``restricted``.
+    #: Every role's tier is fully choosable by the owner; the default is a
+    #: default, not a floor. The *effective* tier also folds in
+    #: ``derived_from``; see :func:`researcher_profiles.privacy.effective_tiers`.
     visibility: Visibility = "public"
     #: Roles or paper_ids this artifact was derived from. Its effective tier is
     #: the most restrictive of its own and its sources'.
@@ -324,10 +324,7 @@ class ArtifactRef(JsonLdModel):
 
     @model_validator(mode="after")
     def _apply_role_tier(self) -> "ArtifactRef":
-        # Full text of copyrighted papers is always restricted and non-overridable.
-        if self.role in ALWAYS_RESTRICTED_ROLES:
-            self.visibility = "restricted"
-        # Otherwise, when the tier was not stated, inherit the role default.
-        elif "visibility" not in self.model_fields_set:
+        # When the tier was not stated, inherit the role default.
+        if "visibility" not in self.model_fields_set:
             self.visibility = role_default_visibility(self.role)
         return self

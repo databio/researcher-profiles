@@ -388,7 +388,7 @@ claims, not to substitute for monograph-level detail.
 ### Escalate to Stage 5
 
 The `paper_fulltext` entry for this paper carries `visibility:
-"restricted"`. Full text of published papers is always restricted, so this
+"restricted"` (its default tier here; the owner may re-tier it), so this
 step is open only to a session that holds credentials for that tier (for
 example, a token accepted by the host serving the profile). A public
 reader stops here, says the summary is as far as the profile goes, and

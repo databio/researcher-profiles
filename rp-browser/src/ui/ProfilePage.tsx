@@ -121,9 +121,12 @@ export function ProfilePage({ url: urlProp, activeTab, onTabChange }: ProfilePag
   const tabs = useMemo(() => {
     if (!detail) return [] as { id: TabId; label: string }[];
     const t: { id: TabId; label: string }[] = [{ id: "overview", label: "Overview" }];
-    if (detail.expertise) t.push({ id: "expertise", label: "Expertise" });
-    if (detail.soul) t.push({ id: "soul", label: "Research Identity" });
-    if (papers.length) t.push({ id: "papers", label: `Publications (${papers.length})` });
+    // The content tabs always render, empty or not: a profile that has no
+    // expertise/soul/papers yet still shows the tab (with an empty state) so
+    // the structure is legible rather than silently missing.
+    t.push({ id: "expertise", label: "Expertise" });
+    t.push({ id: "soul", label: "Research Identity" });
+    t.push({ id: "papers", label: `Publications (${papers.length})` });
     t.push({ id: "embeddings", label: "Embeddings" });
     t.push({ id: "files", label: "Files" });
     for (const e of extraTabs) t.push({ id: e.id, label: e.label });
@@ -131,9 +134,9 @@ export function ProfilePage({ url: urlProp, activeTab, onTabChange }: ProfilePag
   }, [detail, papers.length, extraTabs]);
 
   /**
-   * The tab actually displayed. `tabs` is data-dependent (expertise/soul/papers
-   * only appear when present), so a linked-to segment can be absent -- default
-   * to overview rather than rewriting the URL, mirroring meTabOf/adminTabOf.
+   * The tab actually displayed. The content tabs always exist, but owner-only
+   * extra tabs are still data-dependent, so a linked-to segment can be absent --
+   * default to overview rather than rewriting the URL, mirroring meTabOf/adminTabOf.
    */
   const resolvedActive = useMemo(
     () => (tabs.some((t) => t.id === requestedTab) ? requestedTab : "overview"),
@@ -251,8 +254,18 @@ export function ProfilePage({ url: urlProp, activeTab, onTabChange }: ProfilePag
                 )}
               </>
             )}
-            {resolvedActive === "expertise" && <MarkdownSection title="Expertise narrative" body={detail.expertise} />}
-            {resolvedActive === "soul" && <MarkdownSection title="Narrative voice (SOUL)" body={detail.soul} />}
+            {resolvedActive === "expertise" &&
+              (detail.expertise?.trim() ? (
+                <MarkdownSection title="Expertise narrative" body={detail.expertise} />
+              ) : (
+                <p className="text-muted">No expertise narrative yet.</p>
+              ))}
+            {resolvedActive === "soul" &&
+              (detail.soul?.trim() ? (
+                <MarkdownSection title="Narrative voice (SOUL)" body={detail.soul} />
+              ) : (
+                <p className="text-muted">No research identity (SOUL) written yet.</p>
+              ))}
             {resolvedActive === "papers" && (
               <PapersList papers={papers} loadSummary={loadSummary} />
             )}

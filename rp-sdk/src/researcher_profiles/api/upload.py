@@ -42,7 +42,6 @@ from ..privacy import (
 # canonical definition in ``schema/``. This is not an identity check. Never
 # match a ``rid`` against this; it forbids the uppercase ``X`` check digit some
 # ORCIDs carry.
-from ..schema import ALWAYS_RESTRICTED_ROLES  # noqa: F401  (re-exported)
 from ..store import IngestResult, ProfileStore, UploadError  # noqa: F401  (re-exported)
 from ..utils.paths import CACHE_DIRNAME, LEGACY_CACHE_DIRNAME
 from ..utils.slug import SLUG_RE  # noqa: F401  (re-exported)
@@ -364,8 +363,6 @@ def build_viewer_archive(profile_dir: str | os.PathLike, *, viewer: ViewerTier) 
     Rules, in order:
 
     * a manifest artifact ships when ``tier_allows(viewer, effective_tier)``;
-    * ``ALWAYS_RESTRICTED_ROLES`` (copyrighted full text) never ships, to
-      anyone, at any tier: a legal floor, not a preference;
     * ``ALWAYS_RESTRICTED_PREFIXES`` (``.cache/``, ``.keys/``) never ships;
     * ``profile.jsonld`` always ships, but **projected**: the manifest inside
       it is tier-invariant (spec section 6), while its inline sections are not,
@@ -394,8 +391,6 @@ def build_viewer_archive(profile_dir: str | os.PathLike, *, viewer: ViewerTier) 
             # Not a manifest artifact: it is not part of the published record,
             # so it does not travel. (This is what retires the old whitelist:
             # the manifest already says what a profile contains.)
-            return False
-        if entry.role in ALWAYS_RESTRICTED_ROLES:
             return False
         return tier_allows(viewer, entry.effective)
 

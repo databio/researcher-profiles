@@ -56,9 +56,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel, ValidationError
 
 from ..errors import ProfileError, ProfileWriteError
-from ..privacy import FULLTEXT_LOCK_REASON
 from ..schema import (
-    ALWAYS_RESTRICTED_ROLES,
     ArtifactRef,
     CareerEntry,
     ConceptReference,
@@ -362,8 +360,8 @@ class EditManager:
         Sections are the inline fields of the document (summary, focus,
         methods, the clinical block). They belong here rather than on the
         metadata patch because a tier is a privacy decision: this is the one
-        surface that knows about the legal floor and the host ceiling, and a
-        second way to set a tier is a second privacy implementation.
+        surface that knows about the host ceiling, and a second way to set a
+        tier is a second privacy implementation.
         """
         valid_tiers = {"public", "internal", "restricted"}
         doc = self._profile.metadata
@@ -384,8 +382,6 @@ class EditManager:
             if not targets:
                 raise EditError(f"no manifest artifact matches {entry!r}")
             for target in targets:
-                if target.role in ALWAYS_RESTRICTED_ROLES and tier != "restricted":
-                    raise EditError(FULLTEXT_LOCK_REASON)
                 if target.visibility != tier:
                     changed += 1
                 target.visibility = tier  # type: ignore[assignment]

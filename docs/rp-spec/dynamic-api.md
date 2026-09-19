@@ -167,7 +167,7 @@ header reports the artifact's effective privacy tier.
 - `200`: artifact served
 - `404`: profile not visible, artifact not in manifest, or artifact's
   effective tier is above the caller's viewer tier
-- `403`: hard-floor artifacts (`paper_fulltext`, `.cache/`, `.keys/`) that are
+- `403`: build-local hard-floor artifacts (`.cache/`, `.keys/`) that are
   withheld from all callers
 
 ### GET /profiles/{slug}/papers
@@ -598,9 +598,7 @@ Each `artifacts` entry:
 | `name` | string \| null | Display name |
 | `paper_id` | string \| null | Set for per-paper artifacts |
 | `declared` | string | The tier written on the manifest entry |
-| `effective` | string | What governs after the legal floor, the profile default, and the derivation rule |
-| `locked` | boolean | A legal floor nobody, owner included, may raise |
-| `lock_reason` | string \| null | Full sentence to show when `locked` |
+| `effective` | string | What governs after the profile default and the derivation rule |
 | `raised_by` | list[string] | Causes holding `effective` above `declared` |
 | `visible_to` | list[string] | Subset of `["anonymous", "lab", "you"]` |
 

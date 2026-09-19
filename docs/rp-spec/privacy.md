@@ -72,46 +72,43 @@ combination an interface should offer.
 
 ---
 
-## What's always restricted
+## What's restricted by default
 
-Three separate mechanisms hold artifacts back from `public`, and they are not
+Two separate mechanisms hold artifacts back from `public`, and they are not
 interchangeable.
 
-### 1. A legal floor: one role
+### 1. Role defaults (a default, not a floor)
 
-The manifest `role` `paper_fulltext` (extracted full text of copyrighted
-papers) can never be lowered below `restricted`, no matter what visibility is
-declared on it. This is the only role reported with `locked = true` and a
-lock reason: it is a legal constraint, not a preference.
+Some roles default to a tier more restrictive than `public` when the artifact
+does not declare its own `visibility`: `paper_fulltext`, `cv`, `web`, `grant`
+(the singular grant-derived embedding chunk, not the plural `grants`
+bibliographic record), and `embedding_index_sqlite` (the build-local sqlite
+index; the servable form is the flat `embeddings/` export) default to
+`restricted`; `trials` defaults to `internal`. These are **defaults, not
+floors**: the owner may re-tier any of them freely (up or down), and an
+explicit `"visibility"` on the artifact wins. Nothing is a legal constraint,
+and no role is reported as `locked` — that concept has been removed.
 
-### 2. Role defaults that also act as floors
+`paper_fulltext` is an ordinary role here: it defaults to `restricted` so
+extracted full text never becomes public by accident, but the owner may raise
+it to `internal` or `public` through the visibility editor or
+`PATCH .../visibility`, exactly like any other artifact.
 
-Four more roles default to `restricted` and, in the reference
-implementation, resolve to `restricted` even when the artifact declares
-`"visibility": "public"`: `cv`, `web`, `grant` (the singular grant-derived
-embedding chunk, not the plural `grants` bibliographic record), and
-`embedding_index_sqlite` (the build-local sqlite index; the servable form is
-the flat `embeddings/` export). These are policy, not a legal constraint.
-Unlike `paper_fulltext`, they are not reported as `locked`. An owner UI that
-reads `locked` alone will therefore think the tier can be overridden, which in
-the reference implementation it currently cannot.
-
-### 3. Path prefixes, not tiers
+### 2. Path prefixes, not tiers
 
 The SDK's `.cache/` (serve-time derived caches) and `.keys/` (signing key
-material) are
-excluded unconditionally, regardless of any declared visibility. These never
-enter the tier computation at all; they are written into `.publishignore`
-directly, along with `.publishignore` itself.
+material) are excluded unconditionally, regardless of any declared visibility.
+These never enter the tier computation at all; they are written into
+`.publishignore` directly, along with `.publishignore` itself. They are the
+only artifacts withheld from every viewer, the owner included.
 
-| Artifact | Mechanism | Reported as `locked`? |
+| Artifact | Mechanism | Owner may re-tier? |
 |----------|-----------|------------------------|
-| `sources/papers/*.md` (full text, role `paper_fulltext`) | Legal floor | Yes |
-| `sources/cv.md` (role `cv`) | Role-default floor | No |
-| `sources/web/*.md` (role `web`) | Role-default floor | No |
-| Grant embedding chunks (role `grant`) | Role-default floor | No |
-| `.cache/embeddings.sqlite` (role `embedding_index_sqlite`) | Role-default floor | No |
-| `.cache/`, `.keys/` | Path prefix, excluded unconditionally | N/A, never enters tier computation |
+| `sources/papers/*.md` (full text, role `paper_fulltext`) | Role default (`restricted`) | Yes |
+| `sources/cv.md` (role `cv`) | Role default (`restricted`) | Yes |
+| `sources/web/*.md` (role `web`) | Role default (`restricted`) | Yes |
+| Grant embedding chunks (role `grant`) | Role default (`restricted`) | Yes |
+| `.cache/`, `.keys/` | Path prefix, excluded unconditionally | No — never enters tier computation |
 
 ---
 

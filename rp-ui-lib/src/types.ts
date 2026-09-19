@@ -34,8 +34,6 @@ export interface ArtifactTier {
   content_url: string;
   declared: string;
   effective: string;
-  lock_reason?: string | null;
-  locked?: boolean;
   name?: string | null;
   paper_id?: string | null;
   raised_by?: string[];

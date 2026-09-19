@@ -423,13 +423,8 @@ class ArtifactTier(_APIModel):
     paper_id: Optional[str] = None
     #: What is written on the manifest entry.
     declared: str
-    #: What actually governs, after the legal floor, the profile default, and
-    #: the derivation rule.
+    #: What actually governs, after the profile default and the derivation rule.
     effective: str
-    #: A legal floor: no one, owner included, may raise this.
-    locked: bool = False
-    #: The full sentence to show a human when ``locked``.
-    lock_reason: Optional[str] = None
     #: Concrete causes holding it above ``declared`` ("derived from
     #: sources/cv.md (restricted)"), for display on this row.
     raised_by: list[str] = []

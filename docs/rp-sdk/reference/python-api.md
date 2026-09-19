@@ -419,9 +419,32 @@ Owner-edit policy and mutation surface for one profile.
 
 #### Methods
 
+##### `add_work(record: PaperRecord | dict[str, Any])`
+
+Add one work, or replace the one already carrying its `paper_id`.
+
 ##### `patch_metadata(patch: dict[str, Any])`
 
 Patch owner-editable metadata fields and persist the document.
+
+##### `patch_work(paper_id: str, patch: dict[str, Any])`
+
+Patch one record in `sources/papers.jsonld` and persist the corpus.
+
+The granular counterpart of `patch_metadata` for works: a wrong
+DOI on one paper is a one-field fix, and the only transport it had was
+a whole-profile push. Only the fields present are applied, and only
+those in `EDITABLE_WORK_FIELDS`.
+
+The patched record is round-tripped through `PaperRecord` before
+anything is written, so a bad value is an `EditError` (a 400)
+rather than a corrupt `papers.jsonld`. List order is preserved: the
+corpus order is the published reading order and a patch is not a
+reordering.
+
+##### `remove_work(paper_id: str)`
+
+Remove one work from `sources/papers.jsonld`.
 
 ##### `set_soul(soul: str)`
 
@@ -434,8 +457,8 @@ Set the profile-level, per-artifact, and per-section privacy tiers.
 Sections are the inline fields of the document (summary, focus,
 methods, the clinical block). They belong here rather than on the
 metadata patch because a tier is a privacy decision: this is the one
-surface that knows about the legal floor and the host ceiling, and a
-second way to set a tier is a second privacy implementation.
+surface that knows about the host ceiling, and a second way to set a
+tier is a second privacy implementation.
 
 
 ### Exceptions
@@ -2275,7 +2298,7 @@ which is one indexed query and always current.
 
 Also exported from `researcher_profiles.store`:
 
-### *class* `IngestResult(slug: str, rid: str | None, name: str, level: str, indexed: bool)`
+### *class* `IngestResult(slug: str, rid: str | None, name: str, level: str, indexed: bool, kept: dict[str, int] = dict(), spliced: int = 0, manifest_counts: dict[str, int] = dict(), mode: str = 'replace')`
 
 Outcome of committing one staged profile directory into a store.
 
@@ -2284,13 +2307,25 @@ Outcome of committing one staged profile directory into a store.
 **`indexed`**: *bool*
 : Whether a built embedding index is present afterwards. Always `False` on a store with no filesystem: the index is a `.cache/embeddings.sqlite` handle, which `ArtifactStorage` does not cover (see the module docstring).
 
+**`kept`**: *dict[str, int]*
+: Live files carried over rather than deleted, by class (`{"fulltext": 53, "index": 1}`); see `upload.WITHHELD_CLASSES`. Filled in by `ingest_archive`, not by `commit_directory`.
+
 **`level`**: *str*
+
+**`manifest_counts`**: *dict[str, int]*
+: `{role: count}` over the manifest the store holds after the commit: what a reader can now fetch. Filled in by `ingest_archive`.
+
+**`mode`**: *str*
+: Which `upload.PushMode` the ingest ran under, and so what happened to the live files the archive did not carry.
 
 **`name`**: *str*
 
 **`rid`**: *str | None*
 
 **`slug`**: *str*
+
+**`spliced`**: *int*
+: Manifest entries the server added back for kept files the incoming manifest did not list. Filled in by `ingest_archive`; see `upload._splice_kept_into_manifest`.
 
 
 ### *class* `ProfileNotFoundError`

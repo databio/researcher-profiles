@@ -70,9 +70,11 @@ ROLE_DEFAULT: dict[str, str] = {
     "paper_fulltext": "restricted",
 }
 
-#: Withheld from EVERY viewer, owner included: a legal floor and build-local
-#: derived state. These are the ``.`` rows that stay ``.`` all the way across.
-HARD_FLOORS = frozenset({"embedding_index_sqlite", "paper_fulltext"})
+#: Withheld from EVERY viewer, owner included: build-local derived state under
+#: ``.cache/`` (a path-prefix floor, not a role floor). These are the ``.`` rows
+#: that stay ``.`` all the way across. ``paper_fulltext`` is NOT here: it is an
+#: ordinary restricted-default role the owner may re-tier freely.
+HARD_FLOORS = frozenset({"embedding_index_sqlite"})
 
 VIEWER_TIERS = {
     "anonymous": "public",
@@ -216,8 +218,6 @@ def _detail(client, viewer, **kwargs):
 def _expected_effective(role: str, profile_tier: str, declared: str | None = None) -> str:
     """The tier the matrix says an artifact resolves to. The rule, restated."""
     tiers = [profile_tier, declared or ROLE_DEFAULT[role]]
-    if role == "paper_fulltext":
-        tiers.append("restricted")
     return TIER_ORDER[max(TIER_ORDER.index(t) for t in tiers)]
 
 
@@ -454,15 +454,15 @@ class TestArchiveProjection:
         assert "sources/cv.md" not in public
         assert "sources/cv.md" in operator
 
-    def test_fulltext_ships_to_nobody(self, matrix_client):
+    def test_fulltext_ships_only_to_a_caller_entitled_to_it(self, matrix_client):
+        # Paper full text is an ordinary restricted-default artifact: withheld
+        # from a public caller, shipped to a restricted (operator/owner) one,
+        # exactly like the CV. No role floor holds it back from everyone.
         c = matrix_client()
-        for viewer in ("consumer_public", "consumer_lab", "operator", "owner"):
-            r = _get(c, f"/api/v1/profiles/{SLUG}/archive", viewer)
-            if r.status_code != 200:
-                continue
-            assert not any(m.startswith("sources/papers/") for m in self._members(r)), (
-                f"fulltext shipped to {viewer}"
-            )
+        public = self._members(_get(c, f"/api/v1/profiles/{SLUG}/archive", "consumer_public"))
+        operator = self._members(_get(c, f"/api/v1/profiles/{SLUG}/archive", "operator"))
+        assert not any(m.startswith("sources/papers/") for m in public)
+        assert any(m.startswith("sources/papers/") for m in operator)
 
 
 class TestSearchProjection:
@@ -529,21 +529,32 @@ class TestSearchProjection:
 
 
 class TestVisibilityWritesAreHonest:
-    def test_loosening_fulltext_is_a_400_naming_the_floor(self, matrix_client):
+    def test_fulltext_tier_is_choosable_and_defaults_to_restricted(self, matrix_client):
+        # paper_fulltext defaults to restricted (nothing silently becomes
+        # public), but the owner may raise it: a PATCH to public succeeds and
+        # the report reflects the new effective tier. No floor, no `locked`.
         c = matrix_client()
+        url = ROLE_ARTIFACTS["paper_fulltext"]
+
+        before = _get(c, f"/api/v1/profiles/{SLUG}/visibility", "owner").json()
+        ft = next(a for a in before["artifacts"] if a["content_url"] == url)
+        assert ft["effective"] == "restricted"
+        assert ft.get("locked", False) is False
+        assert ft.get("lock_reason") is None
+
         r = c.patch(
             f"/api/v1/profiles/{SLUG}/visibility",
             json={"artifacts": [{"role": "paper_fulltext", "visibility": "public"}]},
             headers=VIEWER_HEADERS["owner"],
         )
-        assert r.status_code == 400
-        assert "legal floor" in r.json()["detail"]
-        report = _get(c, f"/api/v1/profiles/{SLUG}/visibility", "owner").json()
-        fulltext = next(
-            a for a in report["artifacts"] if a["content_url"] == ROLE_ARTIFACTS["paper_fulltext"]
-        )
-        assert fulltext["effective"] == "restricted"
-        assert fulltext["locked"] is True
+        assert r.status_code == 200, r.text
+        assert r.json()["artifacts_changed"] >= 1
+
+        after = _get(c, f"/api/v1/profiles/{SLUG}/visibility", "owner").json()
+        ft = next(a for a in after["artifacts"] if a["content_url"] == url)
+        assert ft["declared"] == "public"
+        assert ft["effective"] == "public"
+        assert "anonymous" in ft["visible_to"]
 
     def test_a_role_selector_retiers_every_matching_artifact(self, matrix_client):
         c = matrix_client()

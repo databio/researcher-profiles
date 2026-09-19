@@ -17,7 +17,6 @@ from typing import Iterable
 
 from .schema import (
     _VISIBILITY_ORDER,
-    ALWAYS_RESTRICTED_ROLES,
     ProfileDocument,
     Visibility,
     most_restrictive,
@@ -49,14 +48,6 @@ SECTION_FIELDS: dict[str, tuple[str, ...]] = {
     "background": ("training", "career", "job_title", "affiliation"),
 }
 
-#: The sentence an owner is shown when they try to raise a legally-floored
-#: artifact. Written once, here, so the API refusal, the tier explanation, and
-#: any UI all say the same words. A floor explained two ways reads as a bug.
-FULLTEXT_LOCK_REASON = (
-    "Extracted full text of a copyrighted paper. This is a legal floor, not a "
-    "preference, and cannot be raised above restricted by anyone, including you."
-)
-
 #: Map an embedding chunk's ``source_type`` to the manifest ``role`` whose
 #: default tier governs it. For every source the two names coincide today; the
 #: map is written explicitly so the chunk -> role -> tier derivation is
@@ -81,17 +72,6 @@ CHUNK_SOURCE_TYPE_ROLE: dict[str, str] = {
 #: from this public-sync exclude list. Build-session bookkeeping is not a
 #: concern here: it lives in the build root outside the content tree entirely.
 ALWAYS_RESTRICTED_PREFIXES: tuple[str, ...] = (".cache/", ".keys/")
-
-
-def _own_tier(part) -> Visibility:
-    """An artifact's own tier: its declared ``visibility``, floored by role.
-
-    A legally-restricted role (full text) is ``restricted`` no matter what the
-    artifact declared. (The model already enforces this; belt and braces.)
-    """
-    if part.role in ALWAYS_RESTRICTED_ROLES:
-        return "restricted"
-    return part.visibility
 
 
 def tier_allows(viewer: ViewerTier, artifact: Visibility) -> bool:
@@ -161,12 +141,8 @@ class TierExplanation:
     paper_id: str | None = None
     #: What is written on the ``ArtifactRef`` (the role default already applied).
     declared: Visibility = "public"
-    #: After the legal floor, the profile default, and the derivation rule.
+    #: After the profile default and the derivation rule.
     effective: Visibility = "public"
-    #: The role carries a legal floor: no one, owner included, may raise it.
-    locked: bool = False
-    #: A full sentence, shown verbatim to a human. ``None`` unless ``locked``.
-    lock_reason: str | None = None
     #: Concrete causes that held the artifact above its declared tier: the
     #: specific source, not a restatement of the rule.
     raised_by: list[str] = field(default_factory=list)
@@ -207,7 +183,7 @@ def explain_tiers(profile: ProfileDocument) -> dict[str, TierExplanation]:
     """``{contentUrl: TierExplanation}`` for every manifest artifact.
 
     Effective tier = most restrictive of the profile default, the artifact's
-    own tier (floored by role), and the *effective* tiers of everything in its
+    own declared tier, and the *effective* tiers of everything in its
     ``derivedFrom`` (resolved by ``paperId`` or by ``role``). Effective, not
     declared: the restriction is transitive, so a public summary of a public
     digest of a restricted CV is restricted. Resolution is a memoized
@@ -240,15 +216,16 @@ def explain_tiers(profile: ProfileDocument) -> dict[str, TierExplanation]:
                 "derived from itself, directly or through a chain."
             )
 
-        locked = part.role in ALWAYS_RESTRICTED_ROLES
+        # The role default is a *default*, not a floor: it is written onto the
+        # artifact's own ``visibility`` at load (ArtifactRef._apply_role_tier)
+        # only when the owner did not declare one. So it is already folded into
+        # ``part.visibility`` below when it applies, and an explicit declaration
+        # wins. It is deliberately NOT re-added as a cause here, which would
+        # re-floor a declared tier and make role-defaulted artifacts
+        # (paper_fulltext, cv, web, grant, ...) unraisable by their owner.
         causes: list[tuple[Visibility, str]] = []
         unresolved: list[str] = []
-        if locked:
-            causes.append(("restricted", "a legal floor on paper full text (restricted)"))
         causes.append((default, f"the profile default ({default})"))
-        role_default = role_default_visibility(part.role)
-        if role_default != "public":
-            causes.append((role_default, f"the role default for {part.role} ({role_default})"))
         for ref in part.derived_from or []:
             sources = by_paper.get(ref, []) + by_role.get(ref, [])
             if not sources:
@@ -258,7 +235,7 @@ def explain_tiers(profile: ProfileDocument) -> dict[str, TierExplanation]:
                 src_tier = resolve(src, (*visiting, url))
                 causes.append((src_tier, f"derived from {src.content_url} ({src_tier})"))
 
-        effective = most_restrictive(_own_tier(part), *(t for t, _ in causes))
+        effective = most_restrictive(part.visibility, *(t for t, _ in causes))
         memo[url] = effective
         notes[url] = (causes, unresolved)
         return effective
@@ -267,7 +244,6 @@ def explain_tiers(profile: ProfileDocument) -> dict[str, TierExplanation]:
     for p in parts:
         effective = resolve(p, ())
         causes, unresolved = notes[p.content_url]
-        locked = p.role in ALWAYS_RESTRICTED_ROLES
         # Only causes sitting AT the effective tier are holding it there; a
         # cause below it explains nothing.
         raised_by = (
@@ -282,8 +258,6 @@ def explain_tiers(profile: ProfileDocument) -> dict[str, TierExplanation]:
             paper_id=p.paper_id,
             declared=p.visibility,
             effective=effective,
-            locked=locked,
-            lock_reason=FULLTEXT_LOCK_REASON if locked else None,
             raised_by=raised_by,
             unresolved=unresolved,
         )
@@ -406,7 +380,6 @@ def drop_above_public(
 __all__ = [
     "ALWAYS_RESTRICTED_PREFIXES",
     "CHUNK_SOURCE_TYPE_ROLE",
-    "FULLTEXT_LOCK_REASON",
     "DerivationCycleError",
     "TierExplanation",
     "ViewerTier",

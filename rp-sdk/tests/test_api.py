@@ -1193,13 +1193,13 @@ class TestArchiveAndInstall:
         prof = ResearcherProfile.from_files(installed)
         assert prof.slug == SLUG
 
-    def test_fulltext_never_ships_over_http(self, make_api_client, server_root, cache_root):
-        """Copyrighted fulltext is a legal floor: no operator flag can serve it.
+    def test_fulltext_does_not_ship_to_a_public_caller(self, make_api_client, server_root, cache_root):
+        """Paper full text defaults to ``restricted``, so a public install omits it.
 
         The archive is projected through the caller's tier by
-        ``build_viewer_archive``, and ``ALWAYS_RESTRICTED_ROLES`` withholds full
-        text at every tier, so there is no server setting that can turn
-        redistribution on.
+        ``build_viewer_archive``. This install resolves to the ``public`` tier,
+        and ``paper_fulltext`` defaults to ``restricted``, so it is withheld here
+        (an owner-tier caller who has not re-tiered it would still receive it).
         """
         http = make_api_client(server_root)
         summary = install_profile(SLUG, url="http://testserver", root=cache_root, client=http)

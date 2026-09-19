@@ -30,7 +30,6 @@ from ...privacy import (
     tier_allows,
 )
 from ...schema import (
-    ALWAYS_RESTRICTED_ROLES,
     validate_ref,
 )
 from ...schema.jsonld import CONTEXT_URL
@@ -403,9 +402,6 @@ def get_profile_artifact(
       included, so there is no viewer for whom their existence is a secret and
       nothing is disclosed by saying why.
 
-      - ``paper_fulltext`` (``sources/papers/``): extracted full text of
-        copyrighted papers. A legal floor, not a preference; serving it is the
-        redistribution the whole tier exists to prevent.
       - ``.cache/`` and ``.keys/``: build-local derived state (the sqlite
         embedding index) and key material, not servable profile artifacts.
 
@@ -458,11 +454,6 @@ def get_profile_artifact(
         raise unknown
 
     # Hard floors: never served, to anybody, at any tier.
-    if part.role in ALWAYS_RESTRICTED_ROLES:
-        raise HTTPException(
-            status_code=403,
-            detail="paper full text is a restricted hard floor and is never served",
-        )
     if any(artifact.startswith(prefix) for prefix in ALWAYS_RESTRICTED_PREFIXES):
         raise HTTPException(
             status_code=403,
