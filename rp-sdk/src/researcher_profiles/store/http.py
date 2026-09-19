@@ -456,6 +456,17 @@ class HttpProfileStore(_HookedStore, _AnalyticsAccessors):
     def create(self, document: "ProfileDocument", *, slug: str) -> NoReturn:  # noqa: ARG002
         self._read_only("create")
 
+    def create_bundle(
+        self,
+        document: "ProfileDocument",  # noqa: ARG002
+        *,
+        slug: str,  # noqa: ARG002
+        expertise: "str | None" = None,  # noqa: ARG002
+        soul: "str | None" = None,  # noqa: ARG002
+        artifacts: "dict[str, str] | None" = None,  # noqa: ARG002
+    ) -> NoReturn:
+        self._read_only("create_bundle")
+
     def put_document(self, slug: str, document: "ProfileDocument") -> NoReturn:  # noqa: ARG002
         self._read_only("put_document")
 

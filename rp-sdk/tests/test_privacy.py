@@ -251,6 +251,46 @@ def test_a_public_artifact_has_nothing_to_explain():
     assert privacy.explain_tiers(prof)["sources/papers.jsonld"].raised_by == []
 
 
+def test_derivation_restriction_is_transitive():
+    """A public derivative of a public derivative of a restricted CV is not
+    public: the rule walks the chain, it does not stop at one hop."""
+    prof = _profile(
+        hasPart=[
+            {"contentUrl": "sources/cv.md", "role": "cv"},  # restricted
+            {"contentUrl": "digest.md", "role": "digest", "derivedFrom": ["cv"]},
+            {"contentUrl": "blurb.md", "role": "blurb", "derivedFrom": ["digest"]},
+        ]
+    )
+    eff = privacy.effective_tiers(prof)
+    assert eff["digest.md"] == "restricted"
+    assert eff["blurb.md"] == "restricted"
+    assert any("digest.md" in p for p in privacy.explain_tiers(prof)["blurb.md"].raised_by)
+
+
+def test_a_derivation_cycle_raises_rather_than_guessing():
+    prof = _profile(
+        hasPart=[
+            {"contentUrl": "a.md", "role": "a", "derivedFrom": ["b"]},
+            {"contentUrl": "b.md", "role": "b", "derivedFrom": ["a"]},
+        ]
+    )
+    with pytest.raises(privacy.DerivationCycleError, match="cycle"):
+        privacy.explain_tiers(prof)
+    # The validator reports it instead of propagating the raise, so `rp
+    # validate` names the problem rather than traceback-ing on it.
+    assert "cycle" in "".join(privacy.derivation_errors(prof))
+
+
+def test_an_unresolvable_derivedFrom_is_a_validation_error_not_a_public_default():
+    prof = _profile(
+        hasPart=[{"contentUrl": "derived.json", "role": "custom", "derivedFrom": ["nowhere"]}]
+    )
+    errors = privacy.derivation_errors(prof)
+    assert len(errors) == 1
+    assert "nowhere" in errors[0]
+    assert privacy.explain_tiers(prof)["derived.json"].unresolved == ["nowhere"]
+
+
 def test_fulltext_is_locked_with_a_sentence_a_person_can_read():
     prof = _profile(hasPart=[{"contentUrl": "sources/papers/p1.md", "role": "paper_fulltext"}])
     entry = privacy.explain_tiers(prof)["sources/papers/p1.md"]
@@ -559,3 +599,131 @@ class TestRefusalContract:
         assert msgs[0]["content"] == "earlier question"
         assert msgs[1]["role"] == "assistant"
         assert "new q?" in msgs[-1]["content"]
+
+
+def test_inline_section_projection_removes_private_values():
+    from researcher_profiles.privacy import project_document
+    from researcher_profiles.schema import ProfileDocument, SectionVisibility
+
+    doc = ProfileDocument(
+        name="Private Methods",
+        rid="local:private-methods-a1b2c3",
+        provenance="self_published",
+        summary="public summary",
+        methodological_commitments=["secret assay"],
+        section_visibility=[SectionVisibility(section="methods", visibility="restricted")],
+    )
+    public = project_document(doc, "public")
+    assert public.summary == "public summary"
+    assert public.methodological_commitments == []
+    assert project_document(doc, "restricted").methodological_commitments == ["secret assay"]
+
+
+#: The three private values planted in the fixture below, one per section.
+_SECRETS = ("secret assay", "pediatric ward overflow", "IND 12345")
+
+
+@pytest.fixture
+def leak_profile_root(tmp_path):
+    """A published-shape profile whose methods/site/clinical sections are private.
+
+    The summary is public and deliberately repeats one of the private values,
+    the way a generated blurb would if nobody stopped it. Nothing downstream
+    may show any of the three.
+    """
+    from researcher_profiles.schema import SectionVisibility, SiteCapabilities
+
+    from .factories import build_profile_dir
+
+    root = tmp_path / "profiles"
+    pdir = root / "leaky"
+    build_profile_dir(pdir, rid="local:leaky-a1b2c3", manifest=True)
+    prof = ResearcherProfile.from_files(pdir)
+    doc = prof.metadata
+    doc.summary = f"Runs trials. {_SECRETS[0]}."
+    doc.methodological_commitments = [_SECRETS[0]]
+    doc.site_capabilities = SiteCapabilities(patient_populations=[_SECRETS[1]])
+    doc.regulatory_experience = [_SECRETS[2]]
+    doc.section_visibility = [
+        SectionVisibility(section="summary", visibility="restricted"),
+        SectionVisibility(section="methods", visibility="restricted"),
+        SectionVisibility(section="site_capabilities", visibility="restricted"),
+        SectionVisibility(section="regulatory_experience", visibility="restricted"),
+    ]
+    prof.save_profile(doc)
+    return root
+
+
+def _assert_clean(blob: str) -> None:
+    for secret in _SECRETS:
+        assert secret not in blob
+
+
+class TestInlineSectionsCannotEscape:
+    """One private value, every public surface. A tier that holds on the JSON-LD
+    read and not on the export is not a tier; it is a coincidence.
+    """
+
+    def test_http_reads_at_every_tier(self, leak_profile_root, make_api_client):
+        client = make_api_client(leak_profile_root, token="op")
+        for path in (
+            "/api/v1/profiles",
+            "/api/v1/profiles/leaky",
+            "/profiles/leaky/profile.jsonld",
+        ):
+            _assert_clean(client.get(path).text)
+        # The owner still reads their own sections back: the projection is a
+        # cap on the viewer, not a deletion.
+        owner = client.get("/api/v1/profiles/leaky", headers={"Authorization": "Bearer op"}).json()
+        assert owner["metadata"]["methodological_commitments"] == [_SECRETS[0]]
+
+    def test_static_publisher_output(self, leak_profile_root):
+        from researcher_profiles.publish import build_site, render_profile
+
+        pdir = leak_profile_root / "leaky"
+        render_profile(pdir)
+        _assert_clean((pdir / "index.html").read_text(encoding="utf-8"))
+        out = leak_profile_root.parent / "site"
+        build_site(leak_profile_root, out)
+        for f in out.rglob("*"):
+            if f.is_file() and f.suffix in (".json", ".jsonld", ".html", ".md"):
+                _assert_clean(f.read_text(encoding="utf-8"))
+
+    def test_viewer_archive(self, leak_profile_root):
+        import io
+        import tarfile
+
+        from researcher_profiles.api.upload import build_viewer_archive
+
+        blob = build_viewer_archive(leak_profile_root / "leaky", viewer="public")
+        with tarfile.open(fileobj=io.BytesIO(blob)) as tf:
+            for member in tf.getmembers():
+                if member.isfile():
+                    _assert_clean(tf.extractfile(member).read().decode("utf-8"))
+
+    def test_export_bundle(self, leak_profile_root):
+        from researcher_profiles.profile.export import build_export_bundle
+
+        prof = ResearcherProfile.from_files(leak_profile_root / "leaky")
+        bundle = build_export_bundle(prof)
+        _assert_clean(bundle.text)
+        _assert_clean(json.dumps(bundle.model_dump(mode="json")))
+
+
+def test_weighted_interest_keeps_rejection_distinct_from_low_weight():
+    from researcher_profiles.schema import ConceptReference, ProfileDocument, WeightedInterest
+
+    concept = ConceptReference(system="mesh", code="D000001", label="Example")
+    doc = ProfileDocument(
+        name="Weights",
+        rid="local:weights-a1b2c3",
+        provenance="self_published",
+        weighted_interests=[
+            WeightedInterest(concept=concept, decision="accepted", weight=0),
+            WeightedInterest(
+                concept=concept.model_copy(update={"label": "Excluded"}), decision="rejected"
+            ),
+        ],
+    )
+    assert doc.interests == ["Example"]
+    assert doc.not_interests == ["Excluded"]

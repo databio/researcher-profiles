@@ -199,6 +199,39 @@ class ProfileStore(Protocol):
         """
         ...
 
+    def create_bundle(
+        self,
+        document: "ProfileDocument",
+        *,
+        slug: str,
+        expertise: Optional[str] = None,
+        soul: Optional[str] = None,
+        artifacts: Optional[dict[str, str]] = None,
+    ) -> ResearcherProfile:
+        """Create a profile and all of its authored artifacts in one write unit.
+
+        The seam a management host publishes an approved candidate through.
+        :meth:`create` installs a document and nothing else, so a host
+        assembling a complete profile had to follow it with separate artifact
+        writes; between them a half-built profile is live and readable, and a
+        crash leaves one behind with no way to tell it from a finished one.
+        This installs the whole bundle instead, so the document, the persona
+        documents, every artifact in ``artifacts``, the ownership row a
+        pre-commit hook writes, and the derived digest all land together.
+
+        ``artifacts`` maps a manifest ``contentUrl`` to its text body; each key
+        must appear in the document's ``hasPart`` or ``subjectOf``, because an
+        artifact nothing declares is an artifact no consumer can find.
+
+        Whether the unit is genuinely atomic is the backend's to say
+        (``WriteContext.atomic``): SQL commits or rolls back, the filesystem
+        cleans up after itself instead.
+
+        Raises :class:`~researcher_profiles.profile.ProfileWriteError` if
+        ``slug`` or the document's rid is already taken.
+        """
+        ...
+
     def put_document(self, slug: str, document: "ProfileDocument") -> "ResearcherProfile":
         """Create-or-replace a profile's canonical profile.jsonld.
 

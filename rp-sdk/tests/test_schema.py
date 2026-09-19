@@ -190,7 +190,7 @@ class TestSchemaExport:
         from researcher_profiles.validate import schema_fingerprint
 
         assert schema_fingerprint() == (
-            "fc06cb57de508e86ce794e1454c0089992024fb0a727e3f91097cfc161427e0f"
+            "be277cb0d0fcb58cd56196bc3496b8f64fc8c6f8bc7c1881e218352e411b529b"
         )
 
     # ---- Fixture parity: Pydantic + JSON Schema agree on fixtures ----

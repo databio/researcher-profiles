@@ -42,6 +42,34 @@ on its manifest entry:
 To restrict an entire profile, set `visibility` on the profile document itself.
 All artifacts inherit it unless they override.
 
+### Inline sections
+
+Some content is not a file: `summary`, the interests, the methodological
+commitments and the optional clinical fields live inside `profile.jsonld`
+itself. A file exclusion list cannot redact a field out of a document, so
+those fields carry their own tier in `rp:sectionVisibility`:
+
+```json
+{
+  "rp:sectionVisibility": [
+    { "section": "methods", "visibility": "restricted" }
+  ]
+}
+```
+
+The sections are a closed set: `summary`, `expertise`, `focus` (the subfields
+and the interests, weighted and plain), `methods`, `soul`, `clinical`,
+`site_capabilities`, `regulatory_experience`, `contact`, `background`. A
+section's effective tier is the more restrictive of its own and the profile's,
+so a section can never be more public than the profile carrying it.
+
+Everything that serves a profile document — the JSON-LD read, the metadata and
+list views, the rendered page, the archive, the static site and the knowledge
+base export — serves it projected to the reader's tier. An identity key the
+format requires (`name`, `rid`) has no section of its own: it is governed by
+the whole profile's visibility, so a hidden name and a public profile is not a
+combination an interface should offer.
+
 ---
 
 ## What's always restricted
@@ -96,6 +124,14 @@ copyrighted text is still restricted.
 **Exception:** Authored synthesis (like paper summaries or expertise.md) that
 describes sources rather than reproducing them does NOT inherit the restriction.
 Otherwise every summary would be restricted because it is derived from full text.
+
+The inheritance is **transitive**: a `derivedFrom` chain is walked to the end,
+so a public blurb derived from a public digest derived from a restricted CV is
+restricted. Two shapes are errors rather than tiers. A `derivedFrom` value that
+names no `paperId` and no `role` in the manifest is a restriction that silently
+failed to apply, and validation reports it. A cycle makes the rule
+self-referential, and an implementation must refuse to answer rather than
+settle on whichever tier it reached first.
 
 ---
 

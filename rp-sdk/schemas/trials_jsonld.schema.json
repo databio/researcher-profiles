@@ -1,0 +1,258 @@
+{
+  "$defs": {
+    "TrialRecord": {
+      "additionalProperties": true,
+      "description": "A confirmed researcher-to-clinical-trial relationship.\n\nPart of the optional clinical extension (``docs/rp-spec/index.md``). Only\nconfirmed relationships belong here: a trial a discovery pass merely\nproposed is draft state in the host, not a claimed accomplishment. Hence\n``researcher_role`` is optional and stays absent when unknown; inventing a\nPI role to fill a required field would turn \"we do not know\" into a claim\nnobody made.\n\n``nct_id`` is validated against the ClinicalTrials.gov form because it is\nthe record's identity: without it there is nothing to check the claim\nagainst, and the ``@id`` is derived from it.",
+      "properties": {
+        "@context": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "@Context"
+        },
+        "@id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "@Id"
+        },
+        "@type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "MedicalTrial",
+          "title": "@Type"
+        },
+        "completion_date": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Completion Date"
+        },
+        "conditions": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Conditions",
+          "type": "array"
+        },
+        "enrollment": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Enrollment"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "nct_id": {
+          "pattern": "^NCT\\d{8}$",
+          "title": "Nct Id",
+          "type": "string"
+        },
+        "phase": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Phase"
+        },
+        "rp:researcherRole": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rp:Researcherrole"
+        },
+        "sites": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sites"
+        },
+        "sponsor": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sponsor"
+        },
+        "sponsor_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sponsor Type"
+        },
+        "start_date": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Start Date"
+        },
+        "status": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Status"
+        },
+        "therapeutic_area": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Therapeutic Area"
+        }
+      },
+      "required": [
+        "nct_id",
+        "name"
+      ],
+      "title": "TrialRecord",
+      "type": "object"
+    }
+  },
+  "additionalProperties": true,
+  "description": "Top-level model for ``sources/trials.jsonld`` (a ``Collection``).\n\nOptional, and absent from almost every profile. It exists so a clinical\nresearcher whose work is trials rather than papers has somewhere to put the\nrecord: an empty ``papers.jsonld`` alongside a populated trials collection\nis a complete profile, not a broken one.",
+  "properties": {
+    "@context": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": "https://profiles.databio.org/context/v1.jsonld",
+      "title": "@Context"
+    },
+    "@id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "@Id"
+    },
+    "@type": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": "Collection",
+      "title": "@Type"
+    },
+    "about": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "About"
+    },
+    "conformsTo": {
+      "default": "https://profiles.databio.org/context/v1.jsonld",
+      "title": "Conformsto",
+      "type": "string"
+    },
+    "hasPart": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/TrialRecord"
+      },
+      "title": "Haspart",
+      "type": "array"
+    }
+  },
+  "title": "TrialsDocument",
+  "type": "object"
+}

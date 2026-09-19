@@ -34,6 +34,7 @@ from ..privacy import (
     ALWAYS_RESTRICTED_PREFIXES,
     ViewerTier,
     explain_tiers,
+    project_document,
     tier_allows,
 )
 
@@ -86,6 +87,7 @@ SOURCES_MEMBERS = frozenset(
     {
         "papers.jsonld",
         "grants.jsonld",
+        "trials.jsonld",
         "citations.json",
         "papers",
         "summaries",
@@ -276,9 +278,11 @@ def build_viewer_archive(profile_dir: str | os.PathLike, *, viewer: ViewerTier) 
     * ``ALWAYS_RESTRICTED_ROLES`` (copyrighted full text) never ships, to
       anyone, at any tier: a legal floor, not a preference;
     * ``ALWAYS_RESTRICTED_PREFIXES`` (``.cache/``, ``.keys/``) never ships;
-    * ``profile.jsonld`` always ships. It is the document itself, gated at the
-      profile level by the caller's route, and the manifest inside it is
-      tier-invariant (spec section 6).
+    * ``profile.jsonld`` always ships, but **projected**: the manifest inside
+      it is tier-invariant (spec section 6), while its inline sections are not,
+      and an exclude list cannot redact a field out of a document that is
+      already in the tarball. It is otherwise gated at the profile level by the
+      caller's route.
     """
     src = Path(profile_dir).expanduser().resolve()
     doc = src / "profile.jsonld"
@@ -292,7 +296,8 @@ def build_viewer_archive(profile_dir: str | os.PathLike, *, viewer: ViewerTier) 
 
     def _ships(rel: str) -> bool:
         if rel == "profile.jsonld":
-            return True
+            # Never from disk: the projected copy is added separately below.
+            return False
         if any(rel.startswith(prefix) for prefix in ALWAYS_RESTRICTED_PREFIXES):
             return False
         entry = explain.get(rel)
@@ -322,8 +327,17 @@ def build_viewer_archive(profile_dir: str | os.PathLike, *, viewer: ViewerTier) 
         ti.uname = ti.gname = ""
         return ti
 
+    from ..schema.jsonld import canonical_dumps
+
+    document = canonical_dumps(project_document(profile, viewer).model_dump(mode="json")).encode(
+        "utf-8"
+    )
+
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+        info = tarfile.TarInfo("profile.jsonld")
+        info.size = len(document)
+        tf.addfile(info, io.BytesIO(document))
         for child in sorted(src.iterdir()):
             if child.name.startswith("."):
                 continue

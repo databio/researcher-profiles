@@ -22,6 +22,7 @@ from ...models.api import (
 from ...privacy import (
     ViewerTier,
     explain_tiers,
+    section_tiers,
     tier_allows,
 )
 from ...profile.edit import EditError, WorkNotFoundError
@@ -333,6 +334,7 @@ def get_profile_visibility(
         profile_floor=floor.tier,
         profile_floor_reason=floor.reason if floor.tier else None,
         artifacts=artifacts,
+        sections=dict(section_tiers(prof.metadata)),
         counts=counts,
     )
 
@@ -359,6 +361,7 @@ def patch_profile_visibility(
     prof = get_profile(slug, store)
     _check_base_hash(store, store.resolve_slug(slug), body.base_hash)
     artifacts = [a.model_dump(exclude_unset=True) for a in body.artifacts]
+    sections = [s.model_dump(exclude_unset=True) for s in body.sections]
     check_write_scope(
         request,
         "visibility",
@@ -366,12 +369,14 @@ def patch_profile_visibility(
             "slug": slug,
             "profile_visibility": body.profile_visibility,
             "artifacts": artifacts,
+            "sections": sections,
         },
     )
     try:
         _doc, changed = prof.edit.set_visibility(
             profile_visibility=body.profile_visibility,
             artifacts=artifacts or None,
+            sections=sections or None,
         )
     except EditError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
@@ -381,6 +386,8 @@ def patch_profile_visibility(
         updated.append("visibility")
     if artifacts:
         updated.append("artifacts")
+    if sections:
+        updated.append("sections")
     resolved = store.resolve_slug(slug)
     return EditResult(
         slug=resolved,

@@ -42,6 +42,7 @@ from .schema import (
     PapersDocument,
     ProfileDocument,
     SummaryFile,
+    TrialsDocument,
 )
 from .schema.jsonld import CONTEXT_URL, read_jsonld
 from .schema_export import build_schemas
@@ -62,6 +63,7 @@ _SCHEMA_MODELS: dict[str, type] = {
     "profile_jsonld": ProfileDocument,
     "papers_jsonld": PapersDocument,
     "grants_jsonld": GrantsDocument,
+    "trials_jsonld": TrialsDocument,
     "summary_file": SummaryFile,
 }
 
@@ -280,7 +282,7 @@ def validate_artifact(
 
     # Undeclared terms and retired-key detection (only for JSON-LD artifacts,
     # not summary)
-    if schema_name in ("profile_jsonld", "papers_jsonld", "grants_jsonld"):
+    if schema_name in ("profile_jsonld", "papers_jsonld", "grants_jsonld", "trials_jsonld"):
         result.undeclared = undeclared_terms(doc, schema_name)
         result.violations = [_retired_term_violation(t) for t in retired_terms(doc)]
 
@@ -460,10 +462,11 @@ def validate_profile_dir(profile_dir: str | Path) -> ProfileValidationReport:
         (root / "profile.jsonld", "profile_jsonld"),
         (root / "sources" / "papers.jsonld", "papers_jsonld"),
         (root / "sources" / "grants.jsonld", "grants_jsonld"),
+        (root / "sources" / "trials.jsonld", "trials_jsonld"),
     ]
     for path, schema_name in artifact_map:
-        # grants.jsonld is presence-conditional
-        if schema_name == "grants_jsonld" and not path.is_file():
+        # grants.jsonld and trials.jsonld are presence-conditional
+        if schema_name in ("grants_jsonld", "trials_jsonld") and not path.is_file():
             continue
         art_result = validate_artifact(path, schema_name)
         report.artifacts.append(art_result)
@@ -720,6 +723,37 @@ def _check_content_urls(root: Path, profile_doc: dict, report: ProfileValidation
                 )
 
 
+def _check_derivation(profile_doc: dict, report: ProfileValidationReport) -> None:
+    """Every ``derivedFrom`` reference resolves, and the graph has no cycle.
+
+    The derivation rule makes an artifact at least as restricted as everything
+    it came from, so a reference that resolves to nothing is not a harmless
+    dangling link: it is a restriction the projection silently failed to
+    apply. :func:`~researcher_profiles.privacy.derivation_errors` is the one
+    implementation; this only turns its sentences into findings.
+    """
+    from .privacy import derivation_errors
+    from .schema import ProfileDocument
+
+    try:
+        document = ProfileDocument.model_validate(profile_doc)
+    except PydanticValidationError:
+        # The document's own schema violations are already reported; a
+        # derivation walk over a document that will not parse says nothing new.
+        return
+    for message in derivation_errors(document):
+        report.cross_artifact.append(
+            Violation(
+                json_pointer="/hasPart/derivedFrom",
+                keyword="derivation",
+                message=message,
+                found="an unresolvable derivedFrom graph",
+                expected="every derivedFrom names a manifest paperId or role, acyclically",
+                fix="point derivedFrom at an artifact in this manifest, or remove it",
+            )
+        )
+
+
 def _check_cross_artifact(root: Path, report: ProfileValidationReport) -> None:
     """Check cross-artifact invariants and append violations to the report.
 
@@ -733,6 +767,7 @@ def _check_cross_artifact(root: Path, report: ProfileValidationReport) -> None:
     if profile_doc is not None:
         _check_manifest_drift(root, profile_doc, report)
         _check_content_urls(root, profile_doc, report)
+        _check_derivation(profile_doc, report)
     if papers_doc is not None:
         _check_orphan_summaries(root, _paper_ids(papers_doc), report)
 

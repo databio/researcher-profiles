@@ -457,6 +457,65 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
             prof.save_profile(document)
         return prof
 
+    def create_bundle(
+        self,
+        document: ProfileDocument,
+        *,
+        slug: str,
+        expertise: str | None = None,
+        soul: str | None = None,
+        artifacts: dict[str, str] | None = None,
+    ) -> ResearcherProfile:
+        """Create a document and its authored persona artifacts atomically.
+
+        This is the management-host seam for an approved onboarding candidate:
+        nested public writers join the one outer SQL write unit, so ownership,
+        document, artifacts, derived hash, and pre-commit hooks either all land
+        or all roll back.
+        """
+        rid = document.rid
+        if self.exists(slug) or self.exists(rid):
+            raise ProfileWriteError(self.url, f"cannot create {slug!r}: slug or rid already exists")
+        prof = self._admit(ResearcherProfile(SqlArtifactStorage(self, rid, slug=slug)))
+        with prof.write_unit("create") as ctx:
+            ctx.session.add(
+                ProfileRow(
+                    rid=rid,
+                    slug=slug,
+                    document={},
+                    name=document.name,
+                    provenance=str(document.provenance),
+                )
+            )
+            ctx.session.flush()
+            prof.save_profile(document)
+            if expertise is not None:
+                prof.save_expertise(expertise)
+            if soul is not None:
+                prof.save_soul(soul)
+            for content_url, text in (artifacts or {}).items():
+                part = next(
+                    (
+                        p
+                        for p in (*document.has_part, *document.subject_of)
+                        if p.content_url == content_url
+                    ),
+                    None,
+                )
+                if part is None:
+                    raise ProfileWriteError(
+                        self.url, f"artifact {content_url!r} is not in manifest"
+                    )
+                prof.storage.write_artifact(
+                    content_url,
+                    text,
+                    role=part.role or "artifact",
+                    name=part.name or content_url,
+                    manifest_slot="hasPart" if part in document.has_part else "subjectOf",
+                    encoding_format=part.encoding_format or "text/plain",
+                )
+        return prof
+
     def put_document(self, slug: str, document: ProfileDocument) -> ResearcherProfile:
         """Create-or-replace a profile's canonical document only.
 

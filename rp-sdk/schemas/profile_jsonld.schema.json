@@ -416,6 +416,79 @@
       "title": "CareerStage",
       "type": "object"
     },
+    "ConceptReference": {
+      "additionalProperties": true,
+      "description": "One term in a controlled vocabulary (``rp:concept``).\n\nThe ``system``/``code``/``version`` triple is what makes a concept\ncomparable across profiles; ``label`` is only what a human reads. A\nprofile that kept the label alone would have discarded the identity, which\nis why the plain ``interests`` list is a projection of these and never the\ncanonical value.",
+      "properties": {
+        "@context": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "@Context"
+        },
+        "@id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "@Id"
+        },
+        "@type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "@Type"
+        },
+        "code": {
+          "title": "Code",
+          "type": "string"
+        },
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "system": {
+          "title": "System",
+          "type": "string"
+        },
+        "version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Version"
+        }
+      },
+      "required": [
+        "system",
+        "code",
+        "label"
+      ],
+      "title": "ConceptReference",
+      "type": "object"
+    },
     "Identifier": {
       "additionalProperties": true,
       "description": "A ``schema:PropertyValue`` identifier node.\n\nUsed for the identifiers that are not the profile's ``@id``: OpenAlex,\nScopus, and whatever an older ``external_ids`` block carried.",
@@ -747,6 +820,172 @@
       "title": "ResearchOutput",
       "type": "object"
     },
+    "SectionVisibility": {
+      "additionalProperties": true,
+      "description": "A declared privacy tier for one inline section of the document.\n\nArtifacts carry their own tier on an :class:`ArtifactRef`; the fields\n*inside* ``profile.jsonld`` had nowhere to carry one, so a private summary\nor a private methods list rode out in a public document however carefully\nthe files were excluded. The section names are a closed set on purpose:\n:data:`researcher_profiles.privacy.SECTION_FIELDS` maps each to the exact\nfields it governs, and a section nothing maps to would be a tier that\nsilently protects nothing.",
+      "properties": {
+        "@context": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "@Context"
+        },
+        "@id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "@Id"
+        },
+        "@type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "@Type"
+        },
+        "section": {
+          "enum": [
+            "summary",
+            "expertise",
+            "focus",
+            "methods",
+            "soul",
+            "clinical",
+            "site_capabilities",
+            "regulatory_experience",
+            "contact",
+            "background"
+          ],
+          "title": "Section",
+          "type": "string"
+        },
+        "visibility": {
+          "enum": [
+            "public",
+            "internal",
+            "restricted"
+          ],
+          "title": "Visibility",
+          "type": "string"
+        }
+      },
+      "required": [
+        "section",
+        "visibility"
+      ],
+      "title": "SectionVisibility",
+      "type": "object"
+    },
+    "SiteCapabilities": {
+      "additionalProperties": true,
+      "description": "A clinical site's capacity to host trials (``rp:siteCapabilities``).\n\nTyped rather than a free dict so the owner editor can round-trip it and\nthe privacy projection can drop it as one section. See the optional\nclinical extension in ``docs/rp-spec/index.md``.",
+      "properties": {
+        "disease_areas": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Disease Areas",
+          "type": "array"
+        },
+        "enrollment_capacity": {
+          "anyOf": [
+            {
+              "enum": [
+                "low",
+                "medium",
+                "high"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Enrollment Capacity"
+        },
+        "infrastructure": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SiteInfrastructure"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "patient_populations": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Patient Populations",
+          "type": "array"
+        }
+      },
+      "title": "SiteCapabilities",
+      "type": "object"
+    },
+    "SiteInfrastructure": {
+      "additionalProperties": true,
+      "description": "What a trial site has to run a study with (``rp:siteCapabilities``).\n\nEvery field is optional and ``None`` means unknown, never zero: a site\nwhose coordinator count nobody recorded must not read as a site with no\ncoordinators.",
+      "properties": {
+        "coordinators": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Coordinators"
+        },
+        "irb_experience": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Irb Experience"
+        },
+        "phase_experience": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Phase Experience",
+          "type": "array"
+        }
+      },
+      "title": "SiteInfrastructure",
+      "type": "object"
+    },
     "Training": {
       "additionalProperties": true,
       "description": "One training or education entry.\n\n``kind`` separates degrees from postdocs and clinical training. A postdoc\nis a span, not a degree. ``year_start``/``year_end`` express spans; a\nsingle-year degree may set only ``year_end`` (completion year).\n\nAttributes:\n    kind: What kind of training this was.\n    degree: The degree or training title (e.g. \"PhD\", \"Postdoctoral Fellow\").\n    institution: The institution where the training occurred.\n    year_start: Start year; optional for a degree.\n    year_end: End year. For a degree this is the completion year.\n    advisor: The advisor or mentor.\n    field: Field of study (e.g. \"Electrical and Computer Engineering\").",
@@ -826,6 +1065,79 @@
         "institution"
       ],
       "title": "Training",
+      "type": "object"
+    },
+    "WeightedInterest": {
+      "additionalProperties": true,
+      "description": "A concept the researcher accepted (with a weight) or explicitly rejected.\n\nRejection is a first-class decision, not a low weight: \"I do not work on\nthis\" and \"I work on this a little\" are different claims, and a matcher\nthat conflated them would keep proposing the work the researcher already\nsaid no to. Hence the asymmetry the validator enforces: an accepted\nconcept carries a weight in ``[0, 1]``, a rejected one carries none.",
+      "properties": {
+        "@context": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "@Context"
+        },
+        "@id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "@Id"
+        },
+        "@type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "@Type"
+        },
+        "concept": {
+          "$ref": "#/$defs/ConceptReference"
+        },
+        "decision": {
+          "enum": [
+            "accepted",
+            "rejected"
+          ],
+          "title": "Decision",
+          "type": "string"
+        },
+        "weight": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Weight"
+        }
+      },
+      "required": [
+        "concept",
+        "decision"
+      ],
+      "title": "WeightedInterest",
       "type": "object"
     }
   },
@@ -1173,6 +1485,49 @@
       "description": "Researcher id: a canonical ORCID or a local: id",
       "title": "Rid",
       "type": "string"
+    },
+    "rp:regulatoryExperience": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Rp:Regulatoryexperience",
+      "type": "array"
+    },
+    "rp:sectionVisibility": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/SectionVisibility"
+      },
+      "title": "Rp:Sectionvisibility",
+      "type": "array"
+    },
+    "rp:siteCapabilities": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SiteCapabilities"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "rp:therapeuticAreas": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ConceptReference"
+      },
+      "title": "Rp:Therapeuticareas",
+      "type": "array"
+    },
+    "rp:weightedInterests": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/WeightedInterest"
+      },
+      "title": "Rp:Weightedinterests",
+      "type": "array"
     },
     "sameAs": {
       "default": [],

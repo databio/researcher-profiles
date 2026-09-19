@@ -236,7 +236,9 @@ def _build_into(
             logger.warning("Skipping %s: %s", entry.name, e)
             continue
         slugs.append(prof.slug)
-        profile_summaries.append(profile_summary_dict(prof))
+        # ``public``: a collection index is the open-web surface, so every
+        # summary in it is projected to what an anonymous caller may read.
+        profile_summaries.append(profile_summary_dict(prof, "public"))
         if prof.rid:
             by_rid[prof.rid] = f"profiles/{prof.slug}/profile.jsonld"
         _collect_centroid(entry, prof, centroid_entries, result)

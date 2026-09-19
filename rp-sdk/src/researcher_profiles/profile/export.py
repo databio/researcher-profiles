@@ -25,7 +25,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from ..errors import ProfileError
-from ..privacy import chunk_source_tiers, drop_above_public
+from ..privacy import ViewerTier, chunk_source_tiers, drop_above_public, project_document
 from ..schema import CareerEntry, PaperRecord, ProfileDocument, Training, normalize_doi, orcid_of
 from ..schema.jsonld import PROFILE_FORMAT_IRI, canonical_dumps
 from ..utils.clock import now_iso
@@ -594,6 +594,18 @@ def _fit_to_budget(head: str, blocks: list[str], char_budget: int | None) -> str
     return text
 
 
+def export_viewer(options: ExportOptions) -> ViewerTier:
+    """The tier an export is rendered at.
+
+    An ordinary export goes to a knowledge base outside this machine, so it is
+    rendered as ``public``: an inline section the owner held back must not ride
+    out inside the blob. ``allow_nonpublic`` is the deliberate override an
+    operator passes to export their own held-back profile, and it raises the
+    viewer with it, exactly as it already relaxes the persona-document tiers.
+    """
+    return "restricted" if options.allow_nonpublic else "public"
+
+
 def render_export_text(
     profile: ResearcherProfile,
     options: ExportOptions | None = None,
@@ -628,6 +640,7 @@ def render_export_text(
             "exporting it requires allow_nonpublic=True (CLI: --allow-nonpublic)"
         )
 
+    meta = project_document(meta, export_viewer(opts))
     selected = list(papers) if papers is not None else select_export_papers(profile, opts)
 
     doc_tiers = chunk_source_tiers(
@@ -685,7 +698,11 @@ def build_export_bundle(
     selected = list(papers) if papers is not None else select_export_papers(profile, opts)
     text = render_export_text(profile, opts, papers=selected)
 
-    meta = profile.metadata
+    # The same projection the rendered text went through: the bundle's own
+    # fields (``summary`` above all) are the other half of the payload, and a
+    # field withheld from the prose but carried in the envelope has not been
+    # withheld at all.
+    meta = project_document(profile.metadata, export_viewer(opts))
     profile_url = opts.profile_url or meta.url
 
     dois: list[str] = []
@@ -756,6 +773,7 @@ __all__ = [
     "explore_url",
     "export_content_hash",
     "export_paper_body",
+    "export_viewer",
     "render_export_text",
     "select_export_papers",
 ]

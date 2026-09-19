@@ -126,6 +126,14 @@ class _DirSpec:
 _SUBJECT_SPECS: tuple[_FileSpec, ...] = (
     _FileSpec("personality/SOUL.md", "SOUL", "soul", MARKDOWN),
     _FileSpec("personality/expertise.md", "Expertise", "expertise", MARKDOWN),
+    # Optional clinical extension: trial operations and site capability prose,
+    # the clinical counterpart of expertise.md.
+    _FileSpec(
+        "personality/clinical_expertise.md",
+        "Clinical expertise",
+        "clinical_expertise",
+        MARKDOWN,
+    ),
     _FileSpec("personality/topics.json", "Research topics", "topics", JSON),
 )
 
@@ -135,6 +143,8 @@ _PART_SPECS: tuple[_FileSpec, ...] = (
     _FileSpec("SKILL.md", "Agent entry point", "agent_entry_point", MARKDOWN),
     _FileSpec("sources/papers.jsonld", "Works", "works", JSONLD, type_="Collection"),
     _FileSpec("sources/grants.jsonld", "Grants", "grants", JSONLD, type_="Collection"),
+    # Optional clinical extension; ``internal`` by role default.
+    _FileSpec("sources/trials.jsonld", "Clinical trials", "trials", JSONLD, type_="Collection"),
     _FileSpec("sources/citations.json", "Citations", "citations", JSON),
     _FileSpec("sources/cv.md", "CV", "cv", MARKDOWN),
     _FileSpec("sources/interview.md", "Interview digest", "interview", MARKDOWN),

@@ -103,6 +103,23 @@ def _emitted_keys(model) -> set[str]:
     }
 
 
+def _is_defined(key: str, context: dict) -> bool:
+    """Whether ``key`` expands through a real term rather than through ``@vocab``.
+
+    Two ways to be defined. A plain key needs its own term. A compact IRI
+    (``rp:weightedInterests``) needs only its prefix, because JSON-LD expands
+    ``prefix:suffix`` against the prefix's IRI and never consults ``@vocab``;
+    that is how the optional wizard and clinical extensions add terms without
+    touching the byte-frozen v1 context. The prefix must actually be declared:
+    an undeclared one is a plain key with a colon in it, which is exactly the
+    accident this guardrail exists to catch.
+    """
+    if key in context:
+        return True
+    prefix, sep, suffix = key.partition(":")
+    return bool(sep and suffix) and isinstance(context.get(prefix), str)
+
+
 class TestImportCost:
     """Core import must be cheap: only pydantic + pyyaml, no extras pulled.
 
@@ -546,7 +563,9 @@ class TestContextParity:
     def test_every_global_model_key_has_a_context_term(self, context):
         undefined: dict[str, set[str]] = {}
         for model in GLOBAL_MODELS:
-            missing = {k for k in _emitted_keys(model) if k not in KEYWORDS and k not in context}
+            missing = {
+                k for k in _emitted_keys(model) if k not in KEYWORDS and not _is_defined(k, context)
+            }
             if missing:
                 undefined[model.__name__] = missing
         assert not undefined, f"keys with no context term (they would hit @vocab): {undefined}"
@@ -560,7 +579,7 @@ class TestContextParity:
             missing = {
                 k
                 for k in _emitted_keys(model)
-                if k not in KEYWORDS and k not in scoped and k not in context
+                if k not in KEYWORDS and k not in scoped and not _is_defined(k, context)
             }
             if missing:
                 undefined[term] = missing
@@ -936,6 +955,8 @@ class TestStoragePurity:
             "save_soul": lambda: prof.save_soul("# s\n"),
             "save_papers": lambda: prof.save_papers([PaperRecord(paper_id="x", title="t")]),
             "save_grants": lambda: prof.save_grants([]),
+            "save_trials": lambda: prof.save_trials([]),
+            "save_clinical_expertise": lambda: prof.save_clinical_expertise("# c\n"),
             "save_citations": lambda: prof.save_citations(None),
             "save_summary": lambda: prof.save_summary("x", "body"),
             "delete_summary": lambda: prof.delete_summary("x"),

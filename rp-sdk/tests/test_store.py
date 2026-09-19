@@ -27,7 +27,7 @@ from researcher_profiles.errors import (
     WriteHookError,
 )
 from researcher_profiles.profile.storage import ArtifactStorage, DirectoryArtifactStorage
-from researcher_profiles.schema import PaperRecord, ProfileDocument
+from researcher_profiles.schema import ArtifactRef, PaperRecord, ProfileDocument, TrialRecord
 from researcher_profiles.store import (
     DuplicateIdentityError,
     FilesystemProfileStore,
@@ -274,6 +274,53 @@ class TestStoreProtocol:
     def test_create_refuses_a_taken_slug_or_rid(self, both_stores, rid, slug):
         with pytest.raises(ProfileWriteError):
             both_stores.create(_new_document(rid, "Clash"), slug=slug)
+
+    def test_create_bundle_installs_every_artifact_in_one_unit(self, both_stores):
+        """A publication seam: document, persona docs and free artifacts land
+        together, so no reader ever sees a half-assembled profile."""
+        doc = _new_document("local:bundled-e5f6a7", "Bundled")
+        doc.subject_of = [
+            ArtifactRef(
+                **{
+                    "contentUrl": "personality/clinical_expertise.md",
+                    "role": "clinical_expertise",
+                    "name": "Clinical expertise",
+                    "encodingFormat": "text/markdown",
+                }
+            )
+        ]
+        seen = []
+        both_stores.add_pre_commit_hook(seen.append)
+        prof = both_stores.create_bundle(
+            doc,
+            slug="bundled",
+            expertise="# Expertise\n",
+            soul="# SOUL\n",
+            artifacts={"personality/clinical_expertise.md": "# Clinical\n"},
+        )
+        assert prof.rid == "local:bundled-e5f6a7"
+        assert [c.kind for c in seen] == ["create"]
+        installed = both_stores.get("bundled")
+        assert installed.expertise == "# Expertise\n"
+        assert installed.clinical_expertise == "# Clinical\n"
+
+    def test_create_bundle_refuses_an_undeclared_artifact(self, both_stores):
+        """An artifact nothing declares is one no consumer can find."""
+        with pytest.raises(ProfileWriteError):
+            both_stores.create_bundle(
+                _new_document("local:undeclared-f6a7b8", "Undeclared"),
+                slug="undeclared",
+                artifacts={"personality/clinical_expertise.md": "# Clinical\n"},
+            )
+        assert both_stores.exists("undeclared") is False
+
+    def test_trials_round_trip_through_the_storage_seam(self, both_stores):
+        """The optional clinical collection is a backend-agnostic artifact."""
+        prof = both_stores.create(_new_document("local:clinical-a7b8c9", "Clinical"), slug="clin")
+        prof.save_trials([TrialRecord(nct_id="NCT01234567", name="A Phase 2 Study", enrollment=40)])
+        both_stores.evict("clin")
+        reloaded = both_stores.get("clin").trials
+        assert [(t.nct_id, t.enrollment) for t in reloaded] == [("NCT01234567", 40)]
 
     def test_commit_directory_makes_a_staged_tree_live(self, both_stores, tmp_path):
         staging = build_profile_dir(

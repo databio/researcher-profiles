@@ -108,9 +108,26 @@ class ProfileMetadataPayload(_APIModel):
     #: untyped extras, so the generated TypeScript saw ``[k: string]: unknown``
     #: and no owner form could round-trip a field it could not read back typed.
     job_title: Optional[str] = None
+    #: Display projections of :attr:`weighted_interests` when that is set, and
+    #: free-text lists otherwise. Patch ``weighted_interests`` on a profile
+    #: that has one: these two are regenerated from it on every write.
     interests: list[str] = []
     not_interests: list[str] = []
+    #: The canonical form of the two lists above: an ontology concept, an
+    #: explicit accept/reject decision, and a weight on the accepted ones.
+    weighted_interests: list[dict] = []
     same_as: list[str] = []
+    methodological_commitments: list[str] = []
+    #: Optional clinical extension. Declared rather than left to
+    #: ``extra="allow"`` so the generated TypeScript sees real types and an
+    #: owner form can round-trip them; see ``docs/rp-spec/index.md``.
+    therapeutic_areas: list[dict] = []
+    site_capabilities: Optional[dict] = None
+    regulatory_experience: list[str] = []
+    #: Per-section declared tiers. Read-only here for the same reason
+    #: :attr:`visibility` is: they are set through ``PATCH /visibility``, which
+    #: is the one surface that knows about floors and the full-text lock.
+    section_visibility: list[dict] = []
     #: The document's own declared tier. Read-only here: it is set through
     #: ``PATCH /visibility`` (or, on a management host, the publication act), never by a
     #: metadata patch, and it is not what decides who may read this response.
@@ -325,11 +342,25 @@ class ArtifactVisibility(_APIModel):
     visibility: str
 
 
+class SectionTier(_APIModel):
+    """One inline section's declared tier.
+
+    Sections travel on the visibility patch rather than the metadata patch
+    because a tier is a privacy decision, not a display field: the one surface
+    that knows about host floors and the full-text lock has to be the one that
+    sets them.
+    """
+
+    section: str
+    visibility: str
+
+
 class VisibilityPatch(_APIModel):
-    """Set the profile-level default tier and/or per-artifact tiers."""
+    """Set the profile-level default tier, per-artifact tiers, section tiers."""
 
     profile_visibility: Optional[str] = None
     artifacts: list[ArtifactVisibility] = []
+    sections: list[SectionTier] = []
     #: See :attr:`MetadataPatch.base_hash`. Tiers live in the document, so a
     #: visibility write shares the one clock with metadata and soul writes.
     base_hash: Optional[str] = None
@@ -391,6 +422,10 @@ class VisibilityReport(_APIModel):
     profile_floor: Optional[str] = None
     profile_floor_reason: Optional[str] = None
     artifacts: list[ArtifactTier] = []
+    #: ``{section: effective_tier}`` for every inline section, already folded
+    #: with the profile default. An interface shows a section's real tier
+    #: rather than the one the owner typed and the profile then overrode.
+    sections: dict[str, str] = {}
     #: ``{"anonymous": 0, "lab": 12, "you": 63}``: items each viewer can see.
     counts: dict[str, int] = {}
 

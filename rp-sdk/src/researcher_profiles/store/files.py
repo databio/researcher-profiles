@@ -353,6 +353,66 @@ class FilesystemProfileStore(_HookedStore, _AnalyticsAccessors):
         self._bump_generation()
         return self._admit(slug, prof)
 
+    def create_bundle(
+        self,
+        document: ProfileDocument,
+        *,
+        slug: str,
+        expertise: str | None = None,
+        soul: str | None = None,
+        artifacts: dict[str, str] | None = None,
+    ) -> ResearcherProfile:
+        """Create ``<root>/<slug>/`` with its document and every artifact.
+
+        One nested write unit of kind ``"create"``, exactly as :meth:`create`.
+        On this backend that unit is not atomic (``ctx.atomic`` is ``False``),
+        so a failure part-way is undone the only way a directory can be: the
+        whole directory comes back out, which is also what :meth:`create`
+        already does.
+        """
+        target = self._root / slug
+        if target.exists() or self.exists(document.rid):
+            raise ProfileWriteError(
+                str(target),
+                f"cannot create {slug!r}: a profile with that slug or with rid "
+                f"{document.rid!r} already exists in {self._root}",
+            )
+        declared = {p.content_url: p for p in (*document.has_part, *document.subject_of)}
+        for content_url in artifacts or {}:
+            if content_url not in declared:
+                raise ProfileWriteError(
+                    str(target), f"artifact {content_url!r} is not in the document manifest"
+                )
+        target.mkdir(parents=True)
+        try:
+            prof = ResearcherProfile.from_files(target)
+            # See ``create``: seed the in-memory document so a create hook
+            # keyed on the rid is not handed an empty one.
+            prof._metadata = document
+            self._thread_hooks(prof)
+            with prof.write_unit("create"):
+                prof.save_profile(document)
+                if expertise is not None:
+                    prof.save_expertise(expertise)
+                if soul is not None:
+                    prof.save_soul(soul)
+                for content_url, text in (artifacts or {}).items():
+                    part = declared[content_url]
+                    prof.storage.write_artifact(
+                        content_url,
+                        text,
+                        role=part.role or "artifact",
+                        name=part.name or content_url,
+                        encoding_format=part.encoding_format or "text/plain",
+                        manifest_slot=("subjectOf" if part in document.subject_of else "hasPart"),
+                    )
+        except BaseException:
+            shutil.rmtree(target, ignore_errors=True)
+            raise
+        self._rid_map_stamp = None
+        self._bump_generation()
+        return self._admit(slug, prof)
+
     def put_document(self, slug: str, document: ProfileDocument) -> ResearcherProfile:
         """Create-or-replace a profile's canonical document only.
 

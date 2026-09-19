@@ -58,7 +58,19 @@ from ._identity import (
     validate_rid,
 )
 from ._identity import _slugify as _slugify
-from ._parts import Anchor, ArtifactRef, CareerStage, Identifier, PaperStats, ResearchOutput
+from ._parts import (
+    Anchor,
+    ArtifactRef,
+    CareerStage,
+    ConceptReference,
+    Identifier,
+    PaperStats,
+    ResearchOutput,
+    SectionVisibility,
+    SiteCapabilities,
+    SiteInfrastructure,
+    WeightedInterest,
+)
 from ._proof import KNOWN_PROOF_KINDS, Proof
 from ._sources import (
     GrantRecord,
@@ -66,6 +78,9 @@ from ._sources import (
     PaperRecord,
     PapersDocument,
     SummaryFile,
+    TrialRecord,
+    TrialsDocument,
+    TrialStats,
 )
 
 __all__ = [
@@ -77,6 +92,7 @@ __all__ = [
     "ArtifactRef",
     "CareerEntry",
     "CareerStage",
+    "ConceptReference",
     "DERIVED_FIELDS",
     "DOCUMENT_FIELDS",
     "GrantRecord",
@@ -94,10 +110,17 @@ __all__ = [
     "Provenance",
     "ROLE_DEFAULT_VISIBILITY",
     "ResearchOutput",
+    "SectionVisibility",
+    "SiteCapabilities",
+    "SiteInfrastructure",
     "Visibility",
     "most_restrictive",
     "SummaryFile",
+    "TrialRecord",
+    "TrialsDocument",
+    "TrialStats",
     "Training",
+    "WeightedInterest",
     "is_local",
     "is_rid",
     "mint_local_rid",

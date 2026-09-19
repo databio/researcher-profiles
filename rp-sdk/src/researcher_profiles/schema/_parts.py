@@ -199,6 +199,100 @@ class Identifier(JsonLdModel):
     value: str
 
 
+class ConceptReference(JsonLdModel):
+    """One term in a controlled vocabulary (``rp:concept``).
+
+    The ``system``/``code``/``version`` triple is what makes a concept
+    comparable across profiles; ``label`` is only what a human reads. A
+    profile that kept the label alone would have discarded the identity, which
+    is why the plain ``interests`` list is a projection of these and never the
+    canonical value.
+    """
+
+    system: str
+    code: str
+    label: str
+    version: str | None = None
+
+
+class WeightedInterest(JsonLdModel):
+    """A concept the researcher accepted (with a weight) or explicitly rejected.
+
+    Rejection is a first-class decision, not a low weight: "I do not work on
+    this" and "I work on this a little" are different claims, and a matcher
+    that conflated them would keep proposing the work the researcher already
+    said no to. Hence the asymmetry the validator enforces: an accepted
+    concept carries a weight in ``[0, 1]``, a rejected one carries none.
+    """
+
+    concept: ConceptReference
+    decision: Literal["accepted", "rejected"]
+    weight: float | None = Field(default=None, ge=0, le=1)
+
+    @model_validator(mode="after")
+    def _weight_matches_decision(self) -> "WeightedInterest":
+        if self.decision == "accepted" and self.weight is None:
+            raise ValueError("accepted interests require a weight")
+        if self.decision == "rejected" and self.weight is not None:
+            raise ValueError("rejected interests cannot have a weight")
+        return self
+
+
+class SectionVisibility(JsonLdModel):
+    """A declared privacy tier for one inline section of the document.
+
+    Artifacts carry their own tier on an :class:`ArtifactRef`; the fields
+    *inside* ``profile.jsonld`` had nowhere to carry one, so a private summary
+    or a private methods list rode out in a public document however carefully
+    the files were excluded. The section names are a closed set on purpose:
+    :data:`researcher_profiles.privacy.SECTION_FIELDS` maps each to the exact
+    fields it governs, and a section nothing maps to would be a tier that
+    silently protects nothing.
+    """
+
+    section: Literal[
+        "summary",
+        "expertise",
+        "focus",
+        "methods",
+        "soul",
+        "clinical",
+        "site_capabilities",
+        "regulatory_experience",
+        "contact",
+        "background",
+    ]
+    visibility: Visibility
+
+
+class SiteInfrastructure(_Base):
+    """What a trial site has to run a study with (``rp:siteCapabilities``).
+
+    Every field is optional and ``None`` means unknown, never zero: a site
+    whose coordinator count nobody recorded must not read as a site with no
+    coordinators.
+    """
+
+    coordinators: int | None = Field(default=None, ge=0)
+    irb_experience: bool | None = None
+    phase_experience: list[str] = []
+
+
+class SiteCapabilities(_Base):
+    """A clinical site's capacity to host trials (``rp:siteCapabilities``).
+
+    Typed rather than a free dict so the owner editor can round-trip it and
+    the privacy projection can drop it as one section. See the optional
+    clinical extension in ``docs/rp-spec/index.md``.
+    """
+
+    patient_populations: list[str] = []
+    disease_areas: list[str] = []
+    infrastructure: SiteInfrastructure | None = None
+    #: A coarse band, not a headcount. ``None`` is unknown and stays unknown.
+    enrollment_capacity: Literal["low", "medium", "high"] | None = None
+
+
 class ArtifactRef(JsonLdModel):
     """One manifest entry: a typed link to one artifact (file) inside the profile.
 

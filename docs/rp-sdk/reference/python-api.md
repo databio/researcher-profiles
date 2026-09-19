@@ -58,6 +58,9 @@ constructor is the same code path with no validation.
 **`cite`**: *Any*
 : `prof.cite`: get, many, verify, export.
 
+**`clinical_expertise`**: *str*
+: `personality/clinical_expertise.md`; `""` when absent.
+
 **`coverage`**: *Any*
 : `prof.coverage`: get, staleness, recent_work, last_updated.
 
@@ -119,6 +122,9 @@ constructor is the same code path with no validation.
 
 **`topics`**: *Any*
 : `prof.topics`: get, relevance.
+
+**`trials`**: *list[TrialRecord]*
+: Clinical trials from `sources/trials.jsonld`; empty when absent.
 
 #### Class Methods
 
@@ -308,6 +314,10 @@ Omitting `data` persists what is in memory. That is why the
 default is the `UNSET` sentinel and not `None`: `None` is a
 meaningful value here.
 
+##### `save_clinical_expertise(text: str)`
+
+Persist `personality/clinical_expertise.md`.
+
 ##### `save_expertise(text: str | None = None)`
 
 Persist the expertise narrative; `None` persists what is in memory.
@@ -350,6 +360,10 @@ Persist the SOUL narrative; `None` persists what is in memory.
 ##### `save_summary(paper_id: str, text: str)`
 
 Persist one paper summary body.
+
+##### `save_trials(trials: list[TrialRecord] | None = None)`
+
+Persist the clinical trials; `None` persists what is in memory.
 
 ##### `set_paper_contaminated(paper_id: str, contaminated: bool)`
 
@@ -413,9 +427,15 @@ Patch owner-editable metadata fields and persist the document.
 
 Replace the free-form SOUL/persona narrative.
 
-##### `set_visibility(profile_visibility: str | None = None, artifacts: list[dict[str, Any]] | None = None)`
+##### `set_visibility(profile_visibility: str | None = None, artifacts: list[dict[str, Any]] | None = None, sections: list[dict[str, Any]] | None = None)`
 
-Set the profile-level and per-artifact privacy tiers.
+Set the profile-level, per-artifact, and per-section privacy tiers.
+
+Sections are the inline fields of the document (summary, focus,
+methods, the clinical block). They belong here rather than on the
+metadata patch because a tier is a privacy decision: this is the one
+surface that knows about the legal floor and the host ceiling, and a
+second way to set a tier is a second privacy implementation.
 
 
 ### Exceptions
@@ -830,6 +850,14 @@ The object is `analytics.IndexFleetManager`, distinct from the per-profile
 
 `store.indexes`: build and report on every profile's index.
 
+Directory-only, unlike the rest of the store's analytics. Every method
+here reaches a profile's `.cache/` through `require_directory`, so on a
+store whose profiles have no directory (SQL, HTTP) `stats`,
+`coverage` and `rebuild_all` all raise
+`CapabilityUnavailableError`, and
+`rebuild_all` does so on the first profile rather than fail-softly
+skipping it. Export to a directory first.
+
 #### Methods
 
 ##### `coverage()`
@@ -1221,9 +1249,7 @@ root rather than one profile's own index.
 
 `prof.index`: the per-profile embedding index.
 
-Needs a directory: `.cache/embeddings.sqlite` is a sqlite handle and the
-derived caches are not covered by `ArtifactStorage`. The check lives
-here, once, instead of in three subclass overrides.
+Needs a local directory: the index is a `.cache/embeddings.sqlite` handle.
 
 #### Methods
 
@@ -1657,6 +1683,30 @@ exists" and "somebody owns it".
 Raises `ProfileWriteError` if
 `slug` or the document's rid is already taken.
 
+##### `create_bundle(document: ProfileDocument, slug: str, expertise: Optional[str] = None, soul: Optional[str] = None, artifacts: Optional[dict[str, str]] = None)`
+
+Create a profile and all of its authored artifacts in one write unit.
+
+The seam a management host publishes an approved candidate through.
+`create` installs a document and nothing else, so a host
+assembling a complete profile had to follow it with separate artifact
+writes; between them a half-built profile is live and readable, and a
+crash leaves one behind with no way to tell it from a finished one.
+This installs the whole bundle instead, so the document, the persona
+documents, every artifact in `artifacts`, the ownership row a
+pre-commit hook writes, and the derived digest all land together.
+
+`artifacts` maps a manifest `contentUrl` to its text body; each key
+must appear in the document's `hasPart` or `subjectOf`, because an
+artifact nothing declares is an artifact no consumer can find.
+
+Whether the unit is genuinely atomic is the backend's to say
+(`WriteContext.atomic`): SQL commits or rolls back, the filesystem
+cleans up after itself instead.
+
+Raises `ProfileWriteError` if
+`slug` or the document's rid is already taken.
+
 ##### `delete(ref: str)`
 
 Remove a profile and everything belonging to it. Returns its rid.
@@ -1818,6 +1868,16 @@ not atomic (`ctx.atomic` is `False`). A raising hook leaves the
 directory behind, which is why this backend removes it explicitly rather
 than pretending a rename undid anything.
 
+##### `create_bundle(document: ProfileDocument, slug: str, expertise: str | None = None, soul: str | None = None, artifacts: dict[str, str] | None = None)`
+
+Create `<root>/<slug>/` with its document and every artifact.
+
+One nested write unit of kind `"create"`, exactly as `create`.
+On this backend that unit is not atomic (`ctx.atomic` is `False`),
+so a failure part-way is undone the only way a directory can be: the
+whole directory comes back out, which is also what `create`
+already does.
+
 ##### `delete(ref: str)`
 
 
@@ -1851,7 +1911,7 @@ without `with_build`.
 
 ##### `has_vector_index(ref: str)`
 
-Whether the profile ships either vector form. Two stats, no parsing.
+Whether the profile has actual vectors, not just an empty DB.
 
 ##### `list_slugs()`
 
@@ -2019,6 +2079,15 @@ nobody owns.
 
 Create the `rp_*` tables if absent. Fresh-instance convenience.
 
+##### `create_bundle(document: ProfileDocument, slug: str, expertise: str | None = None, soul: str | None = None, artifacts: dict[str, str] | None = None)`
+
+Create a document and its authored persona artifacts atomically.
+
+This is the management-host seam for an approved onboarding candidate:
+nested public writers join the one outer SQL write unit, so ownership,
+document, artifacts, derived hash, and pre-commit hooks either all land
+or all roll back.
+
 ##### `delete(ref: str)`
 
 Remove a profile and every child row, including its build state.
@@ -2139,6 +2208,23 @@ If the profile exists, runs an `"edit"` write unit via
 the profile's `save_profile` so `dateModified` is stamped
 correctly and hooks fire.
 
+##### `refresh_vectors(ref: str)`
+
+Rebuild one profile's vector rows from its current papers.
+
+Exports the stored profile to a temp directory, builds the embedding
+index there, shreds the result back into `rp_chunk_vectors` /
+`rp_profile_vectors`, and cleans up. Best-effort: returns `True`
+on success, `False` when the embedding stack is unavailable or the
+build fails for any reason — a caller should log the outcome, never
+raise on it.
+
+This is the SQL-backed counterpart of the filesystem's
+`prof.index.build()` + `recompute_centroid()` path: both update a
+profile's vectors after its papers change, but only one needs to go
+through an export round-trip because vectors enter this store through
+rows, not a file.
+
 ##### `rename(rid: str, new_slug: str)`
 
 Change a profile's display handle. one update; no child row moves.
@@ -2233,11 +2319,30 @@ perform and neither should have to import the HTTP layer to signal.
 
 Build the store an operator's configuration describes.
 
-`database_url` wins over `profiles_dir`: naming a database is an
-explicit act, and a host that has done it does not want the directory that
-happens to still be on the box. Exactly one composition rule, shared by
-`create_app`'s env-driven default and `python -m researcher_profiles.api`,
-so the two can never disagree about which store a given environment means.
+Precedence, highest first, database over directory at each step:
+
+1. `database_url` / `profiles_dir` passed explicitly
+2. `$RESEARCHER_PROFILES_DATABASE_URL` / `$RESEARCHER_PROFILES_ROOT`
+
+This is exactly one composition rule, shared by `create_app`'s
+env-driven default (`researcher_profiles.api.app._build_default_app`)
+and `python -m researcher_profiles.api`, so the two can never disagree:
+neither caller reads either environment variable itself, both just call
+this (with, at most, a CLI flag as `database_url`/`profiles_dir`) and
+let it decide.
+
+Deliberately does not fall back to `DEFAULT_CACHE_DIR`
+(contrast `resolve_profiles_root`, which does, for the
+CLI's local cache): a server silently pointed at a guessed directory is a
+worse failure than a server that refuses to start, and unlike the CLI's
+profiles root, nothing here has a "correct" guess. Raises `ValueError`
+when neither a database URL nor a profiles directory is configured by any
+means.
+
+Also the fail-loud guard for retired `RP_*` env var names
+(`researcher_profiles.env.check_retired_env_vars`): a caller that
+still exports `RP_DATABASE_URL` would otherwise see it silently ignored
+and this function fall through to "not configured" with no clue why.
 
 
 ---
@@ -3070,9 +3175,19 @@ load reaches the store.
 ##### `save_summary(paper_id: str, text: str)`
 
 
+##### `write_artifact(content_url: str, text: Optional[str], role: str, name: str, encoding_format: str = 'text/plain', manifest_slot: str = DEFAULT_MANIFEST_SLOT, paper_id: Optional[str] = None)`
+
+Upsert one artifact row, creating its manifest entry when new.
+
+The backend's implementation of the generic artifact writer. Unlike a
+directory, this store cannot rebuild a manifest by looking around, so
+the descriptive arguments are what the manifest row is made of.
+`paper_id` is an addition to the base signature, for the summary
+rows that are about one work.
+
 
 ### CLI
 
 `rp db init | push | pull | list | rm`. The database URL resolves
-`--database-url` → `$RESEARCHER_PROFILES_DATABASE_URL`, with no built-in default; a missing URL
+`--database-url` → `$RP_DATABASE_URL`, with no built-in default; a missing URL
 exits `2`.

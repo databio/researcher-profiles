@@ -83,10 +83,11 @@ from ..schema import (
     GrantRecord,
     PaperRecord,
     ProfileDocument,
+    TrialRecord,
     orcid_of,
 )
 from ..schema.jsonld import canonical_dumps
-from .storage import ArtifactStorage, DirectoryArtifactStorage
+from .storage import CLINICAL_EXPERTISE_URL, ArtifactStorage, DirectoryArtifactStorage
 from .write_unit import WriteContext, WriteHook, WriteUnit
 
 __all__ = [
@@ -135,6 +136,7 @@ class ResearcherProfile:
         self._soul: Any = UNSET
         self._papers: Any = UNSET
         self._grants: Any = UNSET
+        self._trials: Any = UNSET
         self._citations: Any = UNSET
         self._summaries: Any = UNSET
 
@@ -553,6 +555,21 @@ class ResearcherProfile:
         return self._cached("_grants", self._storage.load_grants)
 
     @property
+    def trials(self) -> list[TrialRecord]:
+        """Clinical trials from ``sources/trials.jsonld``; empty when absent.
+
+        The optional clinical extension. Empty is the normal answer: almost no
+        profile carries one, and a profile that carries trials but no papers is
+        just as complete as the reverse.
+        """
+        return self._cached("_trials", self._storage.load_trials)
+
+    @property
+    def clinical_expertise(self) -> str:
+        """``personality/clinical_expertise.md``; ``""`` when absent."""
+        return self._storage.artifact_text(CLINICAL_EXPERTISE_URL) or ""
+
+    @property
     def citations(self) -> Any:
         return self._cached("_citations", self._storage.load_citations)
 
@@ -820,6 +837,25 @@ class ResearcherProfile:
         value = self.grants if grants is None else grants
         self._persist_artifact("grants", value, self._storage.save_grants, "_grants")
 
+    def save_trials(self, trials: list[TrialRecord] | None = None) -> None:
+        """Persist the clinical trials; ``None`` persists what is in memory."""
+        value = self.trials if trials is None else trials
+        self._persist_artifact("trials", value, self._storage.save_trials, "_trials")
+
+    def save_clinical_expertise(self, text: str) -> None:
+        """Persist ``personality/clinical_expertise.md``."""
+        with self.write_unit("clinical_expertise") as ctx:
+            self._storage.write_artifact(
+                CLINICAL_EXPERTISE_URL,
+                text,
+                role="clinical_expertise",
+                name="Clinical expertise",
+                encoding_format="text/markdown",
+                manifest_slot="subjectOf",
+            )
+            self._storage.refresh_derived(ctx)
+            self._run_pre_commit_hooks(ctx)
+
     def save_citations(self, data: Any = UNSET) -> None:
         """Persist the citation graph; ``None`` deletes it.
 
@@ -909,6 +945,7 @@ class ResearcherProfile:
         self._soul = UNSET
         self._papers = UNSET
         self._grants = UNSET
+        self._trials = UNSET
         self._citations = UNSET
         self._summaries = UNSET
         backend_refresh = getattr(self._storage, "refresh", None)

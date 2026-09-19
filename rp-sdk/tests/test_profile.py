@@ -734,6 +734,18 @@ class DictStorage(ArtifactStorage):
 
     # Raw bodies
 
+    def write_artifact(
+        self,
+        content_url,
+        text,
+        *,
+        role,
+        name,
+        encoding_format="text/plain",
+        manifest_slot="hasPart",
+    ):
+        self.store.setdefault("artifacts", {})[content_url] = text
+
     def artifact_text(self, content_url):
         return (self.store.get("artifacts") or {}).get(content_url)
 

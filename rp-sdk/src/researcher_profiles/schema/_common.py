@@ -62,6 +62,11 @@ ROLE_DEFAULT_VISIBILITY: dict[str, Visibility] = {
     "grant": "restricted",
     # Build-local sqlite index; the servable embeddings are the flat artifacts.
     "embedding_index_sqlite": "restricted",
+    # The optional clinical trials collection. Trial participation is site and
+    # patient-adjacent operational detail, so it starts lab-visible and an owner
+    # opts it into the open web deliberately. The narrative that describes it
+    # (``clinical_expertise``) is authored for publication and stays public.
+    "trials": "internal",
 }
 
 #: Roles whose tier is a legal constraint, not a preference: extracted full text

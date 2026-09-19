@@ -117,7 +117,7 @@ def _visible_summaries(request: Request, store: ProfileStore) -> list[ProfileSum
             floor = get_profile_tier_floor(request, prof, slug)
             if not profile_visible(prof.metadata, per_profile, floor=floor.tier):
                 continue
-            out.append(_profile_summary(prof))
+            out.append(_profile_summary(prof, per_profile))
         # Boundary: one profile's summary projection; the listing still answers.
         except Exception:
             failed += 1
@@ -302,7 +302,7 @@ def get_profile_detail(
     return ProfileDetail(
         slug=prof.slug,
         rid=getattr(prof, "rid", None),
-        metadata=metadata_payload(prof),
+        metadata=metadata_payload(prof, viewer),
         expertise=(
             prof.expertise
             if artifact_visible(explain, md, "personality/expertise.md", "expertise", viewer)
@@ -345,10 +345,18 @@ def get_profile_jsonld(
     # ``conformsTo`` claim is about a file nobody can retrieve.
     prof = get_profile(slug, store)
     _gate_profile(request, prof, viewer, slug)
-    try:
-        data = store.document_bytes(slug)
-    except (ProfileNotFoundError, KeyError) as e:
-        raise _profile_missing(slug) from e
+    if prof.metadata.section_visibility:
+        from ...privacy import project_document
+        from ...schema.jsonld import canonical_dumps
+
+        data = canonical_dumps(
+            project_document(prof.metadata, viewer).model_dump(mode="json")
+        ).encode()
+    else:
+        try:
+            data = store.document_bytes(slug)
+        except (ProfileNotFoundError, KeyError) as e:
+            raise _profile_missing(slug) from e
     # A strong etag over the served bytes, so the short revalidation above is a
     # 304 rather than a re-send. It is the document itself, not a timestamp: two
     # replicas serving the same profile agree on it.

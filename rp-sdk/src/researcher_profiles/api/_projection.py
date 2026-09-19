@@ -109,17 +109,17 @@ def invalidate_after_write(request: Request, store: ProfileStore, slug: str) -> 
                 pass
 
 
-def _profile_summary(prof) -> ProfileSummary:
+def _profile_summary(prof, viewer: ViewerTier) -> ProfileSummary:
     """Validate the shared summary projection into the wire model.
 
     The projection itself lives in ``payloads.profile_summary_dict``, which the
     static publisher renders from too, so a profile looks the same over HTTP as
     in the published site.
     """
-    return ProfileSummary.model_validate(profile_summary_dict(prof))
+    return ProfileSummary.model_validate(profile_summary_dict(prof, viewer))
 
 
-def metadata_payload(prof) -> ProfileMetadataPayload:
+def metadata_payload(prof, viewer: ViewerTier) -> ProfileMetadataPayload:
     """Validate the shared metadata projection into the wire model.
 
     Part of the read-projection hooks re-exported from
@@ -127,7 +127,7 @@ def metadata_payload(prof) -> ProfileMetadataPayload:
     projects a profile's metadata through this, so its answer and the SDK's
     cannot drift. The projection is ``payloads.metadata_payload_dict``.
     """
-    return ProfileMetadataPayload.model_validate(metadata_payload_dict(prof))
+    return ProfileMetadataPayload.model_validate(metadata_payload_dict(prof, viewer))
 
 
 # ---------------------------------------------------------------------------

@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from ..privacy import render_publishignore
+from ..privacy import effective_tiers, render_publishignore, tier_allows
 from ..profile import ResearcherProfile
 from ..profile.payloads import (
     paper_entries_list,
@@ -103,7 +103,19 @@ def render_profile(
     prof.save_profile(prof.metadata.model_copy(update=update))
 
     # ---- render index.html --------------------------------------------
-    detail = profile_detail_dict(prof)
+    # ``public``, not the owner's own tier: index.html and the JSON-LD graph
+    # inside it are deployed to the open web, and no exclude list can redact a
+    # field out of a page that already contains it. The same projection the
+    # HTTP read uses decides what goes in, so the page and an anonymous GET
+    # cannot disagree.
+    detail = profile_detail_dict(prof, "public")
+    tiers = effective_tiers(prof.metadata)
+    for key, content_url in (
+        ("expertise", "personality/expertise.md"),
+        ("soul", "personality/SOUL.md"),
+    ):
+        if not tier_allows("public", tiers.get(content_url, prof.metadata.visibility)):
+            detail[key] = None
     papers_list = paper_entries_list(
         prof,
         build_state=build_state,

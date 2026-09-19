@@ -205,3 +205,8 @@ profile.
 To mint `v2`: add `context/v2.jsonld` and `context/v2.lock.json`, bump
 `CONTEXT_URL` / `PROFILE_FORMAT_IRI` in `src/researcher_profiles/jsonld.py`, and
 leave `v1` untouched forever.
+Wizard and clinical extensions use explicit `rp:` names (`rp:weightedInterests`,
+`rp:sectionVisibility`, `rp:therapeuticAreas`, `rp:siteCapabilities`,
+`rp:regulatoryExperience`, and `rp:researcherRole`). They intentionally do not
+change the byte-frozen v1 context; JSON-LD processors expand these through the
+already-defined `rp` namespace.

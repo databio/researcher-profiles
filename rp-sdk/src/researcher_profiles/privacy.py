@@ -31,6 +31,24 @@ from .schema import (
 #: the viewer whose tier is ``public``.
 ViewerTier = Visibility
 
+SECTION_FIELDS: dict[str, tuple[str, ...]] = {
+    "summary": ("summary",),
+    "expertise": ("expertise",),
+    "focus": ("subfields", "interests", "not_interests", "weighted_interests"),
+    "methods": ("methodological_commitments",),
+    #: SOUL is an artifact, not an inline field, so it governs no document
+    #: keys: the tier reaches ``personality/SOUL.md`` through the manifest.
+    #: It is listed anyway so :func:`section_tiers` reports a row for it and an
+    #: owner-facing privacy control can offer SOUL beside the other sections
+    #: instead of silently omitting the one section they most expect to see.
+    "soul": (),
+    "clinical": ("therapeutic_areas",),
+    "site_capabilities": ("site_capabilities",),
+    "regulatory_experience": ("regulatory_experience",),
+    "contact": ("email",),
+    "background": ("training", "career", "job_title", "affiliation"),
+}
+
 #: The sentence an owner is shown when they try to raise a legally-floored
 #: artifact. Written once, here, so the API refusal, the tier explanation, and
 #: any UI all say the same words. A floor explained two ways reads as a bug.
@@ -100,6 +118,34 @@ def narrow_viewer(*viewers: ViewerTier) -> ViewerTier:
     return _VISIBILITY_ORDER[rank]
 
 
+def section_tiers(profile: ProfileDocument) -> dict[str, Visibility]:
+    """Effective tier of every declared inline section."""
+    declared = {x.section: x.visibility for x in profile.section_visibility}
+    return {
+        section: most_restrictive(profile.visibility, declared.get(section, "public"))
+        for section in SECTION_FIELDS
+    }
+
+
+def project_document(profile: ProfileDocument, viewer: ViewerTier) -> ProfileDocument:
+    """Remove inline fields whose section tier exceeds ``viewer``.
+
+    The whole-document counterpart of :func:`effective_tiers`: that one decides
+    which *files* a viewer may fetch, this one decides which *fields inside the
+    document* they may read. Both are called from the shared payload
+    projection, so an inline section held back over HTTP is held back in the
+    published site, the archive and the export too.
+    """
+    tiers = section_tiers(profile)
+    projected = profile.model_copy(deep=True)
+    for section, fields in SECTION_FIELDS.items():
+        if not tier_allows(viewer, tiers[section]):
+            for name in fields:
+                value = getattr(profile, name, None)
+                setattr(projected, name, [] if isinstance(value, list) else None)
+    return projected
+
+
 @dataclass(frozen=True)
 class TierExplanation:
     """Why one artifact resolves to the tier it does.
@@ -124,18 +170,28 @@ class TierExplanation:
     #: Concrete causes that held the artifact above its declared tier: the
     #: specific source, not a restatement of the rule.
     raised_by: list[str] = field(default_factory=list)
+    #: ``derivedFrom`` entries that name no artifact in this manifest. A
+    #: dependency nobody can resolve is not a dependency at ``public``: it is a
+    #: hole in the derivation graph, reported by :func:`derivation_errors` and
+    #: by ``rp validate``.
+    unresolved: list[str] = field(default_factory=list)
 
 
-def explain_tiers(profile: ProfileDocument) -> dict[str, TierExplanation]:
-    """``{contentUrl: TierExplanation}`` for every manifest artifact.
+class DerivationCycleError(ValueError):
+    """``derivedFrom`` forms a cycle, so no artifact in it has a tier.
 
-    Effective tier = most restrictive of the profile default, the artifact's
-    own tier (floored by role), and the tiers of everything in its
-    ``derivedFrom`` (resolved by ``paperId`` or by ``role``). Alongside each
-    decision this records which of those causes is holding the artifact where
-    it is, so an interface can name the cause on the row rather than explaining
-    the rule in prose.
+    The derivation rule is defined over a DAG: an artifact is at least as
+    restricted as everything it came from. A cycle makes that rule
+    self-referential, and guessing a tier for a document whose own declaration
+    is incoherent is exactly the silent widening privacy projection exists to
+    prevent. Raised rather than swallowed: every caller
+    (``.publishignore``, the manifest read, the preview) would otherwise
+    publish a tier nothing supports.
     """
+
+
+def _derivation_graph(profile: ProfileDocument) -> tuple[list, dict[str, list], dict[str, list]]:
+    """The manifest plus its ``paperId`` and ``role`` resolution indexes."""
     parts = list(profile.has_part) + list(profile.subject_of)
     by_paper: dict[str, list] = {}
     by_role: dict[str, list] = {}
@@ -144,26 +200,74 @@ def explain_tiers(profile: ProfileDocument) -> dict[str, TierExplanation]:
             by_paper.setdefault(p.paper_id, []).append(p)
         if p.role:
             by_role.setdefault(p.role, []).append(p)
+    return parts, by_paper, by_role
 
+
+def explain_tiers(profile: ProfileDocument) -> dict[str, TierExplanation]:
+    """``{contentUrl: TierExplanation}`` for every manifest artifact.
+
+    Effective tier = most restrictive of the profile default, the artifact's
+    own tier (floored by role), and the *effective* tiers of everything in its
+    ``derivedFrom`` (resolved by ``paperId`` or by ``role``). Effective, not
+    declared: the restriction is transitive, so a public summary of a public
+    digest of a restricted CV is restricted. Resolution is a memoized
+    depth-first walk, and a cycle raises :class:`DerivationCycleError` rather
+    than settling on whichever tier the walk happened to reach first.
+
+    Alongside each decision this records which of those causes is holding the
+    artifact where it is, so an interface can name the cause on the row rather
+    than explaining the rule in prose, plus any ``derivedFrom`` entry that
+    resolved to nothing.
+    """
+    parts, by_paper, by_role = _derivation_graph(profile)
     default = profile.visibility
-    out: dict[str, TierExplanation] = {}
-    for p in parts:
-        own = _own_tier(p)
-        locked = p.role in ALWAYS_RESTRICTED_ROLES
-        # (tier, phrase) for every cause that could be holding this artifact up.
+
+    #: contentUrl -> effective tier, filled in as the walk returns.
+    memo: dict[str, Visibility] = {}
+    #: Causes and unresolved references per artifact, recorded by the same
+    #: walk that decides the tier, so the sentence and the decision are one
+    #: computation.
+    notes: dict[str, tuple[list[tuple[Visibility, str]], list[str]]] = {}
+
+    def resolve(part, visiting: tuple[str, ...]) -> Visibility:
+        url = part.content_url
+        if url in memo:
+            return memo[url]
+        if url in visiting:
+            chain = " -> ".join((*visiting[visiting.index(url) :], url))
+            raise DerivationCycleError(
+                f"derivedFrom forms a cycle: {chain}. An artifact cannot be "
+                "derived from itself, directly or through a chain."
+            )
+
+        locked = part.role in ALWAYS_RESTRICTED_ROLES
         causes: list[tuple[Visibility, str]] = []
+        unresolved: list[str] = []
         if locked:
             causes.append(("restricted", "a legal floor on paper full text (restricted)"))
         causes.append((default, f"the profile default ({default})"))
-        role_default = role_default_visibility(p.role)
+        role_default = role_default_visibility(part.role)
         if role_default != "public":
-            causes.append((role_default, f"the role default for {p.role} ({role_default})"))
-        for ref in p.derived_from or []:
-            for src in by_paper.get(ref, []) + by_role.get(ref, []):
-                src_tier = _own_tier(src)
+            causes.append((role_default, f"the role default for {part.role} ({role_default})"))
+        for ref in part.derived_from or []:
+            sources = by_paper.get(ref, []) + by_role.get(ref, [])
+            if not sources:
+                unresolved.append(ref)
+                continue
+            for src in sources:
+                src_tier = resolve(src, (*visiting, url))
                 causes.append((src_tier, f"derived from {src.content_url} ({src_tier})"))
 
-        effective = most_restrictive(own, *(t for t, _ in causes))
+        effective = most_restrictive(_own_tier(part), *(t for t, _ in causes))
+        memo[url] = effective
+        notes[url] = (causes, unresolved)
+        return effective
+
+    out: dict[str, TierExplanation] = {}
+    for p in parts:
+        effective = resolve(p, ())
+        causes, unresolved = notes[p.content_url]
+        locked = p.role in ALWAYS_RESTRICTED_ROLES
         # Only causes sitting AT the effective tier are holding it there; a
         # cause below it explains nothing.
         raised_by = (
@@ -181,8 +285,30 @@ def explain_tiers(profile: ProfileDocument) -> dict[str, TierExplanation]:
             locked=locked,
             lock_reason=FULLTEXT_LOCK_REASON if locked else None,
             raised_by=raised_by,
+            unresolved=unresolved,
         )
     return out
+
+
+def derivation_errors(profile: ProfileDocument) -> list[str]:
+    """Every way this document's ``derivedFrom`` graph fails to resolve.
+
+    One sentence per problem, in manifest order: a cycle (reported once, since
+    it stops the walk) or a reference naming no artifact. ``rp validate``
+    turns each into a cross-artifact violation; an empty list means every
+    dependency resolved and :func:`explain_tiers` derived a tier from all of
+    them.
+    """
+    try:
+        explained = explain_tiers(profile)
+    except DerivationCycleError as e:
+        return [str(e)]
+    return [
+        f"{note.content_url} is derivedFrom {ref!r}, which names no artifact "
+        "in this manifest (no matching paperId and no matching role)"
+        for note in explained.values()
+        for ref in note.unresolved
+    ]
 
 
 def effective_tiers(profile: ProfileDocument) -> dict[str, Visibility]:
@@ -281,8 +407,10 @@ __all__ = [
     "ALWAYS_RESTRICTED_PREFIXES",
     "CHUNK_SOURCE_TYPE_ROLE",
     "FULLTEXT_LOCK_REASON",
+    "DerivationCycleError",
     "TierExplanation",
     "ViewerTier",
+    "derivation_errors",
     "explain_tiers",
     "narrow_viewer",
     "profile_visible",
@@ -293,4 +421,7 @@ __all__ = [
     "is_publishable",
     "publishignore_lines",
     "render_publishignore",
+    "SECTION_FIELDS",
+    "project_document",
+    "section_tiers",
 ]

@@ -61,9 +61,13 @@ from ..schema import (
     ALWAYS_RESTRICTED_ROLES,
     ArtifactRef,
     CareerEntry,
+    ConceptReference,
     PaperRecord,
     ProfileDocument,
+    SectionVisibility,
+    SiteCapabilities,
     Training,
+    WeightedInterest,
 )
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -100,6 +104,11 @@ EDITABLE_METADATA_FIELDS: frozenset[str] = frozenset(
         "expertise",
         "interests",
         "not_interests",
+        "weighted_interests",
+        "methodological_commitments",
+        "therapeutic_areas",
+        "site_capabilities",
+        "regulatory_experience",
         "training",
         "career",
         "same_as",
@@ -129,6 +138,12 @@ EDITABLE_WORK_FIELDS: frozenset[str] = frozenset(
     }
 )
 
+#: Fields the document regenerates from :attr:`ProfileDocument.weighted_interests`.
+#: Patching one of them on a profile that carries weighted interests would be
+#: silently discarded on the next write, so it is refused with the name of the
+#: field to patch instead.
+_PROJECTED_INTEREST_FIELDS: frozenset[str] = frozenset({"interests", "not_interests"})
+
 
 #: Editable fields whose values are objects, not scalars or string lists.
 #: A patch delivers them as plain dicts (that is what JSON is), and
@@ -142,6 +157,13 @@ EDITABLE_WORK_FIELDS: frozenset[str] = frozenset(
 STRUCTURED_METADATA_FIELDS: dict[str, type[BaseModel]] = {
     "training": Training,
     "career": CareerEntry,
+    "weighted_interests": WeightedInterest,
+    "therapeutic_areas": ConceptReference,
+}
+
+#: Editable fields holding a single object rather than a list of them.
+_STRUCTURED_SCALAR_FIELDS: dict[str, type[BaseModel]] = {
+    "site_capabilities": SiteCapabilities,
 }
 
 
@@ -163,6 +185,13 @@ def _coerce_structured(patch: dict[str, Any]) -> dict[str, Any]:
             except ValidationError as e:
                 raise EditError(f"{key}[{i}] is not a valid {model.__name__}: {e}") from e
         out[key] = parsed
+    for key, model in _STRUCTURED_SCALAR_FIELDS.items():
+        if key not in out or out[key] is None or isinstance(out[key], model):
+            continue
+        try:
+            out[key] = model.model_validate(out[key])
+        except ValidationError as e:
+            raise EditError(f"{key} is not a valid {model.__name__}: {e}") from e
     return out
 
 
@@ -217,6 +246,13 @@ class EditManager:
             )
         if not patch:
             return self._profile.metadata
+        projected = _PROJECTED_INTEREST_FIELDS & set(patch)
+        if projected and self._profile.metadata.weighted_interests:
+            raise EditError(
+                f"{', '.join(sorted(projected))} cannot be patched on a profile that "
+                "carries weighted_interests: they are regenerated from it on every "
+                "write. Patch weighted_interests instead."
+            )
         updated = self._profile.metadata.model_copy(update=_coerce_structured(patch))
         try:
             return self._profile.save_profile(updated)
@@ -319,8 +355,16 @@ class EditManager:
         *,
         profile_visibility: str | None = None,
         artifacts: list[dict[str, Any]] | None = None,
+        sections: list[dict[str, Any]] | None = None,
     ) -> tuple[ProfileDocument, int]:
-        """Set the profile-level and per-artifact privacy tiers."""
+        """Set the profile-level, per-artifact, and per-section privacy tiers.
+
+        Sections are the inline fields of the document (summary, focus,
+        methods, the clinical block). They belong here rather than on the
+        metadata patch because a tier is a privacy decision: this is the one
+        surface that knows about the legal floor and the host ceiling, and a
+        second way to set a tier is a second privacy implementation.
+        """
         valid_tiers = {"public", "internal", "restricted"}
         doc = self._profile.metadata
         update: dict[str, Any] = {}
@@ -349,6 +393,22 @@ class EditManager:
                     target.visibility = tier  # type: ignore[assignment]
             update["has_part"] = new_has_part
             update["subject_of"] = new_subject_of
+        if sections:
+            declared = {x.section: x.visibility for x in doc.section_visibility}
+            for entry in sections:
+                tier = entry.get("visibility")
+                if tier not in valid_tiers:
+                    raise EditError(f"invalid visibility {tier!r} for section {entry!r}")
+                try:
+                    parsed = SectionVisibility.model_validate(entry)
+                except ValidationError as e:
+                    raise EditError(f"{entry!r} is not a known section: {e}") from e
+                if declared.get(parsed.section) != parsed.visibility:
+                    changed += 1
+                declared[parsed.section] = parsed.visibility
+            update["section_visibility"] = [
+                SectionVisibility(section=s, visibility=v) for s, v in sorted(declared.items())
+            ]
         if not update:
             return doc, 0
         updated = doc.model_copy(update=update)

@@ -531,3 +531,41 @@ reveals whether artifacts exist, but a consumer MUST validate rather than trust.
   (institutional SSO, ORCID, e-mail) is out of scope. The
   [management tier](dynamic-api.md#14-management-api) specifies only what a
   credential looks like once issued.
+
+## Optional wizard and clinical extensions
+
+Profiles may carry `rp:weightedInterests`, preserving an ontology system,
+code, version, label, explicit accepted/rejected decision, and a weight only
+for accepted concepts. The legacy `interests` and `not_interests` arrays are
+deterministic display projections of that canonical value.
+
+`rp:sectionVisibility` declares privacy for the finite inline sections summary,
+expertise, focus, methods, SOUL, clinical, site capabilities, regulatory
+experience, contact, and background. A section is never less restrictive than
+the whole profile. Optional clinical profiles may add `rp:therapeuticAreas`,
+`rp:siteCapabilities`, `rp:regulatoryExperience`, a `trials` collection at
+`sources/trials.jsonld`, and `clinical_expertise` Markdown. Trial entries use a
+validated NCT identifier and describe only confirmed researcher relationships;
+an unknown role remains absent.
+
+Both clinical files are ordinary manifest entries and are optional everywhere:
+
+| Path | Slot | `role` | Default tier |
+|---|---|---|---|
+| `sources/trials.jsonld` | `hasPart` | `trials` | `internal` |
+| `personality/clinical_expertise.md` | `subjectOf` | `clinical_expertise` | `public` |
+
+Trials default to `internal` because trial participation is site and
+patient-adjacent operational detail; the narrative describing it is authored
+for publication and stays `public`. Trial statistics are **derived** from the
+records present, never authored: a count that can disagree with the collection
+under it is a count nobody can trust, and an unknown enrollment stays unknown
+rather than becoming zero.
+
+A profile carrying trials and no papers is complete. An empty
+`sources/papers.jsonld`, or none at all, is the normal shape for a clinical or
+non-publishing researcher, and no consumer may treat it as a broken profile.
+
+These extensions add no terms to the byte-frozen `v1` `@context`. Every new key
+is a compact IRI under the already-defined `rp` prefix, which JSON-LD expands
+through that prefix rather than through `@vocab`.

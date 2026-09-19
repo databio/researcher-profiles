@@ -6,7 +6,7 @@
  */
 
 /**
- * HTTP wire types for the researcher-profiles API (researcher_profiles.api_models). Generated; do not edit by hand.
+ * HTTP wire types for the researcher-profiles API (researcher_profiles.models.api). Generated; do not edit by hand.
  */
 export interface ResearcherProfileWireContract {
   artifact_tier: ArtifactTier;
@@ -16,6 +16,7 @@ export interface ResearcherProfileWireContract {
   profile_detail: ProfileDetail;
   profile_metadata: ProfileMetadataPayload;
   profile_summary: ProfileSummary;
+  section_tier: SectionTier;
   visibility_patch: VisibilityPatch;
   visibility_report: VisibilityReport;
   [k: string]: unknown;
@@ -107,20 +108,34 @@ export interface ProfileMetadataPayload {
   job_title?: string | null;
   level?: string;
   license?: string | null;
+  methodological_commitments?: string[];
   name: string;
   not_interests?: string[];
   openalex_id?: string | null;
   provenance?: string | null;
+  regulatory_experience?: string[];
   rid?: string | null;
   same_as?: string[];
   scholar_url?: string | null;
+  section_visibility?: {
+    [k: string]: unknown;
+  }[];
+  site_capabilities?: {
+    [k: string]: unknown;
+  } | null;
   subfields?: string[];
   summary?: string | null;
+  therapeutic_areas?: {
+    [k: string]: unknown;
+  }[];
   training?: {
     [k: string]: unknown;
   }[];
   url?: string | null;
   visibility?: string;
+  weighted_interests?: {
+    [k: string]: unknown;
+  }[];
   [k: string]: unknown;
 }
 export interface ProfileSummary {
@@ -137,12 +152,26 @@ export interface ProfileSummary {
   [k: string]: unknown;
 }
 /**
- * Set the profile-level default tier and/or per-artifact tiers.
+ * One inline section's declared tier.
+ *
+ * Sections travel on the visibility patch rather than the metadata patch
+ * because a tier is a privacy decision, not a display field: the one surface
+ * that knows about host floors and the full-text lock has to be the one that
+ * sets them.
+ */
+export interface SectionTier {
+  section: string;
+  visibility: string;
+  [k: string]: unknown;
+}
+/**
+ * Set the profile-level default tier, per-artifact tiers, section tiers.
  */
 export interface VisibilityPatch {
   artifacts?: ArtifactVisibility[];
   base_hash?: string | null;
   profile_visibility?: string | null;
+  sections?: SectionTier[];
   [k: string]: unknown;
 }
 /**
@@ -157,6 +186,9 @@ export interface VisibilityReport {
   profile_floor_reason?: string | null;
   profile_visibility: string;
   rid?: string | null;
+  sections?: {
+    [k: string]: string;
+  };
   slug: string;
   [k: string]: unknown;
 }

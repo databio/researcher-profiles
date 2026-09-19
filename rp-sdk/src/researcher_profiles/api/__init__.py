@@ -51,9 +51,11 @@ Read projection
     exported for the registry).
 
 ``api.upload``
-    The archive codec and its constants: ``build_profile_archive``,
-    ``extract_profile_archive``, ``ingest_archive``, ``PROFILE_TOP_LEVEL``,
-    ``SOURCES_MEMBERS``, ``CACHE_MEMBERS`` and ``DEFAULT_MAX_UPLOAD_BYTES``.
+    The archive codec and its constants: ``build_profile_archive`` (which
+    returns a ``ProfileArchive``: the bytes, its members, and what on disk did
+    not ship), ``extract_profile_archive``, ``ingest_archive``,
+    ``PROFILE_TOP_LEVEL``, ``SOURCES_MEMBERS``, ``CACHE_MEMBERS`` and
+    ``DEFAULT_MAX_UPLOAD_BYTES``.
 
 ``app.state`` hooks
     Every route reads its store from ``app.state.store``; a host that mounts

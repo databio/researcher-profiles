@@ -320,18 +320,25 @@ class SqlArtifactStorage(ArtifactStorage):
         )
         return {k: v for k, v in doc.model_dump(mode="json").items() if k != "hasPart"}
 
-    def _write_artifact(
+    def write_artifact(
         self,
         content_url: str,
         text: Optional[str],
         *,
         role: str,
         name: str,
-        encoding_format: str = "text/markdown",
+        encoding_format: str = "text/plain",
         manifest_slot: str = DEFAULT_MANIFEST_SLOT,
         paper_id: Optional[str] = None,
     ) -> None:
-        """Upsert one artifact row, creating its manifest entry when new."""
+        """Upsert one artifact row, creating its manifest entry when new.
+
+        The backend's implementation of the generic artifact writer. Unlike a
+        directory, this store cannot rebuild a manifest by looking around, so
+        the descriptive arguments are what the manifest row is made of.
+        ``paper_id`` is an addition to the base signature, for the summary
+        rows that are about one work.
+        """
         s = self._require_session(content_url)
         row = self._artifact_row(s, content_url)
         if row is None:
@@ -371,11 +378,12 @@ class SqlArtifactStorage(ArtifactStorage):
         return self.artifact_text(EXPERTISE_URL) or ""
 
     def save_expertise(self, text: str) -> None:
-        self._write_artifact(
+        self.write_artifact(
             EXPERTISE_URL,
             text,
             role="expertise",
             name="Expertise",
+            encoding_format="text/markdown",
             manifest_slot="subjectOf",
         )
 
@@ -383,7 +391,14 @@ class SqlArtifactStorage(ArtifactStorage):
         return self.artifact_text(SOUL_URL) or ""
 
     def save_soul(self, text: str) -> None:
-        self._write_artifact(SOUL_URL, text, role="soul", name="SOUL", manifest_slot="subjectOf")
+        self.write_artifact(
+            SOUL_URL,
+            text,
+            role="soul",
+            name="SOUL",
+            encoding_format="text/markdown",
+            manifest_slot="subjectOf",
+        )
 
     # --- collections -------------------------------------------------------
 
@@ -483,7 +498,7 @@ class SqlArtifactStorage(ArtifactStorage):
         if data is None:
             self._delete_artifact(CITATIONS_URL)
             return
-        self._write_artifact(
+        self.write_artifact(
             CITATIONS_URL,
             json.dumps(data, indent=2),
             role="citations",
@@ -507,11 +522,12 @@ class SqlArtifactStorage(ArtifactStorage):
         return f"sources/summaries/{paper_id}{SUMMARY_SUFFIX}"
 
     def save_summary(self, paper_id: str, text: str) -> None:
-        self._write_artifact(
+        self.write_artifact(
             self._summary_url(paper_id),
             text,
             role="paper_summary",
             name=f"Summary: {paper_id}",
+            encoding_format="text/markdown",
             paper_id=paper_id,
         )
 
