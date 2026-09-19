@@ -77,7 +77,15 @@ class TestCliWiring:
     """The flags reach the library with the stored login filled in."""
 
     def _spy(self, monkeypatch, target):
-        spy = MagicMock(return_value={"slug": "s", "name": "n", "level": "l", "indexed": False})
+        """A recorder returning a push-shaped result; other targets reset it."""
+        from researcher_profiles.client import PushPlan, PushResult
+
+        spy = MagicMock(
+            return_value=PushResult(
+                plan=PushPlan(slug="s", exists=False),
+                summary={"slug": "s", "name": "n", "level": "l", "indexed": False},
+            )
+        )
         module, attr = target.rsplit(".", 1)
         import importlib
 

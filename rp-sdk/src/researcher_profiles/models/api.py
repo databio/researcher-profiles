@@ -184,6 +184,13 @@ class PushResponse(_APIModel):
     # True when the pushed profile carries a built embedding index
     # (.cache/embeddings.sqlite), i.e. it is immediately matchable.
     indexed: bool = False
+    # Server-side files carried over rather than deleted, by class name
+    # ({"fulltext": 53, "index": 1}). Empty for a new profile, for a pruning
+    # push, or when the archive carried every class.
+    kept: dict[str, int] = {}
+    # The ?mode= the push ran under: what happened to the live files the
+    # archive did not carry (replace | merge | prune).
+    mode: str = "replace"
 
 
 class ResolveRequest(_APIModel):
@@ -258,6 +265,42 @@ class MetadataPatch(_APIModel):
     #: against. Omitted, the patch is last-writer-wins (which is what a
     #: single-owner CLI wants); supplied and stale, the patch is a 409 carrying
     #: the current hash.
+    base_hash: Optional[str] = None
+
+
+class WorkPatch(_APIModel):
+    """Owner-editable fields of one work in ``sources/papers.jsonld``.
+
+    The same shape as :class:`MetadataPatch`, one level down: every field is
+    optional, only the ones present are applied, unknown keys are allowed on
+    the wire (``extra="allow"``) and rejected server-side against the editable
+    whitelist in :mod:`researcher_profiles.profile.edit`.
+
+    Field names are the ones that appear on disk, ``datePublished`` included,
+    so a caller patches what it read out of ``papers.jsonld`` rather than
+    translating into a second vocabulary.
+    """
+
+    name: Optional[str] = None
+    doi: Optional[str] = None
+    openalex_id: Optional[str] = None
+    #: The publication year, spelled as the JSON-LD term rather than declared
+    #: ``year`` with an alias: FastAPI rebuilds a body model's fields for its
+    #: schema pass and pydantic then warns, once per aliased field, that the
+    #: alias has no effect there. The name a caller types is the same either
+    #: way, so the plain field is the one that does not print a warning.
+    datePublished: Optional[int] = None
+    type: Optional[str] = None
+    citation: Optional[str] = None
+    full_text_link: Optional[str] = None
+    access: Optional[str] = None
+    summary: Optional[str] = None
+    first_author: Optional[str] = None
+    author_position: Optional[str] = None
+    is_corresponding: Optional[bool] = None
+    #: See :attr:`MetadataPatch.base_hash`. The digest spans the profile
+    #: document and the SOUL, so it detects a concurrent *profile* edit; a work
+    #: patch sends it for the same reason a metadata patch does.
     base_hash: Optional[str] = None
 
 
@@ -724,4 +767,5 @@ __all__ = [
     "SearchResponse",
     "SoulUpdate",
     "VisibilityPatch",
+    "WorkPatch",
 ]

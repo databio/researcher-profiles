@@ -45,7 +45,7 @@ from .schema import (
 )
 from .schema.jsonld import CONTEXT_URL, read_jsonld
 from .schema_export import build_schemas
-from .utils.paths import CACHE_DIRNAME
+from .utils.paths import CACHE_DIRNAME, LEGACY_CACHE_DIRNAME
 
 if TYPE_CHECKING:
     from .schema import ArtifactRef
@@ -587,13 +587,6 @@ def _manifest_refs(profile_doc: dict, report: ProfileValidationReport) -> "list[
     return refs
 
 
-#: Directory name used for the profile-adjacent derived cache before its
-#: rename to :data:`~researcher_profiles.utils.paths.CACHE_DIRNAME`
-#: (``.cache/``). A manifest entry still pointing under this name is not
-#: really dangling: the file is on disk, just under the old directory.
-_LEGACY_CACHE_DIRNAME = "cache"
-
-
 def _split_legacy_cache_stale(
     root: Path, stale: list[str], report: ProfileValidationReport
 ) -> list[str]:
@@ -608,7 +601,7 @@ def _split_legacy_cache_stale(
     Returns the remaining ``stale`` entries, for the caller to report as
     ordinary drift.
     """
-    legacy_prefix = f"{_LEGACY_CACHE_DIRNAME}/"
+    legacy_prefix = f"{LEGACY_CACHE_DIRNAME}/"
     legacy = [
         entry for entry in stale if entry.startswith(legacy_prefix) and (root / entry).is_file()
     ]
@@ -619,12 +612,12 @@ def _split_legacy_cache_stale(
                 keyword="legacy_cache_dirname",
                 message=(
                     f"{len(legacy)} manifest entry(ies) under the retired cache "
-                    f"directory name {_LEGACY_CACHE_DIRNAME!r}: {legacy[:5]}"
+                    f"directory name {LEGACY_CACHE_DIRNAME!r}: {legacy[:5]}"
                 ),
-                found=f"{_LEGACY_CACHE_DIRNAME}/",
+                found=f"{LEGACY_CACHE_DIRNAME}/",
                 expected=f"{CACHE_DIRNAME}/",
                 fix=(
-                    f"move the file(s) from {_LEGACY_CACHE_DIRNAME}/ to {CACHE_DIRNAME}/ "
+                    f"move the file(s) from {LEGACY_CACHE_DIRNAME}/ to {CACHE_DIRNAME}/ "
                     "and run `rp manifest --write` to regenerate"
                 ),
             )

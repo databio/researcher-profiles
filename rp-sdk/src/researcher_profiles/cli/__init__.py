@@ -12,7 +12,8 @@ How the CLI package is laid out
 ===============================
 
 Every verb lives in a group module (``_corpus``, ``_store``, ``_format``,
-``_publish``, ``_registry``, ``_auth``, ``_skill``, ``_sign``, ``_agent``), and
+``_publish``, ``_registry``, ``_auth``, ``_skill``, ``_sign``, ``_agent``,
+``_work``), and
 each of those exposes exactly two names: ``add_parsers(sub)``, which registers
 its parsers, and ``COMMANDS``, which maps each of its verb names to the handler
 that runs it. This module owns only the root parser, the plugin hook, and the

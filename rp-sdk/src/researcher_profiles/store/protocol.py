@@ -10,7 +10,7 @@ boundary. See the package docstring for why these are protocols and not base
 classes.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Protocol, runtime_checkable
 
@@ -78,6 +78,13 @@ class IngestResult:
     #: on a store with no filesystem: the index is a ``.cache/embeddings.sqlite``
     #: handle, which ``ArtifactStorage`` does not cover (see the module docstring).
     indexed: bool
+    #: Live files carried over rather than deleted, by class
+    #: (``{"fulltext": 53, "index": 1}``); see ``upload.WITHHELD_CLASSES``.
+    #: Filled in by ``ingest_archive``, not by ``commit_directory``.
+    kept: dict[str, int] = field(default_factory=dict)
+    #: Which ``upload.PushMode`` the ingest ran under, and so what happened to
+    #: the live files the archive did not carry.
+    mode: str = "replace"
 
 
 @runtime_checkable

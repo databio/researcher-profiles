@@ -3,8 +3,8 @@
 Two layers:
 
 - :mod:`researcher_profiles.profile.edit`: the on-disk mutation helpers (patch metadata,
-  set soul, set visibility), including the re-validation guarantee and the
-  legal ``paper_fulltext`` restricted pin.
+  set soul, set visibility, patch/add/remove one work), including the
+  re-validation guarantee and the legal ``paper_fulltext`` restricted pin.
 - the ``PATCH/PUT /api/v1/profiles/{slug}/...`` endpoints via ``require_owner``:
   the operator-token fallback on bare rp-sdk, and the owner/non-owner/no-session
   behavior when a management host installs an ``owner_verifier``.
@@ -18,6 +18,7 @@ from researcher_profiles import ResearcherProfile
 from researcher_profiles.errors import ProfileWriteError
 from researcher_profiles.profile.edit import (
     EditError,
+    WorkNotFoundError,
 )
 from researcher_profiles.profile.storage import DirectoryArtifactStorage
 
@@ -122,6 +123,110 @@ class TestEditHelpers:
         assert "dateModified" in doc
 
 
+class TestWorkEdits:
+    """``patch_work`` / ``add_work`` / ``remove_work``: one record at a time.
+
+    The corpus used to be reachable only through ``rp push``, which replaces
+    the whole profile directory. These are the field-level writes, and what
+    they owe is the same thing ``patch_metadata`` owes: a refused patch leaves
+    the file exactly as it was.
+    """
+
+    PAPER = "doe2016example"
+
+    def _papers_entry(self, jane_doe_dir: Path) -> dict:
+        """The manifest entry describing ``sources/papers.jsonld``."""
+        import json
+
+        doc = json.loads((jane_doe_dir / "profile.jsonld").read_text())
+        return next(p for p in doc["hasPart"] if p["contentUrl"] == "sources/papers.jsonld")
+
+    def test_patch_persists_and_reloads(self, jane_doe_dir):
+        prof = ResearcherProfile.from_files(jane_doe_dir)
+        prof.edit.patch_work(self.PAPER, {"doi": "10.1038/s41586-023-06000-1", "access": "closed"})
+        reloaded = ResearcherProfile.from_files(jane_doe_dir)
+        record = next(p for p in reloaded.papers if p.paper_id == self.PAPER)
+        assert record.doi == "10.1038/s41586-023-06000-1"
+        assert record.access == "closed"
+
+    def test_datePublished_reaches_the_year_field(self, jane_doe_dir):
+        """The patch speaks the name on disk, not the python attribute.
+
+        ``year`` is stored under ``datePublished``. A patch that landed the
+        value as an extra key would leave the real year untouched and still
+        report success.
+        """
+        prof = ResearcherProfile.from_files(jane_doe_dir)
+        prof.edit.patch_work(self.PAPER, {"datePublished": 2017})
+        reloaded = ResearcherProfile.from_files(jane_doe_dir)
+        assert next(p for p in reloaded.papers if p.paper_id == self.PAPER).year == 2017
+
+    def test_rejects_non_editable_field(self, jane_doe_dir):
+        prof = ResearcherProfile.from_files(jane_doe_dir)
+        before = (jane_doe_dir / "sources" / "papers.jsonld").read_bytes()
+        with pytest.raises(EditError, match="not owner-editable"):
+            prof.edit.patch_work(self.PAPER, {"cited_by_count": 9000})
+        assert (jane_doe_dir / "sources" / "papers.jsonld").read_bytes() == before
+
+    def test_unknown_paper_id_is_its_own_error(self, jane_doe_dir):
+        prof = ResearcherProfile.from_files(jane_doe_dir)
+        with pytest.raises(WorkNotFoundError, match="no work with paper_id"):
+            prof.edit.patch_work("nobody2099", {"doi": "10.1/x"})
+
+    def test_invalid_value_leaves_the_file_untouched(self, jane_doe_dir):
+        prof = ResearcherProfile.from_files(jane_doe_dir)
+        before = (jane_doe_dir / "sources" / "papers.jsonld").read_bytes()
+        with pytest.raises(EditError, match="is invalid"):
+            prof.edit.patch_work(self.PAPER, {"is_corresponding": "maybe"})
+        assert (jane_doe_dir / "sources" / "papers.jsonld").read_bytes() == before
+
+    def test_list_order_is_preserved(self, jane_doe_dir):
+        """A patch is not a reordering: corpus order is the published order."""
+        prof = ResearcherProfile.from_files(jane_doe_dir)
+        before = [p.paper_id for p in prof.papers]
+        prof.edit.patch_work(self.PAPER, {"citation": "Doe et al. (2016)"})
+        assert [p.paper_id for p in ResearcherProfile.from_files(jane_doe_dir).papers] == before
+
+    def test_manifest_digest_follows_the_new_bytes(self, jane_doe_dir):
+        """A manifest that still describes the pre-edit file is a lie about it."""
+        prof = ResearcherProfile.from_files(jane_doe_dir)
+        prof.edit.patch_work(self.PAPER, {"citation": "first"})
+        first = self._papers_entry(jane_doe_dir)
+        assert first["sha256"] and first["bytes"]
+
+        prof = ResearcherProfile.from_files(jane_doe_dir)
+        prof.edit.patch_work(self.PAPER, {"citation": "second, and rather longer"})
+        second = self._papers_entry(jane_doe_dir)
+        assert second["sha256"] != first["sha256"]
+
+    def test_add_work_appends_and_replaces(self, jane_doe_dir):
+        prof = ResearcherProfile.from_files(jane_doe_dir)
+        before = len(prof.papers)
+        prof.edit.add_work({"paper_id": "doe2026new", "name": "A new work", "type": "authored"})
+        reloaded = ResearcherProfile.from_files(jane_doe_dir)
+        assert len(reloaded.papers) == before + 1
+        assert reloaded.papers[-1].paper_id == "doe2026new"
+
+        prof = ResearcherProfile.from_files(jane_doe_dir)
+        prof.edit.add_work({"paper_id": "doe2026new", "name": "Renamed", "type": "authored"})
+        reloaded = ResearcherProfile.from_files(jane_doe_dir)
+        assert len(reloaded.papers) == before + 1
+        assert reloaded.papers[-1].name == "Renamed"
+
+    def test_add_work_needs_a_paper_id(self, jane_doe_dir):
+        prof = ResearcherProfile.from_files(jane_doe_dir)
+        with pytest.raises(EditError, match="needs a paper_id"):
+            prof.edit.add_work({"name": "Nameless", "type": "authored"})
+
+    def test_remove_work(self, jane_doe_dir):
+        prof = ResearcherProfile.from_files(jane_doe_dir)
+        prof.edit.remove_work(self.PAPER)
+        reloaded = ResearcherProfile.from_files(jane_doe_dir)
+        assert self.PAPER not in [p.paper_id for p in reloaded.papers]
+        with pytest.raises(WorkNotFoundError):
+            prof.edit.remove_work(self.PAPER)
+
+
 class TestEditAgainstAReadOnlyBackend:
     """Writes against a read-only backend raise instead of touching the disk.
 
@@ -217,6 +322,99 @@ class TestEditEndpointsOperatorFallback:
         )
         assert r.status_code == 200, r.text
         assert "visibility" in r.json()["updated"]
+
+
+class TestWorkEndpoints:
+    """``/profiles/{slug}/works/{paper_id}``: the corpus over HTTP.
+
+    The status codes are the contract. 400 and 404 answer different mistakes
+    ("you may not set that" vs "there is no such paper") and a caller retries
+    them differently, so they are pinned here rather than left to whichever
+    exception reached the handler.
+    """
+
+    PAPER = "doe2016example"
+
+    def test_patch_reports_the_fields_it_applied(self, make_api_client, fixture_profiles_root):
+        c = make_api_client(fixture_profiles_root(SLUG))
+        r = c.patch(
+            f"/api/v1/profiles/{SLUG}/works/{self.PAPER}",
+            json={"doi": "10.1038/s41586-023-06000-1", "datePublished": 2017},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["updated"] == ["datePublished", "doi"]
+        record = c.get(f"/api/v1/profiles/{SLUG}/works/{self.PAPER}").json()
+        assert record["doi"] == "10.1038/s41586-023-06000-1"
+        assert record["datePublished"] == "2017"
+
+    def test_disallowed_field_is_a_400(self, make_api_client, fixture_profiles_root):
+        c = make_api_client(fixture_profiles_root(SLUG))
+        r = c.patch(f"/api/v1/profiles/{SLUG}/works/{self.PAPER}", json={"cited_by_count": 9000})
+        assert r.status_code == 400, r.text
+        assert "not owner-editable" in r.json()["detail"]
+
+    def test_unknown_paper_is_a_404(self, make_api_client, fixture_profiles_root):
+        c = make_api_client(fixture_profiles_root(SLUG))
+        r = c.patch(f"/api/v1/profiles/{SLUG}/works/nobody2099", json={"doi": "10.1/x"})
+        assert r.status_code == 404, r.text
+        assert c.get(f"/api/v1/profiles/{SLUG}/works/nobody2099").status_code == 404
+
+    def test_stale_base_hash_is_a_409_and_changes_nothing(
+        self, make_api_client, fixture_profiles_root
+    ):
+        c = make_api_client(fixture_profiles_root(SLUG))
+        stale = c.get(f"/api/v1/profiles/{SLUG}").json()["content_hash"]
+        c.patch(f"/api/v1/profiles/{SLUG}/metadata", json={"field": "Somebody Else's Edit"})
+        r = c.patch(
+            f"/api/v1/profiles/{SLUG}/works/{self.PAPER}",
+            json={"doi": "10.1/mine", "base_hash": stale},
+        )
+        assert r.status_code == 409, r.text
+        assert c.get(f"/api/v1/profiles/{SLUG}/works/{self.PAPER}").json().get("doi") is None
+
+    def test_put_then_delete_one_record(self, make_api_client, fixture_profiles_root):
+        c = make_api_client(fixture_profiles_root(SLUG))
+        r = c.put(
+            f"/api/v1/profiles/{SLUG}/works/doe2026new",
+            json={"paper_id": "ignored", "name": "A new work", "type": "authored"},
+        )
+        assert r.status_code == 200, r.text
+        # The path wins: a record is never filed under a name it was not
+        # addressed by.
+        assert c.get(f"/api/v1/profiles/{SLUG}/works/doe2026new").json()["name"] == "A new work"
+        assert c.get(f"/api/v1/profiles/{SLUG}/works/ignored").status_code == 404
+        assert c.delete(f"/api/v1/profiles/{SLUG}/works/doe2026new").status_code == 200
+        assert c.get(f"/api/v1/profiles/{SLUG}/works/doe2026new").status_code == 404
+
+    def test_a_malformed_put_body_is_a_400_naming_the_field(
+        self, make_api_client, fixture_profiles_root
+    ):
+        c = make_api_client(fixture_profiles_root(SLUG))
+        r = c.put(f"/api/v1/profiles/{SLUG}/works/doe2026new", json={"name": 123})
+        assert r.status_code == 400, r.text
+        assert "name" in r.json()["detail"]
+
+    def test_a_scope_gated_agent_is_refused(self, make_api_client, fixture_profiles_root):
+        """``check_write_scope`` reaches the works routes with the fields named.
+
+        A host that hands out a narrow agent key needs the paper and the fields
+        in the detail, or its verifier can only say yes or no to "edits works
+        at all".
+        """
+        from fastapi import HTTPException
+
+        c = make_api_client(fixture_profiles_root(SLUG))
+        seen: list[tuple[str, dict]] = []
+
+        def _verifier(request, action, detail):  # noqa: ARG001
+            seen.append((action, detail))
+            raise HTTPException(status_code=403, detail="scope profile:works required")
+
+        c.app.state.write_scope_verifier = _verifier
+        r = c.patch(f"/api/v1/profiles/{SLUG}/works/{self.PAPER}", json={"doi": "10.1/x"})
+        assert r.status_code == 403, r.text
+        assert seen == [("works", {"paper_id": self.PAPER, "fields": ["doi"]})]
+        assert c.get(f"/api/v1/profiles/{SLUG}/works/{self.PAPER}").json().get("doi") is None
 
 
 class TestEditEndpointsOwnerScoped:

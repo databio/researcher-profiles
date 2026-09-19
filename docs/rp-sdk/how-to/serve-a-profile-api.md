@@ -61,9 +61,30 @@ defaults to `RESEARCHER_PROFILES_TOKEN`. Or from Python:
 ```python
 from researcher_profiles.client import push_profile
 
-summary = push_profile("http://127.0.0.1:8109", "/path/to/profiles/jane-doe")
-print(summary)  # {"slug": ..., "rid": ..., "name": ..., "level": ..., "indexed": ...}
+result = push_profile("http://127.0.0.1:8109", "/path/to/profiles/jane-doe")
+print(result.plan.counts())  # {"added": 12, "changed": 3, "unchanged": 41, ...}
+print(result.summary)  # {"slug": ..., "rid": ..., "name": ..., "level": ..., "indexed": ...}
 ```
+
+Every push runs a preflight first: it diffs the archive against the server's
+manifest (one `GET /api/v1/profiles/{slug}`) and refuses, without uploading
+anything, if the push would delete files the server holds. `rp push --dry-run`
+prints that plan and stops; `--force` pushes anyway; `--only PATH ...` narrows
+the archive to `profile.jsonld` plus the named files.
+
+A push mode (`?mode=` on the PUT) says what the server does with a live file
+the archive does not carry:
+
+| Mode | Flag | A file the archive carries | A file it omits |
+|---|---|---|---|
+| `replace` | (default) | written | kept only when it belongs to a withheld class (fulltext, the sqlite index) the archive carried no member of; otherwise deleted |
+| `merge` | `--merge`, and implied by `--only` | written | kept, always |
+| `prune` | `--prune` | written | deleted, always |
+
+`replace` is the default because a full build push should reproduce the
+directory it was built from. `--only` selects `merge` on its own: naming a
+file to send has never meant "and delete the rest of the profile", so nothing
+appears as a removal and the push does not refuse.
 
 The push builds the archive with `build_profile_archive`, the whole-record
 transfer builder. Only the documented profile members ship. Dotfiles and

@@ -15,12 +15,13 @@ the two cannot disagree about what a patch addresses).
 
 What an owner may edit is narrow. Display metadata (name, affiliation, job
 title, field and subfields, summary, expertise labels, interests, training and
-career history, links), the SOUL/persona narrative, and per-artifact
-visibility. Not the paper corpus, summaries, or embeddings. Those are generated
-from the corpus, and an owner editing them would desynchronize the record from
-what generated it. Not ``personality/expertise.md`` either: that narrative is
-synthesized from the corpus and cites paper ids, so no edit route reaches it
-even though ``save_expertise`` exists.
+career history, links), the SOUL/persona narrative, per-artifact visibility,
+and the bibliographic fields of one work (:data:`EDITABLE_WORK_FIELDS`). Not
+the generated summaries or embeddings: those are derived from the corpus, and
+an owner editing them would desynchronize the record from what generated it.
+Not ``personality/expertise.md`` either: that narrative is synthesized from the
+corpus and cites paper ids, so no edit route reaches it even though
+``save_expertise`` exists.
 
 ``training`` and ``career`` are authored history. No build tool
 supplies them, and a brand-new self-published profile has neither. They arrive
@@ -60,6 +61,7 @@ from ..schema import (
     ALWAYS_RESTRICTED_ROLES,
     ArtifactRef,
     CareerEntry,
+    PaperRecord,
     ProfileDocument,
     Training,
 )
@@ -70,6 +72,16 @@ if TYPE_CHECKING:  # pragma: no cover
 
 class EditError(ProfileError):
     """A requested edit is not allowed or would produce an invalid profile."""
+
+
+class WorkNotFoundError(EditError):
+    """No work in this profile carries the requested ``paper_id``.
+
+    A subclass rather than a message, because the edit routes owe the caller
+    a 404 here and a 400 for every other bad work edit: "you named a paper
+    that is not in this corpus" and "you sent a field you may not set" are
+    different mistakes and a caller retries them differently.
+    """
 
 
 #: The metadata fields an owner may patch through the interactive edit surface.
@@ -91,6 +103,29 @@ EDITABLE_METADATA_FIELDS: frozenset[str] = frozenset(
         "training",
         "career",
         "same_as",
+    }
+)
+
+#: The fields of one work an owner may patch through the interactive edit
+#: surface. Bibliographic facts a person can see are wrong on their own record:
+#: a missing DOI, a citation string that names the wrong journal, a full-text
+#: link that rotted. ``paper_id`` is not here because it is the selector, and
+#: neither are the pipeline-derived counts (``cited_by_count``,
+#: ``author_index``, ``total_authors``), which come from the corpus build.
+EDITABLE_WORK_FIELDS: frozenset[str] = frozenset(
+    {
+        "doi",
+        "openalex_id",
+        "name",
+        "datePublished",
+        "type",
+        "citation",
+        "full_text_link",
+        "access",
+        "summary",
+        "first_author",
+        "author_position",
+        "is_corresponding",
     }
 )
 
@@ -129,6 +164,14 @@ def _coerce_structured(patch: dict[str, Any]) -> dict[str, Any]:
                 raise EditError(f"{key}[{i}] is not a valid {model.__name__}: {e}") from e
         out[key] = parsed
     return out
+
+
+def _find_work(papers: list[PaperRecord], paper_id: str) -> int:
+    """The position of ``paper_id`` in the corpus, or a :class:`WorkNotFoundError`."""
+    for i, record in enumerate(papers):
+        if record.paper_id == paper_id:
+            return i
+    raise WorkNotFoundError(f"no work with paper_id {paper_id!r} in this profile")
 
 
 def select_parts(entry: dict[str, Any], parts: list[ArtifactRef]) -> list[ArtifactRef]:
@@ -189,6 +232,88 @@ class EditManager:
         except ProfileWriteError as e:
             raise EditError(f"soul could not be saved: {e}") from e
 
+    def patch_work(self, paper_id: str, patch: dict[str, Any]) -> PaperRecord:
+        """Patch one record in ``sources/papers.jsonld`` and persist the corpus.
+
+        The granular counterpart of :meth:`patch_metadata` for works: a wrong
+        DOI on one paper is a one-field fix, and the only transport it had was
+        a whole-profile push. Only the fields present are applied, and only
+        those in :data:`EDITABLE_WORK_FIELDS`.
+
+        The patched record is round-tripped through :class:`PaperRecord` before
+        anything is written, so a bad value is an :class:`EditError` (a 400)
+        rather than a corrupt ``papers.jsonld``. List order is preserved: the
+        corpus order is the published reading order and a patch is not a
+        reordering.
+        """
+        if not isinstance(patch, dict):
+            raise EditError("work patch must be an object")
+        disallowed = set(patch) - EDITABLE_WORK_FIELDS
+        if disallowed:
+            raise EditError(
+                "these work fields are not owner-editable: "
+                + ", ".join(sorted(disallowed))
+                + f" (editable: {', '.join(sorted(EDITABLE_WORK_FIELDS))})"
+            )
+        papers = list(self._profile.papers)
+        index = _find_work(papers, paper_id)
+        if not patch:
+            return papers[index]
+        # Merge into the serialized record rather than ``model_copy``: the patch
+        # speaks the on-disk names (``datePublished``, not ``year``), and
+        # ``model_copy`` assigns attributes without validating, so a bad value
+        # would reach the serializer instead of this ``EditError``.
+        merged = {**papers[index].model_dump(by_alias=True), **patch}
+        try:
+            updated = PaperRecord.model_validate(merged)
+        except ValidationError as e:
+            raise EditError(f"patched work {paper_id!r} is invalid: {e}") from e
+        papers[index] = updated
+        self._save_works(papers)
+        return updated
+
+    def add_work(self, record: PaperRecord | dict[str, Any]) -> PaperRecord:
+        """Add one work, or replace the one already carrying its ``paper_id``."""
+        if isinstance(record, PaperRecord):
+            parsed = record
+        else:
+            try:
+                parsed = PaperRecord.model_validate(record)
+            except ValidationError as e:
+                raise EditError(f"work record is invalid: {e}") from e
+        if not parsed.paper_id:
+            raise EditError("a work record needs a paper_id")
+        papers = list(self._profile.papers)
+        for i, existing in enumerate(papers):
+            if existing.paper_id == parsed.paper_id:
+                papers[i] = parsed
+                break
+        else:
+            papers.append(parsed)
+        self._save_works(papers)
+        return parsed
+
+    def remove_work(self, paper_id: str) -> None:
+        """Remove one work from ``sources/papers.jsonld``."""
+        papers = list(self._profile.papers)
+        del papers[_find_work(papers, paper_id)]
+        self._save_works(papers)
+
+    def _save_works(self, papers: list[PaperRecord]) -> None:
+        """Persist the corpus, then restamp the manifest entry describing it.
+
+        ``save_papers`` writes the file and nothing else, so the manifest's
+        ``bytes``/``sha256`` for ``sources/papers.jsonld`` would go on
+        describing the pre-edit bytes. ``build_manifest(write=True)`` is the
+        one helper that restamps them, and it persists through ``save_profile``,
+        which moves ``dateModified`` with the content.
+        """
+        try:
+            self._profile.save_papers(papers)
+            self._profile.build_manifest(write=True)
+        except ProfileWriteError as e:
+            raise EditError(f"works could not be saved: {e}") from e
+
     def set_visibility(
         self,
         *,
@@ -236,7 +361,9 @@ class EditManager:
 __all__ = [
     "EditError",
     "EDITABLE_METADATA_FIELDS",
+    "EDITABLE_WORK_FIELDS",
     "STRUCTURED_METADATA_FIELDS",
+    "WorkNotFoundError",
     "select_parts",
     "EditManager",
 ]

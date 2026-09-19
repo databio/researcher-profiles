@@ -389,8 +389,14 @@ Upload a built profile directory to a remote API server
 server; the profile is immediately listable, and matchable when it includes a
 built `.cache/embeddings.sqlite`.
 
+Every push first diffs the archive against the server's manifest and refuses
+to delete anything the server holds unless you pass `--force`. Files the
+archive builder leaves out (withheld fulltext, anything under the retired
+`cache/` directory, paths outside the spec) are reported on stderr.
+
 ```
 rp push <profile> [--root DIR] [--url BASE_URL] [--slug SLUG] [--token TOKEN]
+                  [--dry-run] [--force] [--only PATH ...] [--merge | --prune]
                   [--include-fulltext] [--json]
 ```
 
@@ -401,18 +407,41 @@ rp push <profile> [--root DIR] [--url BASE_URL] [--slug SLUG] [--token TOKEN]
 | `--url` | Server base URL, e.g. `http://localhost:8109`. Default: the server you ran [`rp login`](#login) against. |
 | `--slug` | Target slug on the server. Default: the directory name. |
 | `--token` | Bearer token. Default: `RESEARCHER_PROFILES_TOKEN`, else the stored login's key for that server. |
+| `--dry-run` | Print what the push would add, change, remove, and keep, then stop. Uploads nothing. |
+| `--force` | Push even though it removes files the server holds. |
+| `--only PATH ...` | Send only these profile-relative files (plus `profile.jsonld`). Implies `--merge`. |
+| `--merge` | Keep every server-side file this push does not carry. |
+| `--prune` | Delete every server-side file this push does not carry, including withheld fulltext and the index. Cannot combine with `--only` or `--merge`. |
 | `--include-fulltext` | Also upload `sources/papers/` extracted fulltext. Off by default. |
-| `--json` | Emit the server's summary as JSON. |
+| `--json` | Emit the server's summary as JSON (with `--dry-run`, the whole plan). |
+
+**Modes.** With no mode flag the push is a `replace`: the server ends up with
+what the archive carries, except that withheld fulltext and the sqlite index
+are kept when the archive carried none of them. `--only` and `--merge` select
+`merge`: everything not sent stays. `--prune` selects `prune`: everything not
+sent goes. See the [API reference](api.md#put-apiv1profilesslug) for the
+server-side rules.
 
 ```console
 $ rp push profiles/jane-doe --url http://localhost:8109
-pushed jane-doe (Jane A. Doe, level=lite, indexed=True)
+pushed jane-doe: +12 ~3 -0 (kept 2) name=Jane A. Doe, level=lite, indexed=True
+
+$ rp push profiles/jane-doe --only sources/papers.jsonld --dry-run
+dry run: push jane-doe -> http://localhost:8109 (update, merge)
+  added        0
+  changed      1  works 1
+  unchanged    0
+  removed      0
+  kept        10  citations 1, expertise 1, paper_fulltext 2, paper_summary 5, soul 1
+changed (1):
+  sources/papers.jsonld
 ```
 
 **Exit codes.** `0` ok · `1` the server could not be reached or would not
-answer · `2` no server URL resolved, the directory is unreadable, or the target
-refused the upload. See the [API reference](api.md#put-apiv1profilesslug) for
-validation rules.
+answer · `2` no server URL resolved, the directory is unreadable, the push
+would remove server files and `--force` was not given, `--prune` was combined
+with `--only`/`--merge`, or the target refused the upload. See the
+[API reference](api.md#put-apiv1profilesslug) for validation rules.
 
 ---
 

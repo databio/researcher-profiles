@@ -21,9 +21,11 @@ import shutil
 import tarfile
 import tempfile
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal, get_args
 
 import pydantic
 
@@ -41,7 +43,7 @@ from ..privacy import (
 # ORCIDs carry.
 from ..schema import ALWAYS_RESTRICTED_ROLES  # noqa: F401  (re-exported)
 from ..store import IngestResult, ProfileStore, UploadError  # noqa: F401  (re-exported)
-from ..utils.paths import CACHE_DIRNAME
+from ..utils.paths import CACHE_DIRNAME, LEGACY_CACHE_DIRNAME
 from ..utils.slug import SLUG_RE  # noqa: F401  (re-exported)
 
 logger = logging.getLogger(__name__)
@@ -64,8 +66,10 @@ FULLTEXT_SUBDIR = ("sources", "papers")
 #: ``docs/rp-sdk/profile-format.md``). Anything else on disk, notably raw
 #: ``sources/html/`` scrape output, is a build-time intermediate that never
 #: ships, so the archive builder drops it regardless of what is present.
+#: ``index.html`` is the rendered profile page, a manifest part (role
+#: ``html``) like any other.
 PROFILE_TOP_LEVEL = frozenset(
-    {"profile.jsonld", "SKILL.md", "personality", "sources", CACHE_DIRNAME}
+    {"profile.jsonld", "SKILL.md", "index.html", "personality", "sources", CACHE_DIRNAME}
 )
 
 #: Members under ``.cache/`` that ship. Only the derived ``embeddings.sqlite``
@@ -91,16 +95,138 @@ SOURCES_MEMBERS = frozenset(
 )
 
 
+#: The profile document. Always ships: the server loads the staged directory
+#: through it, so an archive without it is not a profile.
+PROFILE_DOCUMENT = "profile.jsonld"
+
+#: Why a file on disk did not enter the archive, in the order a report reads
+#: them. ``fulltext`` is policy (``include_fulltext=False``), ``legacy_cache``
+#: is a profile built before the ``cache/`` -> ``.cache/`` rename, and
+#: ``not_in_spec`` is everything the member whitelists reject.
+DROP_REASONS = ("fulltext", "legacy_cache", "not_in_spec")
+
+
+@dataclass(frozen=True)
+class ProfileArchive:
+    """A built archive plus the account of what stayed behind.
+
+    ``members`` is every regular file inside the tarball, profile-relative, so
+    a caller can diff the push against a server without reopening the tar.
+    ``dropped`` maps a reason from :data:`DROP_REASONS` to the paths on disk
+    that did not ship. The builder's exclusions are deliberate, but silent
+    exclusions are how a user ends up pushing a profile they did not build:
+    the account is returned so the caller can say so.
+    """
+
+    data: bytes
+    members: frozenset[str]
+    dropped: dict[str, list[str]]
+
+
+def _drop_reason(rel: str, *, include_fulltext: bool) -> str | None:
+    """Why the profile-relative path ``rel`` does not ship, or None if it does.
+
+    The one place the member whitelists are applied. Prefix-based, so it
+    answers for a directory as readily as for a file.
+    """
+    parts = Path(rel).parts
+    if parts[0] == LEGACY_CACHE_DIRNAME:
+        return "legacy_cache"
+    # Dotfiles never ship. ``.cache/`` is the one dotted member on the
+    # whitelist, and only for the ``CACHE_MEMBERS`` below it; its own name
+    # is therefore exempt from this sweep, nothing nested under it is.
+    if any(p.startswith(".") for p in parts[1:]) or (
+        parts[0].startswith(".") and parts[0] != CACHE_DIRNAME
+    ):
+        return "not_in_spec"
+    if parts[0] not in PROFILE_TOP_LEVEL:
+        return "not_in_spec"
+    if parts[0] == "sources" and len(parts) >= 2:
+        if parts[1] not in SOURCES_MEMBERS:
+            return "not_in_spec"
+        if not include_fulltext and parts[1] == FULLTEXT_SUBDIR[1]:
+            return "fulltext"
+    if parts[0] == CACHE_DIRNAME and len(parts) >= 2 and parts[1] not in CACHE_MEMBERS:
+        return "not_in_spec"
+    return None
+
+
+def _walk_members(src: Path, *, include_fulltext: bool) -> tuple[list[str], dict[str, list[str]]]:
+    """Split a profile directory into ``(members, dropped)``.
+
+    One walk, both answers, from the single :func:`_drop_reason` predicate, so
+    the tarball and the report it comes with can never disagree.
+
+    A top-level directory that is not a profile member is reported as itself
+    and not descended into: a profile directory that happens to be a git
+    checkout would otherwise drown the report in ``.git/`` objects.
+    """
+    members: list[str] = []
+    dropped: dict[str, list[str]] = {}
+    for child in sorted(src.iterdir()):
+        if child.is_dir():
+            if child.name not in PROFILE_TOP_LEVEL and child.name != LEGACY_CACHE_DIRNAME:
+                dropped.setdefault("not_in_spec", []).append(f"{child.name}/")
+                continue
+            files = [f for f in sorted(child.rglob("*")) if f.is_file()]
+        elif child.is_file():
+            files = [child]
+        else:
+            continue
+        for f in files:
+            rel = f.relative_to(src).as_posix()
+            reason = _drop_reason(rel, include_fulltext=include_fulltext)
+            if reason is None:
+                members.append(rel)
+            else:
+                dropped.setdefault(reason, []).append(rel)
+    return members, dropped
+
+
+def _only_members(src: Path, only: Sequence[str], *, include_fulltext: bool) -> list[str]:
+    """The members of an ``only=`` archive: the document plus the named files.
+
+    A named path that does not exist or is not a pushable member raises rather
+    than being dropped. Naming a file and having it silently vanish from the
+    upload is precisely the behaviour ``only=`` exists to replace.
+    """
+    members = [PROFILE_DOCUMENT]
+    for name in only:
+        rel = Path(name).as_posix()
+        if rel == PROFILE_DOCUMENT:
+            continue
+        if not (src / rel).is_file():
+            raise ValueError(f"not a file in the profile: {name!r}")
+        reason = _drop_reason(rel, include_fulltext=include_fulltext)
+        if reason == "fulltext":
+            raise ValueError(f"{name!r} is extracted fulltext: pass include_fulltext to send it")
+        if reason is not None:
+            raise ValueError(f"{name!r} is not a profile member ({reason})")
+        members.append(rel)
+    return list(dict.fromkeys(members))
+
+
+def _normalize(ti: tarfile.TarInfo) -> tarfile.TarInfo:
+    """Zero the ownership so archives are reproducible across machines."""
+    ti.uid = ti.gid = 0
+    ti.uname = ti.gname = ""
+    return ti
+
+
 def build_profile_archive(
-    profile_dir: str | os.PathLike, *, include_fulltext: bool = False
-) -> bytes:
+    profile_dir: str | os.PathLike,
+    *,
+    include_fulltext: bool = False,
+    only: Sequence[str] | None = None,
+) -> ProfileArchive:
     """Tar+gzip a profile directory's contents (``profile.jsonld`` at the root).
 
     Only the documented profile members ship: the top-level entries in
     :data:`PROFILE_TOP_LEVEL` and, within ``sources/``, the entries in
-    :data:`SOURCES_MEMBERS`. Anything else on disk, such as dotfiles and
-    stale build intermediates, is silently dropped, so a non-spec artifact can
-    never bloat an archive.
+    :data:`SOURCES_MEMBERS`. Anything else on disk, such as dotfiles and stale
+    build intermediates, is dropped -- and named in
+    :attr:`ProfileArchive.dropped`, so a caller can tell the user what did not
+    travel instead of letting them find out from the server.
 
     ``include_fulltext`` is a copyright gate, not a size gate: with
     ``include_fulltext=False`` (the default) the ``sources/papers/``
@@ -114,41 +240,26 @@ def build_profile_archive(
     is an act a caller opts into explicitly (a local backup, an
     operator-enabled serve), never something a caller falls into by forgetting
     a keyword.
+
+    ``only`` narrows the archive to :data:`PROFILE_DOCUMENT` plus the named
+    profile-relative paths. The document is not optional: the server loads the
+    staged directory through it. Nothing is dropped in this mode -- a named
+    path either ships or raises ``ValueError``.
     """
     src = Path(profile_dir).expanduser().resolve()
-    if not (src / "profile.jsonld").is_file():
-        raise FileNotFoundError(f"not a profile directory (no profile.jsonld): {src}")
+    if not (src / PROFILE_DOCUMENT).is_file():
+        raise FileNotFoundError(f"not a profile directory (no {PROFILE_DOCUMENT}): {src}")
 
-    def _filter(ti: tarfile.TarInfo) -> tarfile.TarInfo | None:
-        parts = Path(ti.name).parts
-        # Dotfiles never ship. ``.cache/`` is the one dotted member on the
-        # whitelist, and only for the ``CACHE_MEMBERS`` below it; its own name
-        # is therefore exempt from this sweep, nothing nested under it is.
-        if any(p.startswith(".") for p in parts[1:]) or (
-            parts[0].startswith(".") and parts[0] != CACHE_DIRNAME
-        ):
-            return None
-        if parts[0] not in PROFILE_TOP_LEVEL:
-            return None
-        if parts[0] == "sources" and len(parts) >= 2:
-            if parts[1] not in SOURCES_MEMBERS:
-                return None
-            if not include_fulltext and parts[1] == FULLTEXT_SUBDIR[1]:
-                return None
-        if parts[0] == CACHE_DIRNAME and len(parts) >= 2 and parts[1] not in CACHE_MEMBERS:
-            return None
-        # Normalize ownership so archives are reproducible across machines.
-        ti.uid = ti.gid = 0
-        ti.uname = ti.gname = ""
-        return ti
+    if only is None:
+        members, dropped = _walk_members(src, include_fulltext=include_fulltext)
+    else:
+        members, dropped = _only_members(src, only, include_fulltext=include_fulltext), {}
 
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tf:
-        for child in sorted(src.iterdir()):
-            if child.name not in PROFILE_TOP_LEVEL:
-                continue  # dotfiles + non-spec cruft never enter the tarball
-            tf.add(child, arcname=child.name, filter=_filter)
-    return buf.getvalue()
+        for rel in members:
+            tf.add(src / rel, arcname=rel, filter=_normalize)
+    return ProfileArchive(data=buf.getvalue(), members=frozenset(members), dropped=dropped)
 
 
 def build_viewer_archive(profile_dir: str | os.PathLike, *, viewer: ViewerTier) -> bytes:
@@ -247,13 +358,42 @@ def _is_fulltext_member(name: str) -> bool:
     return parts[: len(FULLTEXT_SUBDIR)] == FULLTEXT_SUBDIR
 
 
+#: Path predicates for artifact classes a push may legitimately omit. When the
+#: archive carries none of a class and the live profile has some, ingest keeps
+#: the live copies. Deleting them takes an explicit prune.
+WITHHELD_CLASSES: dict[str, Callable[[str], bool]] = {
+    "fulltext": _is_fulltext_member,
+    "index": lambda name: Path(name).parts[:2] == (CACHE_DIRNAME, "embeddings.sqlite"),
+}
+
+#: What an ingest does with a live file the archive does not carry:
+#:
+#: * ``replace`` (the default): keep it only when it belongs to a
+#:   :data:`WITHHELD_CLASSES` class the archive carried no member of. A full
+#:   build push is a reproducible replacement of the record.
+#: * ``merge``: keep it, always. This is what ``rp push --only`` needs: send a
+#:   file or two and leave the rest of the server's copy alone.
+#: * ``prune``: delete it, always. The archive is the whole profile.
+PushMode = Literal["replace", "merge", "prune"]
+
+#: The :data:`PushMode` values, for a route validating a query parameter.
+PUSH_MODES = get_args(PushMode)
+
+#: Class name for a kept file no :data:`WITHHELD_CLASSES` predicate matches.
+#: Only ``merge`` produces these: it keeps every live file the archive omitted,
+#: classed or not.
+OTHER_CLASS = "other"
+
+
 def extract_profile_archive(
     data: bytes, staging_dir: Path, *, include_fulltext: bool = True
-) -> None:
+) -> set[str]:
     """Validate ``data`` as a profile tarball and extract it into ``staging_dir``.
 
     Raises :class:`UploadError` on a malformed archive, unsafe members, or a
-    missing root ``profile.jsonld``.
+    missing root ``profile.jsonld``. Returns the profile-relative names of
+    every regular file the archive carried, before the fulltext filter below:
+    what the sender chose to send, not what landed.
 
     ``include_fulltext`` controls whether ``sources/papers/`` members are
     written out. It defaults to ``True`` because this function's job is
@@ -275,7 +415,9 @@ def extract_profile_archive(
             reason = _member_is_unsafe(m)
             if reason:
                 raise UploadError(reason)
-        root_files = {Path(m.name).as_posix().lstrip("./") for m in members if m.isfile()}
+        # ``Path`` collapses a leading ``./``; a character-wise strip would also
+        # eat the dot of ``.cache/``.
+        root_files = {Path(m.name).as_posix() for m in members if m.isfile()}
         if "profile.jsonld" not in root_files:
             raise UploadError(
                 "archive must contain profile.jsonld at its root "
@@ -288,6 +430,7 @@ def extract_profile_archive(
             tf.extractall(path=staging_dir, members=members, filter="data")
         except tarfile.TarError as e:
             raise UploadError(f"archive extraction failed: {e}") from e
+        return root_files
 
 
 def ingest_archive(
@@ -298,6 +441,7 @@ def ingest_archive(
     include_fulltext: bool = False,
     build_missing_index: bool = False,
     gate: "Callable[[str], None] | None" = None,
+    mode: PushMode = "replace",
 ) -> IngestResult:
     """Validate, stage, and commit an uploaded profile tarball into ``store``.
 
@@ -318,15 +462,94 @@ def ingest_archive(
     archive's rid, so any "may you write this profile" check has to see the
     rid. See ``app.state.push_gate``.
 
+    A push is a policy-filtered view of the sender's directory, not the whole
+    of it: ``build_profile_archive`` withholds fulltext by default, and
+    ``only=`` narrows it to a file or two. Absence from the tarball is
+    therefore not automatically a deletion: :data:`PushMode` says what it
+    means. Whatever survives is merged into staging before commit, so the
+    commit itself (and both store backends) still sees one complete directory.
+
     Staging goes beside a directory store (an atomic ``os.rename`` needs the
     same filesystem) and into the system scratch space otherwise.
     """
     root = store.root
     with _staging_dir(root, slug) as staging:
-        extract_profile_archive(data, staging, include_fulltext=include_fulltext)
+        archive_names = extract_profile_archive(data, staging, include_fulltext=include_fulltext)
         if gate is not None:
             gate(_staged_rid(staging))
-        return store.commit_directory(slug, staging, build_missing_index=build_missing_index)
+        kept = _keep_omitted(store, slug, staging, archive_names, mode=mode)
+        result = store.commit_directory(slug, staging, build_missing_index=build_missing_index)
+        result.kept = kept
+        result.mode = mode
+        return result
+
+
+def _keep_omitted(
+    store: "ProfileStore",
+    slug: str,
+    staging: Path,
+    archive_names: set[str],
+    *,
+    mode: PushMode,
+) -> dict[str, int]:
+    """Copy the live files the archive omitted into ``staging``, per ``mode``.
+
+    Under ``replace`` a :data:`WITHHELD_CLASSES` class is kept only when the
+    archive carried none of it: one member of a class makes the archive
+    authoritative for the whole class. Under ``merge`` every live file the
+    archive did not name is kept, counted under its class or
+    :data:`OTHER_CLASS`. Under ``prune`` nothing is. Returns
+    ``{class: files_kept}`` for whatever contributed; a new profile has
+    nothing to keep either way.
+
+    The live copies come from the store's own directory when it has one and
+    from a scratch export otherwise (push is rare; an export is affordable).
+    Fulltext kept this way is the server's own copy, already admitted under
+    its ``accept_fulltext`` policy, so that gate does not apply here.
+    """
+    if mode == "prune" or not store.exists(slug):
+        return {}
+
+    if mode == "merge":
+
+        def _class_of(rel: str) -> str | None:
+            if rel in archive_names:
+                return None
+            cls = next((c for c, match in WITHHELD_CLASSES.items() if match(rel)), None)
+            return cls or OTHER_CLASS
+    else:
+        absent = {
+            cls: match
+            for cls, match in WITHHELD_CLASSES.items()
+            if not any(match(name) for name in archive_names)
+        }
+        if not absent:
+            return {}
+
+        def _class_of(rel: str) -> str | None:
+            return next((c for c, match in absent.items() if match(rel)), None)
+
+    live_slug = store.resolve_slug(slug)
+    root = store.root
+    with tempfile.TemporaryDirectory(prefix=f"rp-keep-{slug}-") as tmp:
+        live = (
+            root / live_slug if root is not None else store.export_directory(live_slug, Path(tmp))
+        )
+        kept: dict[str, int] = {}
+        for item in sorted(live.rglob("*")):
+            if not item.is_file():
+                continue
+            rel = item.relative_to(live).as_posix()
+            cls = _class_of(rel)
+            if cls is None:
+                continue
+            target = staging / rel
+            if target.exists():  # never overwrite what the archive carried
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(item, target)
+            kept[cls] = kept.get(cls, 0) + 1
+    return kept
 
 
 def _staged_rid(staging: Path) -> str:

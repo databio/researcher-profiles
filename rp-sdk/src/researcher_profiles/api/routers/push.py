@@ -39,6 +39,7 @@ from ..deps import (
 )
 from ..upload import (
     DEFAULT_MAX_UPLOAD_BYTES,
+    PUSH_MODES,
     SLUG_RE,
     UploadError,
     build_viewer_archive,
@@ -205,6 +206,13 @@ async def _put_profile_tarball(
     if not data:
         raise HTTPException(status_code=400, detail="empty request body")
 
+    # ``?mode=``: what happens to the live files the archive does not carry.
+    mode = request.query_params.get("mode", "replace")
+    if mode not in PUSH_MODES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"invalid mode {mode!r} (expected one of {', '.join(PUSH_MODES)})",
+        )
     try:
         result = ingest_archive(
             store,
@@ -212,6 +220,7 @@ async def _put_profile_tarball(
             data,
             include_fulltext=bool(getattr(request.app.state, "accept_fulltext", False)),
             gate=lambda rid: _push_gate(request, slug, rid),
+            mode=mode,
         )
     except UploadError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
@@ -229,6 +238,8 @@ async def _put_profile_tarball(
         name=result.name,
         level=result.level,
         indexed=result.indexed,
+        kept=result.kept,
+        mode=result.mode,
     )
 
 

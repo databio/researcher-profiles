@@ -1,4 +1,4 @@
-"""The owner-scoped interactive edit surface: metadata, soul, visibility.
+"""The owner-scoped interactive edit surface: metadata, soul, works, visibility.
 
 Every route here hangs on ``edit_router``, which carries a router-level
 ``Depends(require_owner)``. ``deps.require_owner`` takes ``slug`` as a required
@@ -17,13 +17,15 @@ from ...models.api import (
     SoulUpdate,
     VisibilityPatch,
     VisibilityReport,
+    WorkPatch,
 )
 from ...privacy import (
     ViewerTier,
     explain_tiers,
     tier_allows,
 )
-from ...profile.edit import EditError
+from ...profile.edit import EditError, WorkNotFoundError
+from ...schema import PaperRecord
 from ...store import ProfileStore
 from .._projection import (
     _content_hash,
@@ -135,6 +137,145 @@ def put_profile_soul(
         slug=resolved,
         rid=getattr(prof, "rid", None),
         updated=["soul"],
+        content_hash=_content_hash(store, resolved),
+    )
+
+
+def _work_edit_error(e: EditError) -> HTTPException:
+    """The status an :class:`EditError` from a work edit deserves.
+
+    404 when the corpus has no such ``paper_id`` (the caller addressed nothing),
+    400 for every other refusal (the caller addressed the right record and sent
+    something it may not send).
+    """
+    status = 404 if isinstance(e, WorkNotFoundError) else 400
+    return HTTPException(status_code=status, detail=str(e))
+
+
+@edit_router.get("/profiles/{slug}/works/{paper_id}", response_model=PaperRecord)
+def get_profile_work(
+    slug: str,
+    paper_id: str,
+    store: ProfileStore = Depends(get_store),
+) -> PaperRecord:
+    """One work's whole record, as an editor needs to see it before patching.
+
+    ``GET /profiles/{slug}/papers`` serves a reading list and drops the fields
+    this surface edits (``citation``, ``access``, ``summary``, ...), so an
+    owner had no way to read back what they were about to change. Owner-scoped
+    like the rest of this router, and the full record is exactly what that
+    scope already grants.
+    """
+    prof = get_profile(slug, store)
+    for record in prof.papers:
+        if record.paper_id == paper_id:
+            return record
+    raise HTTPException(
+        status_code=404, detail=f"no work with paper_id {paper_id!r} in this profile"
+    )
+
+
+@edit_router.patch("/profiles/{slug}/works/{paper_id}", response_model=EditResult)
+def patch_profile_work(
+    slug: str,
+    paper_id: str,
+    body: WorkPatch,
+    request: Request,
+    store: ProfileStore = Depends(get_store),
+) -> EditResult:
+    """Patch owner-editable fields of one work in ``sources/papers.jsonld``.
+
+    The granular write for a corpus record: a wrong ``doi`` on one paper is a
+    one-field fix, and before this the only transport was a whole-profile push.
+    Only the fields present in the body are applied, and only fields in the
+    editable whitelist
+    (:data:`researcher_profiles.profile.edit.EDITABLE_WORK_FIELDS`). The patched
+    record is re-validated before it is written; a patch that would produce an
+    invalid record is a 400 and leaves the corpus untouched.
+
+    ``base_hash`` works as on the metadata patch. Note what it covers: the
+    digest spans the profile document and the SOUL (see
+    :func:`_check_base_hash`), so it catches a concurrent *profile* edit, not a
+    concurrent edit to a different work.
+    """
+    prof = get_profile(slug, store)
+    patch = body.model_dump(exclude_unset=True, by_alias=False)
+    # ``base_hash`` is the concurrency token, not a field of the work. Popped
+    # before the whitelist check, or the whitelist would reject the caller's own
+    # bookkeeping; ``paper_id`` never appears here because it is the route
+    # parameter and re-keying a record is not a patch.
+    base_hash = patch.pop("base_hash", None)
+    _check_base_hash(store, store.resolve_slug(slug), base_hash)
+    check_write_scope(request, "works", {"paper_id": paper_id, "fields": sorted(patch)})
+    try:
+        prof.edit.patch_work(paper_id, patch)
+    except EditError as e:
+        raise _work_edit_error(e) from e
+    resolved = store.resolve_slug(slug)
+    invalidate_after_write(request, store, resolved)
+    return EditResult(
+        slug=resolved,
+        rid=getattr(prof, "rid", None),
+        updated=sorted(patch.keys()),
+        content_hash=_content_hash(store, resolved),
+    )
+
+
+@edit_router.put("/profiles/{slug}/works/{paper_id}", response_model=EditResult)
+def put_profile_work(
+    slug: str,
+    paper_id: str,
+    body: dict,
+    request: Request,
+    store: ProfileStore = Depends(get_store),
+) -> EditResult:
+    """Add one work, or replace the record already under this ``paper_id``.
+
+    The body is a whole :class:`~researcher_profiles.schema.PaperRecord`, but
+    it is annotated as a dict and parsed by ``add_work``: taking the on-disk
+    model as the declared body would make a malformed record a 422 about the
+    request shape instead of the 400 naming the offending field that every
+    other edit route answers with.
+
+    The path's ``paper_id`` wins over whatever the body carries, so a record
+    can never be filed under a name other than the one it was addressed by.
+    """
+    prof = get_profile(slug, store)
+    check_write_scope(request, "works", {"paper_id": paper_id, "fields": ["*"]})
+    try:
+        prof.edit.add_work({**body, "paper_id": paper_id})
+    except EditError as e:
+        raise _work_edit_error(e) from e
+    resolved = store.resolve_slug(slug)
+    invalidate_after_write(request, store, resolved)
+    return EditResult(
+        slug=resolved,
+        rid=getattr(prof, "rid", None),
+        updated=[paper_id],
+        content_hash=_content_hash(store, resolved),
+    )
+
+
+@edit_router.delete("/profiles/{slug}/works/{paper_id}", response_model=EditResult)
+def delete_profile_work(
+    slug: str,
+    paper_id: str,
+    request: Request,
+    store: ProfileStore = Depends(get_store),
+) -> EditResult:
+    """Remove one work from ``sources/papers.jsonld``."""
+    prof = get_profile(slug, store)
+    check_write_scope(request, "works", {"paper_id": paper_id, "fields": []})
+    try:
+        prof.edit.remove_work(paper_id)
+    except EditError as e:
+        raise _work_edit_error(e) from e
+    resolved = store.resolve_slug(slug)
+    invalidate_after_write(request, store, resolved)
+    return EditResult(
+        slug=resolved,
+        rid=getattr(prof, "rid", None),
+        updated=[paper_id],
         content_hash=_content_hash(store, resolved),
     )
 

@@ -53,7 +53,14 @@ from ._http import (
     auth_headers,
 )
 from ._identity import resolve_rid
-from ._push import push_profile
+from ._push import (
+    PLAN_GROUPS,
+    PushPlan,
+    PushRefused,
+    PushResult,
+    PushWouldRemove,
+    push_profile,
+)
 from ._registry import (
     CACHE_ENV_VAR,  # noqa: F401  (re-exported)
     REGISTRY_ENV_VAR,  # noqa: F401  (re-exported)
@@ -76,6 +83,11 @@ __all__ = [
     "ApiArtifactStorage",
     "auth_headers",
     "StaticArtifactStorage",
+    "PLAN_GROUPS",
+    "PushPlan",
+    "PushRefused",
+    "PushResult",
+    "PushWouldRemove",
     "push_profile",
     "resolve_rid",
     "install_profile",

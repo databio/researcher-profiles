@@ -389,6 +389,17 @@ server runs with `RESEARCHER_PROFILES_ACCEPT_FULLTEXT=true` (default false).
 The registry refuses to store copyrighted paper text merely because a client
 sent it.
 
+**Query parameter `mode`** (tarball only): what the server does with a live
+file the archive does not carry. Any other value is a `400`.
+
+| `mode` | A file the archive omits |
+|---|---|
+| `replace` (default) | Deleted, unless it belongs to a withheld class (`sources/papers/` fulltext, `.cache/embeddings.sqlite`) the archive carried no member of; those are kept. |
+| `merge` | Kept, always. This is what `rp push --only` and `--merge` send. |
+| `prune` | Deleted, always. |
+
+A file the archive does carry is always written, in every mode.
+
 `GET /api/v1/profiles/{slug}/archive` uses a different builder,
 `build_viewer_archive`, which projects the profile through the caller's privacy
 tier and never ships full text to anyone. See
@@ -419,6 +430,8 @@ without a restart.
 | `name` | string | From the pushed `profile.jsonld`. |
 | `level` | string | Profile depth tier (`lite`, `full`, ...). |
 | `indexed` | boolean | True when the push carried `.cache/embeddings.sqlite`, i.e. the profile is immediately matchable. Always `false` for a JSON body. |
+| `kept` | object | Count of live files the archive omitted but the server kept, keyed by class (`fulltext`, `index`, or `other` under `merge`). Empty for a JSON body. |
+| `mode` | string | The push mode that was applied: `replace`, `merge`, or `prune`. |
 
 ```bash
 tar -C /path/to/profiles/jane-doe -czf - . | curl -X PUT \
@@ -435,8 +448,8 @@ which build the tarball for you (excluding dotfiles like `.archive/`).
 
 - `200` on success.
 - `400` `{"detail": "<reason>"}`: bad slug, empty body, unreadable archive,
-  unsafe member, missing `profile.jsonld`, or a staged profile that fails to
-  load.
+  unsafe member, missing `profile.jsonld`, unknown `?mode=`, or a staged
+  profile that fails to load.
 - `401` as elsewhere.
 - `413` `{"detail": "archive exceeds size cap"}`.
 
@@ -1033,7 +1046,7 @@ retries once on parse failure.
 
 ## The owner edit surface
 
-Four routes, gated by `require_owner` rather than by the consumer token (see
+Gated by `require_owner` rather than by the consumer token (see
 [Authentication](#authentication)). On bare rp-sdk that falls back to the
 operator bearer token. A host that runs the
 [management tier](../../rp-spec/dynamic-api.md#14-management-api) sets
@@ -1044,6 +1057,10 @@ operator bearer token. A host that runs the
 | `PATCH` | `/api/v1/profiles/{slug}/metadata` | Patch owner-editable metadata. |
 | `PUT` | `/api/v1/profiles/{slug}/soul` | Replace `personality/SOUL.md` whole. |
 | `GET` / `PATCH` | `/api/v1/profiles/{slug}/visibility` | Read / set artifact tiers. |
+| `GET` | `/api/v1/profiles/{slug}/works/{paper_id}` | One work's whole record. |
+| `PATCH` | `/api/v1/profiles/{slug}/works/{paper_id}` | Patch owner-editable fields of one work. |
+| `PUT` | `/api/v1/profiles/{slug}/works/{paper_id}` | Add or replace one whole record. |
+| `DELETE` | `/api/v1/profiles/{slug}/works/{paper_id}` | Remove one work from the corpus. |
 
 ### What an owner may edit
 
@@ -1063,6 +1080,21 @@ despite the shared name.
 `training` and `career` arrive as lists of objects and are validated against
 `schema.Training` / `schema.CareerEntry`. A malformed entry is a `400` naming
 the index (`career[0] is not a valid CareerEntry: ...`) and nothing is written.
+
+### What an owner may edit on one work
+
+`researcher_profiles.profile.edit.EDITABLE_WORK_FIELDS`, exactly:
+
+`name`, `doi`, `openalex_id`, `datePublished`, `type`, `citation`,
+`full_text_link`, `access`, `summary`, `first_author`, `author_position`,
+`is_corresponding`.
+
+These are the names the record carries on disk, so a caller patches what it
+read out of `sources/papers.jsonld`. Anything outside the set is a `400`
+(`cited_by_count` and the other build-derived counts included); a `paper_id`
+that is not in the corpus is a `404`. The patched record is re-validated
+before anything is written, so a bad value is a `400` and the file is
+untouched. `rp work set <paper_id> key=value ...` is the CLI for this.
 
 ### Optimistic concurrency (`base_hash` -> 409)
 

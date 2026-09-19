@@ -238,6 +238,9 @@ class ManagementClient:
     def _put(self, path: str, body: dict[str, Any]) -> Any:
         return self._handle_response(self._session.put(self._url(path), json=body))
 
+    def _delete(self, path: str) -> Any:
+        return self._handle_response(self._session.delete(self._url(path)))
+
 
 class IdentityClient:
     """Remote identity introspection resource."""
@@ -272,6 +275,23 @@ class ProfileClient:
         if base_hash:
             body["base_hash"] = base_hash
         return self._client._put(f"/api/v1/profiles/{slug}/soul", body)
+
+    def get_work(self, slug: str, paper_id: str) -> dict:
+        return self._client._get(f"/api/v1/profiles/{slug}/works/{paper_id}")
+
+    def patch_work(
+        self, slug: str, paper_id: str, patch: dict, base_hash: str | None = None
+    ) -> dict:
+        body = dict(patch)
+        if base_hash:
+            body["base_hash"] = base_hash
+        return self._client._patch(f"/api/v1/profiles/{slug}/works/{paper_id}", body)
+
+    def put_work(self, slug: str, paper_id: str, record: dict) -> dict:
+        return self._client._put(f"/api/v1/profiles/{slug}/works/{paper_id}", record)
+
+    def delete_work(self, slug: str, paper_id: str) -> dict:
+        return self._client._delete(f"/api/v1/profiles/{slug}/works/{paper_id}")
 
     def patch_visibility(
         self,

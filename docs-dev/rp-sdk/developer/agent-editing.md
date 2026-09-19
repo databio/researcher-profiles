@@ -49,6 +49,7 @@ The actions rp-sdk passes:
 |---|---|---|
 | `"metadata"` | `{"fields": ["name", "summary"]}` | one scope per field; the host keeps a map keyed by `researcher_profiles.edit.EDITABLE_METADATA_FIELDS` |
 | `"soul"` | `{}` | `profile:narrative` |
+| `"works"` | `{"paper_id": "smith2023protein", "fields": ["doi"]}` | `profile:works`; `fields` is `["*"]` for a whole-record `PUT` and `[]` for a `DELETE` |
 | `"visibility"` | `{"slug": "...", "profile_visibility": "...", "artifacts": [...]}` | `profile:visibility`, narrow-only |
 
 The 403 it raises looks like this:
@@ -79,7 +80,7 @@ definitions with descriptions, endpoints, fields, dangerous flag, and defaults.
 
 App scopes (`read`, `match`, `persona`, `push`) and agent scopes
 (`profile:metadata`, `profile:history`, `profile:identity`,
-`profile:narrative`, `profile:visibility`) cannot mix. A host's key-minting
+`profile:narrative`, `profile:visibility`, `profile:works`) cannot mix. A host's key-minting
 code should raise on any attempt to combine them.
 
 ## See also

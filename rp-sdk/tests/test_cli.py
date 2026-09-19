@@ -18,9 +18,12 @@ this file takes only their parsing and exit-code edges.
 """
 
 import argparse
+import hashlib
 import importlib
+import io
 import json
 import re
+import tarfile
 from functools import cached_property, lru_cache
 from pathlib import Path
 from types import SimpleNamespace
@@ -61,6 +64,7 @@ VERBS_TOP = (
     "sign-verify",
     "agent",
     "profile",
+    "work",
 )
 
 #: Every reachable parser path, including the two ``schema`` subcommands.
@@ -80,6 +84,9 @@ VERB_PATHS = tuple((v,) for v in VERBS_TOP) + (
     ("profile", "diff"),
     ("profile", "push"),
     ("profile", "visibility"),
+    ("work", "show"),
+    ("work", "set"),
+    ("work", "rm"),
 )
 VERB_IDS = [" ".join(p) for p in VERB_PATHS]
 
@@ -165,7 +172,16 @@ class TestParsing:
             (["skill"], {"install": False, "dir": None}),
             (
                 ["push", "P", "--url", "U"],
-                {"slug": None, "token": None, "include_fulltext": False},
+                {
+                    "slug": None,
+                    "token": None,
+                    "include_fulltext": False,
+                    "dry_run": False,
+                    "force": False,
+                    "only": None,
+                    "merge": False,
+                    "prune": False,
+                },
             ),
             (["listr"], {"url": None, "as_json": False}),
         ],
@@ -253,11 +269,12 @@ def _results() -> dict:
     """Return values whose *shape* the CLI's own formatting depends on.
 
     Not bare mocks: `install`'s human branch indexes ``summary["status"]`` and
-    ``["path"]`` directly, `push`'s summary line ``.get()``s four keys, and the
-    `index` branch reads six report attributes. A thinner stand-in would only
-    prove that a KeyError is possible.
+    ``["path"]`` directly, `push`'s summary line reads a ``PushResult``'s plan
+    counts and ``.get()``s four summary keys, and the `index` branch reads six
+    report attributes. A thinner stand-in would only prove that a KeyError is
+    possible.
     """
-    from researcher_profiles.client import RegistryListing
+    from researcher_profiles.client import PushPlan, PushResult, RegistryListing
     from researcher_profiles.validate import ProfileValidationReport
 
     return {
@@ -267,12 +284,15 @@ def _results() -> dict:
         "researcher_profiles.embeddings.write_flat_export": None,
         "researcher_profiles.publish.render_profile": None,
         "researcher_profiles.publish.build_site": SimpleNamespace(warnings=[]),
-        "researcher_profiles.client.push_profile": {
-            "slug": "jane-doe",
-            "name": "Jane Doe",
-            "level": "full",
-            "indexed": 0,
-        },
+        "researcher_profiles.client.push_profile": PushResult(
+            plan=PushPlan(
+                slug="jane-doe",
+                exists=True,
+                changed={"works": ["sources/papers.jsonld"]},
+                dropped={"fulltext": ["sources/papers/doe2016example.md"]},
+            ),
+            summary={"slug": "jane-doe", "name": "Jane Doe", "level": "full", "indexed": 0},
+        ),
         "researcher_profiles.client.install_profile": {
             "status": "installed",
             "slug": "jane-doe",
@@ -326,10 +346,30 @@ class TestWiring:
                 {"base_url": "U", "no_index": True, "now": "T"},
             ),
             (
-                ["push", "{P}", "--url", "U", "--slug", "S", "--token", "T", "--include-fulltext"],
+                [
+                    "push",
+                    "{P}",
+                    "--url",
+                    "U",
+                    "--slug",
+                    "S",
+                    "--token",
+                    "T",
+                    "--include-fulltext",
+                    "--force",
+                    "--only",
+                    "sources/papers.jsonld",
+                ],
                 "researcher_profiles.client.push_profile",
                 ("U", "{P}"),
-                {"slug": "S", "token": "T", "include_fulltext": True},
+                {
+                    "slug": "S",
+                    "token": "T",
+                    "include_fulltext": True,
+                    "force": True,
+                    "only": ["sources/papers.jsonld"],
+                    "dry_run": False,
+                },
             ),
             (
                 ["install", "a", "--url", "U", "--root", "R", "--token", "T", "--force"],
@@ -613,6 +653,201 @@ class TestMachineOutput:
         assert stderr_marker in captured.err
 
 
+class _StubResponse:
+    def __init__(self, status_code: int, payload: dict | None = None):
+        self.status_code = status_code
+        self.text = ""
+        self._payload = payload or {}
+
+    def json(self) -> dict:
+        return self._payload
+
+
+class _StubServer:
+    """A push target: answers the preflight GET, records every PUT.
+
+    Stands in for ``httpx.Client``, which ``push_profile`` constructs itself
+    (the CLI has no client to inject), so patching the class is the seam. A
+    ``manifest`` of ``None`` means the server does not hold the profile.
+    """
+
+    def __init__(self, manifest: list[dict] | None = None):
+        self.manifest = manifest
+        self.puts: list[tuple[str, bytes]] = []
+
+    def __call__(self, **kwargs):
+        return self
+
+    def get(self, url):
+        if self.manifest is None:
+            return _StubResponse(404)
+        return _StubResponse(200, {"slug": "jane-doe", "manifest": self.manifest})
+
+    def put(self, url, *, content, headers=None):
+        self.puts.append((url, content))
+        return _StubResponse(
+            200, {"slug": "jane-doe", "name": "Jane Doe", "level": "full", "indexed": False}
+        )
+
+    def close(self):
+        pass
+
+
+def _entry(profile_dir: Path, rel: str, role: str) -> dict:
+    """A server manifest entry for a file that is on disk, digest and all."""
+    digest = hashlib.sha256((profile_dir / rel).read_bytes()).hexdigest()
+    return {"contentUrl": rel, "role": role, "sha256": digest}
+
+
+def _sent_names(payload: bytes) -> set[str]:
+    """The member names of an uploaded tarball."""
+    with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as tf:
+        return {m.name for m in tf.getmembers()}
+
+
+class TestPushPreflight:
+    """``rp push`` says what it will do before it does it, and can be stopped.
+
+    The diff itself belongs to ``push_profile``; what is asserted here is the
+    CLI's half: nothing is uploaded on a dry run, a removal is refused rather
+    than performed, ``--only`` reaches the archive builder, and an exclusion
+    the user cannot see on disk is never silent.
+    """
+
+    @pytest.fixture
+    def server(self, monkeypatch):
+        import httpx
+
+        def _make(manifest: list[dict] | None = None) -> _StubServer:
+            stub = _StubServer(manifest)
+            monkeypatch.setattr(httpx, "Client", stub)
+            return stub
+
+        return _make
+
+    def test_dry_run_prints_the_plan_and_uploads_nothing(self, server, jane_doe_dir, capsys):
+        stub = server([_entry(jane_doe_dir, "sources/papers.jsonld", "works")])
+
+        assert main(["push", str(jane_doe_dir), "--url", "http://x", "--dry-run"]) == 0
+
+        captured = capsys.readouterr()
+        assert stub.puts == []
+        assert "dry run: push jane-doe -> http://x (update, replace)" in captured.out
+        # One file matches the server's digest; everything else is new.
+        assert "added (8):" in captured.out
+        assert "personality/SOUL.md" in captured.out
+        # unchanged is counted, never listed: it is the part nothing happens to.
+        assert "sources/papers.jsonld" not in captured.out
+        # Withheld fulltext is a count, not a warning.
+        assert "withheld 2 fulltext file(s)" in captured.err
+        assert "warning:" not in captured.err
+
+    def test_dry_run_json_carries_every_group(self, server, jane_doe_dir, capsys):
+        server([_entry(jane_doe_dir, "sources/papers.jsonld", "works")])
+
+        assert main(["push", str(jane_doe_dir), "--url", "http://x", "--dry-run", "--json"]) == 0
+
+        plan = json.loads(capsys.readouterr().out)
+        assert plan["slug"] == "jane-doe" and plan["exists"] is True
+        assert plan["unchanged"] == {"works": ["sources/papers.jsonld"]}
+        assert plan["counts"] == {
+            "added": 8,
+            "changed": 0,
+            "unchanged": 1,
+            "removed": 0,
+            "kept": 0,
+        }
+        assert plan["dropped"]["fulltext"]
+
+    def test_a_push_that_removes_files_refuses_and_uploads_nothing(
+        self, server, jane_doe_dir, capsys
+    ):
+        stub = server([{"contentUrl": "sources/web/gone.md", "role": "web", "sha256": "abc"}])
+
+        assert main(["push", str(jane_doe_dir), "--url", "http://x"]) == 2
+
+        err = capsys.readouterr().err
+        assert stub.puts == []
+        assert "removed (1):" in err and "sources/web/gone.md" in err
+        assert "--force" in err
+        assert "Traceback" not in err
+
+    def test_a_dry_run_reports_removals_instead_of_refusing(self, server, jane_doe_dir, capsys):
+        """Showing them is what was asked for; a run that uploads nothing
+        cannot perform them."""
+        stub = server([{"contentUrl": "sources/web/gone.md", "role": "web", "sha256": "abc"}])
+
+        assert main(["push", str(jane_doe_dir), "--url", "http://x", "--dry-run"]) == 0
+
+        assert stub.puts == []
+        assert "removed (1):" in capsys.readouterr().out
+
+    def test_force_sends_the_push_and_the_line_counts_the_diff(self, server, jane_doe_dir, capsys):
+        stub = server([{"contentUrl": "sources/web/gone.md", "role": "web", "sha256": "abc"}])
+
+        assert main(["push", str(jane_doe_dir), "--url", "http://x", "--force"]) == 0
+
+        assert len(stub.puts) == 1
+        assert capsys.readouterr().out.startswith("pushed jane-doe: +9 ~0 -1 ")
+
+    def test_only_uploads_the_document_and_the_named_file(self, server, jane_doe_dir, capsys):
+        """And merges: everything the server holds and the archive lacks stays.
+
+        The far side holds a file this archive does not carry, which under the
+        default mode would be a removal and a refusal. ``--only`` is the
+        instruction "send these, leave the rest alone", so it is neither.
+        """
+        stub = server([{"contentUrl": "sources/web/keep.md", "role": "web", "sha256": "abc"}])
+
+        argv = ["push", str(jane_doe_dir), "--url", "http://x", "--only", "sources/papers.jsonld"]
+        assert main(argv) == 0
+
+        url, payload = stub.puts[0]
+        assert _sent_names(payload) == {"profile.jsonld", "sources/papers.jsonld"}
+        assert url.endswith("?mode=merge")
+
+    def test_only_and_prune_contradict_and_upload_nothing(self, server, jane_doe_dir, capsys):
+        stub = server()
+
+        argv = ["push", str(jane_doe_dir), "--url", "http://x", "--prune", "--only", "SKILL.md"]
+        assert main(argv) == 2
+
+        assert stub.puts == []
+        assert "--prune" in capsys.readouterr().err
+
+    def test_a_merge_dry_run_names_the_mode_and_removes_nothing(self, server, jane_doe_dir, capsys):
+        server([{"contentUrl": "sources/web/keep.md", "role": "web", "sha256": "abc"}])
+
+        argv = ["push", str(jane_doe_dir), "--url", "http://x", "--merge", "--dry-run"]
+        assert main(argv) == 0
+
+        out = capsys.readouterr().out
+        assert "dry run: push jane-doe -> http://x (update, merge)" in out
+        assert "removed (" not in out
+
+    def test_a_retired_cache_directory_refuses_with_the_fix(self, server, jane_doe_dir, capsys):
+        stub = server()
+        (jane_doe_dir / "cache").mkdir()
+        (jane_doe_dir / "cache" / "embeddings.sqlite").write_bytes(b"not really sqlite")
+
+        assert main(["push", str(jane_doe_dir), "--url", "http://x"]) == 2
+
+        err = capsys.readouterr().err
+        assert stub.puts == []
+        assert "cache/embeddings.sqlite" in err
+        assert "rp manifest --write" in err
+
+    def test_a_non_spec_file_on_disk_is_warned_about(self, server, jane_doe_dir, capsys):
+        stub = server()
+        (jane_doe_dir / "sources" / "html").mkdir(parents=True)
+        (jane_doe_dir / "sources" / "html" / "scrape.html").write_text("<html></html>")
+
+        assert main(["push", str(jane_doe_dir), "--url", "http://x"]) == 0
+
+        assert len(stub.puts) == 1
+        assert "warning: 1 path(s) are not profile members" in capsys.readouterr().err
+
+
 class TestErrorHandling:
     """A failure is a message and a code, never a traceback."""
 
@@ -736,6 +971,103 @@ class TestManagementClientDispatch:
         assert main(["profile", "visibility", "set", "--tier", "internal"]) == 1
         assert calls == []
         assert "Error: denied" in capsys.readouterr().err
+
+
+class TestWorkVerb:
+    """``rp work``: ``key=value`` to a patch, and ``--dry-run`` writes nothing."""
+
+    def _install(self, monkeypatch, record=None):
+        from researcher_profiles.cli.auth import agent
+
+        credential = agent.Credential(
+            "rpa_test", "https://example.test", "test", profile="jane-doe"
+        )
+        calls = []
+        remote = record or {"paper_id": "smith2023protein", "doi": None, "datePublished": "2023"}
+
+        class FakeClient:
+            def __init__(self, _credential):
+                self.profile = SimpleNamespace(
+                    get_work=lambda slug, pid: calls.append(("get", slug, pid)) or remote,
+                    patch_work=lambda slug, pid, patch, base_hash=None: (
+                        calls.append(("patch", slug, pid, patch, base_hash))
+                        or {"updated": sorted(patch)}
+                    ),
+                    delete_work=lambda slug, pid: calls.append(("delete", slug, pid)) or {},
+                )
+
+        monkeypatch.setattr(agent, "resolve_credential", lambda **_: credential)
+        monkeypatch.setattr(agent, "ManagementClient", FakeClient)
+        return calls
+
+    def test_assignments_become_a_typed_patch(self, monkeypatch, capsys):
+        """JSON where it parses, the literal string where it does not.
+
+        ``datePublished=2023`` has to arrive as an int and
+        ``is_corresponding=true`` as a bool or the record fails re-validation
+        server-side; a citation with a colon in it is not JSON and must survive
+        as the string the user typed.
+        """
+        calls = self._install(monkeypatch)
+        assert (
+            main(
+                [
+                    "work",
+                    "set",
+                    "smith2023protein",
+                    "datePublished=2023",
+                    "is_corresponding=true",
+                    "citation=Smith et al., Nature (2023)",
+                ]
+            )
+            == 0
+        )
+        assert calls == [
+            (
+                "patch",
+                "jane-doe",
+                "smith2023protein",
+                {
+                    "datePublished": 2023,
+                    "is_corresponding": True,
+                    "citation": "Smith et al., Nature (2023)",
+                },
+                None,
+            )
+        ]
+        assert "updated" in capsys.readouterr().out
+
+    def test_if_match_travels_as_the_base_hash(self, monkeypatch):
+        calls = self._install(monkeypatch)
+        assert (
+            main(["work", "set", "smith2023protein", "doi=10.1/x", "--if-match", "sha256:a"]) == 0
+        )
+        assert calls[0][-1] == "sha256:a"
+        # --force drops it, which is what last-writer-wins means here.
+        assert main(["work", "set", "smith2023protein", "doi=10.1/x", "--force"]) == 0
+        assert calls[1][-1] is None
+
+    def test_dry_run_writes_nothing_and_shows_the_current_value(self, monkeypatch, capsys):
+        calls = self._install(monkeypatch)
+        assert main(["work", "set", "smith2023protein", "doi=10.1/x", "--dry-run"]) == 0
+        assert [c[0] for c in calls] == ["get"]
+        assert "-> '10.1/x'" in capsys.readouterr().out
+
+    def test_a_bare_word_is_a_usage_error(self, monkeypatch, capsys):
+        calls = self._install(monkeypatch)
+        assert main(["work", "set", "smith2023protein", "doi"]) == 2
+        assert calls == []
+        assert "key=value" in capsys.readouterr().err
+
+    def test_show_and_rm_reach_the_right_resource(self, monkeypatch, capsys):
+        calls = self._install(monkeypatch)
+        assert main(["work", "show", "smith2023protein", "--json"]) == 0
+        assert main(["work", "rm", "smith2023protein"]) == 0
+        assert calls == [
+            ("get", "jane-doe", "smith2023protein"),
+            ("delete", "jane-doe", "smith2023protein"),
+        ]
+        assert '"paper_id"' in capsys.readouterr().out
 
 
 class TestPluginSeam:
