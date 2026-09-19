@@ -37,27 +37,40 @@ export function FilesPanel({ files }: Props) {
         The raw files behind this profile. Every link is a typed entry from the
         profile manifest (hasPart / subjectOf).
       </p>
-      <ul className="list-plain flex flex-col gap-1">
-        {files.map((f) => (
-          <li key={f.href} className="file-list__item">
-            <a className="file-list__link" href={f.href} target="_blank" rel="noreferrer">
-              {roleLabel(f.role)}
-            </a>
-            <span className="file-list__name">{fileName(f.href)}</span>
-            <span className="file-list__meta">
-              {f.visibility && (
-                <span className={`badge ${tierClass(f.visibility)}`}>
-                  {f.visibility}
-                </span>
-              )}
-              <span className="file-list__type">{f.mediaType}</span>
-              {f.bytes != null && (
-                <span className="file-list__bytes">{formatBytes(f.bytes)}</span>
-              )}
-            </span>
-          </li>
-        ))}
-      </ul>
+      <div className="data-table-wrap">
+        <table className="data-table data-table--static">
+          <thead>
+            <tr>
+              <th scope="col">Role</th>
+              <th scope="col">File</th>
+              <th scope="col">Visibility</th>
+              <th scope="col">Type</th>
+              <th scope="col" className="col-right">
+                Size
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {files.map((f) => (
+              <tr key={f.href}>
+                <td>
+                  <a href={f.href} target="_blank" rel="noreferrer">
+                    {roleLabel(f.role)}
+                  </a>
+                </td>
+                <td className="file-list__name">{fileName(f.href)}</td>
+                <td>
+                  {f.visibility && (
+                    <span className={`badge ${tierClass(f.visibility)}`}>{f.visibility}</span>
+                  )}
+                </td>
+                <td className="file-list__type">{f.mediaType}</td>
+                <td className="col-right">{f.bytes != null ? formatBytes(f.bytes) : ""}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }

@@ -479,6 +479,15 @@
   background: var(--rp-color-surface-raised);
 }
 
+/* Non-sortable variant: headers aren't click targets. */
+.data-table--static th {
+  cursor: default;
+}
+
+.data-table .col-right {
+  text-align: right;
+}
+
 /* === TOOLBAR (filter + count) =========================================== */
 
 .toolbar {
@@ -1090,27 +1099,6 @@
   font-size: var(--font-size-sm);
 }
 
-.file-list__item {
-  display: flex;
-  align-items: baseline;
-  gap: var(--space-3);
-  flex-wrap: wrap;
-  padding: var(--space-2) var(--space-3);
-  border: 1px solid var(--rp-color-border);
-  border-radius: var(--radius-md);
-}
-
-.file-list__link {
-  font-weight: var(--font-weight-semibold);
-  color: var(--rp-color-accent);
-  text-decoration: none;
-  flex: 0 0 auto;
-}
-
-.file-list__link:hover {
-  text-decoration: underline;
-}
-
 .file-list__name {
   font-family: var(--font-family-mono);
   font-size: var(--font-size-sm);
@@ -1118,21 +1106,10 @@
   word-break: break-all;
 }
 
-.file-list__meta {
-  margin-left: auto;
-  display: flex;
-  align-items: baseline;
-  gap: var(--space-2);
-  font-size: var(--font-size-xs);
-  color: var(--rp-color-muted);
-}
-
 .file-list__type {
   font-family: var(--font-family-mono);
-}
-
-.file-list__bytes {
-  white-space: nowrap;
+  font-size: var(--font-size-xs);
+  color: var(--rp-color-muted);
 }
 
 /* === EMBEDDINGS PANEL =================================================== */

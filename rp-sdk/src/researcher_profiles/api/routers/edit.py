@@ -14,19 +14,21 @@ from ...models.api import (
     ArtifactTier,
     EditResult,
     MetadataPatch,
+    SectionTierReport,
     SoulUpdate,
     VisibilityPatch,
     VisibilityReport,
     WorkPatch,
 )
 from ...privacy import (
+    SECTION_FIELDS,
     ViewerTier,
     explain_tiers,
     section_tiers,
     tier_allows,
 )
 from ...profile.edit import EditError, WorkNotFoundError
-from ...schema import PaperRecord
+from ...schema import PaperRecord, most_restrictive
 from ...store import ProfileStore
 from .._projection import (
     _content_hash,
@@ -327,6 +329,31 @@ def get_profile_visibility(
         )
     artifacts.sort(key=lambda a: a.content_url)
 
+    # One row per inline section, in SECTION_FIELDS order, carrying BOTH the
+    # tier the owner declared and the tier that actually governs. The `soul`
+    # section governs no inline field: it reaches personality/SOUL.md through
+    # the manifest, so its `declared` folds in the soul artifact's own declared
+    # tier and the read-back matches what actually gates the file.
+    section_effective = section_tiers(prof.metadata)
+    declared_map = {x.section: x.visibility for x in prof.metadata.section_visibility}
+    soul_declared = [e.declared for e in explain.values() if e.role == "soul"]
+    sections: list[SectionTierReport] = []
+    for section in SECTION_FIELDS:
+        declared = declared_map.get(section, "public")
+        if section == "soul":
+            declared = most_restrictive(declared, *soul_declared)
+        effective = section_effective[section]
+        sections.append(
+            SectionTierReport(
+                section=section,
+                declared=declared,
+                effective=effective,
+                visible_to=[
+                    label for label, tier in viewers.items() if tier_allows(tier, effective)
+                ],
+            )
+        )
+
     return VisibilityReport(
         slug=resolved,
         rid=getattr(prof, "rid", None),
@@ -334,7 +361,7 @@ def get_profile_visibility(
         profile_floor=floor.tier,
         profile_floor_reason=floor.reason if floor.tier else None,
         artifacts=artifacts,
-        sections=dict(section_tiers(prof.metadata)),
+        sections=sections,
         counts=counts,
     )
 

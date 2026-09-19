@@ -82,6 +82,13 @@ class IngestResult:
     #: (``{"fulltext": 53, "index": 1}``); see ``upload.WITHHELD_CLASSES``.
     #: Filled in by ``ingest_archive``, not by ``commit_directory``.
     kept: dict[str, int] = field(default_factory=dict)
+    #: Manifest entries the server added back for kept files the incoming
+    #: manifest did not list. Filled in by ``ingest_archive``; see
+    #: ``upload._splice_kept_into_manifest``.
+    spliced: int = 0
+    #: ``{role: count}`` over the manifest the store holds after the commit:
+    #: what a reader can now fetch. Filled in by ``ingest_archive``.
+    manifest_counts: dict[str, int] = field(default_factory=dict)
     #: Which ``upload.PushMode`` the ingest ran under, and so what happened to
     #: the live files the archive did not carry.
     mode: str = "replace"

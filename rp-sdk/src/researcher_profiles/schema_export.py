@@ -29,6 +29,7 @@ from .models.api import (
     ProfileMetadataPayload,
     ProfileSummary,
     SectionTier,
+    SectionTierReport,
     VisibilityPatch,
     VisibilityReport,
 )
@@ -111,6 +112,7 @@ class _WireBundle(BaseModel):
     visibility_patch: VisibilityPatch
     artifact_visibility: ArtifactVisibility
     section_tier: SectionTier
+    section_tier_report: SectionTierReport
 
 
 def build_wire_schema() -> dict:

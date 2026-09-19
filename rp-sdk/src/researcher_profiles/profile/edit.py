@@ -369,6 +369,27 @@ class EditManager:
         doc = self._profile.metadata
         update: dict[str, Any] = {}
         changed = 0
+        # The manifest copies are built lazily: an artifacts patch needs them,
+        # and so does a `soul` section entry (which re-tiers the SOUL artifact),
+        # so whichever runs first materializes them and the other reuses them.
+        new_has_part: list[ArtifactRef] | None = None
+        new_subject_of: list[ArtifactRef] | None = None
+
+        def _retier(entry: dict[str, Any], tier: str) -> None:
+            nonlocal changed, new_has_part, new_subject_of
+            if new_has_part is None:
+                new_has_part = [p.model_copy() for p in doc.has_part]
+                new_subject_of = [p.model_copy() for p in doc.subject_of]
+            targets = select_parts(entry, new_has_part) + select_parts(entry, new_subject_of)
+            if not targets:
+                raise EditError(f"no manifest artifact matches {entry!r}")
+            for target in targets:
+                if target.role in ALWAYS_RESTRICTED_ROLES and tier != "restricted":
+                    raise EditError(FULLTEXT_LOCK_REASON)
+                if target.visibility != tier:
+                    changed += 1
+                target.visibility = tier  # type: ignore[assignment]
+
         if profile_visibility is not None:
             if profile_visibility not in valid_tiers:
                 raise EditError(
@@ -376,23 +397,11 @@ class EditManager:
                 )
             update["visibility"] = profile_visibility
         if artifacts:
-            new_has_part = [p.model_copy() for p in doc.has_part]
-            new_subject_of = [p.model_copy() for p in doc.subject_of]
             for entry in artifacts:
                 tier = entry.get("visibility")
                 if tier not in valid_tiers:
                     raise EditError(f"invalid visibility {tier!r} for artifact {entry!r}")
-                targets = select_parts(entry, new_has_part) + select_parts(entry, new_subject_of)
-                if not targets:
-                    raise EditError(f"no manifest artifact matches {entry!r}")
-                for target in targets:
-                    if target.role in ALWAYS_RESTRICTED_ROLES and tier != "restricted":
-                        raise EditError(FULLTEXT_LOCK_REASON)
-                    if target.visibility != tier:
-                        changed += 1
-                    target.visibility = tier  # type: ignore[assignment]
-            update["has_part"] = new_has_part
-            update["subject_of"] = new_subject_of
+                _retier(entry, tier)
         if sections:
             declared = {x.section: x.visibility for x in doc.section_visibility}
             for entry in sections:
@@ -406,9 +415,18 @@ class EditManager:
                 if declared.get(parsed.section) != parsed.visibility:
                     changed += 1
                 declared[parsed.section] = parsed.visibility
+                # SOUL is an artifact, not an inline field, so the section tier
+                # governs personality/SOUL.md only if it reaches the manifest.
+                # Re-tier every `soul` part to the same tier so this one row is
+                # the single owner-facing knob and the file follows it.
+                if parsed.section == "soul":
+                    _retier({"role": "soul", "visibility": parsed.visibility}, parsed.visibility)
             update["section_visibility"] = [
                 SectionVisibility(section=s, visibility=v) for s, v in sorted(declared.items())
             ]
+        if new_has_part is not None:
+            update["has_part"] = new_has_part
+            update["subject_of"] = new_subject_of
         if not update:
             return doc, 0
         updated = doc.model_copy(update=update)

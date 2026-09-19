@@ -550,10 +550,20 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
 
     @staticmethod
     def _manifest_of(profile: ResearcherProfile) -> list[tuple[str, ArtifactRef, int]]:
-        """``(manifest_slot, part, ordinal)`` for every artifact of ``profile``."""
+        """``(manifest_slot, part, ordinal)`` for every artifact of ``profile``.
+
+        The recorded manifest wins when there is one, which makes it the real
+        index: a file sitting in a source directory that the manifest does not
+        list gets no row and is silently not persisted. That is a legitimate
+        rule (the published document claims the manifest, and regenerating it
+        during an ingest would rewrite a published record), and it is also how
+        a partial ``profile.jsonld`` once deleted 53 artifacts. So when the
+        source is a directory, count what the manifest leaves out and say so.
+        """
         meta = profile.metadata
         recorded = [*meta.has_part, *meta.subject_of]
         if recorded:
+            SqlProfileStore._warn_unlisted(profile, {p.content_url for p in recorded})
             return [
                 *[("hasPart", p, i) for i, p in enumerate(meta.has_part)],
                 *[("subjectOf", p, i) for i, p in enumerate(meta.subject_of)],
@@ -563,6 +573,33 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
             *[("hasPart", p, i) for i, p in enumerate(parts)],
             *[("subjectOf", p, i) for i, p in enumerate(subjects)],
         ]
+
+    @staticmethod
+    def _warn_unlisted(profile: ResearcherProfile, recorded_urls: set[str]) -> None:
+        """Log the files the source directory holds that the manifest omits.
+
+        A cheap sentinel for the next bug of this class. Directory sources
+        only: any other backend has no "files that are there but unlisted"
+        to compare against.
+        """
+        root = getattr(profile.storage, "_root", None)
+        if root is None:
+            return
+        try:
+            parts, subjects = profile.storage.build_manifest()
+        # Boundary: a diagnostic must never fail an ingest.
+        except Exception:  # noqa: BLE001
+            return
+        unlisted = sorted({p.content_url for p in (*parts, *subjects)} - recorded_urls)
+        if unlisted:
+            logger.warning(
+                "%s: %d file(s) in %s are not in the recorded manifest and will "
+                "not be persisted: %s",
+                profile.slug,
+                len(unlisted),
+                root,
+                unlisted[:5],
+            )
 
     @staticmethod
     def _artifact_row(

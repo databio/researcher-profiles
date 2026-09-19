@@ -94,6 +94,25 @@ class TestEditHelpers:
         ft = [p for p in reloaded.metadata.has_part if p.role == "paper_fulltext"]
         assert ft and all(p.visibility == "restricted" for p in ft)
 
+    def test_soul_section_retiers_the_soul_artifact(self, jane_doe_dir):
+        """The `soul` section is the single owner-facing knob for SOUL.md.
+
+        SOUL is a manifest artifact, not an inline field, so a section tier
+        that only wrote `section_visibility` would be a dead knob: the file
+        would keep whatever tier its ArtifactRef declared. Setting the section
+        must therefore re-tier every `soul` part to match.
+        """
+        prof = ResearcherProfile.from_files(jane_doe_dir)
+        _doc, changed = prof.edit.set_visibility(
+            sections=[{"section": "soul", "visibility": "internal"}]
+        )
+        assert changed >= 1
+        reloaded = ResearcherProfile.from_files(jane_doe_dir)
+        soul_refs = [p for p in reloaded.metadata.subject_of if p.role == "soul"]
+        assert soul_refs and all(p.visibility == "internal" for p in soul_refs)
+        declared = {x.section: x.visibility for x in reloaded.metadata.section_visibility}
+        assert declared["soul"] == "internal"
+
     def test_metadata_patch_stamps_date_modified(self, jane_doe_dir):
         import json
 
@@ -322,6 +341,38 @@ class TestEditEndpointsOperatorFallback:
         )
         assert r.status_code == 200, r.text
         assert "visibility" in r.json()["updated"]
+
+    def test_visibility_report_sections_are_rows(self, make_api_client, fixture_profiles_root):
+        """The report's `sections` is a list of {section, declared, effective,
+        visible_to} rows in SECTION_FIELDS order, not a flat {section: tier}
+        map: an editor shows what was declared beside what it resolves to."""
+        c = make_api_client(fixture_profiles_root(SLUG))
+        report = c.get(f"/api/v1/profiles/{SLUG}/visibility").json()
+        sections = report["sections"]
+        assert isinstance(sections, list)
+        by_name = {s["section"]: s for s in sections}
+        assert "soul" in by_name
+        row = by_name["soul"]
+        assert set(row) >= {"section", "declared", "effective", "visible_to"}
+
+    def test_soul_section_patch_retiers_artifact_and_round_trips(
+        self, make_api_client, fixture_profiles_root
+    ):
+        """PATCH sections=[{soul: internal}] re-tiers the soul artifact, and the
+        report reads the declared tier back as internal."""
+        c = make_api_client(fixture_profiles_root(SLUG))
+        r = c.patch(
+            f"/api/v1/profiles/{SLUG}/visibility",
+            json={"sections": [{"section": "soul", "visibility": "internal"}]},
+        )
+        assert r.status_code == 200, r.text
+        assert "sections" in r.json()["updated"]
+        assert r.json()["artifacts_changed"] >= 1
+        report = c.get(f"/api/v1/profiles/{SLUG}/visibility").json()
+        soul_row = next(s for s in report["sections"] if s["section"] == "soul")
+        assert soul_row["declared"] == "internal"
+        soul_artifacts = [a for a in report["artifacts"] if a.get("role") == "soul"]
+        assert soul_artifacts and all(a["declared"] == "internal" for a in soul_artifacts)
 
 
 class TestWorkEndpoints:

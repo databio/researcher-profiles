@@ -25,7 +25,7 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, get_args
+from typing import TYPE_CHECKING, Literal, get_args
 
 import pydantic
 
@@ -46,6 +46,9 @@ from ..schema import ALWAYS_RESTRICTED_ROLES  # noqa: F401  (re-exported)
 from ..store import IngestResult, ProfileStore, UploadError  # noqa: F401  (re-exported)
 from ..utils.paths import CACHE_DIRNAME, LEGACY_CACHE_DIRNAME
 from ..utils.slug import SLUG_RE  # noqa: F401  (re-exported)
+
+if TYPE_CHECKING:  # pragma: no cover
+    from ..schema import ArtifactRef
 
 logger = logging.getLogger(__name__)
 
@@ -388,6 +391,15 @@ WITHHELD_CLASSES: dict[str, Callable[[str], bool]] = {
 #: * ``merge``: keep it, always. This is what ``rp push --only`` needs: send a
 #:   file or two and leave the rest of the server's copy alone.
 #: * ``prune``: delete it, always. The archive is the whole profile.
+#:
+#: Keeping a file is not enough on its own. The manifest inside
+#: ``profile.jsonld`` is the index every reader (and the SQL store) works
+#: from, so a kept file the incoming manifest does not list is a file nobody
+#: can fetch and the SQL backend never even persists. Under ``merge`` and
+#: ``replace`` the committed manifest is therefore the incoming manifest
+#: **plus an entry for every kept file** (see
+#: :func:`_splice_kept_into_manifest`). Under ``prune`` nothing is kept, so
+#: nothing is spliced and the incoming manifest stands alone.
 PushMode = Literal["replace", "merge", "prune"]
 
 #: The :data:`PushMode` values, for a route validating a query parameter.
@@ -491,11 +503,101 @@ def ingest_archive(
         archive_names = extract_profile_archive(data, staging, include_fulltext=include_fulltext)
         if gate is not None:
             gate(_staged_rid(staging))
-        kept = _keep_omitted(store, slug, staging, archive_names, mode=mode)
+        kept_paths = _keep_omitted(store, slug, staging, archive_names, mode=mode)
+        kept_flat = {rel for paths in kept_paths.values() for rel in paths}
+        spliced = (
+            _splice_kept_into_manifest(staging, _live_manifest(store, slug), kept_flat)
+            if kept_flat
+            else 0
+        )
         result = store.commit_directory(slug, staging, build_missing_index=build_missing_index)
-        result.kept = kept
+        result.kept = {cls: len(paths) for cls, paths in kept_paths.items()}
+        result.spliced = spliced
         result.mode = mode
+        result.manifest_counts = _committed_manifest_counts(store, slug)
         return result
+
+
+def _live_manifest(store: "ProfileStore", slug: str) -> dict[str, tuple[str, "ArtifactRef"]]:
+    """``{contentUrl: (manifest_slot, entry)}`` for the profile the store holds.
+
+    Empty when the store does not hold it yet: a create has no live manifest
+    to splice anything out of.
+    """
+    if not store.exists(slug):
+        return {}
+    meta = store.get(slug).metadata
+    return {
+        **{p.content_url: ("subjectOf", p) for p in meta.subject_of},
+        # ``hasPart`` wins a duplicate contentUrl, matching the slot order the
+        # SQL store writes rows in.
+        **{p.content_url: ("hasPart", p) for p in meta.has_part},
+    }
+
+
+def _splice_kept_into_manifest(
+    staging: Path,
+    live_manifest: dict[str, tuple[str, "ArtifactRef"]],
+    kept_paths: set[str],
+) -> int:
+    """Add the live manifest entries for every kept file the staged manifest omits.
+
+    A kept file that the committed manifest does not list is a file no reader
+    can fetch, and the SQL store will not even persist it: ``put`` writes rows
+    *by the recorded manifest*, not by what is in staging. So keeping bytes
+    without keeping the index entry is not a partial save, it is a silent
+    delete. Returns how many entries were added.
+
+    Ordering is deterministic: the staged entries keep their order and the
+    spliced ones follow, sorted by ``contentUrl``.
+    """
+    from ..schema import ProfileDocument
+    from ..schema.jsonld import canonical_dumps
+
+    doc_path = staging / PROFILE_DOCUMENT
+    try:
+        doc = ProfileDocument.model_validate_json(doc_path.read_bytes())
+    except (OSError, ValueError, pydantic.ValidationError) as e:
+        raise UploadError(f"staged profile failed to load: {e}") from e
+
+    staged_urls = {p.content_url for p in (*doc.has_part, *doc.subject_of)}
+    missing = sorted(rel for rel in kept_paths if rel not in staged_urls and rel in live_manifest)
+    if not missing:
+        return 0
+
+    has_part = list(doc.has_part)
+    subject_of = list(doc.subject_of)
+    for rel in missing:
+        slot, entry = live_manifest[rel]
+        (has_part if slot == "hasPart" else subject_of).append(entry)
+    doc.has_part = has_part
+    doc.subject_of = subject_of
+    # ``dateModified`` is deliberately untouched: the push itself stamps it
+    # through the normal write path, and this step restores entries that were
+    # already part of the record rather than changing the record.
+    doc_path.write_text(canonical_dumps(doc.model_dump(mode="json")), encoding="utf-8")
+    logger.info("spliced %d kept manifest entry(ies) back into %s", len(missing), doc_path)
+    return len(missing)
+
+
+def _committed_manifest_counts(store: "ProfileStore", slug: str) -> dict[str, int]:
+    """``{role: count}`` over the manifest the store now holds, post-commit.
+
+    Read back from the store rather than from staging: this is the number the
+    client prints as "the server now holds N artifacts", and it must describe
+    what was committed, not what was offered.
+    """
+    try:
+        entries = store.get(slug).manifest()
+    # Boundary: reporting must never fail a push that already committed.
+    except Exception:  # noqa: BLE001
+        logger.warning("could not read back the committed manifest for %s", slug, exc_info=True)
+        return {}
+    counts: dict[str, int] = {}
+    for entry in entries:
+        role = entry.role or OTHER_CLASS
+        counts[role] = counts.get(role, 0) + 1
+    return counts
 
 
 def _keep_omitted(
@@ -505,7 +607,7 @@ def _keep_omitted(
     archive_names: set[str],
     *,
     mode: PushMode,
-) -> dict[str, int]:
+) -> dict[str, list[str]]:
     """Copy the live files the archive omitted into ``staging``, per ``mode``.
 
     Under ``replace`` a :data:`WITHHELD_CLASSES` class is kept only when the
@@ -513,8 +615,10 @@ def _keep_omitted(
     authoritative for the whole class. Under ``merge`` every live file the
     archive did not name is kept, counted under its class or
     :data:`OTHER_CLASS`. Under ``prune`` nothing is. Returns
-    ``{class: files_kept}`` for whatever contributed; a new profile has
-    nothing to keep either way.
+    ``{class: [profile-relative paths kept]}`` for whatever contributed; a new
+    profile has nothing to keep either way. The paths, not just their count,
+    because the caller has to splice their manifest entries back in
+    (:func:`_splice_kept_into_manifest`) and cannot do that from a number.
 
     The live copies come from the store's own directory when it has one and
     from a scratch export otherwise (push is rare; an export is affordable).
@@ -549,7 +653,7 @@ def _keep_omitted(
         live = (
             root / live_slug if root is not None else store.export_directory(live_slug, Path(tmp))
         )
-        kept: dict[str, int] = {}
+        kept: dict[str, list[str]] = {}
         for item in sorted(live.rglob("*")):
             if not item.is_file():
                 continue
@@ -562,7 +666,7 @@ def _keep_omitted(
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(item, target)
-            kept[cls] = kept.get(cls, 0) + 1
+            kept.setdefault(cls, []).append(rel)
     return kept
 
 

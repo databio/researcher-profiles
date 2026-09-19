@@ -205,9 +205,36 @@ class PushResponse(_APIModel):
     # ({"fulltext": 53, "index": 1}). Empty for a new profile, for a pruning
     # push, or when the archive carried every class.
     kept: dict[str, int] = {}
+    # Manifest entries the server added back because the incoming manifest
+    # dropped a file the server kept. A nonzero count means the pushed
+    # profile.jsonld was not the whole index.
+    spliced: int = 0
+    # {role: count} over the manifest the server holds now. The post-commit
+    # truth, so a client can say what the profile actually contains rather
+    # than what the push offered.
+    manifest_counts: dict[str, int] = {}
     # The ?mode= the push ran under: what happened to the live files the
     # archive did not carry (replace | merge | prune).
     mode: str = "replace"
+
+
+class CapabilitiesResponse(_APIModel):
+    """Result of ``GET /api/v1/capabilities``: what this server can be asked for.
+
+    A push client reads this *before* the PUT. Without it, asking an older
+    server for ``?mode=merge`` gets a plain replace and a 200: the push looks
+    like it worked and the profile is smaller. One cheap unauthenticated GET
+    turns that into a refusal.
+    """
+
+    #: API version this server serves.
+    version: str = "v1"
+    #: The ``?mode=`` values ``PUT /profiles/{slug}`` accepts.
+    push_modes: list[str] = []
+    #: Named behaviours a client can require. ``manifest_splice`` means the
+    #: server adds a manifest entry back for every file it keeps, so a partial
+    #: incoming manifest cannot delete artifacts the server holds.
+    features: list[str] = []
 
 
 class ResolveRequest(_APIModel):
@@ -410,6 +437,29 @@ class ArtifactTier(_APIModel):
     visible_to: list[str] = []
 
 
+class SectionTierReport(_APIModel):
+    """One inline section's tiers, and who they let in: the read side of the
+    section mechanism.
+
+    A section has both a tier the owner *declared* and a tier that actually
+    *governs* after the profile default folds in, and an editor has to show
+    both: the control sits on ``declared``, the "resolves to" badge on
+    ``effective``. The old report collapsed the two into one ``{section: tier}``
+    map, so an owner could not tell what they set from what it became.
+    """
+
+    section: str
+    #: What ``doc.section_visibility`` says for this section (``"public"`` when
+    #: undeclared). For ``soul`` this is the most restrictive of the declared
+    #: section tier and the declared tier of the ``soul`` manifest artifact, so
+    #: the read-back matches what actually gates ``personality/SOUL.md``.
+    declared: str
+    #: After folding in the profile default (``privacy.section_tiers``).
+    effective: str
+    #: Subset of ``["anonymous", "lab", "you"]`` who may read this section.
+    visible_to: list[str] = []
+
+
 class VisibilityReport(_APIModel):
     """``GET /profiles/{slug}/visibility``: what is published, and to whom."""
 
@@ -422,10 +472,11 @@ class VisibilityReport(_APIModel):
     profile_floor: Optional[str] = None
     profile_floor_reason: Optional[str] = None
     artifacts: list[ArtifactTier] = []
-    #: ``{section: effective_tier}`` for every inline section, already folded
-    #: with the profile default. An interface shows a section's real tier
-    #: rather than the one the owner typed and the profile then overrode.
-    sections: dict[str, str] = {}
+    #: One row per inline section, in ``SECTION_FIELDS`` order, each carrying
+    #: its declared tier, its effective tier, and who it lets in. An editor
+    #: shows a section's real tier beside the one the owner typed, rather than
+    #: the single collapsed value the old ``{section: tier}`` map gave.
+    sections: list[SectionTierReport] = []
     #: ``{"anonymous": 0, "lab": 12, "you": 63}``: items each viewer can see.
     counts: dict[str, int] = {}
 
@@ -759,6 +810,7 @@ class HealthResponse(_APIModel):
 
 __all__ = [
     "ArtifactVisibility",
+    "CapabilitiesResponse",
     "AskRequest",
     "AuthorDescriptor",
     "CoiBlock",

@@ -16,6 +16,7 @@ from pydantic import ValidationError
 
 from ...errors import ProfileWriteError
 from ...models.api import (
+    CapabilitiesResponse,
     PushResponse,
 )
 from ...privacy import (
@@ -45,9 +46,31 @@ from ..upload import (
     build_viewer_archive,
     ingest_archive,
 )
-from ._routers import router
+from ._routers import public_router, router
 
 logger = logging.getLogger(__name__)
+
+
+#: Named push behaviours this build implements, advertised at
+#: ``GET /api/v1/capabilities``. ``manifest_splice`` is the guarantee that a
+#: kept file keeps its manifest entry too, so an incoming manifest that drops
+#: entries cannot delete artifacts the server holds.
+PUSH_FEATURES = ["manifest_splice"]
+
+
+@public_router.get("/capabilities", response_model=CapabilitiesResponse)
+def capabilities() -> CapabilitiesResponse:
+    """What this server accepts, for a client to check before it writes.
+
+    Unauthenticated on purpose: it says nothing about any profile, and a push
+    client needs the answer before it has decided whether to authenticate.
+    A 404 here means an older build, which is itself the answer.
+    """
+    return CapabilitiesResponse(
+        version="v1",
+        push_modes=list(PUSH_MODES),
+        features=list(PUSH_FEATURES),
+    )
 
 
 @router.put(
@@ -239,6 +262,8 @@ async def _put_profile_tarball(
         level=result.level,
         indexed=result.indexed,
         kept=result.kept,
+        spliced=result.spliced,
+        manifest_counts=result.manifest_counts,
         mode=result.mode,
     )
 

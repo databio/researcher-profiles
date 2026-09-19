@@ -17,6 +17,7 @@ export interface ResearcherProfileWireContract {
   profile_metadata: ProfileMetadataPayload;
   profile_summary: ProfileSummary;
   section_tier: SectionTier;
+  section_tier_report: SectionTierReport;
   visibility_patch: VisibilityPatch;
   visibility_report: VisibilityReport;
   [k: string]: unknown;
@@ -165,6 +166,23 @@ export interface SectionTier {
   [k: string]: unknown;
 }
 /**
+ * One inline section's tiers, and who they let in: the read side of the
+ * section mechanism.
+ *
+ * A section has both a tier the owner *declared* and a tier that actually
+ * *governs* after the profile default folds in, and an editor has to show
+ * both: the control sits on ``declared``, the "resolves to" badge on
+ * ``effective``. The old report collapsed the two into one ``{section: tier}``
+ * map, so an owner could not tell what they set from what it became.
+ */
+export interface SectionTierReport {
+  declared: string;
+  effective: string;
+  section: string;
+  visible_to?: string[];
+  [k: string]: unknown;
+}
+/**
  * Set the profile-level default tier, per-artifact tiers, section tiers.
  */
 export interface VisibilityPatch {
@@ -186,9 +204,7 @@ export interface VisibilityReport {
   profile_floor_reason?: string | null;
   profile_visibility: string;
   rid?: string | null;
-  sections?: {
-    [k: string]: string;
-  };
+  sections?: SectionTierReport[];
   slug: string;
   [k: string]: unknown;
 }
