@@ -187,13 +187,11 @@ def _gate_profile(request: Request, prof, viewer: ViewerTier, ref: str) -> None:
         raise _profile_missing(ref)
 
 
-def _is_hard_floor(content_url: str, role: str | None) -> bool:
+def _is_hard_floor(content_url: str) -> bool:
     """Withheld from every viewer, owner included (spec section 4).
 
     ``.cache/``/``.keys/`` is build-local derived state and key material, not a
-    servable artifact. No manifest *role* is floored: every artifact's tier is
-    the owner's to choose, so this is a path-prefix test only. ``role`` is
-    accepted for a stable signature across callers.
+    servable artifact.
     """
     return any(content_url.startswith(prefix) for prefix in ALWAYS_RESTRICTED_PREFIXES)
 
@@ -213,7 +211,7 @@ def artifact_visible(
     unlisted artifact as invisible instead would make a profile built before
     manifests were written look empty rather than public.
     """
-    if _is_hard_floor(content_url, role):
+    if _is_hard_floor(content_url):
         return False
     entry = explain.get(content_url)
     if entry is not None:
@@ -232,7 +230,7 @@ def withheld(explain: dict[str, TierExplanation], viewer: ViewerTier) -> list[st
     return sorted(
         url
         for url, entry in explain.items()
-        if _is_hard_floor(url, entry.role) or not tier_allows(viewer, entry.effective)
+        if _is_hard_floor(url) or not tier_allows(viewer, entry.effective)
     )
 
 

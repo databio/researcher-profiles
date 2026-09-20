@@ -307,7 +307,7 @@ def get_profile_visibility(
     counts = dict.fromkeys(viewers, 0)
     artifacts: list[ArtifactTier] = []
     for entry in explain.values():
-        floored = _is_hard_floor(entry.content_url, entry.role)
+        floored = _is_hard_floor(entry.content_url)
         visible_to = []
         for label, tier in viewers.items():
             if not floored and tier_allows(tier, entry.effective):
