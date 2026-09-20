@@ -1193,7 +1193,9 @@ class TestArchiveAndInstall:
         prof = ResearcherProfile.from_files(installed)
         assert prof.slug == SLUG
 
-    def test_fulltext_does_not_ship_to_a_public_caller(self, make_api_client, server_root, cache_root):
+    def test_fulltext_does_not_ship_to_a_public_caller(
+        self, make_api_client, server_root, cache_root
+    ):
         """Paper full text defaults to ``restricted``, so a public install omits it.
 
         The archive is projected through the caller's tier by
