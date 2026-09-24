@@ -819,9 +819,10 @@ Requires the `[signing]` extra.
 ## login
 
 Log in to a profile server from the command line and store the key it mints.
-The server runs a device-authorization flow: `rp` asks for a code, prints a
-link and a short user code, and polls until you approve the request in a
-browser. See
+The server runs the OAuth 2.0 device authorization grant
+([RFC 8628](https://www.rfc-editor.org/rfc/rfc8628)): `rp` asks for a code
+(`POST /api/auth/device`), prints a link and a short user code, and polls
+(`POST /api/auth/token`) until you approve the request in a browser. See
 [Command-line login](../../rp-spec/dynamic-api.md#142-command-line-login) for
 the wire protocol.
 
@@ -840,7 +841,7 @@ rp login [server] [--label NAME] [--no-browser] [--json]
 $ rp login https://profiles.example.org
 Open this link in your browser to approve the login:
 
-  https://profiles.example.org/cli-auth?code=WQTX-9F4K
+  https://profiles.example.org/device?user_code=WQTX-9F4K
 
 Code: WQTX-9F4K
 Waiting for approval...
@@ -854,12 +855,14 @@ profiles you own or edit and nothing else. Once it is stored,
 [`push`](#push), `rp install`, `rp listr` and [`whoami`](#whoami) need no
 flags at all.
 
-A server that does not implement the
-[management tier](../../rp-spec/dynamic-api.md#14-management-api) answers `404`
-on the login request, and the command fails with
-`does not offer command-line login`.
+A server that does not offer
+[command-line login](../../rp-spec/dynamic-api.md#142-command-line-login)
+answers `404` on `POST /api/auth/device`, and the command fails at once with
+`does not offer command-line login`. If you decline the request in the
+browser, or it expires before you approve it, the command stops and says so;
+run `rp login` again to start over.
 
-**Exit codes.** `0` ok · `1` the server refused, timed out, or was unreachable
+**Exit codes.** `0` ok · `1` the server refused, you declined, the request expired or timed out, or the server was unreachable
 · `2` no server URL was given and none is stored.
 
 Requires the `[client]` extra.

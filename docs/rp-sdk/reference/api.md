@@ -1264,10 +1264,11 @@ all calls to one persona before switching where possible.
 
 ## The management tier is not implemented here
 
-`rp login`, `rp whoami`, `rp agent`, and `rp profile` call endpoints under
-`/api/manage/`, specified in
+`rp login` calls the command-line login endpoints (`/api/auth/device` and
+`/api/auth/token`), and `rp whoami`, `rp agent`, and `rp profile` call endpoints
+under `/api/manage/`, all specified in
 [Management API](../../rp-spec/dynamic-api.md#14-management-api). The server in
 this package does not implement them: it has no accounts, no identity provider,
-and no key store, so `POST /api/manage/cli-auth` answers `404` and the client
+and no key store, so `POST /api/auth/device` answers `404` and the client
 reports that the server offers no command-line login. Point those commands at a
 server that implements the management tier.

@@ -1,14 +1,15 @@
 """``rp login`` / ``logout`` / ``whoami`` and the stored-credential precedence.
 
-The device flow is exercised against a stubbed server (an ``httpx`` mock
-transport standing in for a management server), so this covers the CLI's side
-of the protocol: start, poll until approved, store 0600, without a real
-server.
+The device flow (RFC 8628: ``/api/auth/device`` then ``/api/auth/token``) is
+exercised against a stubbed server (an ``httpx`` mock transport), so this
+covers the CLI's side of the protocol: start, poll through pending /
+slow_down / 429 until approved or refused, store 0600, without a real server.
 """
 
 import json
 import stat
 from unittest.mock import MagicMock
+from urllib.parse import parse_qsl
 
 import httpx
 import pytest
@@ -143,44 +144,64 @@ class TestCliWiring:
 
 
 class FakeServer:
-    """Enough of /api/manage/cli-auth to drive ``rp login``.
+    """Enough of the RFC 8628 endpoints (``/api/auth/device`` + ``/api/auth/token``)
+    to drive ``rp login``.
 
-    ``approve_after`` is how many polls return pending before the key appears.
+    ``replies`` scripts the token endpoint: each poll pops the next entry, an
+    OAuth ``error`` code (400), an int status (with an empty body), or
+    ``"ok"`` (the approved 200). When it runs out, polls get ``"ok"``.
     """
 
-    def __init__(self, approve_after: int = 2):
-        self.approve_after = approve_after
+    VERIFY = f"{SERVER}/device"
+
+    def __init__(self, replies=("authorization_pending", "authorization_pending")):
+        self.replies = list(replies)
         self.polls = 0
         self.started: list[dict] = []
         self.collected = False
+        self.complete_uri = True
+        self.interval: int | None = 0
+        self.retry_after: str | None = None
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
-        if path == "/api/manage/cli-auth" and request.method == "POST":
-            self.started.append(json.loads(request.content))
-            return httpx.Response(
-                201,
-                json={
-                    "device_code": "rpd_secret",
-                    "user_code": "ABCD-EFGH",
-                    "verify_url": f"{SERVER}/api/manage/cli-auth/approve?code=ABCD-EFGH",
-                    "expires_in": 600,
-                    "interval": 0,
-                },
-            )
-        if path == "/api/manage/cli-auth/poll":
-            assert json.loads(request.content) == {"device_code": "rpd_secret"}
+        if path == "/api/auth/device" and request.method == "POST":
+            assert request.headers["content-type"] == "application/x-www-form-urlencoded"
+            self.started.append(dict(parse_qsl(request.content.decode())))
+            body = {
+                "device_code": "rpd_secret",
+                "user_code": "ABCD-EFGH",
+                "verification_uri": self.VERIFY,
+                "expires_in": 600,
+            }
+            if self.complete_uri:
+                body["verification_uri_complete"] = f"{self.VERIFY}?user_code=ABCD-EFGH"
+            if self.interval is not None:
+                body["interval"] = self.interval
+            return httpx.Response(200, json=body)
+        if path == "/api/auth/token" and request.method == "POST":
+            assert request.headers["content-type"] == "application/x-www-form-urlencoded"
+            assert dict(parse_qsl(request.content.decode())) == {
+                "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+                "device_code": "rpd_secret",
+                "client_id": "rp",
+            }
             self.polls += 1
             if self.collected:
-                return httpx.Response(404, json={"detail": "already collected"})
-            if self.polls <= self.approve_after:
-                return httpx.Response(200, json={"status": "pending", "interval": 0})
+                return httpx.Response(400, json={"error": "expired_token"})
+            reply = self.replies.pop(0) if self.replies else "ok"
+            if isinstance(reply, int):
+                headers = {"Retry-After": self.retry_after} if self.retry_after else {}
+                return httpx.Response(reply, headers=headers)
+            if reply != "ok":
+                return httpx.Response(400, json={"error": reply})
             self.collected = True
             return httpx.Response(
                 200,
                 json={
-                    "status": "approved",
-                    "token": "rpk_minted",
+                    "access_token": "rpk_minted",
+                    "token_type": "Bearer",
+                    "scope": "push_own",
                     "orcid": "0000-0002-1825-0097",
                     "name": "Jane A. Doe",
                     "url": SERVER,
@@ -214,30 +235,117 @@ def fake(monkeypatch):
     return server
 
 
+def _login(**kw):
+    """Run the flow with no browser, recording every sleep."""
+    slept: list[float] = []
+    kw.setdefault("open_browser", False)
+    result = creds.login(SERVER, sleep=slept.append, **kw)
+    return result, slept
+
+
 class TestLoginFlow:
     def test_polls_until_approved(self, fake, capsys):
-        result = creds.login(SERVER, label="laptop", open_browser=False, sleep=lambda _s: None)
+        result, slept = _login(label="laptop")
         assert result == creds.Login(
             url=SERVER, token="rpk_minted", orcid="0000-0002-1825-0097", name="Jane A. Doe"
         )
         assert fake.polls == 3
-        assert fake.started == [{"label": "laptop"}]
+        assert fake.started == [{"client_id": "rp", "scope": "push_own", "label": "laptop"}]
+        assert slept == [0, 0, 0]
         err = capsys.readouterr().err
-        assert "cli-auth/approve?code=ABCD-EFGH" in err and "ABCD-EFGH" in err
+        assert f"{FakeServer.VERIFY}?user_code=ABCD-EFGH" in err and "Code: ABCD-EFGH" in err
 
-    def test_opens_the_browser_when_asked(self, fake, monkeypatch):
+    def test_interval_defaults_to_five_seconds(self, fake):
+        fake.interval = None
+        _, slept = _login()
+        assert slept == [5, 5, 5]
+
+    def test_slow_down_adds_five_seconds_for_good(self, fake):
+        fake.replies = ["authorization_pending", "slow_down", "authorization_pending", "slow_down"]
+        _, slept = _login()
+        assert slept == [0, 0, 5, 5, 10]
+
+    def test_429_is_slow_down(self, fake):
+        fake.replies = [429, "authorization_pending"]
+        _, slept = _login()
+        assert slept == [0, 5, 5]
+
+    def test_429_honors_a_longer_retry_after(self, fake):
+        fake.replies = [429]
+        fake.retry_after = "30"
+        _, slept = _login()
+        assert slept == [0, 30]
+
+    def test_opens_the_complete_uri_when_asked(self, fake, monkeypatch):
         opened = []
         monkeypatch.setattr(creds.webbrowser, "open", lambda url: opened.append(url))
-        creds.login(SERVER, open_browser=True, sleep=lambda _s: None)
-        assert opened == [f"{SERVER}/api/manage/cli-auth/approve?code=ABCD-EFGH"]
+        _login(open_browser=True)
+        assert opened == [f"{FakeServer.VERIFY}?user_code=ABCD-EFGH"]
 
-    def test_expired_request_is_an_error(self, fake):
-        fake.collected = True  # every poll now 404s
+    def test_falls_back_to_the_plain_uri(self, fake, monkeypatch, capsys):
+        fake.complete_uri = False
+        opened = []
+        monkeypatch.setattr(creds.webbrowser, "open", lambda url: opened.append(url))
+        _login(open_browser=True)
+        assert opened == [FakeServer.VERIFY]
+        assert "Code: ABCD-EFGH" in capsys.readouterr().err
+
+    def test_denied(self, fake):
+        fake.replies = ["authorization_pending", "access_denied"]
+        with pytest.raises(creds.LoginError, match="refused"):
+            _login()
+        assert fake.polls == 2
+
+    @pytest.mark.parametrize("error", ["expired_token", "invalid_grant"])
+    def test_expired(self, fake, error):
+        fake.replies = [error]
         with pytest.raises(creds.LoginError, match="expired or was already used"):
-            creds.login(SERVER, open_browser=False, sleep=lambda _s: None)
+            _login()
+        assert fake.polls == 1
+
+    @pytest.mark.parametrize("reply", ["unsupported_grant_type", "something_new", 500, 404])
+    def test_anything_else_is_fatal(self, fake, reply):
+        fake.replies = [reply]
+        with pytest.raises(creds.LoginError, match="login failed"):
+            _login()
+        assert fake.polls == 1
+
+    def test_busy_start_is_retried_after_retry_after(self, fake, monkeypatch):
+        real = fake.handle
+        busy = [httpx.Response(503, headers={"Retry-After": "7"}), httpx.Response(429)]
+
+        def handle(request):
+            if request.url.path == "/api/auth/device" and busy:
+                return busy.pop(0)
+            return real(request)
+
+        fake.handle = handle
+        result, slept = _login()
+        assert result.token == "rpk_minted"
+        assert slept[:2] == [7, 5]  # Retry-After, then the default when absent
+        assert len(fake.started) == 1
+
+    def test_start_gives_up_when_always_busy(self, monkeypatch):
+        calls = []
+
+        def handle(request):
+            calls.append(request.url.path)
+            return httpx.Response(503)
+
+        monkeypatch.setattr(
+            httpx,
+            "Client",
+            lambda *a, **kw: _RealClient(base_url=SERVER, transport=httpx.MockTransport(handle)),
+        )
+        with pytest.raises(creds.LoginError, match="refused \\(503"):
+            _login()
+        assert len(calls) == creds.START_ATTEMPTS
 
     def test_server_without_the_flow(self, monkeypatch):
-        def handle(_request):
+        calls = []
+
+        def handle(request):
+            calls.append(request.url.path)
             return httpx.Response(404)
 
         monkeypatch.setattr(
@@ -245,11 +353,12 @@ class TestLoginFlow:
             "Client",
             lambda *a, **kw: _RealClient(base_url=SERVER, transport=httpx.MockTransport(handle)),
         )
-        with pytest.raises(creds.LoginError, match="does not offer"):
-            creds.login(SERVER, open_browser=False, sleep=lambda _s: None)
+        with pytest.raises(creds.LoginError, match="does not offer command-line login"):
+            _login()
+        assert calls == ["/api/auth/device"]  # no retry, no other path
 
     def test_timeout(self, monkeypatch):
-        server = FakeServer(approve_after=10**6)
+        server = FakeServer(replies=["authorization_pending"] * 10**3)
         monkeypatch.setattr(httpx, "Client", lambda *a, **kw: server.client())
         clock = iter(range(0, 10**6))
         monkeypatch.setattr(creds.time, "monotonic", lambda: next(clock))

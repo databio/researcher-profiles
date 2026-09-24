@@ -32,6 +32,7 @@ The dynamic API categorizes routes by authentication requirement:
 | Read endpoints (list, detail, papers, summaries, content, registry) | No |
 | Search, match, persona, upload, archive, identity resolution | Yes |
 | Owner edit endpoints | Yes (owner-level) |
+| Command-line login (`/api/auth/*`) | No (see [section 14.2](#142-command-line-login)) |
 | Management endpoints (`/api/manage/*`) | Varies by endpoint (see [section 14](#14-management-api)) |
 
 A server MAY run in **open mode** (no token configured), in which case all
@@ -699,7 +700,9 @@ Each citation:
 ## 13. Error format
 
 Errors use the format `{"detail": "<message>"}` with the appropriate HTTP
-status code. There is no machine-readable error code beyond the status.
+status code. The command-line login endpoints are the exception: they use the
+OAuth error body of [section 14.2](#142-command-line-login). Elsewhere there is
+no machine-readable error code beyond the status.
 
 | Status | Meaning |
 |--------|---------|
@@ -728,128 +731,177 @@ A server MAY implement the management tier without the dynamic API, and vice
 versa. A server MAY offer further management endpoints beyond these five; they
 are outside this specification.
 
-### 14.1. The prefix is normative
+### 14.1. The paths are normative
 
-Unlike the `/api/v1/` prefix in [section 1](#1-url-prefix), the management
-prefix is fixed at `/api/manage/`. A client discovers whether a server offers
-this tier by calling `POST /api/manage/cli-auth` and reading the status; there
-is no discovery document to carry a configurable prefix. A server that mounts
-these endpoints elsewhere is not conforming.
+Unlike the `/api/v1/` prefix in [section 1](#1-url-prefix), the paths in this
+section are fixed. Login endpoints live under `/api/auth/`; everything else
+lives under `/api/manage/`. A client discovers whether a server offers
+command-line login by calling `POST /api/auth/device` and reading the status.
+A server that mounts these endpoints elsewhere is not conforming.
 
-Absence is the signal. A server that does not implement the tier MUST let
-`POST /api/manage/cli-auth` answer `404`. Clients treat `404` there as "this
-server offers no command-line login" and MUST NOT retry.
+The fixed `/api/auth/` segment lets an operator protect every login route with
+one proxy rule (for example a rate limit). A server SHOULD keep any other route
+that signs a person in, such as its browser login, under the same prefix.
+
+Absence is the signal. A server that does not implement command-line login MUST
+let `POST /api/auth/device` answer `404`. A client that gets `404` there treats
+the server as offering no command-line login, reports that, and MUST NOT retry.
+
+A server MAY also publish
+[RFC 8414](https://www.rfc-editor.org/rfc/rfc8414) authorization server
+metadata at `/.well-known/oauth-authorization-server` naming these endpoints as
+`device_authorization_endpoint` and `token_endpoint`, with
+`urn:ietf:params:oauth:grant-type:device_code` in `grant_types_supported`. A
+client MUST NOT depend on it: the fixed paths are authoritative, and on many
+hosts an unknown path answers `200` with an HTML page, so a missing metadata
+document is not a reliable absence signal.
 
 ### 14.2. Command-line login
 
-A device-authorization flow. The client cannot receive a browser redirect, so
-the server issues two codes: a secret the client polls with, and a short code
-the person types or confirms in a browser.
+The OAuth 2.0 Device Authorization Grant,
+[RFC 8628](https://www.rfc-editor.org/rfc/rfc8628). The client cannot receive a
+browser redirect, so the server issues two codes: a secret the client polls
+with, and a short code the person types or confirms in a browser. The wire
+format is RFC 8628's, so a stock OAuth device-flow client works unchanged. This
+section fixes the endpoint paths, pins the choices RFC 8628 leaves open, and
+adds a few fields. Where this section is silent, RFC 8628 and
+[RFC 6749](https://www.rfc-editor.org/rfc/rfc6749) apply.
+
+What the client receives is not a short-lived access token but a long-lived
+`rpk_` API key with the `push_own` scope (see
+[the key model](authentication.md#the-key-model)), returned in the standard
+`access_token` field. It has no refresh token and does not expire until the
+person revokes it.
 
 ```
 client                          server                      person's browser
-  |  POST /api/manage/cli-auth     |                                |
+  |  POST /api/auth/device         |                                |
   |------------------------------->|                                |
-  |  201 {device_code, user_code,  |                                |
-  |       verify_url, expires_in,  |                                |
-  |       interval}                |                                |
+  |  200 {device_code, user_code,  |                                |
+  |       verification_uri,        |                                |
+  |       verification_uri_complete,                                |
+  |       expires_in, interval}    |                                |
   |<-------------------------------|                                |
-  |  (print verify_url + user_code)|         person opens verify_url|
+  |  (print URI + user_code)       |    person opens the URI        |
   |                                |<-------------------------------|
-  |                                |         person approves        |
-  |  POST /api/manage/cli-auth/poll|                                |
+  |                                |    person signs in, approves   |
+  |  POST /api/auth/token          |                                |
   |------------------------------->|                                |
-  |  200 {"status": "pending"}     |                                |
+  |  400 {"error": "authorization_pending"}                         |
   |<-------------------------------|                                |
   |  ... wait `interval` seconds, repeat ...                        |
-  |  200 {"status": "approved", "token": "rpk_..."}                 |
+  |  200 {"access_token": "rpk_...", "token_type": "Bearer", ...}   |
   |<-------------------------------|                                |
 ```
 
-#### POST /api/manage/cli-auth
+Both endpoints are **unauthenticated**: this is how a caller with no credential
+gets one. Requests use `application/x-www-form-urlencoded` bodies (RFC 8628
+§3.1, §3.4). A server MAY also accept the same fields as a JSON object. All
+responses are JSON and MUST carry `Cache-Control: no-store` (RFC 6749 §5.1).
 
-Start a login. Unauthenticated: this is how a caller with no credential gets
-one.
+#### POST /api/auth/device
 
-**Request body** (the whole body is OPTIONAL):
+Start a login (the device authorization endpoint, RFC 8628 §3.1).
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `label` | string \| null | no | Display name for this machine on the approval page. A client SHOULD send the hostname. Servers SHOULD trim it and MAY truncate it. |
+**Request parameters:**
 
-**Response 201:**
+| Field | Required | Description |
+|-------|----------|-------------|
+| `client_id` | yes | Names the client software, e.g. `rp`. Grants nothing. A server MUST accept any non-empty value without prior registration (RFC 6749 §2.4) and MAY show it on the approval page. |
+| `scope` | no | Ignored by servers that mint only `push_own`. |
+| `label` | no | Extension. Display name for this machine on the approval page. A client SHOULD send the hostname. Servers SHOULD trim it and MAY truncate it. |
+
+**Response 200** (RFC 8628 §3.2):
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `device_code` | string | REQUIRED | Opaque polling secret. Never displayed to the person. |
 | `user_code` | string | REQUIRED | Short code the person sees. |
-| `verify_url` | string | REQUIRED | Absolute URL the person opens to approve. |
-| `expires_in` | integer | RECOMMENDED | Seconds until the request expires. Default `600` when absent. |
-| `interval` | integer | RECOMMENDED | Seconds a client SHOULD wait between polls. Default `3` when absent. |
+| `verification_uri` | string | REQUIRED | Absolute URL of the page where the person enters `user_code`. |
+| `verification_uri_complete` | string | RECOMMENDED | `verification_uri` with the code already filled in. |
+| `expires_in` | integer | REQUIRED | Seconds until the request expires. |
+| `interval` | integer | RECOMMENDED | Seconds a client MUST wait between polls. Default `5` when absent. |
 
 Servers MAY include further fields; clients MUST ignore what they do not know.
+A client SHOULD open `verification_uri_complete` when present, and MUST also
+print `user_code` so the person can check it matches the one on the page.
 
 The `device_code` MUST be unguessable, MUST be stored hashed rather than in the
 clear, and MUST NOT be an API key: it grants nothing but the right to collect
 the result of this one request. The `user_code` SHOULD avoid characters people
-confuse (`I`, `O`, `0`, `1`) and SHOULD be short enough to read aloud.
+confuse (`I`, `O`, `0`, `1`), SHOULD be short enough to read aloud, and SHOULD
+be matched ignoring case and punctuation (RFC 8628 §6.1).
 
-`verify_url` MUST point at a page on the server where a signed-in person can
-approve or ignore the request. What that page looks like, and how the person
-signs in, is entirely the server's business and is not specified here. A server
-MUST require an authenticated person to approve; it MUST NOT approve on the
-strength of the `user_code` alone.
+The verification page MUST be served by the server. What it looks like, and how
+the person signs in, is the server's business and is not specified here. A
+server MUST require an authenticated person to approve, and MUST NOT approve on
+the strength of the `user_code` alone: the person has to press an explicit
+approve control. The page SHOULD show the requesting `label` and the
+`user_code` so the person can spot a request they did not start (RFC 8628
+§5.4). It MAY offer a deny control. Servers SHOULD rate-limit code entry
+(RFC 8628 §5.1).
 
-**Status codes:** `201`, `404` (server does not implement this tier),
-`503` (server could not allocate a code; the client SHOULD retry).
+**Status codes:** `200`; `400` with an OAuth error body for a malformed request;
+`404` (server does not offer command-line login); `429` or `503` when the
+server cannot open another request right now (the client SHOULD retry after
+`Retry-After`).
 
-#### POST /api/manage/cli-auth/poll
+#### POST /api/auth/token
 
-Collect the result. **Unauthenticated**: the `device_code` is the credential.
+Collect the result (the token endpoint, RFC 8628 §3.4). The `device_code` is
+the credential.
 
-**Request body:**
+**Request parameters:**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `grant_type` | yes | The literal `urn:ietf:params:oauth:grant-type:device_code` |
+| `device_code` | yes | From the start response |
+| `client_id` | yes | The same value sent to `/api/auth/device` |
+
+**Response 200, approved** (RFC 6749 §5.1):
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `device_code` | string | REQUIRED | From the start response |
+| `access_token` | string | REQUIRED | The minted `rpk_` key. See [the key model](authentication.md#the-key-model). |
+| `token_type` | string | REQUIRED | `"Bearer"` |
+| `scope` | string | RECOMMENDED | Granted scopes, space-separated, e.g. `"push_own"` |
+| `orcid` | string \| null | RECOMMENDED | Extension. The approving person's identifier |
+| `name` | string \| null | RECOMMENDED | Extension. The approving person's display name |
+| `url` | string \| null | | Extension. The server's canonical base URL |
 
-**Response 200, not yet approved:**
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `status` | string | `"pending"` |
-| `interval` | integer | Servers MAY revise the poll interval here |
-
-**Response 200, approved:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `status` | string | REQUIRED | `"approved"` |
-| `token` | string | REQUIRED | The minted key. See [the key model](authentication.md#the-key-model). |
-| `orcid` | string \| null | RECOMMENDED | The approving person's identifier |
-| `name` | string \| null | RECOMMENDED | The approving person's display name |
-| `url` | string \| null | | The server's canonical base URL |
-
-`status` is the only field a client branches on. This specification defines
-`"pending"` and `"approved"`. A client MUST treat any other value as not yet
-approved and keep polling until the request expires, so a server MAY add states
-without breaking existing clients.
+The response carries no `expires_in` and no `refresh_token`, because the key
+does not expire on a schedule.
 
 **The approved response is returned exactly once.** The server MUST mint the key
-and invalidate the `device_code` in the same operation. A second poll after
-collection MUST return `404`, not the token again.
+and invalidate the `device_code` in the same operation. A later request with
+the same `device_code` MUST get `expired_token`, not the key again.
 
-**Status codes:**
+**Response 400, not approved** (RFC 8628 §3.5) carries
+`{"error": "<code>", "error_description": "<optional text>"}`:
 
-- `200` with a `status` body
-- `404` when the `device_code` is unknown, has expired, or has already been
-  collected. These three MUST be indistinguishable, and the client SHOULD tell
-  the person to log in again.
-- `410` when the approving identity has been removed
-- `422` when `device_code` is missing
+| `error` | Meaning | Client action |
+|---------|---------|---------------|
+| `authorization_pending` | Not yet approved | Wait `interval` seconds, poll again |
+| `slow_down` | Polling too fast | Add 5 seconds to `interval` for all later polls, then poll again |
+| `access_denied` | The person refused, or the approving identity has been removed | Stop; report that the login was refused |
+| `expired_token` | The `device_code` is unknown, expired, or already collected | Stop; tell the person to log in again |
+| `invalid_request`, `unsupported_grant_type`, `invalid_grant` | Malformed request (RFC 6749 §5.2) | Stop; report the error |
 
-Servers SHOULD purge expired requests. Servers MAY rate-limit polling; a client
-that honors `interval` will not trip a reasonable limit.
+A server MUST answer unknown, expired, and already-collected codes with the same
+`expired_token` response, so the three are indistinguishable. A client MUST
+treat `invalid_grant` like `expired_token`, since stock OAuth servers use it for
+the same cases.
+
+A server that throttles a polling client SHOULD answer `slow_down` rather than
+`429`. A client MUST treat `429` like `slow_down`. A client MUST treat any
+other `error` value it does not recognize as fatal, and MUST stop polling once
+`expires_in` has passed.
+
+Servers SHOULD purge expired requests.
+
+These two endpoints do not use the `{"detail": ...}` body of
+[section 13](#13-error-format); they use the OAuth error body above.
 
 ### 14.3. Identity echo
 

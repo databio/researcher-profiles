@@ -2,9 +2,10 @@
 
 The scripted credential (``RESEARCHER_PROFILES_TOKEN``, an operator or
 ``push`` key) is for scripts. A person pushing their own profile from a laptop
-gets one by logging in: ``rp login <server>`` runs the server's
-device-authorization flow (``POST /api/manage/cli-auth``, approve in the
-browser, then poll), and the key that comes back is stored here, in
+gets one by logging in: ``rp login <server>`` runs the OAuth 2.0 Device
+Authorization Grant (RFC 8628; ``POST /api/auth/device``, approve in the
+browser, then poll ``POST /api/auth/token``), and the key that comes back as
+the ``access_token`` is stored here, in
 ``~/.config/researcher-profiles/credentials.json`` (mode 0600)::
 
     {"url": "https://profiles.example.org", "token": "rpk_...", "orcid": ..., "name": ...}
@@ -132,6 +133,16 @@ def resolve_token(
 # --- the device flow -----------------------------------------------------------
 
 
+DEVICE_PATH = "/api/auth/device"
+TOKEN_PATH = "/api/auth/token"
+CLIENT_ID = "rp"
+SCOPE = "push_own"
+DEVICE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code"
+DEFAULT_INTERVAL = 5.0  # RFC 8628 §3.2, when the server sends no interval
+SLOW_DOWN_STEP = 5.0  # RFC 8628 §3.5
+START_ATTEMPTS = 3  # tries at /api/auth/device while it answers 429 or 503
+
+
 def login(
     url: str,
     *,
@@ -142,12 +153,21 @@ def login(
     out=None,
     sleep: Optional[Callable[[float], None]] = None,
 ) -> Login:
-    """Run the device-authorization flow against ``url`` and return the key.
+    """Run the device authorization grant (RFC 8628) against ``url``; return the key.
 
-    Prints the verify URL (and opens it in a browser when asked to) on ``out``
-    (stderr by default), then polls until the person approves the request in
-    their browser. Raises :class:`LoginError` on refusal or timeout. The
-    result is not stored; the caller decides (``rp login`` stores it).
+    ``POST /api/auth/device`` opens a request (retried after ``Retry-After``
+    while the server answers ``429`` or ``503``; a ``404`` means the server
+    offers no command-line login and is not retried). The user code and the
+    verification URL (``verification_uri_complete`` when the server sends one,
+    else ``verification_uri``) are printed on ``out`` (stderr by default), and
+    the URL is opened in a browser when asked to. Then ``POST /api/auth/token``
+    is polled every ``interval`` seconds until the person approves in their
+    browser, until ``expires_in`` (or ``timeout``) runs out. ``slow_down``
+    (or a ``429``) adds 5 seconds to the interval for all later polls.
+
+    Raises :class:`LoginError` when the server offers no command-line login
+    (``404``), the person refuses, the request expires, or anything else goes
+    wrong. The result is not stored; the caller decides (``rp login`` stores it).
     """
     import httpx
 
@@ -155,50 +175,100 @@ def login(
     base = server_base(url)
     http = client if client is not None else httpx.Client(base_url=base, timeout=30.0)
     try:
-        try:
-            r = http.post("/api/manage/cli-auth", json={"label": label or _default_label()})
-        except httpx.HTTPError as e:
-            raise LoginError(f"{base}: {e}") from e
-        if r.status_code == 404:
-            raise LoginError(f"{base} does not offer command-line login (no /api/manage/cli-auth)")
-        if r.status_code >= 400:
-            raise LoginError(f"{base}: login request refused ({r.status_code}): {r.text[:200]}")
-        start = r.json()
-        device_code = start["device_code"]
-        verify_url = start["verify_url"]
-        interval = 3.0 if start.get("interval") is None else float(start["interval"])
-        expires_in = float(start.get("expires_in") or timeout)
         sleep = sleep or time.sleep
+        form = {"client_id": CLIENT_ID, "scope": SCOPE, "label": label or _default_label()}
+        for attempt in range(START_ATTEMPTS):
+            try:
+                r = http.post(DEVICE_PATH, data=form)
+            except httpx.HTTPError as e:
+                raise LoginError(f"{base}: {e}") from e
+            if r.status_code not in (429, 503) or attempt == START_ATTEMPTS - 1:
+                break
+            sleep(_retry_after(r) or DEFAULT_INTERVAL)  # busy: retry after Retry-After
+        if r.status_code == 404:
+            raise LoginError(f"{base} does not offer command-line login (no {DEVICE_PATH})")
+        if r.status_code != 200:
+            raise LoginError(f"{base}: login request refused ({_describe(r)})")
+        try:
+            start = r.json()
+            device_code = start["device_code"]
+            user_code = start["user_code"]
+            link = start.get("verification_uri_complete") or start["verification_uri"]
+            interval = (
+                DEFAULT_INTERVAL if start.get("interval") is None else float(start["interval"])
+            )
+            expires_in = float(start["expires_in"])
+        except (ValueError, KeyError, TypeError) as e:
+            raise LoginError(f"{base}: malformed login response: {r.text[:200]}") from e
 
-        print(f"Open this link in your browser to approve the login:\n\n  {verify_url}\n", file=out)
-        print(f"Code: {start['user_code']}", file=out)
+        print(f"Open this link in your browser to approve the login:\n\n  {link}\n", file=out)
+        print(f"Code: {user_code}", file=out)
         if open_browser:
             try:
-                webbrowser.open(verify_url)
+                webbrowser.open(link)
             except (webbrowser.Error, OSError):  # no browser is fine, the URL is printed
                 pass
         print("Waiting for approval...", file=out)
 
+        poll = {"grant_type": DEVICE_GRANT_TYPE, "device_code": device_code, "client_id": CLIENT_ID}
         deadline = time.monotonic() + min(timeout, expires_in)
         while time.monotonic() < deadline:
             sleep(interval)
             try:
-                p = http.post("/api/manage/cli-auth/poll", json={"device_code": device_code})
+                p = http.post(TOKEN_PATH, data=poll)
             except httpx.HTTPError as e:
                 raise LoginError(f"{base}: {e}") from e
-            if p.status_code == 404:
+            if p.status_code == 200:
+                body = _json(p)
+                token = body.get("access_token")
+                if not token:
+                    raise LoginError(f"{base}: approved response has no access_token")
+                return Login(url=base, token=token, orcid=body.get("orcid"), name=body.get("name"))
+            if p.status_code == 429:
+                interval = max(interval + SLOW_DOWN_STEP, _retry_after(p))
+                continue
+            error = _json(p).get("error") if p.status_code == 400 else None
+            if error == "authorization_pending":
+                continue
+            if error == "slow_down":
+                interval += SLOW_DOWN_STEP
+                continue
+            if error == "access_denied":
+                raise LoginError("the login was refused in the browser")
+            if error in ("expired_token", "invalid_grant"):
                 raise LoginError("login request expired or was already used; run rp login again")
-            if p.status_code >= 400:
-                raise LoginError(f"{base}: poll failed ({p.status_code}): {p.text[:200]}")
-            body = p.json()
-            if body.get("status") == "approved":
-                return Login(
-                    url=base, token=body["token"], orcid=body.get("orcid"), name=body.get("name")
-                )
+            raise LoginError(f"{base}: login failed ({_describe(p)})")
         raise LoginError("timed out waiting for approval; run rp login again")
     finally:
         if client is None:
             http.close()
+
+
+def _json(r: Any) -> dict:
+    """The response body as a dict, or ``{}`` when it is not a JSON object."""
+    try:
+        body = r.json()
+    except ValueError:
+        return {}
+    return body if isinstance(body, dict) else {}
+
+
+def _describe(r: Any) -> str:
+    """A short description of an error response: status plus the OAuth error, if any."""
+    body = _json(r)
+    error = body.get("error")
+    if error:
+        desc = body.get("error_description")
+        return f"{r.status_code} {error}" + (f": {desc}" if desc else "")
+    return f"{r.status_code}: {r.text[:200]}"
+
+
+def _retry_after(r: Any) -> float:
+    """``Retry-After`` in seconds (delta form only), or 0 when absent or unparseable."""
+    try:
+        return max(0.0, float(r.headers.get("retry-after", "")))
+    except ValueError:
+        return 0.0
 
 
 def _default_label() -> str:
