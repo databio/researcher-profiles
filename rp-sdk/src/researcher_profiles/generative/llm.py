@@ -112,7 +112,10 @@ class LLMClient:
             messages=messages,
         )
         if temperature is not None:
-            kwargs["temperature"] = temperature
+            # anthropic>=1 dropped ``temperature`` from the create() signature
+            # (TypeError); the API still honours it on models before Opus 4.7,
+            # so send it as a raw body field. Works on 0.x too.
+            kwargs["extra_body"] = {"temperature": temperature}
         if thinking is not None:
             kwargs["thinking"] = thinking
         msg = self._client.messages.create(**kwargs)
