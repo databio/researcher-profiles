@@ -230,6 +230,15 @@
     "about": {
       "anyOf": [
         {
+          "additionalProperties": true,
+          "properties": {
+            "@id": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        {
           "type": "string"
         },
         {

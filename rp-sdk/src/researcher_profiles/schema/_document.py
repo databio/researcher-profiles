@@ -11,7 +11,14 @@ from pydantic import Field, field_validator, model_validator
 from scholarcore import CareerEntry, Training
 from scholarcore.identity import is_local, orcid_of
 
-from ._common import FORMAT_HINT, KNOWN_PROVENANCE, ProfileLevel, Provenance, Visibility
+from ._common import (
+    FORMAT_HINT,
+    KNOWN_PROVENANCE,
+    OrganizationName,
+    ProfileLevel,
+    Provenance,
+    Visibility,
+)
 from ._identity import validate_rid
 from ._parts import (
     Anchor,
@@ -77,7 +84,7 @@ class ProfileDocument(JsonLdModel):
     expertise_cites_paper_ids: bool | None = Field(default=None, alias="expertiseCitesPaperIds")
 
     level: ProfileLevel = "full"
-    affiliation: str | None = None
+    affiliation: OrganizationName = None
     #: A ROR IRI for :attr:`affiliation`. Not an on-disk key of its own: when
     #: set, ``affiliation`` serializes as an ``Organization`` node carrying it.
     affiliation_id: str | None = None

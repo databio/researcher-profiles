@@ -68,7 +68,27 @@
           "anyOf": [
             {
               "items": {
-                "type": "string"
+                "anyOf": [
+                  {
+                    "additionalProperties": true,
+                    "description": "A Person node.",
+                    "properties": {
+                      "@id": {
+                        "type": "string"
+                      },
+                      "@type": {
+                        "type": "string"
+                      },
+                      "name": {
+                        "type": "string"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  {
+                    "type": "string"
+                  }
+                ]
               },
               "type": "array"
             },
@@ -130,6 +150,10 @@
         "datePublished": {
           "anyOf": [
             {
+              "pattern": "^\\s*\\d+\\s*$",
+              "type": "string"
+            },
+            {
               "type": "integer"
             },
             {
@@ -189,6 +213,22 @@
         },
         "isPartOf": {
           "anyOf": [
+            {
+              "additionalProperties": true,
+              "description": "A Periodical node.",
+              "properties": {
+                "@id": {
+                  "type": "string"
+                },
+                "@type": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
             {
               "type": "string"
             },
@@ -456,6 +496,15 @@
     },
     "about": {
       "anyOf": [
+        {
+          "additionalProperties": true,
+          "properties": {
+            "@id": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
         {
           "type": "string"
         },

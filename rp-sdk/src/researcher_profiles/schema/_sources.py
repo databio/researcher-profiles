@@ -15,7 +15,7 @@ from pydantic import (
     model_validator,
 )
 
-from ._common import FORMAT_HINT
+from ._common import FORMAT_HINT, GYear, IdRef, OrganizationName, PeriodicalName, PersonList
 from ._identity import _slugify, normalize_doi
 from ._parts import ResearchOutput
 from .jsonld import CONTEXT_URL, PROFILE_FORMAT_IRI, JsonLdModel
@@ -54,9 +54,9 @@ class PaperRecord(ResearchOutput):
     # property, because that is what a paper's name is called everywhere else
     # in this package.
     name: str = Field(validation_alias=AliasChoices("name", "title"))
-    year: int | None = Field(default=None, alias="datePublished")
-    journal: str | None = Field(default=None, alias="isPartOf")
-    authors: list[str] | None = Field(default=None, alias="author")
+    year: GYear = Field(default=None, alias="datePublished")
+    journal: PeriodicalName = Field(default=None, alias="isPartOf")
+    authors: PersonList = Field(default=None, alias="author")
 
     # Identity
     paper_id: str | None = None
@@ -187,7 +187,7 @@ class _CollectionDocument(JsonLdModel):
     type_: str | None = Field(default="Collection", alias="@type")
     conforms_to: str = Field(default=PROFILE_FORMAT_IRI, alias="conformsTo")
     #: The person this collection is about (their profile ``@id``).
-    about: str | None = None
+    about: IdRef = None
 
     @model_validator(mode="before")
     @classmethod
@@ -249,7 +249,7 @@ class GrantRecord(JsonLdModel):
 
     id: str
     title: str = Field(alias="name")
-    funder: str | None = None
+    funder: OrganizationName = None
     number: str | None = Field(default=None, alias="identifier")
     #: NIH activity code (e.g. "R01", "K99", "U01"), recoverable without
     #: parsing the free-text ``identifier``. Feeds eligibility evaluation

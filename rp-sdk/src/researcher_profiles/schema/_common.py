@@ -5,9 +5,9 @@ This is the leaf of the ``schema`` package: it imports nothing from its
 siblings, so every model module can depend on it without a cycle.
 """
 
-from typing import Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, WithJsonSchema
 
 #: The error text naming the one on-disk format.
 FORMAT_HINT = "a profile is profile.jsonld + sources/papers.jsonld"
@@ -140,6 +140,93 @@ KNOWN_PROVENANCE: frozenset[str] = frozenset(
 #: of headline labels must stay open. :data:`KNOWN_PROVENANCE` is the recognized
 #: set; unknown values warn (see :meth:`ProfileDocument._warn_unknown_provenance`).
 Provenance = str
+
+
+# ---------------------------------------------------------------------------
+# Published-schema overrides for fields whose on-disk shape is not their
+# Python type
+# ---------------------------------------------------------------------------
+
+# A handful of fields hold a flat Python value but are written as a JSON-LD
+# node or typed literal (``datePublished`` is an ``xsd:gYear`` string,
+# ``isPartOf`` a ``Periodical`` node, ``about`` an ``{"@id": ...}`` reference).
+# A ``mode="before"`` validator reads the on-disk form and a field serializer
+# writes it back, so pydantic's generated JSON Schema would otherwise describe
+# the Python type and reject every document this package writes. These
+# annotations make the exported schema describe the shapes the model actually
+# loads: the published form first, and the flat form it also tolerates.
+
+_NULL: dict[str, Any] = {"type": "null"}
+
+
+def _named_node(node_type: str) -> dict[str, Any]:
+    return {
+        "type": "object",
+        "description": f"A {node_type} node.",
+        "properties": {
+            "@type": {"type": "string"},
+            "@id": {"type": "string"},
+            "name": {"type": "string"},
+        },
+        "additionalProperties": True,
+    }
+
+
+#: ``datePublished``: an ``xsd:gYear`` string on disk (``"2024"``); an int in Python.
+GYear = Annotated[
+    int | None,
+    WithJsonSchema(
+        {
+            "anyOf": [
+                {"type": "string", "pattern": r"^\s*\d+\s*$"},
+                {"type": "integer"},
+                _NULL,
+            ]
+        }
+    ),
+]
+
+
+def _node_or_name(node_type: str) -> WithJsonSchema:
+    return WithJsonSchema({"anyOf": [_named_node(node_type), {"type": "string"}, _NULL]})
+
+
+#: ``isPartOf``: a ``Periodical`` node on disk; the journal name in Python.
+PeriodicalName = Annotated[str | None, _node_or_name("Periodical")]
+
+#: ``affiliation`` / ``funder``: an ``Organization`` node on disk; the name in Python.
+OrganizationName = Annotated[str | None, _node_or_name("Organization")]
+
+#: ``author``: ``Person`` nodes on disk; a list of names in Python.
+PersonList = Annotated[
+    list[str] | None,
+    WithJsonSchema(
+        {
+            "anyOf": [
+                {"type": "array", "items": {"anyOf": [_named_node("Person"), {"type": "string"}]}},
+                _NULL,
+            ]
+        }
+    ),
+]
+
+#: ``about``: an ``{"@id": ...}`` reference on disk; the bare IRI in Python.
+IdRef = Annotated[
+    str | None,
+    WithJsonSchema(
+        {
+            "anyOf": [
+                {
+                    "type": "object",
+                    "properties": {"@id": {"type": "string"}},
+                    "additionalProperties": True,
+                },
+                {"type": "string"},
+                _NULL,
+            ]
+        }
+    ),
+]
 
 
 class _Base(BaseModel):

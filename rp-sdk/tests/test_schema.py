@@ -190,8 +190,64 @@ class TestSchemaExport:
         from researcher_profiles.validate import schema_fingerprint
 
         assert schema_fingerprint() == (
-            "be277cb0d0fcb58cd56196bc3496b8f64fc8c6f8bc7c1881e218352e411b529b"
+            "bdb59588c57187d6000a752e8f5ae26f2538a38ff3e015029641cc52ecc4d72f"
         )
+
+    def test_exported_schema_accepts_what_the_model_writes(self):
+        """A document this package serializes must pass its own JSON Schema.
+
+        ``datePublished``, ``isPartOf``, ``author``, ``about``, ``funder`` and
+        ``affiliation`` hold a flat Python value but are written as a typed
+        literal or JSON-LD node. When the schema described the Python type,
+        the browser validator flagged every published works file (``"2024"``
+        is not an integer, ``{"@id": ...}`` is not a string).
+        """
+        import jsonschema
+
+        from researcher_profiles.schema import GrantsDocument
+
+        schemas = build_schemas()
+        papers = PapersDocument.model_validate(
+            {
+                "about": {"@id": "https://orcid.org/0000-0002-1825-0097"},
+                "hasPart": [
+                    {
+                        "name": "A paper",
+                        "doi": "10.1/x",
+                        "datePublished": "2024",
+                        "isPartOf": {"@type": "Periodical", "name": "J"},
+                        "author": [{"@type": "Person", "name": "A. Author"}],
+                    }
+                ],
+            }
+        )
+        grants = GrantsDocument.model_validate(
+            {
+                "about": {"@id": "https://orcid.org/0000-0002-1825-0097"},
+                "hasPart": [
+                    {
+                        "id": "g1",
+                        "name": "A grant",
+                        "funder": {"@type": "Organization", "name": "NIH"},
+                    }
+                ],
+            }
+        )
+        profile = _canonical_doc(
+            affiliation="University of Somewhere",
+            affiliation_id="https://ror.org/000000000",
+        )
+        for name, doc in (
+            ("papers_jsonld", papers),
+            ("grants_jsonld", grants),
+            ("profile_jsonld", profile),
+        ):
+            wire = json.loads(canonical_dumps(doc.model_dump(mode="json", by_alias=True)))
+            errors = [
+                f"{'/'.join(map(str, e.path))}: {e.message}"
+                for e in jsonschema.Draft202012Validator(schemas[name]).iter_errors(wire)
+            ]
+            assert not errors, f"{name}: {errors}"
 
     # ---- Fixture parity: Pydantic + JSON Schema agree on fixtures ----
 
