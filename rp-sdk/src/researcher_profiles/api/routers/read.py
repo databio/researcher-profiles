@@ -409,6 +409,10 @@ def get_profile_artifact(
       manifest at all. "Not for you" and "not there" must not be tellable apart,
       or the error message enumerates the private half of the profile.
 
+    Past all three, a manifest entry whose body the store does not hold (a
+    push withheld it) is a 404 that says so. Only a caller the tier gate
+    admitted can reach it, so it discloses nothing they may not see.
+
     Only paths the manifest declares are servable; an unknown or traversing path
     is a 404. ``X-RP-Effective-Tier`` reports the tier the derivation rule
     resolved (``privacy.effective_tiers``), so a derivative never advertises a
@@ -465,10 +469,23 @@ def get_profile_artifact(
 
     # The store owns retrieval, including the traversal refusal a directory
     # backend needs and a relational one structurally cannot need.
+    #
+    # A manifest row can outlive its body: a push that withholds a class of
+    # files (``sources/papers/`` fulltext is withheld by default) still commits
+    # a manifest listing them. The caller has already passed the tier gate
+    # here, so they may know the artifact exists; telling them it is "not a
+    # manifest artifact" would be false and sends them hunting for a
+    # permission problem. Say what is actually wrong instead.
     try:
         data = store.artifact_bytes(resolved, artifact)
     except (ProfileNotFoundError, KeyError) as e:
-        raise unknown from e
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"artifact {artifact!r} is listed in the manifest of {resolved!r} "
+                "but its content was not uploaded to this registry"
+            ),
+        ) from e
 
     return Response(
         content=data,
