@@ -36,21 +36,26 @@ pip install -e ".[dev]"
 
 ## Documentation
 
-`docs/rp-sdk/reference/python-api.md` is generated, not hand written. Docstrings
-in `src/researcher_profiles/` are the source of truth for it, including the
-`#: comment` style used on most dataclass, SQLModel and pydantic fields, which
-`scripts/render_python_api.py` reads directly from source (griffe does not see
-plain comments). To change what that page says, edit a docstring (or a `#:`
-comment, or a `Field(description=...)`), then regenerate:
+`docs/rp-sdk/reference/python-api.md` is rendered when the site builds, by
+doc-hubs (the `hub-python-api` renderer declared in `docs/docs.yml`), from the
+`::: module.Object` directives in that page. Nothing generated is committed.
+Docstrings in `src/researcher_profiles/` remain the source of truth, including
+the `#: comment` style used on most dataclass, SQLModel and pydantic fields and
+`Field(description=...)`; the renderer reads all three statically from source.
+To change what the page says, edit the docstring. To change which classes and
+functions appear, or their order, add, remove or move `::: module.Object` lines
+in that page (keep the mirrored-codebase order).
+
+To preview the rendered page, run the doc-hubs CLI from the monorepo root (with
+a doc-hubs checkout beside this repo; it needs `griffe` and `pyyaml`):
 
 ```bash
-pip install -e ".[llm,client,sql,vectors,st,docs]"   # or the `dev` extra plus `docs`
-python scripts/render_python_api.py
+python ../doc-hubs/scripts/render_python_api.py \
+    --package-root rp-sdk/src --package-root scholarcore/src \
+    --package researcher_profiles --package scholarcore \
+    --docstring-style sphinx docs/rp-sdk/reference/python-api.md
 ```
 
-Do not hand-edit `docs/rp-sdk/reference/python-api.md`; the next regeneration
-overwrites it. To change which classes and functions appear, or their order,
-edit the `::: module.Class` directive list in `scripts/python-api-directives.md`.
 Narrative content (module layout, the storage interface, capability managers, the
 export idempotency contract) is hand written and lives in
 `docs-dev/rp-sdk/explanation/sdk-architecture.md`.

@@ -34,3 +34,11 @@ nav:
     - Overview: rp-ui-lib/index.md
   - Browser App:
     - Overview: rp-browser/index.md
+renderers:
+  - hub-python-api:
+      package_root:
+        - ../rp-sdk/src
+        - ../scholarcore/src
+      packages: [researcher_profiles, scholarcore]
+      include: [rp-sdk/reference/python-api.md]
+      docstring_style: sphinx

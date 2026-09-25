@@ -124,14 +124,6 @@ topics = [
 signing = [
     "cryptography>=41",
 ]
-# scripts/render_python_api.py: renders docs/rp-sdk/reference/python-api.md
-# from `::: module.Class` directives via griffe. It is needed only to
-# regenerate the Python API reference after a docstring change, not to
-# install, test, or run the SDK. See docs/rp-sdk/reference/python-api.md's own
-# note and AGENTS.md.
-docs = [
-    "griffe>=1.0",
-]
 # The supported test install. It pulls in the api / vectors / client tiers
 # because the SDK test suite exercises the real FastAPI app, the sqlite-vec /
 # numpy registry, and the httpx remote client at module scope. A bare
