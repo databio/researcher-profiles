@@ -15,7 +15,6 @@ import type { FetchOutcome } from "../net/fetchJson";
 import { fetchJson } from "../net/fetchJson";
 import { fetchBinary } from "../net/fetchBinary";
 import { getFix } from "./fixes";
-import { checkOrcidRoundTrip } from "./orcid";
 import { validateAgainstSchema, schemaIdForRole } from "./schemaValidation";
 import { TEXT_ARTIFACT_ROLES, textArtifactProblems } from "./textArtifact";
 
@@ -205,12 +204,6 @@ export async function profileChecks(
     message: identityMessage,
     evidence: `@id: ${rawId || "(none)"}, base: ${base}`,
   });
-
-  // --- orcid-roundtrip badge ---
-  if (orcidMatch) {
-    const orcidBadge = await checkOrcidRoundTrip(orcidMatch[1], base);
-    add(orcidBadge);
-  }
 
   // --- required-roles ---
   const entries = entriesOf(manifest);
@@ -475,12 +468,6 @@ export async function profileChecks(
         : `A paper_summary entry${summaryEntry.paperId ? ` for "${summaryEntry.paperId}"` : ""} 404s. This makes the browser's paper rows dead-end.`,
       evidence: summaryUrl,
     });
-  }
-
-  // --- orcid round-trip badge ---
-  if (manifest.orcid) {
-    const orcidResult = await checkOrcidRoundTrip(manifest.orcid, base);
-    add(orcidResult);
   }
 
   return checks;
