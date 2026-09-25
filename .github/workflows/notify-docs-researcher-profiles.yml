@@ -1,0 +1,28 @@
+name: Notify village docs (researcher-profiles)
+
+# The researcher-profiles spoke of village.databio.org is this repo's docs/
+# tree. This repo hosts a SECOND spoke, scholarcore, with its own notifier in
+# notify-docs-scholarcore.yml — hence the per-spoke filenames.
+#
+# rp-sdk/src/** and scholarcore/src/** are here because docs/docs.yml declares
+# the hub-python-api renderer over them: a docstring change alters the
+# published Python API page.
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'docs/**'
+      - 'rp-sdk/src/**'
+      - 'rp-sdk/pyproject.toml'
+      - 'scholarcore/src/**'
+      - '.github/workflows/notify-docs-researcher-profiles.yml'
+  workflow_dispatch:
+
+jobs:
+  notify:
+    uses: databio/actions/.github/workflows/notify-doc-hub.yml@master
+    with:
+      site: village
+      spoke: researcher-profiles
+    secrets:
+      DOCS_DISPATCH_TOKEN: ${{ secrets.DOCS_DISPATCH_TOKEN }}
