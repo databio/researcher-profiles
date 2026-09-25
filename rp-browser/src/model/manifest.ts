@@ -191,6 +191,23 @@ export function profileFiles(resolved: ResolvedProfile): ProfileFile[] {
 }
 
 /**
+ * Resolve a per-paper manifest entry (e.g. role `paper_summary` or
+ * `paper_fulltext`) for one paper, matched on its exact `paperId`. Returns null
+ * when the profile lists no such artifact for that paper.
+ */
+export function paperArtifactUrl(
+  manifest: Manifest,
+  role: string,
+  paperId: string,
+): string | null {
+  const link = manifestEntries(manifest).find(
+    (e) => e.role === role && e.paperId === paperId,
+  );
+  if (!link) return null;
+  return new URL(link.contentUrl, manifest["@id"]).href;
+}
+
+/**
  * Resolve the summary file for a paper. Per-paper summaries are individual
  * manifest entries (role `paper_summary`) keyed by `paperId`.
  */
@@ -198,11 +215,18 @@ export function summaryUrl(
   manifest: Manifest,
   paperId: string,
 ): string | null {
-  const link = manifestEntries(manifest).find(
-    (e) => e.role === "paper_summary" && e.paperId === paperId,
-  );
-  if (!link) return null;
-  return new URL(link.contentUrl, manifest["@id"]).href;
+  return paperArtifactUrl(manifest, "paper_summary", paperId);
+}
+
+/**
+ * Resolve the profile's own copy of a paper's full text (role
+ * `paper_fulltext`, e.g. `sources/papers/<paperId>.md`), keyed by `paperId`.
+ */
+export function fulltextUrl(
+  manifest: Manifest,
+  paperId: string,
+): string | null {
+  return paperArtifactUrl(manifest, "paper_fulltext", paperId);
 }
 
 // ---------------------------------------------------------------------------

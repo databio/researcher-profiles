@@ -6,15 +6,25 @@ import styles from "./viewer.module.css";
 export type LoadSummary = (paperId: string) => Promise<string>;
 
 /**
- * One paper. When `summary_available`, an "Summary" toggle lazily invokes
- * `loadSummary(paper_id)` and renders the returned markdown inline.
+ * Resolve a paper's internal full-text artifact (the profile's own copy) to a
+ * URL, or null when the profile has none for that paper.
+ */
+export type FullTextHref = (paperId: string) => string | null;
+
+/**
+ * One paper, with small labeled links: "Summary" (when `summary_available`,
+ * lazily invokes `loadSummary(paper_id)` and renders the markdown inline),
+ * "Full text" (the profile's own copy, via `fullTextHref`), and "Publisher"
+ * (the external `full_text_link`). Each shows only when its target exists.
  */
 export function PaperRow({
   paper,
   loadSummary,
+  fullTextHref,
 }: {
   paper: PaperEntry;
   loadSummary?: LoadSummary;
+  fullTextHref?: FullTextHref;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [summary, setSummary] = useState<string | null>(null);
@@ -44,6 +54,9 @@ export function PaperRow({
     }
   }
 
+  const internalFullText =
+    paper.paper_id && fullTextHref ? fullTextHref(paper.paper_id) : null;
+
   const metaLine = [paper.first_author, paper.journal, paper.year]
     .filter((x) => x !== null && x !== undefined && x !== "")
     .join(" · ");
@@ -56,24 +69,37 @@ export function PaperRow({
           {metaLine && <p className={styles.paperMeta}>{metaLine}</p>}
         </div>
         <div className={styles.paperActions}>
+          {canExpand && (
+            <button
+              className={styles.linkBtn}
+              onClick={toggle}
+              disabled={loading}
+              aria-expanded={expanded}
+            >
+              {loading ? "Loading…" : expanded ? "Hide summary" : "Summary"}
+            </button>
+          )}
+          {internalFullText && (
+            <a
+              className={styles.link}
+              href={internalFullText}
+              target="_blank"
+              rel="noreferrer"
+              title="The profile's copy of the full text"
+            >
+              Full text
+            </a>
+          )}
           {paper.full_text_link && (
             <a
               className={styles.link}
               href={paper.full_text_link}
               target="_blank"
               rel="noreferrer"
+              title={paper.full_text_link}
             >
-              Full text
+              Publisher
             </a>
-          )}
-          {canExpand && (
-            <button
-              className={styles.expandBtn}
-              onClick={toggle}
-              disabled={loading}
-            >
-              {loading ? "Loading…" : expanded ? "Hide summary" : "Summary"}
-            </button>
           )}
         </div>
       </div>

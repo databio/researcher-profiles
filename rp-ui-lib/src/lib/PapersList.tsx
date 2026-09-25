@@ -1,20 +1,23 @@
 import { useMemo, useState } from "react";
 import type { PaperEntry } from "../types";
-import { PaperRow, type LoadSummary } from "./PaperRow";
+import { PaperRow, type FullTextHref, type LoadSummary } from "./PaperRow";
 import styles from "./viewer.module.css";
 
 type SortMode = "year" | "title";
 
 /**
  * The paper corpus, grouped by year (descending) or listed by title. Each row
- * can lazily fetch its per-paper summary via `loadSummary`.
+ * can lazily fetch its per-paper summary via `loadSummary` and link the
+ * profile's own full text via `fullTextHref`.
  */
 export function PapersList({
   papers,
   loadSummary,
+  fullTextHref,
 }: {
   papers: PaperEntry[];
   loadSummary?: LoadSummary;
+  fullTextHref?: FullTextHref;
 }) {
   const [sort, setSort] = useState<SortMode>("year");
 
@@ -67,6 +70,7 @@ export function PapersList({
                 key={p.paper_id ?? `${gi}-${i}`}
                 paper={p}
                 loadSummary={loadSummary}
+                fullTextHref={fullTextHref}
               />
             ))}
           </div>

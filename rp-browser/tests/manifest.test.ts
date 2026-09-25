@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { normalizeBase, linkFor, summaryUrl, profileFiles } from "../src/model/manifest";
+import { normalizeBase, linkFor, summaryUrl, fulltextUrl, profileFiles } from "../src/model/manifest";
 import type { Manifest, ResolvedProfile } from "../src/model/manifest";
 
 describe("normalizeBase", () => {
@@ -111,6 +111,40 @@ describe("summaryUrl", () => {
 
   it("returns null when no paper_summary entry matches", () => {
     expect(summaryUrl(manifest, "anything")).toBeNull();
+  });
+});
+
+describe("fulltextUrl", () => {
+  const manifest: Manifest = {
+    "@id": "https://example.com/profiles/alice/",
+    name: "Alice",
+    rid: "0000-0000-0000-0001",
+    hasPart: [
+      {
+        role: "paper_summary",
+        contentUrl: "sources/summaries/smith2024foo.summary.md",
+        paperId: "smith2024foo",
+      },
+      {
+        role: "paper_fulltext",
+        contentUrl: "sources/papers/smith2024foo.md",
+        paperId: "smith2024foo",
+      },
+    ],
+  };
+
+  it("resolves the paper_fulltext entry for a paperId", () => {
+    expect(fulltextUrl(manifest, "smith2024foo")).toBe(
+      "https://example.com/profiles/alice/sources/papers/smith2024foo.md"
+    );
+  });
+
+  it("returns null when the paper has only a summary", () => {
+    const summaryOnly: Manifest = {
+      ...manifest,
+      hasPart: manifest.hasPart!.filter((e) => e.role !== "paper_fulltext"),
+    };
+    expect(fulltextUrl(summaryOnly, "smith2024foo")).toBeNull();
   });
 });
 

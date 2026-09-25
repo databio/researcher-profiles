@@ -6,7 +6,12 @@ import {
   PapersList,
 } from "@rp/ui-lib";
 import type { ProfileDetail, PaperEntry } from "@rp/ui-lib/types";
-import { loadManifest, profileFiles, type ResolvedProfile } from "../model/manifest";
+import {
+  fulltextUrl,
+  loadManifest,
+  profileFiles,
+  type ResolvedProfile,
+} from "../model/manifest";
 import {
   getProfileDetail,
   getProfilePapers,
@@ -116,6 +121,13 @@ export function ProfilePage({ url: urlProp, activeTab, onTabChange }: ProfilePag
     (paperId: string) =>
       loadManifest(url).then((m) => getPaperSummary(m, paperId)),
     [url],
+  );
+
+  // The profile's own full-text copy of a paper (role `paper_fulltext`), when
+  // the manifest lists one; the row hides the link otherwise.
+  const fullTextHref = useCallback(
+    (paperId: string) => (resolved ? fulltextUrl(resolved.manifest, paperId) : null),
+    [resolved],
   );
 
   const tabs = useMemo(() => {
@@ -267,7 +279,11 @@ export function ProfilePage({ url: urlProp, activeTab, onTabChange }: ProfilePag
                 <p className="text-muted">No research identity (SOUL) written yet.</p>
               ))}
             {resolvedActive === "papers" && (
-              <PapersList papers={papers} loadSummary={loadSummary} />
+              <PapersList
+                papers={papers}
+                loadSummary={loadSummary}
+                fullTextHref={fullTextHref}
+              />
             )}
             {resolvedActive === "embeddings" && (
               <EmbeddingsPanel loading={embLoading} error={embError} data={emb} />
