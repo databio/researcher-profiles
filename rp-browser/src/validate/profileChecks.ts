@@ -17,6 +17,7 @@ import { fetchBinary } from "../net/fetchBinary";
 import { getFix } from "./fixes";
 import { checkOrcidRoundTrip } from "./orcid";
 import { validateAgainstSchema, schemaIdForRole } from "./schemaValidation";
+import { TEXT_ARTIFACT_ROLES, textArtifactProblems } from "./textArtifact";
 
 type Emit = (check: CheckResult) => void;
 
@@ -242,6 +243,10 @@ export async function profileChecks(
   const unreachable: Array<{ role: string; href: string; detail: string }> = [];
   const mismatches: string[] = [];
   const fetchedJson: Array<{ role: string; data: unknown }> = [];
+  // Paper full texts and summaries fetched below, and the ones that are
+  // garbled (binary decoded as text, raw PDF bytes).
+  let textChecked = 0;
+  const garbled: Array<{ href: string; problems: string[] }> = [];
   let corsFix: CheckResult["fix"] | undefined;
   for (const entry of entries.slice(0, 40)) {
     const contentUrl = entry.contentUrl || "";
@@ -263,6 +268,16 @@ export async function profileChecks(
     }
     if (isJsonPart && "value" in partOutcome && entry.role) {
       fetchedJson.push({ role: entry.role, data: partOutcome.value });
+    }
+    if (
+      !isJsonPart &&
+      entry.role &&
+      TEXT_ARTIFACT_ROLES.has(entry.role) &&
+      partOutcome.value instanceof ArrayBuffer
+    ) {
+      textChecked++;
+      const problems = textArtifactProblems(partOutcome.value);
+      if (problems.length > 0) garbled.push({ href: contentUrl, problems });
     }
     if (entry.encodingFormat && partOutcome.contentType) {
       const declared = entry.encodingFormat.split(";")[0].trim();
@@ -288,6 +303,26 @@ export async function profileChecks(
     evidence: unreachable.length > 0 ? unreachable.map((u) => u.href).join(", ") : undefined,
     fix: corsFix,
   });
+
+  // --- text-artifacts (paper full text and summaries are clean text) ---
+  // Same rule as `rp validate` (researcher_profiles.text_artifact). Only the
+  // files fetched above are checked, so a large profile is sampled, not
+  // exhaustively scanned; `rp validate` checks every file.
+  if (textChecked > 0) {
+    add({
+      id: "text-artifacts",
+      title: "Paper Text Is Clean",
+      severity: "error",
+      passed: garbled.length === 0,
+      message:
+        garbled.length === 0
+          ? `${textChecked} paper text file(s) checked; all are clean text.`
+          : `${garbled.length} of ${textChecked} paper text file(s) are garbled: ${garbled
+              .map((g) => `${g.href} (${g.problems.join("; ")})`)
+              .join("; ")}.`,
+      evidence: garbled.length > 0 ? garbled.map((g) => g.href).join(", ") : undefined,
+    });
+  }
 
   // --- ajv schema validation of fetched auxiliary documents ---
   for (const { role, data } of fetchedJson) {

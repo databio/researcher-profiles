@@ -1,0 +1,104 @@
+{
+  "@context": "https://profiles.databio.org/context/v1.jsonld",
+  "@id": "https://orcid.org/0000-0002-1825-0097",
+  "@type": "Person",
+  "conformsTo": "https://profiles.databio.org/context/v1.jsonld",
+  "name": "Ada Lovelace",
+  "rid": "0000-0002-1825-0097",
+  "provenance": "third_party",
+  "license": "https://creativecommons.org/licenses/by/4.0/",
+  "level": "full",
+  "affiliation": "Analytical Society",
+  "field": "Mathematics",
+  "subfields": [
+    "symbolic computation",
+    "mechanical calculation"
+  ],
+  "summary": "Ada Lovelace was a mathematician who worked on Charles Babbage's Analytical Engine. Her notes describe how the engine could be programmed to compute Bernoulli numbers and argue that it manipulates general symbols, not merely numbers.",
+  "expertise": [
+    "symbolic-computation",
+    "exposition-of-machinery"
+  ],
+  "interests": [
+    "general-purpose-computation",
+    "symbol-manipulation"
+  ],
+  "anchor": {
+    "confidence": "high",
+    "disambiguation_evidence": "Synthetic fixture. The ORCID 0000-0002-1825-0097 is used here only to exercise the schema; all content is invented for testing."
+  },
+  "paper_stats": {
+    "corresponding": 2,
+    "first": 2,
+    "last": 0,
+    "middle": 0,
+    "total": 2,
+    "unknown": 0,
+    "year_max": 1843,
+    "year_min": 1843
+  },
+  "hasPart": [
+    {
+      "@type": "Collection",
+      "name": "Works",
+      "visibility": "public",
+      "role": "works",
+      "encodingFormat": "application/ld+json",
+      "contentUrl": "sources/papers.jsonld",
+      "bytes": 1824,
+      "sha256": "f0018a5ad92f6c79aa5a66d71d0451302cc5ed8d1b2598a204c79d534992d218"
+    },
+    {
+      "@type": "DigitalDocument",
+      "name": "Summary: lovelace1843notes",
+      "visibility": "public",
+      "role": "paper_summary",
+      "paperId": "lovelace1843notes",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "sources/summaries/lovelace1843notes.summary.md",
+      "bytes": 338,
+      "sha256": "65a43f2b7ff30a5d76f58a755c6906aacac07b24a2a527d7345f32d4ee598ace"
+    },
+    {
+      "@type": "DigitalDocument",
+      "name": "Summary: lovelace1843translation",
+      "visibility": "public",
+      "role": "paper_summary",
+      "paperId": "lovelace1843translation",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "sources/summaries/lovelace1843translation.summary.md",
+      "bytes": 303,
+      "sha256": "eb460b616b056cfd7dc7c3012af6e7f8ae75da80e9544304866b6e8bbca097ee"
+    },
+    {
+      "@type": "DigitalDocument",
+      "name": "Full text: lovelace1843notes",
+      "role": "paper_fulltext",
+      "paperId": "lovelace1843notes",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "sources/papers/lovelace1843notes.md"
+    }
+  ],
+  "subjectOf": [
+    {
+      "@type": "DigitalDocument",
+      "name": "SOUL",
+      "visibility": "public",
+      "role": "soul",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "personality/SOUL.md",
+      "bytes": 929,
+      "sha256": "abc57dae1791ddd903b428a173005bb981ce7fb71f48741651ca7fe9240e4077"
+    },
+    {
+      "@type": "DigitalDocument",
+      "name": "Expertise",
+      "visibility": "public",
+      "role": "expertise",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "personality/expertise.md",
+      "bytes": 738,
+      "sha256": "ef51a044ee199eee11c6e475ae03b4c2ea25e3384ad62308bb58b037320f03e2"
+    }
+  ]
+}

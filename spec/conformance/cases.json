@@ -88,6 +88,22 @@
           "artifact-reachable"
         ]
       }
+    },
+    {
+      "dir": "invalid/garbled-fulltext",
+      "description": "A paper_fulltext file (sources/papers/lovelace1843notes.md) holds a PDF that a download decoded as text: mostly U+FFFD replacement characters and control characters. Everything else is valid. The CLI fails it on the text-content rule; the explorer's text-artifacts check fails the same file.",
+      "cli": {
+        "valid": false,
+        "expect_fail": [
+          "text_content"
+        ]
+      },
+      "explorer": {
+        "valid": false,
+        "expect_fail": [
+          "text-artifacts"
+        ]
+      }
     }
   ]
 }

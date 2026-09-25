@@ -476,16 +476,76 @@ def validate_profile_dir(profile_dir: str | Path) -> ProfileValidationReport:
     if summaries_dir.is_dir():
         for f in sorted(summaries_dir.iterdir()):
             if f.is_file() and f.name.endswith(".summary.md"):
-                text = f.read_text(encoding="utf-8")
+                text = f.read_bytes().decode("utf-8", errors="replace")
                 fm = _extract_frontmatter(text)
                 if fm is not None:
                     art_result = _validate_data(fm, "summary_file", str(f))
                     report.artifacts.append(art_result)
 
+    # Character rule for paper text (full text and summaries)
+    for art_result in _check_text_artifacts(root):
+        report.artifacts.append(art_result)
+
     # Cross-artifact invariants
     _check_cross_artifact(root, report)
 
     return report
+
+
+#: The text artifacts the character rule covers: (directory, filename suffix,
+#: manifest role). Mirrors the ``sources/summaries`` and ``sources/papers``
+#: rows of the manifest table in ``schema.manifest``.
+_TEXT_ARTIFACT_DIRS: tuple[tuple[str, str, str], ...] = (
+    ("sources/papers", ".md", "paper_fulltext"),
+    ("sources/summaries", ".summary.md", "paper_summary"),
+)
+
+
+def _check_text_artifacts(root: Path) -> list[ArtifactResult]:
+    """Fail every paper full text or summary that is not clean text.
+
+    Only failing files get a result, so a clean profile's report is unchanged.
+    The rule itself lives in :mod:`researcher_profiles.text_artifact`, which the
+    builder also runs before it writes a file.
+    """
+    from .text_artifact import text_artifact_problems
+
+    results: list[ArtifactResult] = []
+    for rel_dir, suffix, role in _TEXT_ARTIFACT_DIRS:
+        directory = root / rel_dir
+        if not directory.is_dir():
+            continue
+        for f in sorted(directory.iterdir()):
+            if not (f.is_file() and f.name.endswith(suffix)):
+                continue
+            problems = text_artifact_problems(f.read_bytes())
+            if not problems:
+                continue
+            results.append(
+                ArtifactResult(
+                    path=str(f),
+                    schema_name=role,
+                    exists=True,
+                    parsed=True,
+                    ok=False,
+                    violations=[
+                        Violation(
+                            json_pointer="/",
+                            keyword="text_content",
+                            message=_cap(problem, 300),
+                            found=f"{rel_dir}/{f.name}",
+                            expected="clean UTF-8 text",
+                            fix=(
+                                "delete the file and re-download the paper"
+                                if role == "paper_fulltext"
+                                else "delete the summary and regenerate it"
+                            ),
+                        )
+                        for problem in problems
+                    ],
+                )
+            )
+    return results
 
 
 def _extract_frontmatter(text: str) -> dict | None:
