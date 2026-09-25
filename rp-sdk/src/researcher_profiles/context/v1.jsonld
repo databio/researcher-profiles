@@ -66,6 +66,7 @@
     "challenge": "rp:challenge",
     "token": "rp:token",
     "matchedUrl": "rp:matchedUrl",
+    "orcid": "rp:orcid",
     "field": "rp:field",
     "subfields": { "@id": "rp:subfield", "@container": "@set" },
     "expertise": { "@id": "schema:knowsAbout", "@container": "@set" },

@@ -17,6 +17,7 @@ import { fetchBinary } from "../net/fetchBinary";
 import { getFix } from "./fixes";
 import { validateAgainstSchema, schemaIdForRole } from "./schemaValidation";
 import { TEXT_ARTIFACT_ROLES, textArtifactProblems } from "./textArtifact";
+import { orcidLoginChecks } from "./orcidLogin";
 
 type Emit = (check: CheckResult) => void;
 
@@ -204,6 +205,11 @@ export async function profileChecks(
     message: identityMessage,
     evidence: `@id: ${rawId || "(none)"}, base: ${base}`,
   });
+
+  // --- proof-orcid-login / orcid-verified ---
+  // A registry-issued ORCID login proof, trusted only from the origin that
+  // served this document. No proof, no check.
+  for (const c of orcidLoginChecks(manifest, manifestOutcome.finalUrl)) add(c);
 
   // --- required-roles ---
   const entries = entriesOf(manifest);

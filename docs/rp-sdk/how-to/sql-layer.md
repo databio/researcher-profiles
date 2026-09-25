@@ -24,6 +24,7 @@ deployment.
 | `rp_chunk_vectors` | `ChunkVectorRow` | embedded chunk (the searchable index) |
 | `rp_profile_vectors` | `ProfileVectorRow` | profile-level vector (the centroid) |
 | `rp_build_state` | `BuildStateRow` | profile's build sidecar (not published) |
+| `rp_rid_aliases` | `RidAliasRow` | retired rid that now resolves to a successor |
 
 Every child table references its owner by `profile_rid`, a foreign key onto
 `rp_profiles.rid`.
@@ -160,7 +161,37 @@ store.list_slugs()  # just the handles
 store.list_profiles()  # ProfileRow objects, ordered by slug
 store.delete("doe-jane")  # cascades to every child table; returns the rid
 store.manifest_from_rows(rid)  # (hasPart, subjectOf); the DB twin of build_manifest
+store.rids_with_email("jane@example.org")  # rids whose document email matches (case-insensitive)
 ```
+
+## Merge two profiles about one person
+
+`merge_into` retires one profile into a survivor in ONE write unit: it commits
+the staged survivor directory at `survivor_rid` (create or replace), deletes
+the retired profile, and records an alias in `rp_rid_aliases`. Pre-commit hooks
+fire with `ctx.kind == "merge"`, `ctx.rid` (the survivor) and `ctx.retired_rid`
+/ `ctx.retired_slug`, on the unit's own session, so a host can re-key its own
+rows in the same transaction. A raising hook rolls all of it back.
+
+```python
+store.merge_into(
+    "jane-local",           # the retired profile, by slug or rid
+    staging_dir,            # the merged survivor, as a profile directory
+    survivor_rid="0000-0002-1825-0097",
+    survivor_slug="doe-jane",
+)
+store.get("jane-local").rid        # -> "0000-0002-1825-0097": the old slug still resolves
+store.successor_of("jane-local")   # -> "0000-0002-1825-0097"
+store.alias_slugs()                # {"jane-local"}: retired slugs stay reserved
+```
+
+After a merge, `get`, `rid_for`, `resolve_slug` and `exists` follow the alias
+when a ref is not a live profile, so the old rid and slug keep working on every
+route, and `resolve_person` answers the successor for a retired rid instead of
+minting a stub. Chains stay one hop: a later merge re-points earlier aliases.
+`list_slugs` never lists an alias. Only the SQL store merges; the filesystem
+and HTTP stores raise `NotImplementedError` (and `rids_with_email` over HTTP
+does too).
 
 ## Serve it over HTTP
 

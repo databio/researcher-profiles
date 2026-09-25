@@ -433,6 +433,10 @@ At least one of `rid`/`name` MUST be supplied.
 `201` on a true miss (a new identity was minted); `200` otherwise, including a
 deferral.
 
+A rid that a registry retired by merging two profiles about one person
+resolves to its successor: the response carries the successor's `rid`, and the
+server MUST NOT mint a stub for a retired rid.
+
 **Status codes:** `200`, `201`, `400` (neither `rid` nor `name`, a malformed
 rid, or an unknown `local:` rid), `401`, `403`.
 

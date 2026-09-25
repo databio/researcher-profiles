@@ -4,7 +4,8 @@
 implements: enumerate profiles, resolve a reference, create/delete one, hand
 out its bytes. :class:`VectorStore` is the optional *capability* protocol on
 top of it: a backend that can also serve a profile's vectors.
-:class:`IngestResult`, :class:`ProfileNotFoundError`, :class:`UploadError` and
+:class:`IngestResult`, :class:`ProfileNotFoundError`, :class:`RetiredRidError`,
+:class:`UploadError` and
 :class:`DuplicateIdentityError` are the value and error types that cross that
 boundary. See the package docstring for why these are protocols and not base
 classes.
@@ -14,7 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Protocol, runtime_checkable
 
-from ..errors import ProfileError
+from ..errors import ProfileError, ProfileWriteError
 from ..profile import ResearcherProfile
 from ..profile.write_unit import WriteHook
 
@@ -43,6 +44,32 @@ class ProfileNotFoundError(ProfileError, KeyError):
         # ``KeyError.__str__`` reprs its argument, so a message would arrive
         # wrapped in quotes. These carry a sentence, not a key.
         return str(self.args[0]) if self.args else ""
+
+
+class RetiredRidError(ProfileWriteError):
+    """A write targets a rid or slug that a merge retired.
+
+    A retired rid or slug keeps resolving to its successor through an alias,
+    so reusing it would silently hijack (or resurrect) that identity. A store
+    that keeps aliases refuses such a write with this error. It is a
+    :class:`~researcher_profiles.errors.ProfileWriteError` on purpose: every
+    route that already maps a write error to 409 then does the right thing.
+    """
+
+    def __init__(
+        self, ref: str, successor_rid: str, *, rid: Optional[str] = None, slug: Optional[str] = None
+    ):
+        self.rid = rid
+        self.slug = slug
+        self.successor_rid = successor_rid
+        self.message = (
+            f"{ref!r} was retired by a merge into {successor_rid!r}; "
+            "a retired rid or slug cannot be reused"
+        )
+        super().__init__(ref, self.message)
+
+    def __str__(self) -> str:
+        return self.message
 
 
 class UploadError(ValueError):
@@ -191,7 +218,52 @@ class ProfileStore(Protocol):
         """
         ...
 
+    def rids_with_email(self, email: str) -> list[str]:
+        """rids of every profile whose top-level document ``email`` equals ``email``.
+
+        Ignoring case and outer whitespace, sorted. Reads stored documents only:
+        never a host's overlay or lens of someone else's profile. A backend that
+        cannot enumerate documents (HTTP) raises ``NotImplementedError``.
+        """
+        ...
+
+    def successor_of(self, ref: str) -> Optional[str]:
+        """The live rid a retired rid or slug resolves to, or ``None``.
+
+        ``None`` for a live profile, for an unknown ref, and on every backend
+        that cannot merge. ``get``, ``rid_for``, ``resolve_slug`` and ``exists``
+        already follow the alias; this says whether they had to.
+        """
+        ...
+
+    def alias_slugs(self) -> set[str]:
+        """Slugs of retired profiles. They stay reserved: allocate around them."""
+        ...
+
     # mutation
+
+    def merge_into(
+        self,
+        retired_ref: str,
+        staging: Path,
+        *,
+        survivor_rid: str,
+        survivor_slug: str,
+        build_missing_index: bool = True,
+    ) -> IngestResult:
+        """Retire one profile into another in ONE write unit.
+
+        Commits the staged survivor directory at ``survivor_rid`` (create or
+        replace), deletes the retired profile, and records an alias so the
+        retired rid and slug keep resolving to the survivor. Chains are kept
+        one hop. Pre-commit hooks see ``ctx.kind == "merge"``,
+        ``ctx.rid == survivor_rid`` and ``ctx.retired_rid`` /
+        ``ctx.retired_slug``. Only a transactional (SQL) store implements it;
+        the others raise ``NotImplementedError``. Raises :class:`RetiredRidError`
+        when ``survivor_rid`` is itself a retired rid: a merge never makes a
+        retired rid live again.
+        """
+        ...
 
     def create(self, document: "ProfileDocument", *, slug: str) -> ResearcherProfile:
         """Create a new profile from a validated document. Returns it.
@@ -202,7 +274,7 @@ class ProfileStore(Protocol):
         exists" and "somebody owns it".
 
         Raises :class:`~researcher_profiles.profile.ProfileWriteError` if
-        ``slug`` or the document's rid is already taken.
+        ``slug`` or the document's rid is already taken. A store that keeps aliases raises :class:`RetiredRidError` for a retired rid or slug.
         """
         ...
 
@@ -235,7 +307,7 @@ class ProfileStore(Protocol):
         cleans up after itself instead.
 
         Raises :class:`~researcher_profiles.profile.ProfileWriteError` if
-        ``slug`` or the document's rid is already taken.
+        ``slug`` or the document's rid is already taken. A store that keeps aliases raises :class:`RetiredRidError` for a retired rid or slug.
         """
         ...
 
@@ -253,7 +325,7 @@ class ProfileStore(Protocol):
         (papers, embeddings) is added later by a push or a build.
 
         Returns the profile, so the caller can read ``rid`` / ``name`` /
-        ``level`` for the response.
+        ``level`` for the response. A store that keeps aliases raises :class:`RetiredRidError` for a retired rid or slug.
         """
         ...
 
@@ -277,6 +349,7 @@ class ProfileStore(Protocol):
         rankable. A backend with no filesystem accepts it and ignores it.
 
         Raises :class:`UploadError` if the staged directory does not load.
+        A store that keeps aliases raises :class:`RetiredRidError` for a retired rid or slug.
         """
         ...
 

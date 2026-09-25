@@ -71,7 +71,13 @@ from ._parts import (
     SiteInfrastructure,
     WeightedInterest,
 )
-from ._proof import KNOWN_PROOF_KINDS, Proof
+from ._proof import (
+    KNOWN_PROOF_KINDS,
+    REGISTRY_ISSUED_PROOF_KINDS,
+    Proof,
+    strip_registry_issued_from_document,
+    strip_registry_issued_proofs,
+)
 from ._sources import (
     GrantRecord,
     GrantsDocument,
@@ -107,6 +113,7 @@ __all__ = [
     "ProfileDocument",
     "ProfileLevel",
     "Proof",
+    "REGISTRY_ISSUED_PROOF_KINDS",
     "Provenance",
     "ROLE_DEFAULT_VISIBILITY",
     "ResearchOutput",
@@ -129,4 +136,6 @@ __all__ = [
     "role_default_visibility",
     "validate_ref",
     "validate_rid",
+    "strip_registry_issued_from_document",
+    "strip_registry_issued_proofs",
 ]

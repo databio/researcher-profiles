@@ -32,6 +32,19 @@
       }
     },
     {
+      "dir": "valid/orcid-login-proof",
+      "description": "The ada-lovelace profile carrying an orcid_login proof from the registry that serves it (issuer http://localhost, the origin the explorer harness serves fixtures from). The proof names the same ORCID iD as rid, so it is well formed and the explorer shows the ORCID verified badge.",
+      "cli": {
+        "valid": true
+      },
+      "explorer": {
+        "valid": true,
+        "expect_pass": [
+          "orcid-verified"
+        ]
+      }
+    },
+    {
       "dir": "invalid/profile-missing-name",
       "description": "profile.jsonld omits the required `name`, so ProfileDocument validation fails with a Pydantic `missing` error.",
       "cli": {
@@ -102,6 +115,22 @@
         "valid": false,
         "expect_fail": [
           "text-artifacts"
+        ]
+      }
+    },
+    {
+      "dir": "invalid/orcid-login-proof-mismatch",
+      "description": "An orcid_login proof whose orcid is a valid ORCID iD that is not the profile's rid. The CLI's document rule raises a value_error; the explorer's proof-orcid-login check fails.",
+      "cli": {
+        "valid": false,
+        "expect_fail": [
+          "value_error"
+        ]
+      },
+      "explorer": {
+        "valid": false,
+        "expect_fail": [
+          "proof-orcid-login"
         ]
       }
     }

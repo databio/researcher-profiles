@@ -10,12 +10,14 @@ whatever a profile looks like over HTTP, it looks the same in the published
 site.
 """
 
+from collections.abc import Sequence
 from typing import Any
 
 import pydantic
 
 from ..build_state import BuildState
 from ..privacy import ViewerTier, project_document
+from ..schema import strip_registry_issued_proofs
 from . import ResearcherProfile
 
 
@@ -75,7 +77,9 @@ def profile_summary_dict(prof: ResearcherProfile, viewer: ViewerTier) -> dict[st
     }
 
 
-def metadata_payload_dict(prof: ResearcherProfile, viewer: ViewerTier) -> dict[str, Any]:
+def metadata_payload_dict(
+    prof: ResearcherProfile, viewer: ViewerTier, *, proofs: Sequence[Any] = ()
+) -> dict[str, Any]:
     """Project the on-disk JSON-LD document onto the (non-JSON-LD) wire shape.
 
     The wire contract speaks Python-ish field names, so this dumps by name
@@ -86,9 +90,16 @@ def metadata_payload_dict(prof: ResearcherProfile, viewer: ViewerTier) -> dict[s
     document, inline sections included, so a default would mean a caller that
     forgot the tier got everything: the failure would be silent, total, and
     indistinguishable from correct output.
+
+    ``proofs`` are the registry-issued proofs (``Proof`` models) the serving
+    registry attaches to this read. Any registry-issued proof already in the
+    stored document is dropped first: only the registry computes those.
     """
     md = project_document(prof.metadata, viewer)
     data = md.model_dump(mode="json", by_alias=False)
+    data["proof"] = strip_registry_issued_proofs(data.get("proof") or []) + [
+        p.model_dump(mode="json", by_alias=False) for p in proofs
+    ]
     data.pop("affiliation_id", None)
     data["license"] = data.pop("license_", None)
     data["expertise"] = list(md.expertise)

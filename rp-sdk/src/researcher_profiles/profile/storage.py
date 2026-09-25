@@ -67,6 +67,20 @@ CLINICAL_EXPERTISE_URL = "personality/clinical_expertise.md"
 CITATIONS_URL = "sources/citations.json"
 
 
+def persistable_document(document: dict, *, where: str = "") -> dict:
+    """``document`` fit to write as ``profile.jsonld``: registry-issued proofs dropped.
+
+    The filesystem backend's one strip point: :meth:`DirectoryArtifactStorage.save_document`
+    and the directory store's staged-directory commit both call it, so no
+    filesystem write path can store an ``orcid_login`` proof (see
+    :data:`~researcher_profiles.schema.REGISTRY_ISSUED_PROOF_KINDS`). A document
+    with none comes back unchanged.
+    """
+    from ..schema import strip_registry_issued_from_document
+
+    return strip_registry_issued_from_document(document, where=where)
+
+
 class LazySummaries(Mapping[str, str]):
     """Lazy ``Mapping[str, str]`` over a fixed key set with fetch-on-access bodies.
 
@@ -559,6 +573,7 @@ class DirectoryArtifactStorage(ArtifactStorage):
         fail to load never reaches the store.
         """
         path = self._p("profile.jsonld")
+        data = persistable_document(dict(data), where=str(path))
         try:
             path.write_text(canonical_dumps(data), encoding="utf-8")
         except OSError as e:

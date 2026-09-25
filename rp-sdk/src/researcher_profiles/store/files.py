@@ -81,6 +81,27 @@ def swap_profile_dir(root: Path, slug: str, staging_dir: Path) -> Path:
     return target
 
 
+def _strip_staged_document(staging: Path) -> None:
+    """Drop registry-issued proofs from a staged ``profile.jsonld`` before it goes live.
+
+    A pushed or ingested directory is swapped in whole, so its document never
+    passes :meth:`DirectoryArtifactStorage.save_document`; this is the same
+    strip, applied to the staged file. Untouched when there is nothing to
+    drop, so the pushed bytes stay verbatim.
+    """
+    from ..profile.storage import persistable_document
+    from ..schema.jsonld import canonical_dumps
+
+    path = staging / "profile.jsonld"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return  # the load below reports an unreadable document
+    stripped = persistable_document(data, where=str(path))
+    if stripped is not data:
+        path.write_text(canonical_dumps(stripped), encoding="utf-8")
+
+
 class FilesystemProfileStore(_HookedStore, _AnalyticsAccessors):
     """Profiles as directories under one root, with a small LRU over the
     loaded :class:`~researcher_profiles.profile.ResearcherProfile` objects.
@@ -203,6 +224,32 @@ class FilesystemProfileStore(_HookedStore, _AnalyticsAccessors):
         except ProfileNotFoundError:
             return False
         return True
+
+    def rids_with_email(self, email: str) -> list[str]:
+        """rids whose document ``email`` equals ``email`` (case and outer space ignored).
+
+        Loads every profile, which is fine for a directory corpus.
+        """
+        needle = (email or "").strip().lower()
+        if not needle:
+            return []
+        out = []
+        for slug in self.list_slugs():
+            meta = self.get(slug).metadata
+            if (meta.email or "").strip().lower() == needle:
+                out.append(meta.rid)
+        return sorted(out)
+
+    def successor_of(self, ref: str) -> Optional[str]:  # noqa: ARG002
+        """Always ``None``: a directory store keeps no aliases (it cannot merge)."""
+        return None
+
+    def alias_slugs(self) -> set[str]:
+        """Always empty: a directory store keeps no aliases."""
+        return set()
+
+    def merge_into(self, retired_ref: str, staging: Path, **kwargs) -> IngestResult:  # noqa: ARG002
+        raise NotImplementedError("merge needs the SQL store")
 
     def write_lookup_index(self) -> Optional[Path]:
         """Persist ``rid <-> slug`` into ``<root>/.cache/index.json``.
@@ -482,6 +529,7 @@ class FilesystemProfileStore(_HookedStore, _AnalyticsAccessors):
         committed but unindexed rather than raising. The profile is hosted,
         but not yet in ``/match``.
         """
+        _strip_staged_document(Path(staging))
         try:
             staged = ResearcherProfile.from_files(staging)
             name = staged.metadata.name

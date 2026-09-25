@@ -199,6 +199,7 @@ authored and served, validated by this schema either way. See
 | `verifiedAt` | string \| null | no | `null` | required when `provenance` is `orcid_verified` | When the ORCID round-trip was checked. |
 | `license` | string \| null | no | `null` | an IRI | Reuse terms for the published record. |
 | `url` | string \| null | no | `null` | | The published profile URL. Required by `orcid_verified`. |
+| `proof` | list[`Proof`] | no | `[]` | see `Proof` sub-table; at most one `orcid_login`, and its `orcid` must equal `rid` | Verification proofs. Unknown kinds are kept, never rejected. |
 | `dateModified` | string \| null | no | `null` | | |
 | `sameAs` | list[string] | no | `[]` | | Other URLs for the same person (Scholar, lab site, homepage). |
 | `identifier` | list[`Identifier`] | no | `[]` | `PropertyValue` nodes | Non-`@id` identifiers (OpenAlex, Scopus, ...). |
@@ -227,6 +228,28 @@ authored and served, validated by this schema either way. See
 | `career_stage` | `CareerStage` \| null | no | `null` | see `CareerStage` sub-table | Date-anchored eligibility facts. |
 
 ### Nested `$defs` sub-objects
+
+**`Proof`** (tolerant: extra members are kept). `kind` is required. Each known
+kind requires its own members, and the exported schema enforces them with an
+`allOf` of `if kind == ... then required` rules, generated from the same table
+the Python validator reads:
+
+| `kind` | Required members | Notes |
+|---|---|---|
+| `key_signature` | `verificationMethod`, `alg`, `signatureValue` | Detached JWS over the canonical document. |
+| `domain_wellknown` | `issuer`, `challenge` | A `.well-known` challenge on the claimed domain. |
+| `orcid_roundtrip` | `issuer` | The ORCID record's website list points back (the self-hosted option). |
+| `orcid_login` | `issuer`, `orcid`, `verifiedAt` | Registry-issued: see below. |
+| `institution` | none | Reserved. |
+
+`orcid_login` is a registry-issued kind (`REGISTRY_ISSUED_PROOF_KINDS` in
+`researcher_profiles.schema`). The registry serving a document computes it on
+each read: "the profile's owner signed in here with ORCID iD `orcid`". `issuer` is the registry's base URL (absolute `http(s)`), `orcid` the
+bare ORCID iD equal to `rid`, and `verifiedAt` when the registry last confirmed
+the sign-in. The Python validator also checks those three formats; the JSON
+Schema checks only that they are present. Every store strips registry-issued
+proofs from a document before persisting it
+(`strip_registry_issued_proofs`), so a stored `profile.jsonld` never holds one.
 
 **`Training`** (strict; `kind`, `degree` and `institution` required). A postdoc
 is a `kind: postdoc` span entry, never a degree. For a degree, `year_end` is the

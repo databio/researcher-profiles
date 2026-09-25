@@ -792,10 +792,16 @@ class ResearcherProfile:
 
         Returns the re-parsed :class:`ProfileDocument`.
         """
+        from ..schema import strip_registry_issued_from_document
         from ..utils.date_modified import stamp_date_modified
 
         candidate = self.metadata if doc is None else doc
-        data = candidate.model_dump(mode="json")
+        # Registry-issued proofs are computed when served, never stored. The
+        # backends strip them too; doing it here keeps the returned (and
+        # cached) document identical to what was persisted.
+        data = strip_registry_issued_from_document(
+            candidate.model_dump(mode="json"), where=self.locate("profile.jsonld")
+        )
         previous = self._storage.load_persisted_document()
         stamped = stamp_date_modified(data, previous)
         raw = canonical_dumps(stamped)

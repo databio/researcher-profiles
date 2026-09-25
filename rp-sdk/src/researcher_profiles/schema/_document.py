@@ -235,6 +235,22 @@ class ProfileDocument(JsonLdModel):
             ]
         return self
 
+    @model_validator(mode="after")
+    def _check_orcid_login_proof(self) -> "ProfileDocument":
+        """An ``orcid_login`` proof is unique and names this profile's ORCID."""
+        logins = [p for p in self.proof if p.kind == "orcid_login"]
+        if len(logins) > 1:
+            raise ValueError(
+                "a document carries at most one orcid_login proof: it is served by one registry"
+            )
+        for p in logins:
+            if p.orcid != self.orcid:
+                raise ValueError(
+                    f"orcid_login proof names ORCID iD {p.orcid} but this "
+                    f"profile's rid is {self.rid}"
+                )
+        return self
+
     # --- derived ------------------------------------------------------
 
     @property

@@ -492,7 +492,9 @@ def _resolve_by_rid(
     except ValueError as e:
         raise ResolveError(str(e)) from e
     if store.exists(rid):
-        return ResolveResult(rid=rid, created=False, confidence="exact")
+        # ``rid_for`` follows a merge alias, so a retired rid answers with its
+        # live successor and never mints a stub over a retired identity.
+        return ResolveResult(rid=store.rid_for(rid), created=False, confidence="exact")
     if is_local(rid):
         # A local: rid is only ever chosen by this resolver, never
         # supplied from outside: accepting one for a profile that does

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
 from pydantic import ValidationError
+from sqlalchemy import func
 from sqlmodel import Session, select
 
 from ...build_state import BuildState
@@ -28,10 +29,11 @@ from ..db import (
     PaperRow,
     ProfileRow,
     ProfileVectorRow,
+    RidAliasRow,
     create_all,
 )
 from ..hooks import _HookedStore
-from ..protocol import IngestResult, ProfileNotFoundError, UploadError
+from ..protocol import IngestResult, ProfileNotFoundError, RetiredRidError, UploadError
 from . import _vectors
 from ._shared import RENDERED_URLS, _is_memory_sqlite, _is_text, artifact_rows, render_collection
 from ._storage import SqlArtifactStorage
@@ -164,10 +166,82 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
             row = s.exec(select(ProfileRow).where(ProfileRow.slug == ref)).first()
             if row is not None:
                 return row.rid
+            successor = self._alias_successor(s, ref)
+            if successor is not None and s.get(ProfileRow, successor) is not None:
+                return successor
         raise ProfileNotFoundError(
             f"nothing in {self.url} matches {ref!r}: no rp_profiles row with "
             f"rid={ref!r}, and none with slug={ref!r}"
         )
+
+    @staticmethod
+    def _alias_successor(s: Session, ref: str) -> Optional[str]:
+        """The successor rid of a retired rid or slug ``ref``, or ``None``.
+
+        Only consulted after the live lookups miss, so a live profile always
+        beats an alias. Chains are one hop by construction (``merge_into``
+        re-points them), so this is one indexed lookup, never a walk.
+        """
+        alias = s.get(RidAliasRow, ref)
+        if alias is None:
+            alias = s.exec(select(RidAliasRow).where(RidAliasRow.old_slug == ref)).first()
+        return None if alias is None else alias.successor_rid
+
+    @staticmethod
+    def _refuse_retired(s: Session, rid: str, slug: Optional[str]) -> None:
+        """Raise :class:`RetiredRidError` if a write would reuse a retired rid or slug.
+
+        A retired rid or slug resolves to its successor through an alias, so a
+        write that made it live again would hijack that identity. Rid and slug
+        are checked in their own namespaces (not via :meth:`_alias_successor`,
+        which falls through from one to the other).
+        """
+        alias = s.get(RidAliasRow, rid)
+        if alias is not None and s.get(ProfileRow, rid) is None:
+            raise RetiredRidError(rid, alias.successor_rid, rid=rid, slug=slug)
+        if slug:
+            alias = s.exec(select(RidAliasRow).where(RidAliasRow.old_slug == slug)).first()
+            if (
+                alias is not None
+                and s.exec(select(ProfileRow).where(ProfileRow.slug == slug)).first() is None
+            ):
+                raise RetiredRidError(slug, alias.successor_rid, rid=rid, slug=slug)
+
+    def successor_of(self, ref: str) -> Optional[str]:
+        """The live rid a retired rid or slug now resolves to, or ``None``.
+
+        ``None`` for a live profile and for a ref nothing has ever retired.
+        """
+        with self.session() as s:
+            if s.get(ProfileRow, ref) is not None:
+                return None
+            if s.exec(select(ProfileRow).where(ProfileRow.slug == ref)).first() is not None:
+                return None
+            return self._alias_successor(s, ref)
+
+    def alias_slugs(self) -> set[str]:
+        """Every retired slug. They stay reserved: slug allocation treats them as taken."""
+        with self.session() as s:
+            rows = s.exec(select(RidAliasRow.old_slug).where(RidAliasRow.old_slug.is_not(None)))
+            return {r for r in rows.all() if r}
+
+    def rids_with_email(self, email: str) -> list[str]:
+        """rids of every profile whose top-level document ``email`` equals ``email``.
+
+        Ignores case and outer whitespace, sorted. Reads stored documents only
+        (the ``rp_profiles.email`` projection).
+        """
+        needle = (email or "").strip().lower()
+        if not needle:
+            return []
+        with self.session() as s:
+            return list(
+                s.exec(
+                    select(ProfileRow.rid)
+                    .where(func.lower(func.trim(ProfileRow.email)) == needle)
+                    .order_by(ProfileRow.rid)
+                ).all()
+            )
 
     def exists(self, ref: str) -> bool:
         try:
@@ -248,68 +322,89 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
         row and loses only its bytes. It does not gate vectors: those are
         shredded into ``rp_chunk_vectors`` / ``rp_profile_vectors`` on every
         put, because a queryable vector is not a file body.
+
+        Raises :class:`RetiredRidError` when the rid or slug was retired by a
+        merge; that covers :meth:`commit_directory` and :meth:`import_directory`.
+        """
+        handle = slug or profile.slug
+        with self.session() as s:
+            self._refuse_retired(s, profile.metadata.rid, handle)
+            rid = self._write_profile_rows(s, profile, slug=handle, include_binary=include_binary)
+            s.commit()
+        self._bump_generation()
+        return rid
+
+    def _write_profile_rows(
+        self,
+        s: Session,
+        profile: ResearcherProfile,
+        *,
+        slug: str,
+        include_binary: bool,
+    ) -> str:
+        """Replace ``profile``'s rows on ``s``. Flushes, never commits. Returns the rid.
+
+        The body of :meth:`put`, shared with :meth:`merge_into` so a merge writes
+        the survivor exactly the way an ingest would, inside its own write unit.
         """
         meta = profile.metadata
         rid = meta.rid
-        handle = slug or profile.slug
+        handle = slug
         document = profile.persisted_document() or json.loads(
             canonical_dumps(meta.model_dump(mode="json"))
         )
         soul = profile.soul or ""
         parts = self._manifest_of(profile)
 
-        with self.session() as s:
-            existing = s.get(ProfileRow, rid)
-            if existing is not None:
-                self._delete_children(s, rid)
-                s.delete(existing)
-                s.flush()
-
-            s.add(ProfileRow.from_document(meta, slug=handle, document=document, soul=soul))
-            # Flush the parent BEFORE any child. SQLAlchemy orders a flush by
-            # mapper dependencies, which come from `relationship()` declarations,
-            # and these tables carry FK *columns* with no relationships, so
-            # the unit of work is free to emit `INSERT INTO rp_artifacts` first
-            # and have the FK rejected. Postgres FKs are not deferrable, so this
-            # is a real failure there (and anywhere SQLite's foreign_keys pragma
-            # is on, which a management host turns on), not a test artifact.
+        existing = s.get(ProfileRow, rid)
+        if existing is not None:
+            self._delete_children(s, rid)
+            s.delete(existing)
             s.flush()
 
-            for ordinal, paper in enumerate(profile.papers):
-                s.add(PaperRow.from_record(rid, paper, ordinal=ordinal))
-            for ordinal, grant in enumerate(profile.grants):
-                s.add(GrantRow.from_record(rid, grant, ordinal=ordinal))
-            for ordinal, topic in enumerate(meta.expertise):
-                s.add(ExpertiseTopicRow(profile_rid=rid, ordinal=ordinal, topic=topic))
+        s.add(ProfileRow.from_document(meta, slug=handle, document=document, soul=soul))
+        # Flush the parent BEFORE any child. SQLAlchemy orders a flush by
+        # mapper dependencies, which come from `relationship()` declarations,
+        # and these tables carry FK *columns* with no relationships, so
+        # the unit of work is free to emit `INSERT INTO rp_artifacts` first
+        # and have the FK rejected. Postgres FKs are not deferrable, so this
+        # is a real failure there (and anywhere SQLite's foreign_keys pragma
+        # is on, which a management host turns on), not a test artifact.
+        s.flush()
 
-            seen: set[str] = set()
-            for slot, part, ordinal in parts:
-                if part.content_url in seen:
-                    continue
-                seen.add(part.content_url)
-                s.add(
-                    self._artifact_row(
-                        rid, part, slot, ordinal, profile.storage, include_binary=include_binary
-                    )
+        for ordinal, paper in enumerate(profile.papers):
+            s.add(PaperRow.from_record(rid, paper, ordinal=ordinal))
+        for ordinal, grant in enumerate(profile.grants):
+            s.add(GrantRow.from_record(rid, grant, ordinal=ordinal))
+        for ordinal, topic in enumerate(meta.expertise):
+            s.add(ExpertiseTopicRow(profile_rid=rid, ordinal=ordinal, topic=topic))
+
+        seen: set[str] = set()
+        for slot, part, ordinal in parts:
+            if part.content_url in seen:
+                continue
+            seen.add(part.content_url)
+            s.add(
+                self._artifact_row(
+                    rid, part, slot, ordinal, profile.storage, include_binary=include_binary
                 )
+            )
 
-            state = profile.build_state
-            if state is not None and (state.papers or state.build.completed_phases):
-                s.add(
-                    BuildStateRow(
-                        profile_rid=rid,
-                        schema_version=int(state.schema_version),
-                        state=state.model_dump(mode="json", exclude_none=True),
-                    )
+        state = profile.build_state
+        if state is not None and (state.papers or state.build.completed_phases):
+            s.add(
+                BuildStateRow(
+                    profile_rid=rid,
+                    schema_version=int(state.schema_version),
+                    state=state.model_dump(mode="json", exclude_none=True),
                 )
+            )
 
-            # Vectors: shredded into queryable rows, never stored as a blob.
-            # This is what makes the store a ``VectorStore``; see ``_vectors``.
-            for row in _vectors.shred_profile(rid, profile):
-                s.add(row)
-
-            s.commit()
-        self._bump_generation()
+        # Vectors: shredded into queryable rows, never stored as a blob.
+        # This is what makes the store a ``VectorStore``; see ``_vectors``.
+        for row in _vectors.shred_profile(rid, profile):
+            s.add(row)
+        s.flush()
         return rid
 
     def import_directory(self, path: str | Path, *, include_binary: bool = False) -> str:
@@ -357,6 +452,125 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
                 staged = ResearcherProfile.from_files(staging)
         rid = self.put(staged, slug=slug, include_binary=True)
         return IngestResult(slug=slug, rid=rid, name=name, level=level, indexed=indexed)
+
+    def merge_into(
+        self,
+        retired_ref: str,
+        staging: Path,
+        *,
+        survivor_rid: str,
+        survivor_slug: str,
+        build_missing_index: bool = True,
+    ) -> IngestResult:
+        """Retire one profile into another, in ONE write unit.
+
+        ``staging`` is the complete survivor directory (the merged content the
+        caller assembled). In one transaction this commits it at
+        ``survivor_rid`` (create or replace), deletes the retired profile,
+        records ``rp_rid_aliases(retired rid, retired slug -> survivor)`` and
+        re-points every alias whose successor was the retired rid, so chains
+        stay one hop. Pre-commit hooks fire with ``ctx.kind == "merge"``,
+        ``ctx.rid == survivor_rid`` and ``ctx.retired_rid`` / ``ctx.retired_slug``
+        set, on the unit's own session, so a host can re-key its own rows in
+        the same transaction.
+
+        When the survivor keeps the retired profile's slug (a rid conversion),
+        the alias covers the old rid only: the slug still names a live profile.
+
+        Raises :class:`ProfileWriteError` when the retired and survivor rids are
+        the same or the staged rid is not ``survivor_rid``, :class:`RetiredRidError`
+        when ``survivor_rid`` was itself retired by an earlier merge,
+        :class:`ProfileNotFoundError` when ``retired_ref`` names no live profile,
+        :class:`UploadError` when the staged directory does not load.
+        """
+        with self.session() as s:
+            # A merge must never make a retired rid live again.
+            self._refuse_retired(s, survivor_rid, None)
+            retired_row = (
+                s.get(ProfileRow, retired_ref)
+                or s.exec(select(ProfileRow).where(ProfileRow.slug == retired_ref)).first()
+            )
+            if retired_row is None:
+                raise ProfileNotFoundError(f"no live profile {retired_ref!r} in {self.url}")
+            retired_rid, retired_slug = retired_row.rid, retired_row.slug
+        if retired_rid == survivor_rid:
+            raise ProfileWriteError(self.url, "cannot merge a profile into itself")
+        try:
+            staged = ResearcherProfile.from_files(staging)
+            name = staged.metadata.name
+            level = str(staged.level)
+        except (OSError, ValueError, ProfileError, ValidationError) as e:
+            raise UploadError(f"staged profile failed to load: {e}") from e
+        if staged.metadata.rid != survivor_rid:
+            raise ProfileWriteError(
+                self.url,
+                f"staged rid {staged.metadata.rid!r} is not the survivor rid {survivor_rid!r}",
+            )
+        indexed = (cache_dir(staging) / "embeddings.sqlite").is_file()
+        if not indexed and build_missing_index:
+            indexed = self._try_build_index(Path(staging))
+            if indexed:
+                staged = ResearcherProfile.from_files(staging)
+
+        storage = SqlArtifactStorage(self, survivor_rid, slug=survivor_slug)
+        storage.context_extra = {"retired_rid": retired_rid, "retired_slug": retired_slug}
+        prof = self._admit(ResearcherProfile(storage))
+        try:
+            self._merge_unit(
+                prof, storage, staged, retired_rid, retired_slug, survivor_rid, survivor_slug
+            )
+        finally:
+            storage.context_extra = {}
+        self._bump_generation()
+        return IngestResult(
+            slug=survivor_slug, rid=survivor_rid, name=name, level=level, indexed=indexed
+        )
+
+    def _merge_unit(
+        self,
+        prof: ResearcherProfile,
+        storage: SqlArtifactStorage,
+        staged: ResearcherProfile,
+        retired_rid: str,
+        retired_slug: str,
+        survivor_rid: str,
+        survivor_slug: str,
+    ) -> None:
+        """The one write unit behind :meth:`merge_into`."""
+        with prof.write_unit("merge") as ctx:
+            s = ctx.session
+            self._delete_children(s, retired_rid)
+            gone = s.get(ProfileRow, retired_rid)
+            if gone is not None:
+                s.delete(gone)
+            s.flush()
+            self._write_profile_rows(s, staged, slug=survivor_slug, include_binary=True)
+            # A live profile beats an alias: drop any alias that names the
+            # survivor's own rid or slug, then collapse chains onto the survivor.
+            for stale in s.exec(
+                select(RidAliasRow).where(
+                    (RidAliasRow.old_rid == survivor_rid)
+                    | (RidAliasRow.old_slug == survivor_slug)
+                    | (RidAliasRow.old_slug == retired_slug)
+                )
+            ).all():
+                s.delete(stale)
+            for chained in s.exec(
+                select(RidAliasRow).where(RidAliasRow.successor_rid == retired_rid)
+            ).all():
+                chained.successor_rid = survivor_rid
+                s.add(chained)
+            s.flush()
+            s.add(
+                RidAliasRow(
+                    old_rid=retired_rid,
+                    old_slug=None if retired_slug == survivor_slug else retired_slug,
+                    successor_rid=survivor_rid,
+                )
+            )
+            s.flush()
+            storage.refresh_derived(ctx)
+            prof._run_pre_commit_hooks(ctx)
 
     @staticmethod
     def _try_build_index(staging: Path) -> bool:
@@ -436,6 +650,8 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
         nobody owns.
         """
         rid = document.rid
+        with self.session() as s:
+            self._refuse_retired(s, rid, slug)
         if self.exists(slug) or self.exists(rid):
             raise ProfileWriteError(
                 self.url,
@@ -474,6 +690,8 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
         or all roll back.
         """
         rid = document.rid
+        with self.session() as s:
+            self._refuse_retired(s, rid, slug)
         if self.exists(slug) or self.exists(rid):
             raise ProfileWriteError(self.url, f"cannot create {slug!r}: slug or rid already exists")
         prof = self._admit(ResearcherProfile(SqlArtifactStorage(self, rid, slug=slug)))
@@ -524,6 +742,8 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
         the profile's :meth:`save_profile` so ``dateModified`` is stamped
         correctly and hooks fire.
         """
+        with self.session() as s:
+            self._refuse_retired(s, document.rid, slug)
         is_create = not self.exists(slug)
 
         if is_create:

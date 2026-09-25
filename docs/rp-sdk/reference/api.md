@@ -378,14 +378,25 @@ Full profile detail: metadata + raw `expertise.md` + raw `SOUL.md`.
 
 ### GET /api/v1/profiles/{slug}/profile.jsonld
 
-Serve the stored `profile.jsonld` **verbatim**: the exact bytes the store
-persisted, not a re-serialization from the loaded model. This is what makes
-the `conformsTo` claim retrievable: a crawler or agent fetching this route
-gets the published document byte for byte.
+Serve the profile document: the stored record plus any **registry-issued
+proofs** (`orcid_login`), which the registry computes on each request and never
+stores. A host supplies them through the `app.state.registry_proofs` hook, a
+callable `(request, rid) -> list[Proof]` given the rid of the document being
+served; bare rp-sdk leaves it `None`. A hook that raises is logged and treated
+as no proofs. When there is no section projection and no registry proof, the
+response is the exact bytes the store persisted, not a re-serialization, so a
+crawler or agent gets the published document byte for byte. Any
+registry-issued proof found in a stored document is dropped; only the hook's
+are served.
+
+`/api/v1/profiles/{slug}/content/profile.jsonld` returns the same bytes with
+the same headers. `GET /api/v1/profiles/{slug}` carries the same proofs in
+`metadata.proof`. The archive (`GET /api/v1/profiles/{slug}/archive`) is the
+stored record and carries none.
 
 Supports conditional requests: the response carries a strong `ETag` (a
-SHA-256 over the served bytes) and `Last-Modified`; a matching
-`If-None-Match` gets a `304`.
+SHA-256 over the served bytes, so it changes when a registry proof changes) and
+`Last-Modified`; a matching `If-None-Match` gets a `304`.
 
 **Status codes:** `200`; `304` (conditional hit); `400` bad slug; `404`
 `{"detail": "profile '<slug>' not found"}`.
@@ -651,6 +662,10 @@ document, exactly as against a static site.
 
 `{artifact}` must be a `contentUrl` present in the manifest (or `profile.jsonld`
 itself); any other path, including a traversal, is `404`.
+
+`profile.jsonld` here is the same response as
+`GET /api/v1/profiles/{slug}/profile.jsonld`: projected by section visibility,
+with registry-issued proofs, a strong `ETag`, and the same cache headers.
 
 **Response 200**: the artifact bytes, with the manifest's `encodingFormat` as
 the content type. `X-RP-Effective-Tier` reports the artifact's effective tier

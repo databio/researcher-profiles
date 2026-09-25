@@ -5,13 +5,16 @@ which of its pieces, and the functions that turn a loaded profile into a wire
 payload. The three ``APIRouter`` objects the route modules attach to live
 beside this, in :mod:`.routers._routers`.
 
-Four of these are the hooks a hosting service composes against, and they are
+Some of these are the hooks a hosting service composes against, and they are
 re-exported without an underscore from ``researcher_profiles.api``:
-``artifact_visible``, ``invalidate_after_write``, ``metadata_payload`` and
-``withheld``. Everything else here is internal to the route modules.
+``artifact_visible``, ``invalidate_after_write``, ``metadata_payload``,
+``withheld``, and the serve-time document helpers ``registry_proofs``,
+``served_document`` and ``served_document_bytes``. Everything else here is
+internal to the route modules.
 """
 
 import logging
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from email.utils import format_datetime
 
@@ -28,13 +31,19 @@ from ..privacy import (
     ViewerTier,
     chunk_source_tiers,
     profile_visible,
+    project_document,
     tier_allows,
 )
 from ..profile.payloads import metadata_payload_dict, profile_summary_dict
 from ..schema import (
+    REGISTRY_ISSUED_PROOF_KINDS,
+    ProfileDocument,
+    Proof,
     most_restrictive,
     role_default_visibility,
+    strip_registry_issued_proofs,
 )
+from ..schema.jsonld import canonical_dumps
 from ..store import ProfileStore
 from ..utils.paths import STORE_CACHE_DIRNAME
 from .deps import (
@@ -118,15 +127,81 @@ def _profile_summary(prof, viewer: ViewerTier) -> ProfileSummary:
     return ProfileSummary.model_validate(profile_summary_dict(prof, viewer))
 
 
-def metadata_payload(prof, viewer: ViewerTier) -> ProfileMetadataPayload:
+def metadata_payload(
+    prof, viewer: ViewerTier, *, proofs: Sequence[Proof] = ()
+) -> ProfileMetadataPayload:
     """Validate the shared metadata projection into the wire model.
 
     Part of the read-projection hooks re-exported from
     ``researcher_profiles.api``: a hosting service composing its own surface
     projects a profile's metadata through this, so its answer and the SDK's
     cannot drift. The projection is ``payloads.metadata_payload_dict``.
+
+    ``proofs`` are the registry-issued proofs to attach to this read (see
+    :func:`registry_proofs`); any stored copy of such a proof is dropped.
     """
-    return ProfileMetadataPayload.model_validate(metadata_payload_dict(prof, viewer))
+    return ProfileMetadataPayload.model_validate(metadata_payload_dict(prof, viewer, proofs=proofs))
+
+
+# ---------------------------------------------------------------------------
+# Registry-issued proofs (computed per read, never stored)
+# ---------------------------------------------------------------------------
+
+
+def registry_proofs(request: Request, rid: str) -> list[Proof]:
+    """The registry-issued proofs to attach when serving the document of ``rid``.
+
+    Calls ``app.state.registry_proofs`` (``(request, rid) -> list[Proof]``);
+    ``[]`` when the slot is unset, which is every bare rp-sdk server. A hook
+    that raises is logged and treated as ``[]``: a proof failure must never
+    fail a public read.
+    """
+    hook = getattr(request.app.state, "registry_proofs", None)
+    if hook is None:
+        return []
+    try:
+        return list(hook(request, rid) or [])
+    # Boundary: whatever the host's hook raises, the read still succeeds.
+    except Exception:
+        logger.warning("registry_proofs hook failed for %r", rid, exc_info=True)
+        return []
+
+
+def _served(prof, viewer: ViewerTier, proofs: Sequence[Proof]) -> ProfileDocument:
+    md = prof.metadata
+    doc = project_document(md, viewer) if md.section_visibility else md
+    return doc.model_copy(update={"proof": strip_registry_issued_proofs(doc.proof) + list(proofs)})
+
+
+def served_document(request: Request, prof, viewer: ViewerTier) -> ProfileDocument:
+    """The document a registry serves: the stored record plus its registry proofs.
+
+    Projected by section visibility when the profile declares any. The stored
+    document's own registry-issued proofs (none should exist) are dropped and
+    the hook's are appended. Never mutates ``prof.metadata``: the store caches
+    that object.
+    """
+    return _served(prof, viewer, registry_proofs(request, prof.metadata.rid))
+
+
+def served_document_bytes(
+    request: Request, store: ProfileStore, prof, viewer: ViewerTier, slug: str
+) -> bytes:
+    """The ``profile.jsonld`` bytes to serve for ``prof`` to ``viewer``.
+
+    With no section projection, no registry proof to attach, and no stored
+    copy of a registry-issued proof, the stored bytes (``store.document_bytes``)
+    come back verbatim. Otherwise the served document is re-serialized
+    canonically, which drops any stored registry-issued proof (a bare server
+    with no hook must not serve one either). Raises what ``document_bytes``
+    raises when the store has lost the profile.
+    """
+    proofs = registry_proofs(request, prof.metadata.rid)
+    stored_registry_proof = any(p.kind in REGISTRY_ISSUED_PROOF_KINDS for p in prof.metadata.proof)
+    if not prof.metadata.section_visibility and not proofs and not stored_registry_proof:
+        return store.document_bytes(slug)
+    doc = _served(prof, viewer, proofs)
+    return canonical_dumps(doc.model_dump(mode="json")).encode()
 
 
 # ---------------------------------------------------------------------------

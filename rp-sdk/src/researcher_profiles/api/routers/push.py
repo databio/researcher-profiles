@@ -247,6 +247,9 @@ async def _put_profile_tarball(
         )
     except UploadError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+    except ProfileWriteError as e:
+        # Includes RetiredRidError: an archive whose rid or slug a merge retired.
+        raise HTTPException(status_code=409, detail=str(e)) from e
 
     # Invalidate: cached profile object, in-memory registry snapshot, and the
     # on-disk registry caches. Extraction restores archive mtimes, which can
@@ -296,6 +299,9 @@ def get_profile_archive(
     The response carries ``X-RP-Archive-Digest`` (md5 of the body) so the
     client can verify the transfer before committing it to its cache, and
     ``X-RP-Archive-Tier`` naming the tier it was built for.
+
+    The archive is the stored record and carries no registry-issued proofs:
+    those are computed only when ``profile.jsonld`` is served.
     """
     # A read path accepts either form. Never gate a rid on SLUG_RE: it
     # forbids uppercase and would reject every X-suffixed ORCID.

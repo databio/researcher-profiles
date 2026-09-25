@@ -230,6 +230,20 @@ class HttpProfileStore(_HookedStore, _AnalyticsAccessors):
             return False
         return True
 
+    def rids_with_email(self, email: str) -> list[str]:  # noqa: ARG002
+        raise NotImplementedError("rids_with_email is not available over HTTP")
+
+    def successor_of(self, ref: str) -> Optional[str]:  # noqa: ARG002
+        """Always ``None``: a published site carries no alias table."""
+        return None
+
+    def alias_slugs(self) -> set[str]:
+        """Always empty: a published site carries no alias table."""
+        return set()
+
+    def merge_into(self, retired_ref: str, staging: Path, **kwargs) -> IngestResult:  # noqa: ARG002
+        raise NotImplementedError("merge needs the SQL store")
+
     def write_lookup_index(self) -> None:
         """``None``: there is nowhere to write, and the site already publishes one.
 

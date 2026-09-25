@@ -595,6 +595,81 @@
     },
     "Proof": {
       "additionalProperties": true,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "key_signature"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "required": [
+              "verificationMethod",
+              "alg",
+              "signatureValue"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "domain_wellknown"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "required": [
+              "issuer",
+              "challenge"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "orcid_roundtrip"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "required": [
+              "issuer"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "orcid_login"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "required": [
+              "issuer",
+              "orcid",
+              "verifiedAt"
+            ]
+          }
+        }
+      ],
       "description": "One verification proof attached to a profile (``rp:proof``).\n\nThe format standardizes the *envelope*: what is asserted (``kind``), who\nvouches (``issuer``), when it was last confirmed (``verifiedAt``), and,\nfor checkable proofs, how to check it. It stays neutral on the identity\n*source*. A profile may carry zero, one, or many proofs at once; a\nconsumer picks its own trust threshold over the proofs whose ``kind`` it\nunderstands.\n\n``extra=\"allow\"`` (inherited from :class:`JsonLdModel`) matters here:\ndifferent kinds carry different members, and future kinds add members\nthis version does not model. Unknown members are preserved, never\nrejected.",
       "properties": {
         "@context": {
@@ -684,6 +759,18 @@
           ],
           "default": null,
           "title": "Matchedurl"
+        },
+        "orcid": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Orcid"
         },
         "signatureValue": {
           "anyOf": [

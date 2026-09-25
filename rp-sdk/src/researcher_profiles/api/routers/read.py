@@ -45,6 +45,8 @@ from .._projection import (
     _profile_summary,
     artifact_visible,
     metadata_payload,
+    registry_proofs,
+    served_document_bytes,
     withheld,
 )
 from ..deps import (
@@ -301,7 +303,7 @@ def get_profile_detail(
     return ProfileDetail(
         slug=prof.slug,
         rid=getattr(prof, "rid", None),
-        metadata=metadata_payload(prof, viewer),
+        metadata=metadata_payload(prof, viewer, proofs=registry_proofs(request, prof.metadata.rid)),
         expertise=(
             prof.expertise
             if artifact_visible(explain, md, "personality/expertise.md", "expertise", viewer)
@@ -327,38 +329,43 @@ def get_profile_jsonld(
     store: ProfileStore = Depends(get_store),
     viewer: ViewerTier = Depends(get_viewer_tier),
 ) -> Response:
-    """Serve the stored ``profile.jsonld`` **verbatim**.
+    """Serve the profile's ``profile.jsonld``: the stored record plus registry proofs.
 
-    These are the bytes the store persisted, not a re-serialization from the
-    loaded model: what a crawler or an agent fetches here has to be the
-    published document, byte for byte, or the ``conformsTo`` claim is about a
-    file nobody can retrieve. ``store.document_bytes`` is that guarantee on
-    every backend.
+    The served document is the stored record plus any registry-issued proofs
+    (``orcid_login``), which the registry computes on every request from its
+    own live state and never stores (``app.state.registry_proofs``). A profile
+    with no section projection and no registry proof is served as the exact
+    bytes the store persisted (``store.document_bytes``), so the
+    ``conformsTo`` claim is about a file anyone can retrieve byte for byte.
+    ``/profiles/{slug}/content/profile.jsonld`` returns the same bytes.
     """
     try:
         validate_ref(slug)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
-    # The profile-level tier gates the document; what is inside it is served
-    # verbatim (spec section 6/7). The bytes are the published record or the
-    # ``conformsTo`` claim is about a file nobody can retrieve.
     prof = get_profile(slug, store)
     _gate_profile(request, prof, viewer, slug)
-    if prof.metadata.section_visibility:
-        from ...privacy import project_document
-        from ...schema.jsonld import canonical_dumps
+    return _document_response(request, store, prof, viewer, slug)
 
-        data = canonical_dumps(
-            project_document(prof.metadata, viewer).model_dump(mode="json")
-        ).encode()
-    else:
-        try:
-            data = store.document_bytes(slug)
-        except (ProfileNotFoundError, KeyError) as e:
-            raise _profile_missing(slug) from e
+
+def _document_response(
+    request: Request, store: ProfileStore, prof, viewer: ViewerTier, slug: str
+) -> Response:
+    """The one ``profile.jsonld`` response, shared by both document URLs.
+
+    Gated by the profile tier only (the caller has already run the gate);
+    inline sections are projected when the profile declares section
+    visibility, and registry-issued proofs are attached (see
+    :func:`served_document_bytes`).
+    """
+    try:
+        data = served_document_bytes(request, store, prof, viewer, store.resolve_slug(slug))
+    except (ProfileNotFoundError, KeyError) as e:
+        raise _profile_missing(slug) from e
     # A strong etag over the served bytes, so the short revalidation above is a
     # 304 rather than a re-send. It is the document itself, not a timestamp: two
-    # replicas serving the same profile agree on it.
+    # replicas serving the same profile agree on it, and a change in a
+    # registry proof changes it.
     etag = '"' + hashlib.sha256(data).hexdigest()[:32] + '"'
     headers = _cache_headers(viewer, etag=etag, last_modified_iso=prof.metadata.date_modified)
     if request.headers.get("if-none-match") == etag:
@@ -426,22 +433,10 @@ def get_profile_artifact(
     # here rather than through the manifest lookup below. This is what makes
     # ``/content/`` a usable base URL: a client points at one directory and
     # follows relative contentUrls out of the document it finds there, exactly
-    # as it does against a static site. Gated by the profile tier only: the
-    # bytes are served verbatim (spec section 6/7).
+    # as it does against a static site. The same response as
+    # ``/profiles/{slug}/profile.jsonld``: same bytes, same ETag.
     if artifact == "profile.jsonld":
-        try:
-            data = store.document_bytes(resolved)
-        except (ProfileNotFoundError, KeyError) as e:
-            raise _profile_missing(slug) from e
-        headers = {"Cache-Control": "private, no-store", "Vary": VARY_ON_CREDENTIALS}
-        lm = _http_date(prof.metadata.date_modified)
-        if lm is not None:
-            headers["Last-Modified"] = lm
-        return Response(
-            content=data,
-            media_type="application/ld+json",
-            headers=headers,
-        )
+        return _document_response(request, store, prof, viewer, resolved)
 
     # Only manifest artifacts are servable. Keying off effective_tiers (rather
     # than the raw path) both bounds the surface to declared artifacts and gives

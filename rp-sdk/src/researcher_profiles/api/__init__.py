@@ -41,6 +41,9 @@ Read projection
     ``withheld`` are the functions the route modules project through. A host
     that composes its own surface uses the same four, so it and the SDK cannot
     disagree about what a viewer may see or about what a write invalidates.
+    ``registry_proofs``, ``served_document`` and ``served_document_bytes``
+    build the served ``profile.jsonld``: the stored record plus the
+    registry-issued proofs the ``registry_proofs`` hook computes per read.
 
 ``api.deps``
     The dependency callables a host reuses or wraps: ``get_store``,
@@ -62,9 +65,10 @@ Read projection
     the routers or re-declares the handlers sets it to a ``ProfileStore``.
     ``create_app`` sets the auth and policy hooks to ``None`` and a host
     replaces them with callables: ``owner_verifier``, ``consumer_verifier``,
-    ``write_scope_verifier``, ``push_gate``, ``viewer_resolver`` and
-    ``profile_tier_floor``. A host that runs an embedding preflight reports it
-    through ``embedding_healthy`` and ``embedding_health_detail``. Each is
+    ``write_scope_verifier``, ``push_gate``, ``viewer_resolver``,
+    ``profile_tier_floor`` and ``registry_proofs``. A host that runs an
+    embedding preflight reports it through ``embedding_healthy`` and
+    ``embedding_health_detail``. Each is
     described where ``create_app`` sets it and in the root ``AGENTS.md``.
 """
 
@@ -72,6 +76,9 @@ from ._projection import (
     artifact_visible,
     invalidate_after_write,
     metadata_payload,
+    registry_proofs,
+    served_document,
+    served_document_bytes,
     withheld,
 )
 from .app import create_app
@@ -93,9 +100,12 @@ __all__ = [
     "list_profiles",
     "metadata_payload",
     "public_router",
+    "registry_proofs",
     "review_profile",
     "riff_profile",
     "router",
     "search_profile",
+    "served_document",
+    "served_document_bytes",
     "withheld",
 ]

@@ -74,6 +74,9 @@ class SqlArtifactStorage(ArtifactStorage):
         #: ``SqlProfileStore.create`` inserts the bare row through the unit's
         #: own session, via ``WriteContext.session``.
         self.session: Optional[Session] = None
+        #: Extra :class:`WriteContext` fields for the next unit this storage
+        #: opens (``merge_into`` sets ``retired_rid`` / ``retired_slug``).
+        self.context_extra: dict[str, Any] = {}
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"SqlArtifactStorage(url={self._store.url!r}, rid={self._rid!r})"
@@ -598,6 +601,7 @@ class SqlArtifactStorage(ArtifactStorage):
             kind=kind,
             session=self.session,
             atomic=True,
+            **self.context_extra,
         )
 
     def refresh_derived(self, ctx: WriteContext) -> None:  # noqa: ARG002

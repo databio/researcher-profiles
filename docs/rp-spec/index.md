@@ -393,11 +393,37 @@ The optional `proof` array carries fine-grained verification:
 
 | Proof kind | What it proves |
 |------------|----------------|
-| `orcid_roundtrip` | ORCID record points back |
+| `orcid_roundtrip` | ORCID record points back (the self-hosted option) |
 | `domain_wellknown` | Control of domain via `.well-known` challenge |
 | `key_signature` | Detached JWS over canonicalized document |
+| `orcid_login` (registry-issued) | The registry serving this document saw the profile's owner sign in with ORCID iD `orcid` |
 
 Consumers MUST ignore unknown proof kinds.
+
+##### Registry-issued proofs
+
+A registry that hosts profiles and signs people in with ORCID can vouch for
+that sign-in itself. It does so with an `orcid_login` proof:
+
+| Member | Value |
+|--------|-------|
+| `kind` | `"orcid_login"` |
+| `issuer` | The base URL of the registry serving the document |
+| `orcid` | The bare ORCID iD (`0000-0002-1825-0097`), equal to the ORCID in `rid` |
+| `verifiedAt` | When the registry last confirmed the ORCID sign-in (ISO 8601) |
+
+A registry computes this proof each time it serves the document. It MUST NOT
+store it, and it MUST drop any copy a document author supplies. A document
+carries at most one, and its `orcid` MUST equal the ORCID in `rid`.
+
+A consumer MUST treat an `orcid_login` proof as valid only when it fetched the
+document from the `issuer` origin (or re-fetches it from there to check). A
+copy served by any other host proves nothing: anyone can paste the JSON into
+their own document.
+
+Self-hosted profiles have no registry to vouch for them. They use
+`orcid_roundtrip` instead: the ORCID record's website list points back to the
+profile.
 
 #### Vocabulary
 
