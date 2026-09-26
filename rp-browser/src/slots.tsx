@@ -42,6 +42,8 @@ export interface HomeAction {
  * its own values with <ShellSlotsProvider> inside mountApp's `wrap`.
  */
 export interface ShellSlots {
+  /** Replaces the built-in logo and app name at the left of the header. */
+  brand: ReactNode;
   /** Extra links appended to the top nav. */
   navExtras: ReactNode;
   /** The right-hand header cluster (identity, sign in, sign out). */
@@ -57,6 +59,7 @@ export interface ShellSlots {
 }
 
 const EMPTY: ShellSlots = {
+  brand: null,
   navExtras: null,
   headerRight: null,
   emptyScreen: null,
