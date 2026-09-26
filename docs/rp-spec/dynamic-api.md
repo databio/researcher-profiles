@@ -269,8 +269,34 @@ server may be configured to accept it.
 | `level` | string | Profile depth tier |
 | `indexed` | boolean | Whether the upload included a search index (always `false` for a JSON body) |
 
-**Status codes:** `200`, `400` (validation failure), `401`, `413` (size cap
-exceeded).
+**Status codes:** `200`, `400` (validation failure), `401`, `403` (see
+below), `413` (size cap exceeded).
+
+**Uploads by an app or account key.** A caller holding `push`, or `push_own`
+on a profile its person may write, replaces the profile outright. A server
+implementing [per-part access](authentication.md#per-part-access) MUST also
+accept an upload from an app or account key that holds neither, when the
+target profile exists, the caller may write it, and the caller's table holds
+`write` on at least one part. Such an upload:
+
+- MUST NOT create a profile;
+- MUST be compared with the profile it would replace, part by part, before
+  anything is written: a document field changed counts against the part that
+  governs it, and a file added, removed, or whose bytes changed counts against
+  its role's part (so does a change to its manifest entry). A file with no
+  bytes on either side (full text the server never held) is unchanged. A
+  change of what the public sees, a field no part covers, or an
+  infrastructure file counts against no part;
+- lands only if every part it changes is `write` and nothing it changes is
+  outside every part. Otherwise the server MUST return `403` with the
+  [`insufficient_access`](authentication.md#insufficient-access) body,
+  `needs_replace` included, and MUST change nothing.
+
+To change one file without restating the rest, the caller sends only that file
+with `?mode=merge`. The document still travels, so its sections must match the
+server's. A caller that may write nothing of the target gets
+[`insufficient_scope`](authentication.md#insufficient-scope) for `push`, the
+same answer whether or not the profile exists.
 
 **Request (JSON document):** `Content-Type: application/json`
 
@@ -293,7 +319,8 @@ upload or a build.
 **Status codes:** `200`, `400` (invalid JSON, a body that is not an object, a
 missing `rid` without minting, or a minting conflict), `401`, `403`, `409`
 (`If-Match` mismatch, or the store refused the write), `422` (the body is not
-a valid profile document).
+a valid profile document). The part-by-part rule above applies to a JSON
+upload too; a file it does not carry keeps the bytes it has.
 
 ### GET /profiles/{slug}/archive
 
@@ -547,12 +574,14 @@ Generate divergent brainstorm fragments.
 
 These endpoints let a profile's owner, or an agent acting for them, edit the
 profile. They require owner-level authorization. A server MAY satisfy that with
-an operator bearer token, a signed-in person's session, or a scoped agent key
-(see [Management API](#14-management-api)). When a scoped key is used, each
-endpoint requires the scope named in the
-[scope catalog](authentication.md#agent-scopes), and a request whose key lacks
-it returns `403` with the
-[`insufficient_scope` body](authentication.md#insufficient-scope).
+an operator bearer token, a signed-in person's session, or an app or account
+key whose [parts table](authentication.md#per-part-access) holds `write` on
+every part the edit touches: each metadata field's part, `soul` for the SOUL,
+`works` for a works edit. A key missing one gets `403` with the
+[`insufficient_access` body](authentication.md#insufficient-access). A metadata
+field no part covers, and every visibility change, is
+[not delegable](authentication.md#acts-no-app-or-key-may-hold): `403` with
+`detail.error` `"not_delegable"`.
 
 ### PATCH /profiles/{slug}/metadata
 
@@ -641,9 +670,9 @@ optimistic concurrency as metadata edits.
 | `artifacts_changed` | integer | How many manifest artifacts were re-tiered |
 | `content_hash` | string \| null | The hash AFTER this write, usable as the next `base_hash` |
 
-A caller holding an agent key with `profile:visibility` may only NARROW a tier.
-An attempt to widen one returns `403` naming the artifact, its current tier, and
-the requested tier.
+No app or account key may call this endpoint: it answers `403` with
+`detail.error` `"not_delegable"`, whatever the key's table. What the public
+sees is the owner's decision alone.
 
 ---
 
@@ -704,15 +733,18 @@ Each citation:
 ## 13. Error format
 
 Errors use the format `{"detail": "<message>"}` with the appropriate HTTP
-status code. The command-line login endpoints are the exception: they use the
-OAuth error body of [section 14.2](#142-command-line-login). Elsewhere there is
-no machine-readable error code beyond the status.
+status code. Two exceptions: the command-line login endpoints use the OAuth
+error body of [section 14.2](#142-command-line-login), and a `403` refusing an
+app or key carries an object in `detail` whose `error` is
+`"insufficient_access"`, `"insufficient_scope"`, or `"not_delegable"` (see
+[refusal bodies](authentication.md#refusal-bodies)). Elsewhere there is no
+machine-readable error code beyond the status.
 
 | Status | Meaning |
 |--------|---------|
 | `400` | Bad request (invalid slug or ref, unreadable archive, unknown metadata field, unknown `?as=` value) |
 | `401` | Invalid or missing bearer token |
-| `403` | Hard-floor artifact (withheld from all callers), or a credential that lacks the required scope |
+| `403` | Hard-floor artifact (withheld from all callers), a credential that lacks the required scope, a key without `write` on a part the write touches, or an act no key may perform |
 | `404` | Profile not found, artifact not in manifest, or access denied (indistinguishable) |
 | `409` | Profile not persona-ready (persona endpoints), concurrent edit detected (owner endpoints), or `If-Match` mismatch (JSON upload) |
 | `413` | Archive exceeds size cap |
@@ -728,11 +760,11 @@ no machine-readable error code beyond the status.
 
 An OPTIONAL tier for servers that host profiles on behalf of the people they
 describe. It covers three things a file server has no need of: getting a
-credential onto a command line, telling a caller what their credential is, and
-publishing the vocabulary of write scopes.
+credential onto a command line, and telling a caller what their credential is
+and what it may read and write.
 
 A server MAY implement the management tier without the dynamic API, and vice
-versa. A server MAY offer further management endpoints beyond these five; they
+versa. A server MAY offer further management endpoints beyond these four; they
 are outside this specification.
 
 ### 14.1. The paths are normative
@@ -935,71 +967,55 @@ Each `profiles` entry:
 | `rid` | string | |
 | `role` | string | `owner` or `editor` |
 
-**Status codes:** `200`; `400` when the credential belongs to the agent family
+**Status codes:** `200`; `400` when the credential belongs to the account family
 (the response SHOULD name the correct endpoint); `401` when the header is
 missing, malformed, or the key is unknown, revoked, or expired.
 
 #### GET /api/manage/agent/whoami
 
-Describe an agent-family (`rpa_`) key. Requires `Authorization: Bearer <key>`.
-An agent is expected to call this at the start of every session, before
-attempting any write.
+Describe an account-family (`rpa_`) key: everything it may read and write.
+Requires `Authorization: Bearer <key>`. A key is expected to call this at the
+start of every session, before attempting any write, and again after a
+refusal.
 
 **Response 200:**
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `principal` | object | REQUIRED | The agent itself (below) |
-| `owner` | object \| null | REQUIRED | `{orcid, name}` of the person who minted the key |
-| `profiles` | array | REQUIRED | Profiles this key is bound to (below) |
-| `tier` | string | REQUIRED | The most permissive [viewer tier](authentication.md#viewer-tiers) this key reads at |
-| `scopes` | list[string] | REQUIRED | Granted agent scopes, sorted |
-| `scopes_not_granted` | list[string] | RECOMMENDED | Every agent scope this key does not hold |
-| `never_delegable` | array | RECOMMENDED | Acts no agent key can ever perform, as `{act, why}` objects |
+| `principal` | object | REQUIRED | The key itself (below) |
+| `owner` | object \| null | REQUIRED | `{orcid, name}` of the person whose account the key acts for |
+| `profiles` | array | REQUIRED | Every profile the account reaches (below) |
+| `parts` | object | REQUIRED | The key's [parts table](authentication.md#per-part-access): `{part: "read" \| "write"}`. A part left out is `none` |
+| `replace_profiles` | boolean | REQUIRED | Whether the key holds [Replace whole profiles](authentication.md#replace-whole-profiles) |
+| `never_delegable` | array | RECOMMENDED | [Acts no app or key may hold](authentication.md#acts-no-app-or-key-may-hold), as `{act, why}` objects, worded accurately for this key |
 
 `principal`:
 
 | Field | Type | Description |
 |-------|------|-------------|
+| `kind` | string | `consumer` |
 | `label` | string \| null | Human label given when the key was minted |
-| `handle` | string | Stable machine identifier for this agent |
+| `handle` | string | Stable machine identifier for this key |
 | `created_at` | string \| null | ISO 8601 |
 | `last_used_at` | string \| null | ISO 8601 |
 | `expires_at` | string \| null | ISO 8601, or null for no expiry |
+
+A server MAY add fields (for example numeric ids).
 
 Each `profiles` entry:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `slug` | string | |
+| `slug` | string \| null | |
 | `rid` | string | |
-| `role` | string | `editor` when the key holds any write scope, else `viewer-restricted` |
+| `role` | string | How the account reaches it: `owner`, `co-owner`, `editor`, or `permission` (a person granted the account a permission on their data) |
+| `writes` | list[string] | The parts the key may write here: the table's `write` parts where the account may write, else empty |
 | `published` | boolean | Present when the server tracks a publication decision |
-| `profile_visibility` | string \| null | The profile's document-level tier |
 
-`scopes_not_granted` exists so an agent can state what it cannot do without
-guessing. `never_delegable` exists so it can state what nobody can grant it.
-Servers SHOULD populate both.
+The table is the whole of the key's authority. It is not stored in the key and
+the account holder may change it at any time, so a client MUST NOT cache it
+across sessions.
 
 **Status codes:** `200`; `400` when the credential belongs to the app family;
 `401` when the header is missing or malformed, or the key is unknown, revoked,
 or expired.
-
-#### GET /api/manage/agent/scopes
-
-The scope catalog. **Unauthenticated**: it describes the vocabulary, not any
-particular key, and an agent needs to read it before it has a key.
-
-**Response 200** is a flat object keyed by scope name. Each value:
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `description` | string | REQUIRED | One sentence, written for the person deciding whether to grant it |
-| `endpoints` | list[string] | RECOMMENDED | Requests this scope unlocks, as `"METHOD /path"` |
-| `fields` | list[string] | RECOMMENDED | Metadata fields this scope covers, when it covers fields |
-| `dangerous` | boolean | REQUIRED | Whether granting it can reduce what the world can see |
-| `default_on` | boolean | REQUIRED | Whether a minting interface SHOULD pre-select it |
-
-The catalog MUST contain the scopes defined in
-[Agent scopes](authentication.md#agent-scopes). A server MAY add its own; a
-client MUST ignore names it does not recognize.

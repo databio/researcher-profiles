@@ -10,8 +10,8 @@ This gives the Researcher Profile HTTP interface three tiers:
 2. [Dynamic API](dynamic-api.md): OPTIONAL. Additional endpoints for advanced use, like
    listing, searching, matching, and interacting with profiles programmatically.
 3. [Management API](dynamic-api.md#14-management-api): OPTIONAL. Endpoints for
-   obtaining and introspecting credentials: command-line login, identity echo,
-   and the scope catalog. A server that hosts profiles on behalf of the people
+   obtaining and introspecting credentials: command-line login, and identity
+   echo, including what a key may read and write, part by part. A server that hosts profiles on behalf of the people
    they describe needs these; a file server does not.
 
 All servers MUST satisfy the static API. The dynamic and management tiers are
