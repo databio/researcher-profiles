@@ -34,22 +34,31 @@ export async function ensureModel(
     try {
       // Dynamic import so the model code is only loaded when needed
       const { pipeline: createPipeline, env } = await import(
-        /* @vite-ignore */
-        "@xenova/transformers"
+        "@huggingface/transformers"
       );
 
-      // Self-host configuration
+      // Self-host configuration. Paths hang off BASE_URL, not "./", so they
+      // resolve the same from any route and any bundle location.
+      const base = import.meta.env.BASE_URL;
       const allowRemote = import.meta.env.VITE_RP_ALLOW_REMOTE_MODELS === "1";
       env.allowRemoteModels = allowRemote;
       if (!allowRemote) {
-        env.localModelPath = "./models/";
+        env.allowLocalModels = true;
+        env.localModelPath = `${base}models/`;
       }
-      env.backends.onnx.wasm.wasmPaths = "./ort/";
+      // onnxruntime-web .wasm/.mjs files copied to /ort/ by vite.config.ts.
+      // Without this, ORT fetches them from a CDN.
+      const wasm = env.backends.onnx.wasm;
+      if (wasm) wasm.wasmPaths = `${base}ort/`;
 
       pipeline = await createPipeline(
         "feature-extraction",
         "Xenova/all-MiniLM-L6-v2",
         {
+          // q8 = onnx/model_quantized.onnx, the file fetch-model.mjs
+          // downloads and the one the stored vectors were checked against.
+          device: "wasm",
+          dtype: "q8",
           progress_callback: onProgress as ((progress: unknown) => void) | undefined,
         },
       );
