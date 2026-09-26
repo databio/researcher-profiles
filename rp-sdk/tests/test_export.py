@@ -339,7 +339,7 @@ class TestExportBundle:
             "https://profiles.example.org/profiles/jane-doe/profile.jsonld",
             explore_base="https://explore.example.org",
         ) == (
-            "https://explore.example.org/#/p?u="
+            "https://explore.example.org/p?u="
             "https%3A%2F%2Fprofiles.example.org%2Fprofiles%2Fjane-doe%2F"
         )
         assert explore_url(None) is None

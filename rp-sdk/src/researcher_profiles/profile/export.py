@@ -229,8 +229,9 @@ def explore_url(profile_url: str | None, *, explore_base: str | None = None) -> 
     """The browser-app backlink for a published profile directory.
 
     Returns ``None`` unless both a profile URL and an explore base are given.
-    The hash shape matches what the browser app parses back to the same
-    directory: a trailing slash, ``profile.jsonld`` stripped, percent-encoded.
+    The browser app's profile route, ``/p?u=<directory>``: a trailing slash,
+    ``profile.jsonld`` stripped, percent-encoded. The app loads the document
+    from that directory.
     """
     if not profile_url or not explore_base:
         return None
@@ -244,7 +245,7 @@ def explore_url(profile_url: str | None, *, explore_base: str | None = None) -> 
     if not url.endswith("/"):
         url += "/"
     quoted = urllib.parse.quote(url, safe="")
-    return f"{explore_base.rstrip('/')}/#/p?u={quoted}"
+    return f"{explore_base.rstrip('/')}/p?u={quoted}"
 
 
 def export_paper_body(
