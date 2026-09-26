@@ -20,7 +20,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 from researcher_profiles import LLMClient, ResearcherProfile, StaticArtifactStorage
-from researcher_profiles.cli.auth.agent import Credential, InsufficientScopeError, ManagementClient
+from researcher_profiles.cli.auth.agent import (
+    AgentAPIError,
+    Credential,
+    InsufficientAccessError,
+    ManagementClient,
+)
 from researcher_profiles.client import (
     ApiArtifactStorage,
     _split_profile_url,
@@ -128,7 +133,6 @@ class TestManagementClient:
         "resource, method, args, kwargs, http_method, path, body",
         [
             ("identity", "whoami", (), {}, "get", "/api/manage/agent/whoami", None),
-            ("identity", "scopes", (), {}, "get", "/api/manage/agent/scopes", None),
             ("profile", "get", (SLUG,), {}, "get", f"/api/v1/profiles/{SLUG}", None),
             (
                 "profile",
@@ -193,7 +197,6 @@ class TestManagementClient:
         ],
         ids=[
             "whoami",
-            "scopes",
             "get",
             "patch-metadata",
             "put-soul",
@@ -225,7 +228,6 @@ class TestManagementClient:
         "resource, method, args, kwargs",
         [
             ("identity", "whoami", (), {}),
-            ("identity", "scopes", (), {}),
             ("profile", "get", (SLUG,), {}),
             ("profile", "patch_metadata", (SLUG, {"name": "Jane"}), {}),
             ("profile", "put_soul", (SLUG, "A narrative."), {}),
@@ -236,7 +238,6 @@ class TestManagementClient:
         ],
         ids=[
             "whoami",
-            "scopes",
             "get",
             "patch-metadata",
             "put-soul",
@@ -246,25 +247,48 @@ class TestManagementClient:
             "delete-work",
         ],
     )
-    def test_resource_methods_preserve_insufficient_scope_error(
-        self, resource, method, args, kwargs
-    ):
+    def test_resource_methods_raise_insufficient_access(self, resource, method, args, kwargs):
         client, session = _management_client()
         response = MagicMock(status_code=403, is_success=False)
+        # The server's shape: FastAPI wraps the structured refusal in ``detail``.
         response.json.return_value = {
-            "error": "insufficient_scope",
-            "hint": "Need profile:metadata.",
-            "missing": ["profile:metadata"],
+            "detail": {
+                "error": "insufficient_access",
+                "required": ["background", "summary"],
+                "missing": ["background"],
+                "needs_replace": [],
+                "hint": "This needs Write on background.",
+            }
         }
         session.get.return_value = response
         session.patch.return_value = response
         session.put.return_value = response
         session.delete.return_value = response
 
-        with pytest.raises(InsufficientScopeError) as error:
+        with pytest.raises(InsufficientAccessError) as error:
             getattr(getattr(client, resource), method)(*args, **kwargs)
 
-        assert error.value.missing == ["profile:metadata"]
+        assert error.value.missing == ["background"]
+        assert error.value.required == ["background", "summary"]
+        assert error.value.detail == "This needs Write on background."
+
+    def test_a_not_delegable_refusal_carries_its_hint(self):
+        client, session = _management_client()
+        response = MagicMock(status_code=403, is_success=False)
+        response.json.return_value = {
+            "detail": {
+                "error": "not_delegable",
+                "action": "visibility",
+                "hint": "Apps and API keys may not make this change.",
+            }
+        }
+        session.patch.return_value = response
+
+        with pytest.raises(AgentAPIError) as error:
+            client.profile.patch_visibility(SLUG, profile_visibility="internal")
+
+        assert not isinstance(error.value, InsufficientAccessError)
+        assert error.value.detail == "Apps and API keys may not make this change."
 
 
 # ---------------------------------------------------------------------------

@@ -470,8 +470,27 @@ pushed jane-doe: +0 ~1 -0 (kept 10) name=Jane A. Doe, level=lite, indexed=True
 server now holds 11 artifacts: citations 1, expertise 1, paper_fulltext 2, paper_summary 5, soul 1, works 1
 ```
 
+**Pushing with an API key.** An `rpa_` key (or app key) without the "Replace
+whole profiles" switch may still push to a profile it may write. The server
+compares the push with the profile it replaces, part by part, and lands it only
+if every part it changes is Write in the key's table. Otherwise it writes
+nothing and `rp push` names what is in the way:
+
+```console
+$ rp push profiles/jane-doe --url http://localhost:8109 --token rpa_...
+push refused: nothing was written.
+  needs Write on: summary
+Send only the files you may write (--only <file>), or ask the account holder to change this key's access on the Privacy page.
+```
+
+A change no part covers (what the public sees, a field such as
+`provenance_note`) is listed on its own line: only a key with "Replace whole
+profiles" may make it. `rp push --only <file>` sends one file and keeps the
+rest, so a key with Write on `paper_summary` can update one summary. See
+[`rp agent whoami`](#agent) for the key's table.
+
 **Exit codes.** `0` ok · `1` the server could not be reached or would not
-answer · `2` no server URL resolved, the directory is unreadable, the push
+answer, or refused the push part by part (`403 insufficient_access`) · `2` no server URL resolved, the directory is unreadable, the push
 would remove server files (or shrink the manifest) and `--force` was not given,
 the local manifest names files that are not on disk, `--prune` was combined
 with `--only`/`--merge`, the server does not support the requested mode, or the
@@ -919,26 +938,24 @@ Requires the `[client]` extra.
 
 ## agent
 
-Introspect an **agent** credential: the `rpa_` key an assistant holds to edit
-one profile on one server. Distinct from [`login`](#login), which handles a
-person's own `rpk_` push key.
+Introspect an **agent** credential: the `rpa_` API key an assistant holds to
+act for one person's account on one server. Distinct from [`login`](#login),
+which handles a person's own `rpk_` push key.
 
 ```
 rp agent whoami [--host NAME] [--json]
-rp agent scopes [--host NAME] [--json]
 rp agent config [--host NAME]
 ```
 
 | Subcommand | Calls | Prints |
 |---|---|---|
-| `whoami` | `GET /api/manage/agent/whoami` | The agent's label and handle, its owner, viewer tier, granted and missing scopes, and the profiles it is bound to. |
-| `scopes` | `GET /api/manage/agent/scopes` | The scope catalog, with the dangerous and default-on flags. |
+| `whoami` | `GET /api/manage/agent/whoami` | The key's label and handle, its owner, its parts table (which parts it may read and write), the "Replace whole profiles" switch, every profile the account reaches with the parts the key may write there, and the acts no key may ever do. |
 | `config` | nothing (local) | Which credential resolved, and from where. |
 
 | Option | Description |
 |---|---|
 | `--host NAME` | Which `[hosts.<name>]` block in `credentials.toml` to use. Default: the file's `default =`, or `$RESEARCHER_PROFILES_AUTH_HOST`. |
-| `--json` | (`whoami`, `scopes`) Emit the server's response verbatim. |
+| `--json` | (`whoami`) Emit the server's response verbatim. |
 
 The credential resolves in four steps; the first hit wins
 (`researcher_profiles.agent.resolve_credential`):
@@ -949,17 +966,29 @@ The credential resolves in four steps; the first hit wins
 3. The nearest `.env` walked up from the working directory, same two names.
 4. `~/.config/researcher-profiles/credentials.toml`, which must be mode `0600`.
 
-The scope vocabulary is normative in
-[Agent scopes](../../rp-spec/authentication.md#agent-scopes).
+A key's authority is one table: a level (`none`, `read`, or `write`) for each
+part of a profile (sections such as `summary` and `background`, files such as
+`paper_summary` and `cv`, and `lenses`), plus the "Replace whole profiles"
+switch. The account holder sets both on the server's Privacy page; nothing
+about them is stored in `credentials.toml`. A part `whoami` does not list is
+`none`.
 
 ```console
 $ rp agent whoami
-Agent:   laptop-assistant (rpa_7f3a91c2b40e)
+Agent:   summary bot (agent_1a2b3c4d5e6f)
 Owner:   Jane Doe (0000-0002-1825-0097)
-Tier:    restricted
-Scopes:  profile:history, profile:metadata, profile:narrative, read
-Missing: profile:identity, profile:visibility
-Profile: jane-doe (editor)
+Write:   paper_summary
+Read:    background, cv, expertise, focus, summary, works
+None:    every other part
+Replace whole profiles: off
+Profiles:
+  jane-doe (owner, published): writes paper_summary
+Never allowed:
+  publish: Publishing is a decision by the person the profile describes.
+  unpublish: Same decision, other direction.
+  change what the public sees: Only the owner decides what the public may read.
+  delete: Only the profile owner may delete a profile.
+  grant: Only the account holder may give access, including making another key.
 ```
 
 **Exit codes.** `0` ok · `1` no credential resolved, or the server refused

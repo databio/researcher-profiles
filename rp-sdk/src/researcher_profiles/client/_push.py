@@ -57,6 +57,39 @@ class PushWouldRemove(PushRefused):
         super().__init__(why)
 
 
+class PushInsufficientAccess(PushRefused):
+    """The server refused the push part by part (403 ``insufficient_access``).
+
+    An app or API key without the "Replace whole profiles" switch may push only
+    when every part the push changes is Write in its table. The server compares
+    the push with the profile it would replace, writes nothing, and names what
+    is in the way: ``missing`` (parts the key needs Write on) and
+    ``needs_replace`` (changes no part covers, such as what the public sees,
+    which only the switch allows).
+    """
+
+    def __init__(self, body: dict):
+        self.required: list[str] = list(body.get("required") or [])
+        self.missing: list[str] = list(body.get("missing") or [])
+        self.needs_replace: list[str] = list(body.get("needs_replace") or [])
+        self.hint: str = body.get("hint") or ""
+        super().__init__("this key may not change every part this push touches")
+
+
+def _insufficient_access(resp: Any) -> Optional[dict]:
+    """The ``insufficient_access`` body of a 403, or ``None`` for any other answer."""
+    if resp.status_code != 403:
+        return None
+    try:
+        body = resp.json()
+    except ValueError:
+        return None
+    detail = body.get("detail") if isinstance(body, dict) else None
+    if isinstance(detail, dict) and detail.get("error") == "insufficient_access":
+        return detail
+    return None
+
+
 @dataclass(frozen=True)
 class PushPlan:
     """What a push would do to the server's copy, computed before it runs.
@@ -420,7 +453,10 @@ def push_profile(
     ``force=True``. A profile still carrying the retired ``cache/`` directory,
     or whose manifest names files this directory does not have (the signature
     of a partial copy), raises :class:`PushRefused`. All of them leave the
-    server untouched. ``dry_run=True`` stops after the plan and returns it,
+    server untouched. A 403 ``insufficient_access`` (an app or API key
+    without Write on a part the push changes) raises
+    :class:`PushInsufficientAccess`, and the server has written nothing.
+    ``dry_run=True`` stops after the plan and returns it,
     removals and all, rather than raising: a run that uploads nothing has
     nothing to refuse.
 
@@ -529,6 +565,9 @@ def push_profile(
         )
         if resp.status_code == 401:
             raise PermissionError(resp.text)
+        denied = _insufficient_access(resp)
+        if denied is not None:
+            raise PushInsufficientAccess(denied)
         if resp.status_code >= 400:
             raise RuntimeError(f"push failed ({resp.status_code}): {resp.text[:300]}")
         return PushResult(plan=plan, mode=mode, summary=resp.json())

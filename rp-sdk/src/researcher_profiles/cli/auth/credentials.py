@@ -17,7 +17,7 @@ login, but only for the server it was minted for. And
 what lets ``rp push path/to/profile`` work with no flags at all.
 
 Distinct from :mod:`researcher_profiles.cli.auth.agent`, which resolves ``rpa_`` AGENT
-keys (per-profile write scopes for an assistant) from ``credentials.toml``.
+keys (an account API key with a per-part access table) from ``credentials.toml``.
 This file holds a person's own ``push_own`` key.
 """
 

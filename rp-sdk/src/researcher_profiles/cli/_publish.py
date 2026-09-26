@@ -288,11 +288,45 @@ def _warn_dropped(dropped: dict[str, list[str]]) -> None:
         print(f"warning: {len(paths)} path(s) {what}: {shown}", file=sys.stderr)
 
 
+def _report_insufficient_access(e, *, only: bool) -> None:
+    """Name, on stderr, the parts a refused push needed and the key lacks.
+
+    Exit 1, not 2: nothing was mistyped. The key's table on the server is
+    what stands in the way, and only the account holder can change it.
+    """
+    print("push refused: nothing was written.", file=sys.stderr)
+    if e.missing:
+        print(f"  needs Write on: {', '.join(e.missing)}", file=sys.stderr)
+    if e.needs_replace:
+        print(
+            f"  also changes {', '.join(e.needs_replace)}, which only a key allowed "
+            'to "Replace whole profiles" may change',
+            file=sys.stderr,
+        )
+    if e.hint and not (e.missing or e.needs_replace):
+        print(e.hint, file=sys.stderr)
+    if only:
+        # --only still sends the local profile.jsonld, whose inline sections
+        # (summary, expertise, ...) replace the server's.
+        print(
+            "profile.jsonld travels with --only: its sections must match the "
+            "server's, or ask the account holder to change this key's access "
+            "on the Privacy page.",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            "Send only the files you may write (--only <file>), or ask the account "
+            "holder to change this key's access on the Privacy page.",
+            file=sys.stderr,
+        )
+
+
 def _cmd_push(args: argparse.Namespace) -> int:
     """Upload a built profile directory to a remote API server."""
     import httpx
 
-    from ..client import PushRefused, PushWouldRemove, push_profile
+    from ..client import PushInsufficientAccess, PushRefused, PushWouldRemove, push_profile
 
     target = resolve_profile_arg("push", args.profile, args.root)
     if target is None:
@@ -354,6 +388,9 @@ def _cmd_push(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return EXIT_USAGE
+    except PushInsufficientAccess as e:
+        _report_insufficient_access(e, only=bool(args.only))
+        return EXIT_ERROR
     except PushRefused as e:
         print(f"push refused: {e}", file=sys.stderr)
         return EXIT_USAGE

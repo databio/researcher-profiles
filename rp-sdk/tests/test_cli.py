@@ -78,7 +78,6 @@ VERB_PATHS = tuple((v,) for v in VERBS_TOP) + (
     ("db", "list"),
     ("db", "rm"),
     ("agent", "whoami"),
-    ("agent", "scopes"),
     ("agent", "config"),
     ("profile", "pull"),
     ("profile", "diff"),
@@ -788,10 +787,13 @@ class _StubServer:
         *,
         capabilities: dict | None = _DEFAULT_CAPS,
         summary: dict | None = None,
+        refuse: dict | None = None,
     ):
         self.manifest = manifest
         self.capabilities = capabilities
         self.summary = summary
+        #: A 403 body the PUT answers with (inside ``detail``), as Prosopia does.
+        self.refuse = refuse
         self.puts: list[tuple[str, bytes]] = []
 
     def __call__(self, **kwargs):
@@ -808,6 +810,8 @@ class _StubServer:
 
     def put(self, url, *, content, headers=None):
         self.puts.append((url, content))
+        if self.refuse is not None:
+            return _StubResponse(403, {"detail": self.refuse})
         return _StubResponse(
             200,
             self.summary
@@ -1089,6 +1093,43 @@ class TestPushPreflight:
         assert main(["push", str(jane_doe_dir), "--url", "http://x"]) == 0
         assert len(stub.puts) == 1
 
+    def test_a_part_refusal_names_the_missing_parts(self, server, jane_doe_dir, capsys):
+        """A 403 ``insufficient_access`` is the key's table talking: name the
+        parts it lacks and the changes only the switch allows, and exit 1."""
+        stub = server(
+            [],
+            refuse={
+                "error": "insufficient_access",
+                "required": ["paper_summary", "summary"],
+                "missing": ["summary"],
+                "needs_replace": ["provenance_note"],
+                "hint": "This needs Write on summary.",
+            },
+        )
+
+        assert main(["push", str(jane_doe_dir), "--url", "http://x"]) == 1
+
+        err = capsys.readouterr().err
+        assert len(stub.puts) == 1
+        assert "push refused: nothing was written." in err
+        assert "needs Write on: summary" in err
+        assert "provenance_note" in err and "Replace whole profiles" in err
+        assert "--only" in err
+        assert "Traceback" not in err
+
+    def test_a_part_refusal_under_only_blames_the_document(self, server, jane_doe_dir, capsys):
+        server(
+            [],
+            refuse={"error": "insufficient_access", "missing": ["summary"], "needs_replace": []},
+        )
+
+        argv = ["push", str(jane_doe_dir), "--url", "http://x", "--only", "sources/papers.jsonld"]
+        assert main(argv) == 1
+
+        err = capsys.readouterr().err
+        assert "needs Write on: summary" in err
+        assert "profile.jsonld travels with --only" in err
+
     def test_push_prints_source_and_target(self, server, jane_doe_dir, capsys):
         server([])
         assert main(["push", str(jane_doe_dir), "--url", "http://x", "--dry-run"]) == 0
@@ -1155,6 +1196,27 @@ class TestErrorHandling:
         assert "Traceback" not in capsys.readouterr().err
 
 
+#: What Prosopia's ``GET /api/manage/agent/whoami`` answers, trimmed.
+WHOAMI = {
+    "principal": {"kind": "consumer", "label": "summary bot", "handle": "agent_1a2b3c"},
+    "owner": {"orcid": "0000-0002-1825-0097", "name": "Jane Doe"},
+    "profiles": [
+        {
+            "slug": "jane-doe",
+            "rid": "0000-0002-1825-0097",
+            "role": "owner",
+            "writes": ["paper_summary"],
+            "published": True,
+        }
+    ],
+    "parts": {"paper_summary": "write", "summary": "read", "cv": "read"},
+    "replace_profiles": False,
+    "never_delegable": [
+        {"act": "publish", "why": "Publishing is a decision by the person the profile describes."}
+    ],
+}
+
+
 class TestManagementClientDispatch:
     """The CLI selects the ManagementClient resource, not its HTTP shape."""
 
@@ -1169,8 +1231,7 @@ class TestManagementClientDispatch:
         class FakeClient:
             def __init__(self, _credential):
                 self.identity = SimpleNamespace(
-                    whoami=lambda: calls.append("whoami") or {"principal": {}, "scopes": []},
-                    scopes=lambda: calls.append("scopes") or {},
+                    whoami=lambda: calls.append("whoami") or dict(WHOAMI),
                 )
                 self.profile = SimpleNamespace(
                     get=lambda slug: calls.append(("get", slug)) or {"metadata": {}},
@@ -1188,9 +1249,24 @@ class TestManagementClientDispatch:
     def test_agent_identity_subcommands_dispatch_to_identity(self, monkeypatch, capsys):
         calls = self._install(monkeypatch)
         assert main(["agent", "whoami", "--json"]) == 0
-        assert main(["agent", "scopes", "--json"]) == 0
-        assert calls == ["whoami", "scopes"]
+        assert calls == ["whoami"]
         assert '"principal"' in capsys.readouterr().out
+
+    def test_whoami_prints_the_parts_table(self, monkeypatch, capsys):
+        self._install(monkeypatch)
+        assert main(["agent", "whoami"]) == 0
+        out = capsys.readouterr().out
+        assert "Write:   paper_summary" in out
+        assert "Read:    cv, summary" in out
+        assert "None:    every other part" in out
+        assert "Replace whole profiles: off" in out
+        assert "jane-doe (owner, published): writes paper_summary" in out
+        assert "publish: Publishing is a decision" in out
+        assert "scope" not in out.lower() and "tier" not in out.lower()
+
+    def test_agent_scopes_is_gone(self, capsys):
+        with pytest.raises(SystemExit):
+            main(["agent", "scopes"])
 
     def test_profile_read_dispatches_to_profile_resource(self, monkeypatch, capsys):
         calls = self._install(monkeypatch)

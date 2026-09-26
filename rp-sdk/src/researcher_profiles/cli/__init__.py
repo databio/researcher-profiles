@@ -42,7 +42,7 @@ with concrete slugs and ORCIDs in them. A `<placeholder>` teaches an agent
 nothing it did not already know from the metavar. Every command that answers a
 question (``search``, ``where``, ``list``, ``listr``, ``seek``, ``manifest``,
 ``validate``, ``export``, ``rank-works``, ``whoami``, ``login``, ``push``,
-``agent whoami``, ``agent scopes``, ``graph build``, and the ``rp db``
+``agent whoami``, ``graph build``, and the ``rp db``
 subcommands) carries ``--json``; the commands that write files (``index``,
 ``render``, ``site``, ``sign``, ``schema``, ...) do not. Human text stays the
 default, and status never shares stdout with a JSON document.

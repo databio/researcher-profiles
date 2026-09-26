@@ -87,10 +87,10 @@ in Settings. A new key reads everything and writes nothing.
 | `site_capabilities` | site_capabilities | yes |
 | `regulatory_experience` | regulatory_experience | yes |
 | `background` | name, affiliation, job_title, training, career, same_as | yes |
-| `contact` | email | read only |
+| `contact` | email | by `rp push` only |
 | `works` | the publication list | yes |
-| `paper_summary`, `paper_abstract`, `paper_fulltext`, `grants`, `cv`, `interview`, `web`, `trials`, `citations`, `other_files` | generated files | read only |
-| `lenses` | the account's lenses | read only |
+| `paper_summary`, `paper_abstract`, `paper_fulltext`, `grants`, `cv`, `interview`, `web`, `trials`, `citations`, `other_files` | generated files | by `rp push` only |
+| `lenses` | the account's lenses | yes |
 
 You never read less than the public: anything the researcher shows the public
 you can read, whatever your table says.
@@ -129,6 +129,10 @@ A change no key may ever make, however its table is set:
 A metadata field that belongs to no part gives `not_delegable` too, with a hint
 naming the fields.
 
+A refused `rp push` also lists `needs_replace`: changes no part covers (what
+the public sees, a field such as `provenance_note`). Only a key with "Replace
+whole profiles" may make those. `rp push` prints both lists.
+
 **Do not retry a 403. Report what is missing to the user and stop.**
 
 ## What you can never do
@@ -164,6 +168,25 @@ owner edit returns 409 rather than a silent clobber. Use `--force` to skip it.
   `write` on `soul`.
 - Visibility is not yours to push. `rp profile visibility set` answers 403
   `not_delegable`.
+
+### Pushing files
+
+Files (paper summaries, the CV, grants, web pages) change only through
+`rp push`, which sends the whole profile directory. Without "Replace whole
+profiles" the push lands only if every part it changes is `write`. To change
+one file, send just that file:
+
+```bash
+rp push jane-doe --url https://profiles.example.org --token rpa_... \
+  --only sources/summaries/doe2016example.summary.md
+```
+
+`rp push` does not read `credentials.toml`; pass the key with `--token` (or
+`RESEARCHER_PROFILES_TOKEN`) and the server with `--url`.
+
+`--only` keeps every other file, but the local `profile.jsonld` still travels,
+so its inline sections must match the server's or the push changes those
+parts too.
 
 ## Cautions
 

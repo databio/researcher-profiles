@@ -55,6 +55,7 @@ from ._http import (
 from ._identity import resolve_rid
 from ._push import (
     PLAN_GROUPS,
+    PushInsufficientAccess,
     PushPlan,
     PushRefused,
     PushResult,
@@ -85,6 +86,7 @@ __all__ = [
     "StaticArtifactStorage",
     "PLAN_GROUPS",
     "PushPlan",
+    "PushInsufficientAccess",
     "PushRefused",
     "PushResult",
     "PushWouldRemove",

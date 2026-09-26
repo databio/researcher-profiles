@@ -23,7 +23,6 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
         "agent",
         "Agent credential and identity commands",
         "rp agent whoami",
-        "rp agent scopes",
         "rp agent config",
     )
     agent_sub = p_agent.add_subparsers(dest="agent_cmd", metavar="<subcommand>")
@@ -31,22 +30,12 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
     p_agent_whoami = add_subcommand(
         agent_sub,
         "whoami",
-        "Show agent identity and scopes",
+        "Show the key's per-part access and the profiles it reaches",
         "rp agent whoami",
         "rp agent whoami --json",
     )
     add_json(p_agent_whoami, "JSON output")
     _add_host(p_agent_whoami)
-
-    p_agent_scopes = add_subcommand(
-        agent_sub,
-        "scopes",
-        "Show the scope catalog",
-        "rp agent scopes",
-        "rp agent scopes --json",
-    )
-    add_json(p_agent_scopes, "JSON output")
-    _add_host(p_agent_scopes)
 
     p_agent_config = add_subcommand(
         agent_sub,
@@ -150,13 +139,16 @@ def _agent_config(cred) -> int:
         print(f"profile: {cred.profile}")
     if cred.owner:
         print(f"owner:   {cred.owner}")
-    if cred.scopes:
-        print(f"scopes:  {', '.join(cred.scopes)}")
     return EXIT_OK
 
 
 def _agent_whoami(client, args: argparse.Namespace) -> int:
-    """Print the agent's identity, tier, scopes and editable profiles."""
+    """Print the key's identity, its parts table, and what it may write where.
+
+    The table is the whole of the key's authority: one level per part
+    (``none``, ``read``, ``write``) plus the "Replace whole profiles" switch.
+    A part the server does not list is ``none``.
+    """
     from .auth.agent import AgentAPIError
 
     try:
@@ -168,39 +160,32 @@ def _agent_whoami(client, args: argparse.Namespace) -> int:
         print(json.dumps(result, indent=2))
         return EXIT_OK
     p = result.get("principal", {})
-    print(f"Agent:   {p.get('label', '?')} ({p.get('handle', '?')})")
+    print(f"Agent:   {p.get('label') or '?'} ({p.get('handle', '?')})")
     owner = result.get("owner")
     if owner:
-        print(f"Owner:   {owner.get('name', '?')} ({owner.get('orcid', '?')})")
-    print(f"Tier:    {result.get('tier', '?')}")
-    print(f"Scopes:  {', '.join(result.get('scopes', []))}")
-    not_granted = result.get("scopes_not_granted", [])
-    if not_granted:
-        print(f"Missing: {', '.join(not_granted)}")
-    for prof in result.get("profiles", []):
-        print(f"Profile: {prof.get('slug', '?')} ({prof.get('role', '?')})")
-    return EXIT_OK
-
-
-def _agent_scopes(client, args: argparse.Namespace) -> int:
-    """Print the server's scope catalog."""
-    from .auth.agent import AgentAPIError
-
-    try:
-        result = client.identity.scopes()
-    except AgentAPIError as e:
-        print(f"Error: {e.detail}", file=sys.stderr)
-        return EXIT_ERROR
-    if args.as_json:
-        print(json.dumps(result, indent=2))
-        return EXIT_OK
-    for name, info in result.items():
-        flag = " [DANGEROUS]" if info.get("dangerous") else ""
-        default = " (default)" if info.get("default_on") else ""
-        print(f"  {name}{default}{flag}")
-        print(f"    {info.get('description', '')}")
-        if info.get("fields"):
-            print(f"    Fields: {', '.join(info['fields'])}")
+        print(f"Owner:   {owner.get('name') or '?'} ({owner.get('orcid') or '?'})")
+    parts = result.get("parts") or {}
+    for level in ("write", "read"):
+        names = sorted(part for part, lvl in parts.items() if lvl == level)
+        print(f"{level.capitalize() + ':':<9}{', '.join(names) or '-'}")
+    print("None:    every other part")
+    replace = "on" if result.get("replace_profiles") else "off"
+    print(f"Replace whole profiles: {replace}")
+    profiles = result.get("profiles") or []
+    if profiles:
+        print("Profiles:")
+    for prof in profiles:
+        state = prof.get("role", "?")
+        if "published" in prof:
+            state += ", published" if prof["published"] else ", unpublished"
+        writes = ", ".join(prof.get("writes") or []) or "nothing"
+        name = prof.get("slug") or prof.get("rid") or "?"
+        print(f"  {name} ({state}): writes {writes}")
+    never = result.get("never_delegable") or []
+    if never:
+        print("Never allowed:")
+    for item in never:
+        print(f"  {item.get('act', '?')}: {item.get('why', '')}")
     return EXIT_OK
 
 
@@ -208,7 +193,6 @@ def _agent_scopes(client, args: argparse.Namespace) -> int:
 #: not, because it reports the credential itself and never calls the server.
 _AGENT_HANDLERS: dict[str, Callable[..., int]] = {
     "whoami": _agent_whoami,
-    "scopes": _agent_scopes,
 }
 
 
@@ -217,7 +201,7 @@ def _cmd_agent(args: argparse.Namespace) -> int:
     from .auth.agent import CredentialError, ManagementClient, resolve_credential
 
     if not args.agent_cmd:
-        print("rp agent: subcommand required (whoami, scopes, config)", file=sys.stderr)
+        print("rp agent: subcommand required (whoami, config)", file=sys.stderr)
         return EXIT_USAGE
 
     try:
@@ -337,7 +321,7 @@ def _profile_diff(client, slug: str, args: argparse.Namespace) -> int:
 
 def _profile_push(client, slug: str, args: argparse.Namespace) -> int:
     """Push the document's changed metadata fields, and its SOUL body if present."""
-    from .auth.agent import AgentAPIError
+    from .auth.agent import AgentAPIError, InsufficientAccessError
 
     path = Path(args.file)
     if not path.is_file():
@@ -364,6 +348,13 @@ def _profile_push(client, slug: str, args: argparse.Namespace) -> int:
         if local.get("body") is not None:
             client.profile.put_soul(slug, local["body"], base_hash=base_hash)
             print("Soul: updated")
+    except InsufficientAccessError as e:
+        print(f"Refused: this key needs Write on {', '.join(e.missing)}.", file=sys.stderr)
+        print(
+            "Ask the account holder to change this key's access on the Privacy page.",
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
     except AgentAPIError as e:
         print(f"Error: {e.detail}", file=sys.stderr)
         return EXIT_ERROR
