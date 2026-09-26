@@ -2,8 +2,8 @@
  * The landing page at `#/`. A first-time visitor lands here rather than in the
  * inventory, so the page explains what a researcher profile is before showing
  * any sources. It is the front door: a hero, one paragraph that says what this
- * is, and two clear next steps. A host application can replace the calls to
- * action through the shell slots.
+ * is, and two clear next steps. A host application can add its logo and lede
+ * (`homeHero`) and replace the calls to action through the shell slots.
  */
 import { Link } from "react-router";
 import type { ReactNode } from "react";
@@ -44,18 +44,28 @@ export function Home() {
     { label: "What is this?", href: "/about" },
   ];
 
+  const hero = slots.homeHero;
+
   return (
     <div className="home">
-      <section className="home__hero">
-        <p className="home__eyebrow">{__RP_APP_NAME__}</p>
+      <section className={hero ? "home__hero home__hero--branded" : "home__hero"}>
+        {hero ? (
+          <div className="home__mark">{hero.mark}</div>
+        ) : (
+          <p className="home__eyebrow">{__RP_APP_NAME__}</p>
+        )}
         <h1 className="home__title">
           Your research identity, made machine-readable.
         </h1>
         <p className="home__lede">
-          A researcher profile is an open, structured record of who you are, what
-          you work on, and what you have published, in a form other people and
-          their AI agents can read, match, and cite. Publish yours, or
-          browse everyone else&rsquo;s.
+          {hero?.lede ?? (
+            <>
+              A researcher profile is an open, structured record of who you are,
+              what you work on, and what you have published, in a form other
+              people and their AI agents can read, match, and cite. Publish
+              yours, or browse everyone else&rsquo;s.
+            </>
+          )}
         </p>
         <div className="home__actions">
           {actions.map((a) => (
