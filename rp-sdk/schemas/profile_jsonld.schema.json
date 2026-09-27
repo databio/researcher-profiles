@@ -418,7 +418,7 @@
     },
     "ConceptReference": {
       "additionalProperties": true,
-      "description": "One term in a controlled vocabulary (``rp:concept``).\n\nThe ``system``/``code``/``version`` triple is what makes a concept\ncomparable across profiles; ``label`` is only what a human reads. A\nprofile that kept the label alone would have discarded the identity, which\nis why the plain ``interests`` list is a projection of these and never the\ncanonical value.",
+      "description": "One term in a controlled vocabulary (``rp:concept``).\n\nThe ``system``/``code``/``version`` triple is what makes a concept\ncomparable across profiles; ``label`` is only what a human reads. Used by\n``therapeutic_areas``; research interests use :class:`InterestConcept`.",
       "properties": {
         "@context": {
           "anyOf": [
@@ -543,6 +543,181 @@
         "value"
       ],
       "title": "Identifier",
+      "type": "object"
+    },
+    "InterestConcept": {
+      "additionalProperties": true,
+      "description": "The concept a :class:`ResearchInterest` points at.\n\nTwo forms, never mixed. A **coded** concept names a term in a controlled\nvocabulary: ``system`` (the vocabulary URI), ``code``, ``display`` (the\nlabel snapshot a human reads), an optional pinned ``version``, and the\nterm's own IRI as ``@id``. A **text-only** concept is a ``label`` with\n``unmapped: true`` and no ``@id``, ``system`` or ``code``: an interest no\nvocabulary covers, kept rather than forced onto a wrong term.\n\nThe field names follow FHIR ``Coding`` (``system``, ``code``,\n``display``, ``version``), so a Coding view is a rename, not a mapping.\nThis is a separate type from :class:`ConceptReference`, which stays the\nshape of ``therapeutic_areas``.",
+      "properties": {
+        "@context": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "@Context"
+        },
+        "@id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "@Id"
+        },
+        "@type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "@Type"
+        },
+        "code": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Code"
+        },
+        "display": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Display"
+        },
+        "label": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Label"
+        },
+        "system": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "System"
+        },
+        "unmapped": {
+          "default": false,
+          "title": "Unmapped",
+          "type": "boolean"
+        },
+        "version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Version"
+        }
+      },
+      "title": "InterestConcept",
+      "type": "object"
+    },
+    "InterestEvidence": {
+      "additionalProperties": true,
+      "description": "Why an inferred interest was proposed: raw counts live here, not in weight.",
+      "properties": {
+        "@context": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "@Context"
+        },
+        "@id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "@Id"
+        },
+        "@type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "@Type"
+        },
+        "papers": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Papers",
+          "type": "array"
+        },
+        "share": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Share"
+        }
+      },
+      "title": "InterestEvidence",
       "type": "object"
     },
     "PaperStats": {
@@ -825,6 +1000,103 @@
         "kind"
       ],
       "title": "Proof",
+      "type": "object"
+    },
+    "ResearchInterest": {
+      "additionalProperties": true,
+      "description": "One weighted person-to-concept link (``rp:ResearchInterest``).\n\nModeled on the Weighted Interest Ontology pattern (person ->\n``wi:WeightedInterest`` -> topic, with ``wi:weight``). ``weight`` is signed\nin ``[-1, 1]``: +1 a core interest, 0 declared neutral, -1 a hard exclude,\nand values between -1 and 0 mean rank lower. A missing weight means\n*unknown*, never 0, which is why an inferred entry built from paper counts\ncarries its share in ``evidence`` and leaves ``weight`` unset.\n\nSeveral entries may cover one concept; :func:`effective_interests` picks\nthe one that counts.",
+      "properties": {
+        "@context": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "@Context"
+        },
+        "@id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "@Id"
+        },
+        "@type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "ResearchInterest",
+          "title": "@Type"
+        },
+        "assertedAt": {
+          "format": "date-time",
+          "title": "Assertedat",
+          "type": "string"
+        },
+        "concept": {
+          "$ref": "#/$defs/InterestConcept"
+        },
+        "evidence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InterestEvidence"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "generator": {
+          "minLength": 1,
+          "title": "Generator",
+          "type": "string"
+        },
+        "method": {
+          "enum": [
+            "declared",
+            "inferred",
+            "imported"
+          ],
+          "title": "Method",
+          "type": "string"
+        },
+        "weight": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": -1,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Weight"
+        }
+      },
+      "required": [
+        "concept",
+        "method",
+        "generator",
+        "assertedAt"
+      ],
+      "title": "ResearchInterest",
       "type": "object"
     },
     "ResearchOutput": {
@@ -1152,79 +1424,6 @@
         "institution"
       ],
       "title": "Training",
-      "type": "object"
-    },
-    "WeightedInterest": {
-      "additionalProperties": true,
-      "description": "A concept the researcher accepted (with a weight) or explicitly rejected.\n\nRejection is a first-class decision, not a low weight: \"I do not work on\nthis\" and \"I work on this a little\" are different claims, and a matcher\nthat conflated them would keep proposing the work the researcher already\nsaid no to. Hence the asymmetry the validator enforces: an accepted\nconcept carries a weight in ``[0, 1]``, a rejected one carries none.",
-      "properties": {
-        "@context": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "@Context"
-        },
-        "@id": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "@Id"
-        },
-        "@type": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "@Type"
-        },
-        "concept": {
-          "$ref": "#/$defs/ConceptReference"
-        },
-        "decision": {
-          "enum": [
-            "accepted",
-            "rejected"
-          ],
-          "title": "Decision",
-          "type": "string"
-        },
-        "weight": {
-          "anyOf": [
-            {
-              "maximum": 1,
-              "minimum": 0,
-              "type": "number"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Weight"
-        }
-      },
-      "required": [
-        "concept",
-        "decision"
-      ],
-      "title": "WeightedInterest",
       "type": "object"
     }
   },
@@ -1597,6 +1796,14 @@
       "title": "Rp:Regulatoryexperience",
       "type": "array"
     },
+    "rp:researchInterests": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ResearchInterest"
+      },
+      "title": "Rp:Researchinterests",
+      "type": "array"
+    },
     "rp:sectionVisibility": {
       "default": [],
       "items": {
@@ -1622,14 +1829,6 @@
         "$ref": "#/$defs/ConceptReference"
       },
       "title": "Rp:Therapeuticareas",
-      "type": "array"
-    },
-    "rp:weightedInterests": {
-      "default": [],
-      "items": {
-        "$ref": "#/$defs/WeightedInterest"
-      },
-      "title": "Rp:Weightedinterests",
       "type": "array"
     },
     "sameAs": {

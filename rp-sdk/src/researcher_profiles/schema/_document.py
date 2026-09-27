@@ -27,10 +27,11 @@ from ._parts import (
     ConceptReference,
     Identifier,
     PaperStats,
+    ResearchInterest,
     ResearchOutput,
     SectionVisibility,
     SiteCapabilities,
-    WeightedInterest,
+    project_interests,
 )
 from ._proof import Proof
 from .jsonld import CONTEXT_URL, PROFILE_FORMAT_IRI, JsonLdModel
@@ -106,7 +107,10 @@ class ProfileDocument(JsonLdModel):
     expertise: list[str] = []
     interests: list[str] = []
     not_interests: list[str] = []
-    weighted_interests: list[WeightedInterest] = Field(default=[], alias="rp:weightedInterests")
+    #: The canonical interest record. When non-empty, ``interests`` and
+    #: ``not_interests`` are rebuilt from it on every load (see
+    #: :func:`~.project_interests`).
+    research_interests: list[ResearchInterest] = Field(default=[], alias="rp:researchInterests")
     section_visibility: list[SectionVisibility] = Field(default=[], alias="rp:sectionVisibility")
     therapeutic_areas: list[ConceptReference] = Field(default=[], alias="rp:therapeuticAreas")
     site_capabilities: SiteCapabilities | None = Field(default=None, alias="rp:siteCapabilities")
@@ -226,13 +230,8 @@ class ProfileDocument(JsonLdModel):
             # the document is served, so an unpublished profile still has a
             # well-formed subject IRI.
             self.id_ = self.url or "#me"
-        if self.weighted_interests:
-            self.interests = [
-                x.concept.label for x in self.weighted_interests if x.decision == "accepted"
-            ]
-            self.not_interests = [
-                x.concept.label for x in self.weighted_interests if x.decision == "rejected"
-            ]
+        if self.research_interests:
+            self.interests, self.not_interests = project_interests(self.research_interests)
         return self
 
     @model_validator(mode="after")
@@ -327,8 +326,11 @@ DERIVED_FIELDS: frozenset[str] = frozenset(
 
 #: JSON-LD infrastructure, document metadata, manifest, external identifiers,
 #: and fields assembled from ORCID by the build tool (not LLM-written).
+#: ``research_interests`` is here too: the build writes it in Python (topic
+#: counts, and the LLM's free-text lists converted to typed entries).
 DOCUMENT_FIELDS: frozenset[str] = frozenset(
     {
+        "research_interests",
         "context",
         "id_",
         "type_",

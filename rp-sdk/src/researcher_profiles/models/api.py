@@ -108,14 +108,15 @@ class ProfileMetadataPayload(_APIModel):
     #: untyped extras, so the generated TypeScript saw ``[k: string]: unknown``
     #: and no owner form could round-trip a field it could not read back typed.
     job_title: Optional[str] = None
-    #: Display projections of :attr:`weighted_interests` when that is set, and
-    #: free-text lists otherwise. Patch ``weighted_interests`` on a profile
-    #: that has one: these two are regenerated from it on every write.
+    #: Display projections of :attr:`research_interests` when that is set
+    #: (positive weights, negative weights), and free-text lists otherwise.
+    #: Patching either list writes declared text-only entries.
     interests: list[str] = []
     not_interests: list[str] = []
-    #: The canonical form of the two lists above: an ontology concept, an
-    #: explicit accept/reject decision, and a weight on the accepted ones.
-    weighted_interests: list[dict] = []
+    #: The canonical form of the two lists above: one ``ResearchInterest``
+    #: per entry (a concept, a signed weight in -1..1 or none for unknown,
+    #: method, generator, assertedAt, evidence).
+    research_interests: list[dict] = []
     same_as: list[str] = []
     methodological_commitments: list[str] = []
     #: Optional clinical extension. Declared rather than left to
@@ -295,8 +296,13 @@ class MetadataPatch(_APIModel):
     subfields: Optional[list[str]] = None
     summary: Optional[str] = None
     expertise: Optional[list[str]] = None
+    #: Either list, when present, replaces the profile's text-only interest
+    #: entries with declared ones (+0.5 / -0.5, ``generator: user``).
     interests: Optional[list[str]] = None
     not_interests: Optional[list[str]] = None
+    #: Typed entries (``ResearchInterest``), validated server-side like
+    #: ``training``. Replaces the whole list.
+    research_interests: Optional[list[dict]] = None
     #: Authored history. Kept as ``list[dict]`` on the wire: the
     #: entries are validated against ``schema.Training`` / ``schema.CareerEntry``
     #: inside ``profile.edit.patch_metadata``, so a malformed entry is a 400
@@ -511,7 +517,16 @@ class MatchRequest(_APIModel):
     query: str
     k: int = 5
     prefilter: int = 10
+    #: Topic labels, or OpenAlex topic ids (``T10222``) matched against each
+    #: profile's typed research interests.
     require_topics: Optional[list[str]] = None
+    #: The query side's typed interests (``ResearchInterest`` entries, e.g. a
+    #: query profile's ``research_interests``). Each candidate's OpenAlex topics
+    #: are scored against them: declared weights boost or push down, a declared
+    #: -1 drops the candidate, and an unweighted topic counts through its share.
+    interests: list[dict] = []
+    #: How much that topic score adds to a candidate's score.
+    topic_alpha: float = 0.2
     diversify: bool = True
     lambda_: float = 0.5
     topk_chunks: int = 5
@@ -523,6 +538,8 @@ class MatchEvidencePayload(_APIModel):
     centroid_score: float
     top_papers: list[str] = []
     overlapping_topics: list[str] = []
+    #: OpenAlex topic ids shared with the request's ``interests``.
+    matched_topics: list[str] = []
     # Populated only when the request sets include_chunks=True.
     top_chunks: list["SearchHitPayload"] = []
 

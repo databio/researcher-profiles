@@ -11,26 +11,53 @@ Reached as ``store.match``.
 import json
 import logging
 import math
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 import numpy as np
+from pydantic import ValidationError
 
 from ..embeddings._sqlite import IndexNotBuiltError
 from ..embeddings.backends import MissingEmbeddingBackendError
 from ..embeddings.chunking import PAPER_CHUNK_TYPES
-from ..errors import CapabilityUnavailableError
+from ..errors import CapabilityUnavailableError, ProfileError
 from ..generative.calibration import ensure_calibration, normalize_score
 from ..models.results import Match, MatchEvidence
+from ..openalex import _TOPIC_ID_RE, topic_score
 from ..profile import ResearcherProfile
+from ..schema import ResearchInterest, effective_interests
 from ..store._analytics import require_vector_store
 from ..utils.clock import now_iso
+from ..vocab import OPENALEX_SYSTEM
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from ..store.protocol import VectorStore
     from .roster import _Roster, _RosterCache
 
 logger = logging.getLogger(__name__)
+
+
+def _profile_topic_codes(prof: ResearcherProfile) -> set[str]:
+    """The OpenAlex topics a profile works on, from its typed interests.
+
+    Its inferred topics (counted from its papers) and any it weighs above 0;
+    a topic it weighs at 0 or below is not one it offers. A profile whose
+    document cannot be read offers none.
+    """
+    try:
+        entries = prof.metadata.research_interests
+    except (OSError, ProfileError, ValidationError):
+        # An unreadable candidate must not break the ranking; it just offers
+        # no topics.
+        return set()
+    return {
+        e.concept.code
+        for e in effective_interests(entries)
+        if not e.concept.unmapped
+        and e.concept.system == OPENALEX_SYSTEM
+        and (e.weight is None or e.weight > 0)
+    }
 
 
 class MatchManager:
@@ -80,8 +107,23 @@ class MatchManager:
         diversify: bool = True,
         lambda_: float = 0.5,
         topk_chunks: int = 5,
+        interests: "Sequence[ResearchInterest] | None" = None,
+        topic_alpha: float = 0.2,
     ) -> list[Match]:
-        """Rank every profile in the store against a free-text query."""
+        """Rank every profile in the store against a free-text query.
+
+        ``require_topics`` keeps only profiles claiming one of them: a topic
+        label (the cached topic index), or an OpenAlex topic id (``T10222``)
+        the profile's typed research interests carry.
+
+        ``interests`` are the query side's typed interests (a query profile's
+        ``research_interests``). After the chunk re-rank, each candidate's
+        OpenAlex topics are scored against them with
+        :func:`~researcher_profiles.openalex.topic_score`, and ``topic_alpha``
+        times that is added to its score. A candidate on a topic the query
+        declared -1 is dropped. The shared topics are reported in
+        ``evidence.matched_topics``.
+        """
         # Up front, before any work: ranking is the capability, and a store
         # that cannot serve vectors should say so in one error rather than
         # produce an empty ranking that reads like "nobody matched".
@@ -119,6 +161,8 @@ class MatchManager:
             )
             for i in self._survivors(sims, roster, candidate_slugs, prefilter=prefilter, k=k)
         ]
+        if interests:
+            matches = self._apply_topic_scores(matches, interests, topic_alpha)
 
         matches.sort(key=lambda m: -m.score)
         if diversify and len(matches) > k:
@@ -126,13 +170,48 @@ class MatchManager:
         return matches[:k]
 
     def _topic_allowed_slugs(self, require_topics: list[str]) -> set[str]:
-        """The slugs claiming at least one of ``require_topics``."""
-        idx = self.topics()
+        """The slugs claiming at least one of ``require_topics``.
+
+        An OpenAlex topic id matches the profiles whose typed interests carry
+        that topic (and do not weigh it at 0 or below); anything else is a
+        label looked up in the cached topic index.
+        """
+        ids = {m.group(1).upper() for t in require_topics if (m := _TOPIC_ID_RE.match(t.strip()))}
+        labels = [t for t in require_topics if not _TOPIC_ID_RE.match(t.strip())]
         allowed: set[str] = set()
-        for t in require_topics:
-            for p in idx.get(t.lower(), []):
-                allowed.add(p.slug)
+        if ids:
+            for prof in self._rostered().profiles:
+                if ids & _profile_topic_codes(prof):
+                    allowed.add(prof.slug)
+        if labels:
+            idx = self.topics()
+            for t in labels:
+                for p in idx.get(t.lower(), []):
+                    allowed.add(p.slug)
         return allowed
+
+    @staticmethod
+    def _apply_topic_scores(
+        matches: list[Match], interests: "Sequence[ResearchInterest]", alpha: float
+    ) -> list[Match]:
+        """Add ``alpha * topic_score`` to each match; drop hard-excluded ones."""
+        wanted = {
+            e.concept.code
+            for e in effective_interests(interests)
+            if not e.concept.unmapped
+            and e.concept.system == OPENALEX_SYSTEM
+            and (e.weight is None or e.weight > 0)
+        }
+        kept: list[Match] = []
+        for m in matches:
+            codes = _profile_topic_codes(m.profile)
+            ts = topic_score(codes, interests)
+            if ts is None:
+                continue
+            m.score += alpha * ts
+            m.evidence.matched_topics = sorted(codes & wanted)
+            kept.append(m)
+        return kept
 
     def _survivors(
         self,

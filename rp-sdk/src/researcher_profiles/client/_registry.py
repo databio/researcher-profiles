@@ -102,10 +102,16 @@ def rank_against(
     topk_chunks: int = 5,
     normalize: bool = True,
     include_chunks: bool = False,
+    interests: Optional[list[dict]] = None,
+    topic_alpha: float = 0.2,
     timeout: float = 60.0,
     client: Any = None,
 ) -> list[dict]:
     """Rank indexed profiles on a remote server against ``query``.
+
+    ``interests`` are the query side's typed ``ResearchInterest`` entries (as
+    JSON dicts); each match's ``evidence.matched_topics`` names the OpenAlex
+    topics that moved its score.
 
     Registry ranking is not profile-scoped, so this is a module-level function
     (not an :class:`ApiArtifactStorage` method). POSTs to ``/api/v1/match`` and
@@ -127,6 +133,8 @@ def rank_against(
         "topk_chunks": topk_chunks,
         "normalize": normalize,
         "include_chunks": include_chunks,
+        "interests": list(interests or []),
+        "topic_alpha": topic_alpha,
     }
     http = (
         client

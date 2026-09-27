@@ -215,8 +215,9 @@ authored and served, validated by this schema either way. See
 | `training` | list[`Training`] | no | `[]` | see `Training` sub-table | Education / training history. |
 | `career` | list[`CareerEntry`] | no | `[]` | see `CareerEntry` sub-table | Positions held. |
 | `expertise` | list[string] | no | `[]` | | Expertise topic labels. |
-| `interests` | list[string] | no | `[]` | | Research interests. |
-| `not_interests` | list[string] | no | `[]` | | Explicit non-interests. |
+| `interests` | list[string] | no | `[]` | rebuilt from `rp:researchInterests` when that is set | Research interests. |
+| `not_interests` | list[string] | no | `[]` | rebuilt from `rp:researchInterests` when that is set | Explicit non-interests. |
+| `rp:researchInterests` | list[`ResearchInterest`] | no | `[]` | `concept` (coded `{@id, system, code, display, version}` or text-only `{label, unmapped: true}`), `weight` -1..1 or absent (unknown), `method`, `generator`, `assertedAt`, `evidence` | Typed, weighted interests; see the spec's Research interests section. |
 | `methodological_commitments` | list[string] | no | `[]` | | Methodological stances. |
 | `recurring_positions` | list[string] | no | `[]` | | Positions taken repeatedly. |
 | `intellectual_lineage` | list[string] | no | `[]` | | Intellectual influences. |

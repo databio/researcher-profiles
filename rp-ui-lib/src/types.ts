@@ -113,6 +113,9 @@ export interface ProfileMetadataPayload {
   openalex_id?: string | null;
   provenance?: string | null;
   regulatory_experience?: string[];
+  research_interests?: {
+    [k: string]: unknown;
+  }[];
   rid?: string | null;
   same_as?: string[];
   scholar_url?: string | null;
@@ -132,9 +135,6 @@ export interface ProfileMetadataPayload {
   }[];
   url?: string | null;
   visibility?: string;
-  weighted_interests?: {
-    [k: string]: unknown;
-  }[];
   [k: string]: unknown;
 }
 export interface ProfileSummary {

@@ -4,6 +4,7 @@ nav:
   - Specification:
     - Specification: rp-spec/index.md
     - Privacy: rp-spec/privacy.md
+    - Vocabularies: rp-spec/vocabularies.md
     - Embeddings: rp-spec/embeddings.md
     - Static API: rp-spec/static-api.md
     - Dynamic API: rp-spec/dynamic-api.md

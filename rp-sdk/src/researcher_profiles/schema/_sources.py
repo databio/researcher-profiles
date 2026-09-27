@@ -74,6 +74,9 @@ class PaperRecord(ResearchOutput):
     cited_by_count: int | None = None
     abstract: str | None = None
     summary: str | None = None
+    #: OpenAlex topic ids (``T…``) the work is tagged with, primary topic
+    #: first, each once. What an inferred interest counts over.
+    topics: list[str] = []
 
     # Authorship (researcher-profiles specific)
     author_position: str | None = None

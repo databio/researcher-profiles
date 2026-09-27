@@ -195,12 +195,14 @@ packages = ["src/researcher_profiles"]
 # this line states the intent and pins it against a future ignore/exclude
 # rule. The real guarantee is tests/test_packaging.py, which builds a wheel
 # and asserts the skill tree and context/v1.jsonld are in the zip. The
-# context/ entry is the single canonical copy of the frozen JSON-LD @context
+# context/ entry is the single canonical copy of the JSON-LD @context
 # (jsonld.context_document_text() loads it via importlib.resources; the
-# freeze/lock guardrail reads it here too).
+# lock guardrail reads it here too). vocab/ holds the pinned OpenAlex
+# topic and MeSH descriptor lists that interest concepts resolve against.
 artifacts = [
     "src/researcher_profiles/skill/**",
     "src/researcher_profiles/context/**",
+    "src/researcher_profiles/vocab/**",
 ]
 
 [tool.pytest.ini_options]

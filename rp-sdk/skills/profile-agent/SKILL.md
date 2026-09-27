@@ -80,7 +80,7 @@ in Settings. A new key reads everything and writes nothing.
 |---|---|---|
 | `summary` | summary | yes |
 | `expertise` | expertise (and the expertise file) | yes |
-| `focus` | field, subfields, interests, not_interests, weighted_interests | yes |
+| `focus` | field, subfields, interests, not_interests, research_interests (typed interests with a weight from -1 to 1; the two lists are rebuilt from it) | yes |
 | `methods` | methodological_commitments | yes |
 | `soul` | the SOUL narrative | yes |
 | `clinical` | therapeutic_areas | yes |

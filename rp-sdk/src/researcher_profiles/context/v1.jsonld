@@ -7,6 +7,10 @@
     "schema": "https://schema.org/",
     "dcterms": "http://purl.org/dc/terms/",
     "xsd": "http://www.w3.org/2001/XMLSchema#",
+    "skos": "http://www.w3.org/2004/02/skos/core#",
+    "wi": "http://purl.org/ontology/wi/core#",
+    "foaf": "http://xmlns.com/foaf/0.1/",
+    "prov": "http://www.w3.org/ns/prov#",
 
     "conformsTo": { "@id": "dcterms:conformsTo", "@type": "@id" },
 
@@ -81,6 +85,35 @@
     "critiques": { "@id": "rp:critique", "@container": "@set" },
     "collaborators": { "@id": "schema:knows", "@container": "@set" },
     "heldGrant": { "@id": "rp:heldGrant", "@container": "@set" },
+
+    "rp:researchInterests": {
+      "@id": "rp:researchInterests",
+      "@container": "@set",
+      "@context": {
+        "concept": {
+          "@id": "wi:topic",
+          "@context": {
+            "system": { "@id": "skos:inScheme", "@type": "@id" },
+            "code": "skos:notation",
+            "display": "skos:prefLabel",
+            "version": "rp:sourceVocabularyVersion",
+            "label": "rp:labelSnapshot",
+            "unmapped": "rp:unmapped"
+          }
+        },
+        "weight": { "@id": "wi:weight", "@type": "xsd:decimal" },
+        "method": "rp:method",
+        "generator": "rp:generator",
+        "assertedAt": { "@id": "prov:generatedAtTime", "@type": "xsd:dateTime" },
+        "evidence": {
+          "@id": "rp:evidence",
+          "@context": {
+            "papers": { "@id": "rp:evidencePaper", "@container": "@set" },
+            "share": { "@id": "rp:paperShare", "@type": "xsd:decimal" }
+          }
+        }
+      }
+    },
 
     "training": {
       "@id": "rp:training",
@@ -179,6 +212,7 @@
     "oa_url": { "@id": "rp:oaUrl", "@type": "@id" },
     "pdf_url": { "@id": "rp:pdfUrl", "@type": "@id" },
     "full_text_link": { "@id": "rp:fullTextLink", "@type": "@id" },
+    "topics": { "@id": "rp:openalexTopic", "@container": "@set" },
 
     "ScholarlyArticle": {
       "@id": "schema:ScholarlyArticle",
@@ -200,6 +234,7 @@
       }
     },
 
+    "ResearchInterest": "rp:ResearchInterest",
     "Person": "schema:Person",
     "Organization": "schema:Organization",
     "Periodical": "schema:Periodical",

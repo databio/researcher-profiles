@@ -17,3 +17,14 @@ is independent of the package versions (`rp-sdk`, `scholarcore`). A profile's
 `context/v1.jsonld`), and the conformance suite gates on that IRI. Pre-1.0
 versions MAY introduce incompatible changes between releases with no shims and
 no deprecation period.
+
+Research interests. `rp:researchInterests` replaces `rp:weightedInterests`.
+Each entry links the person to one concept (coded, or text-only with
+`unmapped: true`) with an optional signed weight from -1 to 1 (missing means
+unknown, 0 means declared neutral), plus `method`, `generator`, `assertedAt`
+and optional `evidence`. The accepted/rejected decision is gone. `interests`
+and `not_interests` are rebuilt from the entries that count by precedence.
+The recommended vocabularies (OpenAlex topics, then MeSH, then text-only) and
+their system URIs are in [Vocabularies](vocabularies.md). The context
+(`context/v1.jsonld`) gains the SKOS, Weighted Interest Ontology and PROV
+mappings for these entries; no existing term changes meaning.

@@ -720,19 +720,28 @@ class TestInlineSectionsCannotEscape:
         _assert_clean(json.dumps(bundle.model_dump(mode="json")))
 
 
-def test_weighted_interest_keeps_rejection_distinct_from_low_weight():
-    from researcher_profiles.schema import ConceptReference, ProfileDocument, WeightedInterest
+def test_research_interest_keeps_neutral_and_unknown_out_of_both_lists():
+    """0 (declared neutral) and no weight (unknown) are neither interest nor exclusion."""
+    from researcher_profiles.schema import InterestConcept, ProfileDocument, ResearchInterest
 
-    concept = ConceptReference(system="mesh", code="D000001", label="Example")
+    def entry(label, weight):
+        return ResearchInterest(
+            concept=InterestConcept(label=label, unmapped=True),
+            weight=weight,
+            method="declared",
+            generator="user",
+            assertedAt="2026-09-25T12:00:00Z",
+        )
+
     doc = ProfileDocument(
         name="Weights",
         rid="local:weights-a1b2c3",
         provenance="self_published",
-        weighted_interests=[
-            WeightedInterest(concept=concept, decision="accepted", weight=0),
-            WeightedInterest(
-                concept=concept.model_copy(update={"label": "Excluded"}), decision="rejected"
-            ),
+        research_interests=[
+            entry("Example", 0.5),
+            entry("Neutral", 0),
+            entry("Unknown", None),
+            entry("Excluded", -1),
         ],
     )
     assert doc.interests == ["Example"]

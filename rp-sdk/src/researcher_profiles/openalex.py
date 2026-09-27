@@ -18,17 +18,23 @@ Public API:
     to_work_dict(raw) -> dict: {..., coauthors} lite shape
     to_normalized_dict(raw) -> dict: {..., authors} lite shape
     profile_query_terms(profile) -> dict: {topics, seed_work_ids}
+    work_topic_ids(raw) -> list[str]: a raw work's topic ids, primary first
+    topic_prevalence(papers) -> list[ResearchInterest]: inferred topic interests
+    topic_score(work_topics, interests) -> float | None: interest boost / exclude
     fetch_new_works(...) -> list[PaperRecord]: query OpenAlex for candidates
     fetch_work(id) -> PaperRecord | None: point lookup of one work
 """
 
 import logging
 import re
+from collections.abc import Iterable
+from datetime import datetime, timezone
+from typing import Any
 
 from pydantic import ValidationError
 
 from .errors import ProfileError
-from .schema import PaperRecord
+from .schema import PaperRecord, ResearchInterest, effective_interests
 
 logger = logging.getLogger("researcher_profiles.openalex")
 _abstract_logger = logging.getLogger("researcher_profiles.openalex.abstract_decode")
@@ -186,6 +192,16 @@ def _extract_pmcid(raw: dict) -> str | None:
     return None
 
 
+def work_topic_ids(raw: dict) -> list[str]:
+    """Bare OpenAlex topic ids, primary topic first, each once."""
+    out: list[str] = []
+    for t in [raw.get("primary_topic") or {}, *(raw.get("topics") or [])]:
+        tid = str((t or {}).get("id") or "").rsplit("/", 1)[-1]
+        if tid and tid not in out:
+            out.append(tid)
+    return out
+
+
 def parse_work(raw: dict) -> PaperRecord | None:
     """Parse a raw OpenAlex work dict into a :class:`PaperRecord`.
 
@@ -193,7 +209,8 @@ def parse_work(raw: dict) -> PaperRecord | None:
     guard), first-author last name, journal (``primary_location`` then
     ``host_venue``), preferred ``pdf_url``, bare ``doi``, ``pmid`` (from
     ``ids``), ``pmcid`` (from ``locations``), ``cited_by_count``, lowercased
-    ``type``, and the de-inverted ``abstract``.
+    ``type``, the de-inverted ``abstract``, and ``topics`` (the bare topic ids
+    of ``primary_topic`` and ``topics``, primary first, each once).
 
     This function does not compute ``paper_id``. That is ID policy, not
     OpenAlex parsing, so ``paper_id`` is left ``None`` for the caller to fill.
@@ -219,12 +236,138 @@ def parse_work(raw: dict) -> PaperRecord | None:
         openalex_id=(raw.get("id") or "").rsplit("/", 1)[-1],
         doi=_bare_doi(raw),
         type=(raw.get("type") or "").lower() or None,
+        topics=work_topic_ids(raw),
         status="pending",
         # Extra fields (PaperRecord allows extras).
         pmid=_extract_pmid(raw),
         pmcid=_extract_pmcid(raw),
         cited_by_count=int(raw.get("cited_by_count") or 0),
     )
+
+
+# ---------------------------------------------------------------------------
+# Topic prevalence: inferred interests from a corpus's OpenAlex topics
+# ---------------------------------------------------------------------------
+
+#: The generator prefix every topic-count entry carries; the pinned release
+#: follows the ``@``. A rebuild replaces exactly the entries under this prefix.
+TOPIC_GENERATOR = "openalex-topics"
+
+
+def _get(paper: Any, key: str) -> Any:
+    return paper.get(key) if isinstance(paper, dict) else getattr(paper, key, None)
+
+
+def topic_prevalence(
+    papers: Iterable[Any],
+    *,
+    top_n: int = 15,
+    min_share: float = 0.05,
+    names: dict[str, str] | None = None,
+    asserted_at: datetime | None = None,
+) -> list[ResearchInterest]:
+    """The corpus's most common OpenAlex topics as inferred interests.
+
+    Each paper counts once per topic, whether the topic is its primary topic,
+    a secondary one, or both (RADAR's ``distinct_paper_prevalence``, not its
+    double-counting ``aggregate_topic_filters``). ``share`` is the fraction of
+    the papers that carry topic data at all, so a paper OpenAlex never tagged
+    neither helps nor hurts a topic.
+
+    Entries are ``method: inferred``, ``generator: openalex-topics@<release>``,
+    with **no weight**: how often a topic appears is not how much the person
+    cares about it, so the share goes in ``evidence`` only.
+
+    A topic id the pinned copy does not know is kept, with its display name
+    from ``names`` (or the id itself) and no ``version``, and logged.
+    """
+    from . import vocab
+    from .schema import InterestConcept
+
+    tagged = [p for p in papers if _get(p, "topics")]
+    if not tagged:
+        return []
+    by_topic: dict[str, list[str]] = {}
+    for i, p in enumerate(tagged):
+        work = str(_get(p, "openalex_id") or _get(p, "paper_id") or i).rsplit("/", 1)[-1]
+        for tid in dict.fromkeys(_get(p, "topics")):
+            by_topic.setdefault(str(tid).rsplit("/", 1)[-1].upper(), []).append(work)
+    n = len(tagged)
+    ranked = sorted(by_topic.items(), key=lambda kv: (-len(kv[1]), kv[0]))
+    at = asserted_at or datetime.now(timezone.utc).replace(microsecond=0)
+    generator = f"{TOPIC_GENERATOR}@{vocab.OPENALEX_RELEASE}"
+    out: list[ResearchInterest] = []
+    for tid, works in ranked[:top_n]:
+        share = len(works) / n
+        if share < min_share:
+            break
+        concept = vocab.lookup(vocab.OPENALEX_SYSTEM, tid)
+        if concept is None:
+            logger.warning(
+                "OpenAlex topic %s is not in the pinned topic list (release %s); "
+                "keeping it unversioned",
+                tid,
+                vocab.OPENALEX_RELEASE,
+            )
+            concept = InterestConcept.model_validate(
+                {
+                    "@id": vocab.concept_iri(vocab.OPENALEX_SYSTEM, tid),
+                    "system": vocab.OPENALEX_SYSTEM,
+                    "code": tid,
+                    "display": (names or {}).get(tid) or tid,
+                }
+            )
+        out.append(
+            ResearchInterest(
+                concept=concept,
+                method="inferred",
+                generator=generator,
+                assertedAt=at,
+                evidence={"papers": works, "share": round(share, 4)},
+            )
+        )
+    return out
+
+
+#: How much an inferred topic's share of papers counts, next to a declared
+#: weight: it is evidence of what someone works on, not a statement of interest.
+INFERRED_TOPIC_FACTOR = 0.5
+
+
+def topic_score(work_topics: Iterable[str], interests: Iterable[ResearchInterest]) -> float | None:
+    """How a work's OpenAlex topics sit against a person's interests.
+
+    For each of the work's topics that the person has an effective entry on:
+
+    - a declared weight adds that weight (a negative one pushes the work down);
+    - a declared weight of -1 is a hard exclude: the answer is ``None`` and the
+      caller drops the work;
+    - an entry with no declared weight adds ``0.5 * evidence.share``, a weaker
+      inferred signal; with neither it adds nothing.
+
+    Matching is on the exact topic id only. A weight is never carried across a
+    vocabulary mapping or up to a parent subfield, so a hard exclude can only
+    come from the person declaring -1 on that very topic.
+    """
+    from .vocab import OPENALEX_SYSTEM
+
+    by_code = {
+        e.concept.code: e
+        for e in effective_interests(interests)
+        if not e.concept.unmapped and e.concept.system == OPENALEX_SYSTEM
+    }
+    score = 0.0
+    for t in dict.fromkeys(str(t).rsplit("/", 1)[-1].upper() for t in work_topics):
+        ri = by_code.get(t)
+        if ri is None:
+            continue
+        if ri.weight is not None and ri.method == "declared":
+            if ri.weight <= -1:
+                return None
+            score += ri.weight
+        elif ri.evidence and ri.evidence.share:
+            score += INFERRED_TOPIC_FACTOR * ri.evidence.share
+    return score
 
 
 # ---------------------------------------------------------------------------
@@ -379,18 +522,71 @@ def _transport_errors() -> tuple[type[BaseException], ...]:
     return (httpx.HTTPError, ValueError)
 
 
+#: How many inferred topics (by share of papers) join the feed query. They have
+#: no weight, so they are a weaker, bounded signal next to declared topics.
+INFERRED_QUERY_TOPICS = 5
+
+#: With at least this many OpenAlex topic ids to query on, the broad free-text
+#: ``subfields`` add noise rather than recall, so they are left out.
+SUBFIELDS_DROPPED_AT = 3
+
+
+def _typed_query_terms(md) -> tuple[list[str], list[str]]:
+    """``(topic ids, free-text terms)`` from a profile's typed interests.
+
+    Topic ids: OpenAlex topics with a positive effective weight, then the top
+    inferred (unweighted) topics by ``evidence.share``. A topic the person
+    weighed at 0 or below is never queried, even if their papers carry it.
+    Free text: the labels of other positively weighted concepts (text-only and
+    non-OpenAlex coded ones).
+    """
+    from .schema import effective_interests
+    from .vocab import OPENALEX_SYSTEM
+
+    ids: list[str] = []
+    text: list[str] = []
+    inferred = []
+    for e in effective_interests(md.research_interests):
+        c = e.concept
+        if not c.unmapped and c.system == OPENALEX_SYSTEM:
+            if e.weight is not None:
+                if e.weight > 0:
+                    ids.append(c.code)
+            elif e.evidence and e.evidence.share:
+                inferred.append(e)
+        elif e.weight is not None and e.weight > 0:
+            text.append(c.text)
+    inferred.sort(key=lambda e: -(e.evidence.share or 0))
+    ids += [e.concept.code for e in inferred[:INFERRED_QUERY_TOPICS] if e.concept.code not in ids]
+    return ids, text
+
+
 def profile_query_terms(profile) -> dict:
     """Extract the OpenAlex query seeds a profile offers.
 
-    Returns ``{"topics": [...], "seed_work_ids": [...]}``: the profile's
-    ``subfields`` + ``interests`` (free-text labels, order-preserving, deduped)
-    and the OpenAlex work ids of its own papers (the citation neighborhood,
-    usually higher precision for specialists).
+    Returns ``{"topics": [...], "seed_work_ids": [...]}``. ``topics`` mixes
+    OpenAlex topic ids (``T…``, queried as ``topics.id:`` filters) and free-text
+    labels (queried by title/abstract search), order-preserving and deduped:
+
+    - with typed ``research_interests``: positively weighted OpenAlex topics,
+      the top inferred topics by share of papers, the labels of other
+      positively weighted interests, and ``subfields`` unless there are at
+      least :data:`SUBFIELDS_DROPPED_AT` topic ids;
+    - without: ``subfields`` + ``interests``, as free text.
+
+    ``seed_work_ids`` are the OpenAlex work ids of the profile's own papers
+    (the citation neighborhood, usually higher precision for specialists).
     """
     md = profile.metadata
+    if getattr(md, "research_interests", None):
+        ids, text = _typed_query_terms(md)
+        subfields = [] if len(ids) >= SUBFIELDS_DROPPED_AT else list(md.subfields or [])
+        candidates = ids + subfields + text
+    else:
+        candidates = list(md.subfields or []) + list(md.interests or [])
     topics: list[str] = []
     seen: set[str] = set()
-    for term in list(md.subfields or []) + list(md.interests or []):
+    for term in candidates:
         term = (term or "").strip()
         if term and term.lower() not in seen:
             seen.add(term.lower())

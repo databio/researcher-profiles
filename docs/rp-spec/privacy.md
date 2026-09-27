@@ -58,7 +58,7 @@ those fields carry their own tier in `rp:sectionVisibility`:
 ```
 
 The sections are a closed set: `summary`, `expertise`, `focus` (the subfields
-and the interests, weighted and plain), `methods`, `soul`, `clinical`,
+and the interests, typed and plain), `methods`, `soul`, `clinical`,
 `site_capabilities`, `regulatory_experience`, `contact`, `background`. A
 section's effective tier is the more restrictive of its own and the profile's,
 so a section can never be more public than the profile carrying it.

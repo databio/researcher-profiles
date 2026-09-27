@@ -63,6 +63,8 @@ def _raw_work(**overrides) -> dict:
         "locations": [
             {"id": "pmh:oai:pubmedcentral.nih.gov:6772529"},
         ],
+        "primary_topic": {"id": "https://openalex.org/T10222"},
+        "topics": [{"id": "https://openalex.org/T10222"}, {"id": "https://openalex.org/T11289"}],
     }
     base.update(overrides)
     return base
@@ -86,6 +88,8 @@ def test_parse_work_field_mapping():
     assert rec.pmid == "12345678"
     assert rec.pmcid == "PMC6772529"
     assert rec.cited_by_count == 42
+    # Primary topic first, each topic once, bare ids.
+    assert rec.topics == ["T10222", "T11289"]
 
 
 @pytest.mark.parametrize(
@@ -418,6 +422,58 @@ class TestProfileQueryTerms:
         assert "vector-representations-of-example-regions" in terms["topics"]
         assert terms["seed_work_ids"] == []
 
+    def test_typed_interests_query_by_topic_id(self):
+        from types import SimpleNamespace
+
+        from researcher_profiles.openalex import profile_query_terms
+        from researcher_profiles.schema import ProfileDocument
+
+        def topic(code, weight=None, share=None):
+            entry = {
+                "concept": {
+                    "@id": f"https://openalex.org/{code}",
+                    "system": "https://openalex.org/topics",
+                    "code": code,
+                    "display": code,
+                },
+                "method": "declared" if weight is not None else "inferred",
+                "generator": "user" if weight is not None else "openalex-topics@2026-09",
+                "assertedAt": "2026-09-25T12:00:00Z",
+            }
+            if weight is not None:
+                entry["weight"] = weight
+            if share is not None:
+                entry["evidence"] = {"papers": ["W1"], "share": share}
+            return entry
+
+        doc = ProfileDocument.model_validate(
+            {
+                "name": "T",
+                "rid": "local:t-a1b2c3",
+                "provenance": "self_published",
+                "subfields": ["broad field"],
+                "rp:researchInterests": [
+                    topic("T1", 0.5),
+                    topic("T2", share=0.2),
+                    topic("T3", share=0.6),
+                    topic("T4", share=0.9),
+                    topic("T4", -1),  # declared exclude beats the paper count
+                    topic("T5", 0),  # neutral: not queried
+                    {
+                        "concept": {"label": "graph methods", "unmapped": True},
+                        "weight": 0.5,
+                        "method": "inferred",
+                        "generator": "llm",
+                        "assertedAt": "2026-09-25T12:00:00Z",
+                    },
+                ],
+            }
+        )
+        terms = profile_query_terms(SimpleNamespace(metadata=doc, papers=[]))
+        # Declared positive topics, then inferred by share; three topic ids
+        # drop the broad subfields; positive free text stays.
+        assert terms["topics"] == ["T1", "T3", "T2", "graph methods"]
+
     def test_seed_ids_are_bare(self):
         from types import SimpleNamespace
 
@@ -499,3 +555,74 @@ class TestFetchWork:
         if stub is not None:
             monkeypatch.setattr(oa, "_http_get_json", stub)
         assert oa.fetch_work(ref) is None
+
+
+# ---------------------------------------------------------------------------
+# topic_prevalence: inferred interests from a corpus's topics
+# ---------------------------------------------------------------------------
+
+
+class TestTopicPrevalence:
+    def test_share_counts_each_paper_once_and_carries_no_weight(self):
+        from researcher_profiles.openalex import topic_prevalence
+
+        papers = [
+            {"openalex_id": "W1", "topics": ["T10222", "T11289", "T10222"]},
+            {"openalex_id": "W2", "topics": ["T10222"]},
+            {"openalex_id": "W3", "topics": ["T11289"]},
+            {"openalex_id": "W4", "topics": ["T12345"]},
+            {"openalex_id": "W5"},  # no topic data: neither helps nor hurts
+        ]
+        out = topic_prevalence(papers, min_share=0.3)
+        assert [(e.concept.code, e.evidence.share, e.evidence.papers) for e in out] == [
+            ("T10222", 0.5, ["W1", "W2"]),
+            ("T11289", 0.5, ["W1", "W3"]),
+        ]
+        assert all(e.weight is None and e.method == "inferred" for e in out)
+        assert out[0].generator.startswith("openalex-topics@")
+        assert out[0].concept.version  # resolved against the pinned copy
+
+    def test_an_unknown_topic_is_kept_unversioned(self, caplog):
+        from researcher_profiles.openalex import topic_prevalence
+
+        out = topic_prevalence(
+            [{"openalex_id": "W1", "topics": ["T99999999"]}], names={"T99999999": "New topic"}
+        )
+        [entry] = out
+        assert (entry.concept.code, entry.concept.display) == ("T99999999", "New topic")
+        assert entry.concept.version is None
+        assert "not in the pinned topic list" in caplog.text
+
+
+class TestTopicScore:
+    @pytest.mark.parametrize(
+        ("entry", "expected"),
+        [
+            ({"weight": 1}, 1.0),
+            ({"weight": -0.5}, -0.5),
+            ({"weight": -1}, None),
+            ({"method": "inferred", "evidence": {"papers": ["W1"], "share": 0.4}}, 0.2),
+            ({"method": "inferred"}, 0.0),
+        ],
+        ids=["boost", "push-down", "hard-exclude", "inferred-share-at-half", "no-weight-no-share"],
+    )
+    def test_score_for_one_shared_topic(self, entry, expected):
+        from researcher_profiles.openalex import topic_score
+        from researcher_profiles.schema import ResearchInterest
+
+        interest = ResearchInterest.model_validate(
+            {
+                "concept": {
+                    "@id": "https://openalex.org/T1",
+                    "system": "https://openalex.org/topics",
+                    "code": "T1",
+                    "display": "T1",
+                },
+                "method": "declared",
+                "generator": "user",
+                "assertedAt": "2026-09-25T12:00:00Z",
+                **entry,
+            }
+        )
+        score = topic_score(["https://openalex.org/T1", "T2"], [interest])
+        assert score == (None if expected is None else pytest.approx(expected))

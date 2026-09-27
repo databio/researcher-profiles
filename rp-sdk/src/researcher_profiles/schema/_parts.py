@@ -6,7 +6,9 @@ Training and CareerEntry are the two exceptions: they come from scholarcore and
 are re-exported by the package, not defined here.
 """
 
-from typing import Literal
+from collections.abc import Iterable
+from datetime import datetime, timezone
+from typing import Any, Literal
 
 from pydantic import Field, model_validator
 
@@ -203,10 +205,8 @@ class ConceptReference(JsonLdModel):
     """One term in a controlled vocabulary (``rp:concept``).
 
     The ``system``/``code``/``version`` triple is what makes a concept
-    comparable across profiles; ``label`` is only what a human reads. A
-    profile that kept the label alone would have discarded the identity, which
-    is why the plain ``interests`` list is a projection of these and never the
-    canonical value.
+    comparable across profiles; ``label`` is only what a human reads. Used by
+    ``therapeutic_areas``; research interests use :class:`InterestConcept`.
     """
 
     system: str
@@ -215,27 +215,198 @@ class ConceptReference(JsonLdModel):
     version: str | None = None
 
 
-class WeightedInterest(JsonLdModel):
-    """A concept the researcher accepted (with a weight) or explicitly rejected.
+class InterestConcept(JsonLdModel):
+    """The concept a :class:`ResearchInterest` points at.
 
-    Rejection is a first-class decision, not a low weight: "I do not work on
-    this" and "I work on this a little" are different claims, and a matcher
-    that conflated them would keep proposing the work the researcher already
-    said no to. Hence the asymmetry the validator enforces: an accepted
-    concept carries a weight in ``[0, 1]``, a rejected one carries none.
+    Two forms, never mixed. A **coded** concept names a term in a controlled
+    vocabulary: ``system`` (the vocabulary URI), ``code``, ``display`` (the
+    label snapshot a human reads), an optional pinned ``version``, and the
+    term's own IRI as ``@id``. A **text-only** concept is a ``label`` with
+    ``unmapped: true`` and no ``@id``, ``system`` or ``code``: an interest no
+    vocabulary covers, kept rather than forced onto a wrong term.
+
+    The field names follow FHIR ``Coding`` (``system``, ``code``,
+    ``display``, ``version``), so a Coding view is a rename, not a mapping.
+    This is a separate type from :class:`ConceptReference`, which stays the
+    shape of ``therapeutic_areas``.
     """
 
-    concept: ConceptReference
-    decision: Literal["accepted", "rejected"]
-    weight: float | None = Field(default=None, ge=0, le=1)
+    system: str | None = None
+    code: str | None = None
+    display: str | None = None
+    version: str | None = None
+    label: str | None = None
+    unmapped: bool = False
 
     @model_validator(mode="after")
-    def _weight_matches_decision(self) -> "WeightedInterest":
-        if self.decision == "accepted" and self.weight is None:
-            raise ValueError("accepted interests require a weight")
-        if self.decision == "rejected" and self.weight is not None:
-            raise ValueError("rejected interests cannot have a weight")
+    def _coded_or_text(self) -> "InterestConcept":
+        coded = self.system is not None and self.code is not None
+        if self.unmapped:
+            if coded or self.system or self.code or self.id_ or not self.label:
+                raise ValueError("text-only concept needs label and no @id/system/code")
+        elif not coded or not self.display:
+            raise ValueError("coded concept needs system, code and display")
         return self
+
+    def _jsonld_node(self, data: dict[str, Any]) -> dict[str, Any]:
+        # ``unmapped`` is a claim only when true; ``false`` on every coded
+        # concept would be noise.
+        if not data.get("unmapped"):
+            data.pop("unmapped", None)
+        return data
+
+    @property
+    def text(self) -> str:
+        """What a human reads: the label of a text-only concept, else ``display``."""
+        return (self.label if self.unmapped else self.display) or ""
+
+    @property
+    def key(self) -> str:
+        """Identity for precedence: ``system|code``, or the casefolded label."""
+        if self.unmapped:
+            return "text|" + (self.label or "").casefold()
+        return f"{self.system}|{self.code}"
+
+
+class InterestEvidence(JsonLdModel):
+    """Why an inferred interest was proposed: raw counts live here, not in weight."""
+
+    #: Work ids (OpenAlex ``W…`` or paper ids) that carry the concept.
+    papers: list[str] = []
+    #: Share of the profile's papers that carry the concept, in ``[0, 1]``.
+    share: float | None = Field(default=None, ge=0, le=1)
+
+
+#: Who said so. ``declared``: the person. ``inferred``: computed from papers or
+#: written by a model. ``imported``: copied from another record (e.g. ORCID).
+InterestMethod = Literal["declared", "inferred", "imported"]
+
+
+class ResearchInterest(JsonLdModel):
+    """One weighted person-to-concept link (``rp:ResearchInterest``).
+
+    Modeled on the Weighted Interest Ontology pattern (person ->
+    ``wi:WeightedInterest`` -> topic, with ``wi:weight``). ``weight`` is signed
+    in ``[-1, 1]``: +1 a core interest, 0 declared neutral, -1 a hard exclude,
+    and values between -1 and 0 mean rank lower. A missing weight means
+    *unknown*, never 0, which is why an inferred entry built from paper counts
+    carries its share in ``evidence`` and leaves ``weight`` unset.
+
+    Several entries may cover one concept; :func:`effective_interests` picks
+    the one that counts.
+    """
+
+    type_: str | None = Field(default="ResearchInterest", alias="@type")
+    concept: InterestConcept
+    weight: float | None = Field(default=None, ge=-1, le=1)
+    method: InterestMethod
+    #: What produced the entry: ``user``, ``llm``, ``prosopia-wizard``,
+    #: ``openalex-topics@2026-09``, ...
+    generator: str = Field(min_length=1)
+    asserted_at: datetime = Field(alias="assertedAt")
+    evidence: InterestEvidence | None = None
+
+
+def effective_interests(entries: Iterable[ResearchInterest]) -> list[ResearchInterest]:
+    """The one entry per concept that counts, in first-appearance order.
+
+    Precedence: a ``declared`` entry beats an ``inferred`` or ``imported``
+    one; among equals the newest ``assertedAt`` wins.
+    """
+    best: dict[str, ResearchInterest] = {}
+    for e in entries:
+        k = e.concept.key
+        cur = best.get(k)
+        if cur is None or _rank(e) > _rank(cur):
+            best[k] = e
+    return list(best.values())
+
+
+def _rank(e: ResearchInterest) -> tuple[int, datetime]:
+    at = e.asserted_at
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=timezone.utc)
+    return (1 if e.method == "declared" else 0, at)
+
+
+#: The weight a free-text list entry gets when it becomes a typed entry:
+#: "interested" / "less interested", the middle stops of the scale.
+TEXT_INTEREST_WEIGHT = 0.5
+
+
+def interests_from_text(
+    interests: Iterable[str],
+    not_interests: Iterable[str] = (),
+    *,
+    generator: str,
+    method: InterestMethod,
+    asserted_at: datetime | None = None,
+) -> list[ResearchInterest]:
+    """Text-only entries for two free-text lists (+0.5 and -0.5).
+
+    The one conversion every builder uses, so an LLM's ``interests`` /
+    ``not_interests`` become the same typed entries whichever tool wrote them.
+    Blank and repeated labels (case-insensitive) are dropped.
+    """
+    at = asserted_at or datetime.now(timezone.utc).replace(microsecond=0)
+    out: list[ResearchInterest] = []
+    seen: set[str] = set()
+    for labels, weight in (
+        (interests, TEXT_INTEREST_WEIGHT),
+        (not_interests, -TEXT_INTEREST_WEIGHT),
+    ):
+        for raw in labels:
+            label = (raw or "").strip()
+            if not label or label.casefold() in seen:
+                continue
+            seen.add(label.casefold())
+            out.append(
+                ResearchInterest(
+                    concept=InterestConcept(label=label, unmapped=True),
+                    weight=weight,
+                    method=method,
+                    generator=generator,
+                    assertedAt=at,
+                )
+            )
+    return out
+
+
+def merge_generated_interests(
+    existing: Iterable[ResearchInterest | dict[str, Any]],
+    generated: Iterable[ResearchInterest],
+    *,
+    generator_prefix: str,
+) -> list[ResearchInterest]:
+    """Replace one generator's entries, keeping every other entry.
+
+    A rebuild regenerates only what it generates: entries whose ``generator``
+    starts with ``generator_prefix`` (``llm``, ``openalex-topics``) are dropped
+    and ``generated`` appended; everything else, and every declared entry
+    whatever its generator, survives.
+    """
+    kept: list[ResearchInterest] = []
+    for e in existing:
+        entry = e if isinstance(e, ResearchInterest) else ResearchInterest.model_validate(e)
+        if entry.method != "declared" and entry.generator.startswith(generator_prefix):
+            continue
+        kept.append(entry)
+    return kept + list(generated)
+
+
+def project_interests(entries: Iterable[ResearchInterest]) -> tuple[list[str], list[str]]:
+    """``(interests, not_interests)``: labels of effective entries by weight sign.
+
+    Positive weights are interests, negative weights not-interests; a missing
+    weight (unknown) or 0 (declared neutral) goes in neither list.
+    """
+    pos: list[str] = []
+    neg: list[str] = []
+    for e in effective_interests(entries):
+        if e.weight is None or e.weight == 0:
+            continue
+        (pos if e.weight > 0 else neg).append(e.concept.text)
+    return pos, neg
 
 
 class SectionVisibility(JsonLdModel):

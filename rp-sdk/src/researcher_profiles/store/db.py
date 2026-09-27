@@ -213,6 +213,9 @@ class ProfileRow(SQLModel, table=True):
     subfields: list = Field(default_factory=list, sa_column=Column(JSON))
     interests: list = Field(default_factory=list, sa_column=Column(JSON))
     not_interests: list = Field(default_factory=list, sa_column=Column(JSON))
+    #: The typed ``rp:researchInterests`` entries, as stored (every entry, not
+    #: just the effective ones), so interests are searchable by concept code.
+    research_interests: list = Field(default_factory=list, sa_column=Column(JSON))
     methodological_commitments: list = Field(default_factory=list, sa_column=Column(JSON))
     recurring_positions: list = Field(default_factory=list, sa_column=Column(JSON))
     intellectual_lineage: list = Field(default_factory=list, sa_column=Column(JSON))
@@ -317,6 +320,7 @@ def _json_projection(meta: "ProfileDocument") -> dict:
         subfields=list(meta.subfields),
         interests=list(meta.interests),
         not_interests=list(meta.not_interests),
+        research_interests=[e.model_dump(mode="json") for e in meta.research_interests],
         methodological_commitments=list(meta.methodological_commitments),
         recurring_positions=list(meta.recurring_positions),
         intellectual_lineage=list(meta.intellectual_lineage),

@@ -151,7 +151,9 @@ conformant document once loaded and re-saved.
 | `dateModified` | RECOMMENDED | ISO 8601 timestamp |
 | `visibility` | optional | `public`, `internal`, or `restricted` (default: `public`) |
 | `expertise` | optional | Array of topic labels |
-| `not_interests` | optional | Authoritative non-interests |
+| `interests` | optional | Interest labels. When `rp:researchInterests` is present, rebuilt from it: the entries with a positive weight (see [Research interests](#research-interests)) |
+| `not_interests` | optional | Authoritative non-interests. When `rp:researchInterests` is present, rebuilt from it: the entries with a negative weight |
+| `rp:researchInterests` | optional | Typed, weighted interests; the canonical form of the two lists above (see [Research interests](#research-interests)) |
 | `career_stage` | optional | Date-anchored eligibility facts (see below) |
 | `collaborators` | optional | Declared connections to other researchers (see below) |
 | `researchOutputs` | optional | Research outputs other than papers: grants, software, datasets, protocols, etc. (see below) |
@@ -558,12 +560,56 @@ reveals whether artifacts exist, but a consumer MUST validate rather than trust.
   [management tier](dynamic-api.md#14-management-api) specifies only what a
   credential looks like once issued.
 
-## Optional wizard and clinical extensions
+## Research interests
 
-Profiles may carry `rp:weightedInterests`, preserving an ontology system,
-code, version, label, explicit accepted/rejected decision, and a weight only
-for accepted concepts. The legacy `interests` and `not_interests` arrays are
-deterministic display projections of that canonical value.
+`rp:researchInterests` is a list of `ResearchInterest` entries. Each one links
+the person to one concept with an optional signed weight. It follows the
+Weighted Interest Ontology pattern (person, `wi:WeightedInterest`, topic, with
+`wi:weight`); `rp:ResearchInterest` is declared a subclass of
+`wi:WeightedInterest`. That ontology is a precedent, not a standard, and it has
+no fixed range or neutral value, so this spec adds both.
+
+| Field | Required | Meaning |
+|---|---|---|
+| `concept` | REQUIRED | The term (below) |
+| `weight` | optional | A number from -1 to 1. +1 is a core interest, 0 is declared neutral, -1 is a hard exclude, and values between -1 and 0 mean rank lower. **A missing weight means unknown, never 0.** |
+| `method` | REQUIRED | `declared` (the person said it), `inferred` (computed from papers or written by a model), or `imported` (copied from another record, e.g. ORCID keywords) |
+| `generator` | REQUIRED | What produced the entry, e.g. `user`, `llm`, `prosopia-wizard`, `openalex-topics@2026-09` |
+| `assertedAt` | REQUIRED | When the entry was made (`prov:generatedAtTime`). The same person may reassess a concept; this says which entry is newer |
+| `evidence` | optional | `{papers: [...], share: 0.45}`. Raw counts and shares live here, never in `weight` |
+
+A concept has one of two forms, never a mix:
+
+- **Coded**: `@id` (the term's own IRI), `system` (the vocabulary URI,
+  `skos:inScheme`), `code` (`skos:notation`), `display` (the label snapshot,
+  `skos:prefLabel`), and an optional `version` (the release of the pinned
+  vocabulary copy). The field names follow FHIR `Coding`.
+- **Text-only**: `label` plus `unmapped: true`, with no `@id`, `system` or
+  `code`. The fallback when no vocabulary term fits.
+
+[Vocabularies](vocabularies.md) says which vocabularies to use and what
+`system` and `version` hold for each.
+
+**Precedence.** Several entries may cover the same concept (same `system` and
+`code`, or the same text-only label ignoring case). Exactly one counts: a
+`declared` entry beats an `inferred` or `imported` one, and among equals the
+newest `assertedAt` wins.
+
+**Projection.** When `rp:researchInterests` is present, `interests` and
+`not_interests` are rebuilt from the entries that count: a positive weight is
+an interest, a negative weight a non-interest, and an entry with no weight or
+weight 0 is in neither list. A free-text list written by a tool or a person
+becomes text-only entries (+0.5 for an interest, -0.5 for a non-interest).
+
+The spec says what a weight means, not how to compute one. An entry inferred
+from paper counts (`evidence.share`) leaves `weight` unset: how often a topic
+appears in someone's papers is not how much they care about it.
+
+An export MAY give a FOAF view with `foaf:topic_interest` for concepts with a
+positive weight only. Interests are never exported as `schema:knowsAbout`,
+which states expertise, not interest.
+
+## Optional wizard and clinical extensions
 
 `rp:sectionVisibility` declares privacy for the finite inline sections summary,
 expertise, focus, methods, SOUL, clinical, site capabilities, regulatory
@@ -592,6 +638,8 @@ A profile carrying trials and no papers is complete. An empty
 `sources/papers.jsonld`, or none at all, is the normal shape for a clinical or
 non-publishing researcher, and no consumer may treat it as a broken profile.
 
-These extensions add no terms to the byte-frozen `v1` `@context`. Every new key
-is a compact IRI under the already-defined `rp` prefix, which JSON-LD expands
-through that prefix rather than through `@vocab`.
+These extensions add no terms of their own to the `@context`. Every new key is
+a compact IRI under the already-defined `rp` prefix, which JSON-LD expands
+through that prefix rather than through `@vocab`. The one exception is
+`rp:researchInterests`: its SKOS, `wi:` and PROV mappings need a scoped
+context, which the `@context` defines. No existing term changes meaning.

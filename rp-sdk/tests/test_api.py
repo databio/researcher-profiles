@@ -2149,6 +2149,37 @@ class TestMatchEndpoint:
         assert chunks[0]["source_id"] == "paper1"
         assert chunks[0]["score"] == pytest.approx(0.9)
 
+    def test_match_forwards_interests_and_reports_matched_topics(self, api_client):
+        match = _fake_match()
+        match.evidence.matched_topics = ["T10222"]
+        vstore = self._use(api_client.app, _FakeVectorStore([match]))
+        interest = {
+            "concept": {
+                "@id": "https://openalex.org/T10222",
+                "system": "https://openalex.org/topics",
+                "code": "T10222",
+                "display": "Genomics and Chromatin Dynamics",
+            },
+            "weight": 1,
+            "method": "declared",
+            "generator": "user",
+            "assertedAt": "2026-09-25T12:00:00Z",
+        }
+        r = api_client.post("/api/v1/match", json={"query": "chromatin", "interests": [interest]})
+        assert r.status_code == 200
+        assert r.json()["matches"][0]["evidence"]["matched_topics"] == ["T10222"]
+        [forwarded] = vstore.calls[0][1]["interests"]
+        assert forwarded.concept.code == "T10222" and forwarded.weight == 1
+        assert vstore.calls[0][1]["topic_alpha"] == pytest.approx(0.2)
+
+    def test_match_refuses_malformed_interests(self, api_client):
+        self._use(api_client.app, _FakeVectorStore([_fake_match()]))
+        r = api_client.post(
+            "/api/v1/match",
+            json={"query": "chromatin", "interests": [{"concept": {"label": "x"}}]},
+        )
+        assert r.status_code == 422
+
     def test_match_503_when_no_profile_is_indexed(self, api_client):
         """Profiles exist and none has vectors: 503, never an empty 200.
 

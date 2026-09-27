@@ -40,6 +40,7 @@ from ...models.api import (
 from ...privacy import (
     ViewerTier,
 )
+from ...schema import ResearchInterest
 from ...store import ProfileStore
 from .._projection import (
     _allowed_source_types,
@@ -136,7 +137,14 @@ def match_profiles(
     diversification (``store.match.rank``) and returns each match's
     slug, name, ORCID, score, and evidence. Chunk-level evidence is included
     only when ``include_chunks=True``.
+
+    ``interests`` (the query side's typed research interests) add a topic
+    component: see ``MatchManager.rank``.
     """
+    try:
+        interests = [ResearchInterest.model_validate(i) for i in body.interests]
+    except pydantic.ValidationError as e:
+        raise HTTPException(status_code=422, detail=f"invalid interests: {e}") from e
     try:
         matches = vstore.match.rank(
             body.query,
@@ -147,6 +155,8 @@ def match_profiles(
             lambda_=body.lambda_,
             topk_chunks=body.topk_chunks,
             normalize=body.normalize,
+            interests=interests or None,
+            topic_alpha=body.topic_alpha,
         )
     # Boundary: the whole store-wide match stack.
     except Exception as e:
@@ -168,6 +178,7 @@ def match_profiles(
             centroid_score=ev.centroid_score,
             top_papers=list(ev.top_papers or []),
             overlapping_topics=list(ev.overlapping_topics or []),
+            matched_topics=list(ev.matched_topics or []),
             top_chunks=(
                 [
                     _search_hit_payload(h)

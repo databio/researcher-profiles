@@ -26,7 +26,15 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from ..errors import ProfileError
 from ..privacy import ViewerTier, chunk_source_tiers, drop_above_public, project_document
-from ..schema import CareerEntry, PaperRecord, ProfileDocument, Training, normalize_doi, orcid_of
+from ..schema import (
+    CareerEntry,
+    PaperRecord,
+    ProfileDocument,
+    Training,
+    effective_interests,
+    normalize_doi,
+    orcid_of,
+)
 from ..schema.jsonld import PROFILE_FORMAT_IRI, canonical_dumps
 from ..utils.clock import now_iso
 from . import ResearcherProfile
@@ -35,7 +43,7 @@ from . import ResearcherProfile
 #: can detect the change and re-ingest. This is a detector, not a switch: there
 #: is exactly one rendering and it is the current one. Never add a ``version=``
 #: parameter that reproduces an older blob.
-EXPORT_VERSION: int = 1
+EXPORT_VERSION: int = 2
 
 #: The ``[abstract-only]`` marker a summary carries when it was written from an
 #: abstract rather than full text. Same marker ``embeddings/chunking.py``
@@ -511,11 +519,11 @@ def _overview_and_field_lines(meta: ProfileDocument) -> list[str]:
 def _profile_bullet_sections(meta: ProfileDocument) -> list[str]:
     """Expertise, interests (with the not-interested trailer), and commitments."""
     out = list(_bullets("Expertise", meta.expertise))
-    not_interests = [i for i in meta.not_interests if i and i.strip()]
+    interests, not_interests = _weighted_interest_labels(meta)
     out.extend(
         _bullets(
             "Interests",
-            meta.interests,
+            interests,
             trailer=(
                 "Not interested in: " + ", ".join(i.strip() for i in not_interests)
                 if not_interests
@@ -525,6 +533,27 @@ def _profile_bullet_sections(meta: ProfileDocument) -> list[str]:
     )
     out.extend(_bullets("Methodological commitments", meta.methodological_commitments))
     return out
+
+
+def _weighted_interest_labels(meta: ProfileDocument) -> tuple[list[str], list[str]]:
+    """The interest lists, each label followed by its weight when typed.
+
+    A profile with ``research_interests`` shows the signed weight beside each
+    label (``ATAC-seq (+0.5)``), so a reader can tell a core interest from a
+    passing one; a profile with only the plain lists shows them as they are.
+    """
+    if not meta.research_interests:
+        return (
+            [i for i in meta.interests if i and i.strip()],
+            [i for i in meta.not_interests if i and i.strip()],
+        )
+    pos: list[str] = []
+    neg: list[str] = []
+    for e in effective_interests(meta.research_interests):
+        if e.weight is None or e.weight == 0:
+            continue
+        (pos if e.weight > 0 else neg).append(f"{e.concept.text.strip()} ({e.weight:+g})")
+    return pos, neg
 
 
 def _career_lines(career: Sequence[CareerEntry]) -> list[str]:
@@ -763,6 +792,46 @@ def build_export_bundle(
     return bundle
 
 
+def to_foaf(meta: ProfileDocument) -> dict[str, Any]:
+    """A FOAF view of the person's interests, as a JSON-LD node.
+
+    Emits ``foaf:topic_interest`` for every concept whose effective weight is
+    positive, and nothing else: an unknown (no weight), neutral (0) or negative
+    entry is not an interest, and FOAF has no way to say "not interested".
+    A coded concept is referenced by its ``@id`` (or, lacking one, a node
+    carrying its code and label); a text-only concept is a blank node with its
+    label. Interests are never emitted as ``schema:knowsAbout``, which states
+    expertise, not interest.
+    """
+    topics: list[dict[str, Any]] = []
+    for e in effective_interests(meta.research_interests):
+        if e.weight is None or e.weight <= 0:
+            continue
+        c = e.concept
+        if c.unmapped:
+            topics.append({"skos:prefLabel": c.text})
+        elif c.id_:
+            topics.append({"@id": c.id_, "skos:prefLabel": c.text})
+        else:
+            topics.append(
+                {
+                    "skos:inScheme": {"@id": c.system},
+                    "skos:notation": c.code,
+                    "skos:prefLabel": c.text,
+                }
+            )
+    return {
+        "@context": {
+            "foaf": "http://xmlns.com/foaf/0.1/",
+            "skos": "http://www.w3.org/2004/02/skos/core#",
+        },
+        "@id": meta.id_,
+        "@type": "foaf:Person",
+        "foaf:name": meta.name,
+        "foaf:topic_interest": topics,
+    }
+
+
 __all__ = [
     "EXPORT_VERSION",
     "ExportError",
@@ -777,4 +846,5 @@ __all__ = [
     "export_viewer",
     "render_export_text",
     "select_export_papers",
+    "to_foaf",
 ]

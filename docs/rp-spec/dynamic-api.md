@@ -589,7 +589,8 @@ Patch owner-editable metadata fields.
 
 **Editable fields:** `name`, `affiliation`, `job_title`, `field`, `subfields`,
 `summary`, `expertise` (the label list), `interests`, `not_interests`,
-`training`, `career`, `same_as`.
+`research_interests`, `training`, `career`, `same_as`. A patch to `interests`
+or `not_interests` is recorded as declared `research_interests` entries.
 
 A key outside this set returns `400`. Fields like `rid`, `provenance`,
 `collaborators`, and `visibility` are not editable through this endpoint.
@@ -696,8 +697,9 @@ The following fields appear in profile detail responses (e.g. `GET /profiles/{sl
 | `summary` | string \| null | |
 | `job_title` | string \| null | |
 | `expertise` | list[string] | Topic labels (distinct from the `expertise` markdown) |
-| `interests` | list[string] | |
-| `not_interests` | list[string] | Authoritative non-interests |
+| `interests` | list[string] | Rebuilt from `research_interests` (positive weights) when that is set |
+| `not_interests` | list[string] | Authoritative non-interests; rebuilt from `research_interests` (negative weights) when that is set |
+| `research_interests` | list[object] | Typed, weighted interests (see [spec](index.md#research-interests)) |
 | `training` | list[object] | Educational history |
 | `career` | list[object] | Career history |
 | `collaborators` | list[string \| object] | Declared connections (see [spec](index.md#the-collaborators-array)) |

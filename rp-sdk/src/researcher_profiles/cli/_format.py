@@ -1,4 +1,4 @@
-"""The format verbs: ``schema``, ``validate``, ``manifest``, ``where``, ``mint-local-id``.
+"""The format verbs: ``schema``, ``vocab``, ``validate``, ``manifest``, ``where``, ``mint-local-id``.
 
 These are the commands that answer questions about the on-disk contract rather
 than about a corpus or a server: what the schema is, whether a directory passes
@@ -51,6 +51,36 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
     s_wire.add_argument(
         "out_file",
         help="Output file for the combined wire schema (e.g. rp-ui-lib/schemas/wire.schema.json)",
+    )
+
+    p_vocab = add_subcommand(
+        sub,
+        "vocab",
+        "Maintain the pinned interest vocabularies (OpenAlex topics, MeSH)",
+        "rp vocab refresh --openalex",
+        "rp vocab refresh --mesh desc2026.xml",
+    )
+    vocab_sub = p_vocab.add_subparsers(dest="vocab_cmd", required=True, metavar="<subcommand>")
+    v_refresh = add_subcommand(
+        vocab_sub,
+        "refresh",
+        "Rewrite the pinned vocabulary files from their sources",
+        "rp vocab refresh --openalex --mesh desc2026.gz",
+    )
+    v_refresh.add_argument(
+        "--openalex", action="store_true", help="Refetch the OpenAlex topic list (network)"
+    )
+    v_refresh.add_argument(
+        "--mesh",
+        metavar="PATH",
+        help="NLM MeSH descriptor XML (desc<YEAR>.xml, or its .gz); the year is the release",
+    )
+    v_refresh.add_argument(
+        "--release", help="OpenAlex snapshot release (default: this month, YYYY-MM)"
+    )
+    v_refresh.add_argument(
+        "--out-dir",
+        help="Directory to write into (default: the package's own vocab/ directory)",
     )
 
     p_validate = add_subcommand(
@@ -136,6 +166,25 @@ def _cmd_schema(args: argparse.Namespace) -> int:
         print(f"wrote {pth}")
         return EXIT_OK
     return EXIT_USAGE
+
+
+def _cmd_vocab(args: argparse.Namespace) -> int:
+    """Rewrite the pinned vocabulary files and report what changed."""
+    if args.vocab_cmd != "refresh":
+        return EXIT_USAGE
+    if not args.openalex and not args.mesh:
+        print("error: nothing to refresh; pass --openalex and/or --mesh PATH", file=sys.stderr)
+        return EXIT_USAGE
+    from ..vocab.refresh import refresh
+
+    for line in refresh(
+        openalex=args.openalex,
+        mesh_xml=Path(args.mesh) if args.mesh else None,
+        out_dir=Path(args.out_dir) if args.out_dir else None,
+        release=args.release,
+    ):
+        print(line)
+    return EXIT_OK
 
 
 def _cmd_validate(args: argparse.Namespace) -> int:
@@ -354,6 +403,7 @@ def _cmd_mint_local_id(args: argparse.Namespace) -> int:
 
 COMMANDS: dict[str, Callable[[argparse.Namespace], int]] = {
     "schema": _cmd_schema,
+    "vocab": _cmd_vocab,
     "validate": _cmd_validate,
     "manifest": _cmd_manifest,
     "where": _cmd_where,

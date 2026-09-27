@@ -33,7 +33,7 @@ ViewerTier = Visibility
 SECTION_FIELDS: dict[str, tuple[str, ...]] = {
     "summary": ("summary",),
     "expertise": ("expertise",),
-    "focus": ("subfields", "interests", "not_interests", "weighted_interests"),
+    "focus": ("subfields", "interests", "not_interests", "research_interests"),
     "methods": ("methodological_commitments",),
     #: SOUL is an artifact, not an inline field, so it governs no document
     #: keys: the tier reaches ``personality/SOUL.md`` through the manifest.

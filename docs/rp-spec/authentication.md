@@ -115,7 +115,7 @@ Sections, and the document fields each governs:
 |------|--------|
 | `summary` | `summary` |
 | `expertise` | `expertise` (the label list), and the `personality/expertise.md` file |
-| `focus` | `field`, `subfields`, `interests`, `not_interests`, `weighted_interests` |
+| `focus` | `field`, `subfields`, `interests`, `not_interests`, `research_interests` |
 | `methods` | `methodological_commitments` |
 | `soul` | the `personality/SOUL.md` narrative (role `soul`) |
 | `clinical` | `therapeutic_areas` |

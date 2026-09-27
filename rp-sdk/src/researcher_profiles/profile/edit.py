@@ -51,6 +51,7 @@ methods catch :class:`~researcher_profiles.errors.ProfileWriteError` only, and
 never bare ``Exception``.
 """
 
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ValidationError
@@ -60,12 +61,15 @@ from ..schema import (
     ArtifactRef,
     CareerEntry,
     ConceptReference,
+    InterestConcept,
     PaperRecord,
     ProfileDocument,
+    ResearchInterest,
     SectionVisibility,
     SiteCapabilities,
     Training,
-    WeightedInterest,
+    effective_interests,
+    interests_from_text,
 )
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -102,7 +106,7 @@ EDITABLE_METADATA_FIELDS: frozenset[str] = frozenset(
         "expertise",
         "interests",
         "not_interests",
-        "weighted_interests",
+        "research_interests",
         "methodological_commitments",
         "therapeutic_areas",
         "site_capabilities",
@@ -136,13 +140,6 @@ EDITABLE_WORK_FIELDS: frozenset[str] = frozenset(
     }
 )
 
-#: Fields the document regenerates from :attr:`ProfileDocument.weighted_interests`.
-#: Patching one of them on a profile that carries weighted interests would be
-#: silently discarded on the next write, so it is refused with the name of the
-#: field to patch instead.
-_PROJECTED_INTEREST_FIELDS: frozenset[str] = frozenset({"interests", "not_interests"})
-
-
 #: Editable fields whose values are objects, not scalars or string lists.
 #: A patch delivers them as plain dicts (that is what JSON is), and
 #: ``model_copy`` does not validate, so they are parsed into their schema models
@@ -155,7 +152,7 @@ _PROJECTED_INTEREST_FIELDS: frozenset[str] = frozenset({"interests", "not_intere
 STRUCTURED_METADATA_FIELDS: dict[str, type[BaseModel]] = {
     "training": Training,
     "career": CareerEntry,
-    "weighted_interests": WeightedInterest,
+    "research_interests": ResearchInterest,
     "therapeutic_areas": ConceptReference,
 }
 
@@ -191,6 +188,85 @@ def _coerce_structured(patch: dict[str, Any]) -> dict[str, Any]:
         except ValidationError as e:
             raise EditError(f"{key} is not a valid {model.__name__}: {e}") from e
     return out
+
+
+def _declare_text_interests(doc: ProfileDocument, patch: dict[str, Any]) -> dict[str, Any]:
+    """Turn a patch of the plain interest lists into declared typed entries.
+
+    The plain lists are a projection of ``research_interests``, so a patch to
+    them is recorded where the projection reads from. For each patched list
+    (``interests`` is +0.5, ``not_interests`` is -0.5):
+
+    - a label that names a coded concept already projected into the same list
+      is left alone (it is already there, at whatever weight it has);
+    - a label that names a coded concept projected into the other list gets a
+      declared entry on that concept with the new sign;
+    - any other label becomes a declared text-only entry;
+    - a coded concept that was in the patched list but whose label is gone gets
+      a declared entry with no weight, which outranks the entry that put it
+      there and drops it from both lists.
+
+    Earlier text-only entries in a patched list are replaced: the patch is the
+    owner's full statement of that list.
+    """
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    base = list(patch.get("research_interests", doc.research_interests))
+    if not base:
+        # A profile that predates typed interests: its plain lists are the
+        # builder's, so they become the same entries a build now writes, and
+        # the list this patch does not touch survives.
+        base = interests_from_text(
+            doc.interests, doc.not_interests, generator="llm", method="inferred", asserted_at=now
+        )
+    effective = effective_interests(base)
+    coded = {
+        e.concept.text.casefold(): e
+        for e in effective
+        if not e.concept.unmapped and e.weight is not None and e.weight != 0
+    }
+    added: list[ResearchInterest] = []
+    seen: set[str] = set()
+
+    def declare(concept: InterestConcept, weight: float | None) -> None:
+        added.append(
+            ResearchInterest(
+                concept=concept, weight=weight, method="declared", generator="user", assertedAt=now
+            )
+        )
+
+    lists = {
+        field: [str(x).strip() for x in patch.pop(field) or [] if str(x).strip()]
+        for field in ("interests", "not_interests")
+        if field in patch
+    }
+    mentioned = {label.casefold() for labels in lists.values() for label in labels}
+    patched_signs = {1 if field == "interests" else -1 for field in lists}
+    # Text-only entries that project into a patched list are replaced; the
+    # rest (the other list, unknown, neutral) and every coded entry stay.
+    kept = [
+        e
+        for e in base
+        if not e.concept.unmapped
+        or e.weight is None
+        or e.weight == 0
+        or (1 if e.weight > 0 else -1) not in patched_signs
+    ]
+    for field, labels in lists.items():
+        sign = 1 if field == "interests" else -1
+        for label in labels:
+            k = label.casefold()
+            if k in seen:
+                continue
+            seen.add(k)
+            hit = coded.get(k)
+            if hit is None:
+                declare(InterestConcept(label=label, unmapped=True), sign * 0.5)
+            elif (hit.weight or 0) * sign < 0:
+                declare(hit.concept, sign * 0.5)
+        for k, e in coded.items():
+            if (e.weight or 0) * sign > 0 and k not in mentioned:
+                declare(e.concept, None)
+    return {**patch, "research_interests": kept + added}
 
 
 def _find_work(papers: list[PaperRecord], paper_id: str) -> int:
@@ -244,14 +320,16 @@ class EditManager:
             )
         if not patch:
             return self._profile.metadata
-        projected = _PROJECTED_INTEREST_FIELDS & set(patch)
-        if projected and self._profile.metadata.weighted_interests:
-            raise EditError(
-                f"{', '.join(sorted(projected))} cannot be patched on a profile that "
-                "carries weighted_interests: they are regenerated from it on every "
-                "write. Patch weighted_interests instead."
-            )
-        updated = self._profile.metadata.model_copy(update=_coerce_structured(patch))
+        coerced = _coerce_structured(patch)
+        if "interests" in coerced or "not_interests" in coerced:
+            coerced = _declare_text_interests(self._profile.metadata, coerced)
+        updated = self._profile.metadata.model_copy(update=coerced)
+        try:
+            # ``model_copy`` does not validate; re-validating runs the interest
+            # projection so the persisted plain lists match the typed entries.
+            updated = ProfileDocument.model_validate(updated.model_dump(mode="json"))
+        except ValidationError as e:
+            raise EditError(f"patched profile is invalid: {e}") from e
         try:
             return self._profile.save_profile(updated)
         except ProfileWriteError as e:

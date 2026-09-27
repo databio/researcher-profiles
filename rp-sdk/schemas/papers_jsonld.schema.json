@@ -399,6 +399,14 @@
           "default": null,
           "title": "Summary"
         },
+        "topics": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Topics",
+          "type": "array"
+        },
         "total_authors": {
           "anyOf": [
             {

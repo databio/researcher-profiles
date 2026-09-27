@@ -280,6 +280,30 @@ See the [schema reference](schemas.md).
 
 ---
 
+## vocab
+
+Rewrite the pinned interest vocabularies that ship in the package
+(`researcher_profiles/vocab/`): the OpenAlex topic list and the MeSH
+descriptors. Every tool resolves interest codes against these copies, so a
+refresh is a deliberate, reviewed change, run every year or two.
+
+```
+rp vocab refresh [--openalex] [--mesh PATH] [--release YYYY-MM] [--out-dir DIR]
+```
+
+| Option | Description |
+|---|---|
+| `--openalex` | Refetch every OpenAlex topic (network). The release is this month unless `--release` is given. |
+| `--mesh PATH` | Parse NLM's descriptor XML (`desc2026.xml`, or the `desc2026.gz` NLM also ships). The release is the year in the file name. |
+| `--out-dir DIR` | Write somewhere other than the package's own `vocab/` directory. |
+
+Prints, per file, how many ids it now holds and how many were added or
+removed. Passing neither `--openalex` nor `--mesh` exits `2`.
+
+See [Vocabularies](../../rp-spec/vocabularies.md).
+
+---
+
 ## validate
 
 Validate a profile directory against the JSON Schema spec: schema conformance

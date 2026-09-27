@@ -46,8 +46,7 @@ unmapped term.
 This is third-party tolerance, not a catch-all for ongoing build output.
 `@vocab` exists to guarantee that a publisher who adds their own keys is still
 readable, not to license new unmodeled keys from a build tool. A new key a
-build tool emits should get an explicit term here (see the freeze policy below)
-or, at `v2`, a proper mapping.
+build tool emits should get an explicit term here (see the change policy below).
 
 ## Term mapping
 
@@ -177,36 +176,48 @@ context, the same as everywhere else in the document:
 person→grant link is therefore `rp:heldGrant`, an `rp:` decision, not
 an oversight.
 
-## Freeze policy
+## Change policy
 
-**`v1` is immutable once published.** A change of meaning means minting `v2` at a
-new IRI (`https://profiles.databio.org/context/v2.jsonld`).
-
-The **only** permitted post-publication edit to `v1` is adding a term definition
-whose expanded IRI is byte-identical to what `@vocab` already produced for that
-key, i.e. `"foo": "rp:foo"`. Such an addition cannot change the meaning of any
-document already in the wild, because the key already expanded to exactly that
-IRI.
-
-Every other change mints `v2`:
-
-- retyping a term (`"@type": "@id"`, `xsd:gYear`, ...)
-- adding or removing a `@container`
-- redirecting a key from `rp:` to a `schema:` IRI (or the reverse)
-- adding or changing a type-scoped or property-scoped context
-- changing a prefix
+The format is not versioned yet: `v1` is the only context, and it is still
+being shaped. Edits to `v1.jsonld` are allowed, but they must be deliberate.
 
 `context/v1.lock.json` records the sha256 of `context/v1.jsonld`, and
 `tests/test_guardrails.py::TestContextParity::test_context_bytes_match_the_lock`
-recomputes it. The lock's purpose is to make an
-accidental edit a **red test** rather than a silent break of every published
-profile.
+recomputes it. The lock's purpose is to make an accidental edit a **red test**
+rather than a silent change to what every profile means. When you change the
+context on purpose, update the hash in the lock file in the same change.
 
-To mint `v2`: add `context/v2.jsonld` and `context/v2.lock.json`, bump
-`CONTEXT_URL` / `PROFILE_FORMAT_IRI` in `src/researcher_profiles/jsonld.py`, and
-leave `v1` untouched forever.
-Wizard and clinical extensions use explicit `rp:` names (`rp:weightedInterests`,
-`rp:sectionVisibility`, `rp:therapeuticAreas`, `rp:siteCapabilities`,
-`rp:regulatoryExperience`, and `rp:researcherRole`). They intentionally do not
-change the byte-frozen v1 context; JSON-LD processors expand these through the
-already-defined `rp` namespace.
+Prefer additive edits that change no existing term: new prefixes, and new term
+definitions for keys that had none. Retyping a term, changing a `@container`,
+or redirecting a key to a different IRI changes the meaning of documents
+already written, so treat it as a format change.
+
+Wizard and clinical extensions use explicit `rp:` names (`rp:sectionVisibility`,
+`rp:therapeuticAreas`, `rp:siteCapabilities`, `rp:regulatoryExperience`, and
+`rp:researcherRole`). They need no term definition; JSON-LD processors expand
+them through the already-defined `rp` namespace.
+
+## Research interests
+
+The context carries what `rp:researchInterests` needs:
+
+- prefixes `skos:` (`http://www.w3.org/2004/02/skos/core#`), `wi:` (the
+  Weighted Interest Ontology, `http://purl.org/ontology/wi/core#`), `foaf:`
+  and `prov:`;
+- a term for `rp:researchInterests` (`@set`) whose scoped context maps each
+  entry: `concept` → `wi:topic`, `weight` → `wi:weight` (`xsd:decimal`),
+  `method` → `rp:method`, `generator` → `rp:generator`, `assertedAt` →
+  `prov:generatedAtTime` (`xsd:dateTime`), `evidence` → `rp:evidence`
+  (`papers` → `rp:evidencePaper`, `share` → `rp:paperShare`);
+- inside `concept`: `system` → `skos:inScheme` (`@id`), `code` →
+  `skos:notation`, `display` → `skos:prefLabel`, `version` →
+  `rp:sourceVocabularyVersion`, `label` → `rp:labelSnapshot`, `unmapped` →
+  `rp:unmapped`. The concept's own `@id` is the term IRI
+  (`https://openalex.org/T10222`, `http://id.nlm.nih.gov/mesh/D057890`);
+- `ResearchInterest` → `rp:ResearchInterest`, the `@type` every entry carries
+  (a subclass of `wi:WeightedInterest`);
+- `topics` → `rp:openalexTopic` (`@set`) on works, the OpenAlex topic ids a
+  paper is tagged with.
+
+The term is keyed by its compact IRI, `rp:researchInterests`, because that is
+the on-disk key; JSON-LD 1.1 applies a term definition keyed that way.

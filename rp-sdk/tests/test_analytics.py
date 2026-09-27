@@ -256,6 +256,54 @@ class TestLitePapers:
         assert matches[0].evidence.top_papers == expected
 
     # ----------------------------------------------------------------------
+    # The topic component: the query's typed interests against a candidate's
+    # OpenAlex topics
+    # ----------------------------------------------------------------------
+
+    @staticmethod
+    def _topic(code: str, weight: float | None, method: str = "declared") -> dict:
+        entry = {
+            "concept": {
+                "@id": f"https://openalex.org/{code}",
+                "system": "https://openalex.org/topics",
+                "code": code,
+                "display": code,
+            },
+            "method": method,
+            "generator": "user" if method == "declared" else "openalex-topics@2026-09",
+            "assertedAt": "2026-09-25T12:00:00Z",
+        }
+        if weight is not None:
+            entry["weight"] = weight
+        else:
+            entry["evidence"] = {"papers": ["W1"], "share": 0.5}
+        return entry
+
+    def test_rank_topic_boost_hard_exclude_and_require_topic_ids(
+        self, lite_store: FilesystemProfileStore
+    ) -> None:
+        from researcher_profiles.schema import ResearchInterest
+
+        doc_path = lite_store.root / "lite-researcher" / "profile.jsonld"
+        doc = json.loads(doc_path.read_text())
+        doc["rp:researchInterests"] = [self._topic("T10222", None, method="inferred")]
+        doc_path.write_text(json.dumps(doc))
+
+        def rank(**kw):
+            return lite_store.match.rank("chromatin", k=3, normalize=False, diversify=False, **kw)
+
+        def query(weight):
+            return [ResearchInterest.model_validate(self._topic("T10222", weight))]
+
+        [plain] = rank()
+        [boosted] = rank(interests=query(1), topic_alpha=0.2)
+        assert boosted.score == pytest.approx(plain.score + 0.2)
+        assert boosted.evidence.matched_topics == ["T10222"]
+        assert rank(interests=query(-1)) == []
+        assert [m.profile.slug for m in rank(require_topics=["T10222"])] == ["lite-researcher"]
+        assert rank(require_topics=["T11289"]) == []
+
+    # ----------------------------------------------------------------------
     # Bug 2: indexes.coverage counted n_papers from paper_summary only
     # ----------------------------------------------------------------------
 

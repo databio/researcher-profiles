@@ -1120,8 +1120,13 @@ operator bearer token. A host that runs the
 `researcher_profiles.edit.EDITABLE_METADATA_FIELDS`, exactly:
 
 `name`, `affiliation`, `job_title`, `field`, `subfields`, `summary`,
-`expertise` (the label list), `interests`, `not_interests`, `training`,
-`career`, `same_as`.
+`expertise` (the label list), `interests`, `not_interests`,
+`research_interests`, `training`, `career`, `same_as`.
+
+`interests` and `not_interests` are a view of `research_interests`. Patching
+either list writes declared text-only entries (+0.5 / -0.5, generator `user`)
+in place of the earlier text-only entries for that list, and the list is
+rebuilt from them.
 
 A key outside that set (`rid`, `provenance`, `visibility`, and everything a
 build tool generates) is a hard `400`, never a silent drop. `slug`
@@ -1192,8 +1197,9 @@ unchanged.
 | `training` | list[dict] | Authored history; entries match `schema.Training`. |
 | `career` | list[dict] | Authored history; entries match `schema.CareerEntry`. |
 | `expertise` | list[string] | Default `[]`. Distinct from the `expertise` markdown on `ProfileDetail`. |
-| `interests` | list[string] | Default `[]`. |
-| `not_interests` | list[string] | Default `[]`. Authoritative: a consumer must not improvise around them. |
+| `interests` | list[string] | Default `[]`. Rebuilt from `research_interests` (positive weights) when that is set. |
+| `not_interests` | list[string] | Default `[]`. Authoritative: a consumer must not improvise around them. Rebuilt from `research_interests` (negative weights) when that is set. |
+| `research_interests` | list[dict] | Default `[]`. Typed, weighted interests (`ResearchInterest`). |
 | `same_as` | list[string] | Default `[]`. Other URLs for the same person. |
 | `visibility` | string | The document's OWN declared tier. Read-only here. Set it through `PATCH .../visibility`, never a metadata patch. |
 

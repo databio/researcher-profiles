@@ -43,6 +43,7 @@ VERBS_TOP = (
     "search",
     "rank-works",
     "schema",
+    "vocab",
     "graph",
     "db",
     "push",
@@ -71,6 +72,7 @@ VERBS_TOP = (
 VERB_PATHS = tuple((v,) for v in VERBS_TOP) + (
     ("schema", "export"),
     ("schema", "export-wire"),
+    ("vocab", "refresh"),
     ("graph", "build"),
     ("db", "init"),
     ("db", "push"),
