@@ -42,6 +42,8 @@ export interface HomeHero {
   mark: ReactNode;
   /** Inline content for the paragraph under the headline; replaces the default. */
   lede?: ReactNode;
+  /** Shown below the calls to action, inside the hero. */
+  extra?: ReactNode;
 }
 
 /**

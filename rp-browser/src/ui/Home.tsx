@@ -78,6 +78,7 @@ export function Home() {
             </Cta>
           ))}
         </div>
+        {hero?.extra}
       </section>
 
       <section className="home__features">
