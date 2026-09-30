@@ -13,21 +13,22 @@ coercion, :class:`EditError`, and :func:`select_parts` (the one visibility
 selector, used by both the canonical edit path and a host's patch layer, so
 the two cannot disagree about what a patch addresses).
 
-What an owner may edit is narrow. Display metadata (name, affiliation, job
-title, field and subfields, summary, expertise labels, interests, training and
-career history, links), the SOUL/persona narrative, per-artifact visibility,
-and the bibliographic fields of one work (:data:`EDITABLE_WORK_FIELDS`). Not
-the generated summaries or embeddings: those are derived from the corpus, and
-an owner editing them would desynchronize the record from what generated it.
-Not ``personality/expertise.md`` either: that narrative is synthesized from the
-corpus and cites paper ids, so no edit route reaches it even though
-``save_expertise`` exists.
+What an owner may edit is every content field of the profile document,
+including every field the build AI writes (``career_stage``, ``critiques``,
+``collaborators``, and the rest): an owner can always correct what a model
+guessed about them, without paying for a rebuild. Only a short list is locked
+(:data:`LOCKED_METADATA_FIELDS`): identity and proof, facts code computes from
+the corpus (``paper_stats``, ``anchor``, ...), the file manifest, format
+markers and bookkeeping, and visibility, which has its own route. The
+bibliographic fields of one work are a separate surface
+(:data:`EDITABLE_WORK_FIELDS`). ``personality/expertise.md`` is an artifact,
+not a document field: it cites paper ids, so no edit route reaches it even
+though ``save_expertise`` exists.
 
-``training`` and ``career`` are authored history. No build tool
-supplies them, and a brand-new self-published profile has neither. They arrive
-here as plain dicts and are validated by the same round-trip through
-:class:`~researcher_profiles.schema.ProfileDocument` as every other field, so a
-malformed entry is a 400 and nothing is persisted.
+Structured fields (``training``, ``career``, ``career_stage``,
+``research_outputs``, ...) arrive here as plain dicts and are validated by the
+same round-trip through :class:`~researcher_profiles.schema.ProfileDocument`
+as every other field, so a malformed entry is a 400 and nothing is persisted.
 
 Every mutation:
 
@@ -60,11 +61,13 @@ from ..errors import ProfileError, ProfileWriteError
 from ..schema import (
     ArtifactRef,
     CareerEntry,
+    CareerStage,
     ConceptReference,
     InterestConcept,
     PaperRecord,
     ProfileDocument,
     ResearchInterest,
+    ResearchOutput,
     SectionVisibility,
     SiteCapabilities,
     Training,
@@ -90,31 +93,49 @@ class WorkNotFoundError(EditError):
     """
 
 
-#: The metadata fields an owner may patch through the interactive edit surface.
-#: These are display/persona fields. Identity (``rid``), provenance, the
-#: manifest, and every pipeline-derived field are excluded. An
-#: owner renaming themselves is fine; an owner rewriting ``rid`` or
-#: ``paper_stats`` is not.
-EDITABLE_METADATA_FIELDS: frozenset[str] = frozenset(
+#: The fields no owner edit may touch. Everything else in the profile
+#: document is editable, including every field the build AI writes: an
+#: owner can always correct what a model guessed about them.
+LOCKED_METADATA_FIELDS: frozenset[str] = frozenset(
     {
-        "name",
-        "affiliation",
-        "job_title",
-        "field",
-        "subfields",
-        "summary",
-        "expertise",
-        "interests",
-        "not_interests",
-        "research_interests",
-        "methodological_commitments",
-        "therapeutic_areas",
-        "site_capabilities",
-        "regulatory_experience",
-        "training",
-        "career",
-        "same_as",
+        # identity and proof: who the profile is about
+        "rid",
+        "id_",
+        "provenance",
+        "provenance_note",
+        "proof",
+        "verified_at",
+        "identifier",
+        # computed by code from the corpus, never asserted
+        "paper_stats",
+        "anchor",
+        "level",
+        "has_citation_graph",
+        "has_embedding_index",
+        "expertise_cites_paper_ids",
+        # the file manifest
+        "has_part",
+        "subject_of",
+        # format markers and bookkeeping
+        "context",
+        "type_",
+        "conforms_to",
+        "url",
+        "date_modified",
+        # visibility has its own route
+        "visibility",
+        "section_visibility",
     }
+)
+assert LOCKED_METADATA_FIELDS <= set(ProfileDocument.model_fields), (
+    "locked fields missing from ProfileDocument: "
+    f"{sorted(LOCKED_METADATA_FIELDS - set(ProfileDocument.model_fields))}"
+)
+
+#: The metadata fields an owner may patch through the interactive edit
+#: surface: every ``ProfileDocument`` field that is not locked.
+EDITABLE_METADATA_FIELDS: frozenset[str] = (
+    frozenset(ProfileDocument.model_fields) - LOCKED_METADATA_FIELDS
 )
 
 #: The fields of one work an owner may patch through the interactive edit
@@ -154,11 +175,13 @@ STRUCTURED_METADATA_FIELDS: dict[str, type[BaseModel]] = {
     "career": CareerEntry,
     "research_interests": ResearchInterest,
     "therapeutic_areas": ConceptReference,
+    "research_outputs": ResearchOutput,
 }
 
 #: Editable fields holding a single object rather than a list of them.
 _STRUCTURED_SCALAR_FIELDS: dict[str, type[BaseModel]] = {
     "site_capabilities": SiteCapabilities,
+    "career_stage": CareerStage,
 }
 
 
@@ -514,6 +537,7 @@ __all__ = [
     "EditError",
     "EDITABLE_METADATA_FIELDS",
     "EDITABLE_WORK_FIELDS",
+    "LOCKED_METADATA_FIELDS",
     "STRUCTURED_METADATA_FIELDS",
     "WorkNotFoundError",
     "select_parts",

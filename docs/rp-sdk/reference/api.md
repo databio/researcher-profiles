@@ -1117,27 +1117,45 @@ operator bearer token. A host that runs the
 
 ### What an owner may edit
 
-`researcher_profiles.edit.EDITABLE_METADATA_FIELDS`, exactly:
+Every field of the profile document except a short locked list. That includes
+every field the build AI writes (`summary`, `expertise`, `career_stage`,
+`critiques`, `collaborators`, `research_outputs`, and the rest): an owner can
+always correct what a model guessed about them, without a rebuild.
 
-`name`, `affiliation`, `job_title`, `field`, `subfields`, `summary`,
-`expertise` (the label list), `interests`, `not_interests`,
-`research_interests`, `training`, `career`, `same_as`.
+The locked fields are `researcher_profiles.profile.edit.LOCKED_METADATA_FIELDS`:
+
+- identity and proof: `rid`, `@id`, `provenance`, `provenanceNote`, `proof`,
+  `verifiedAt`, `identifier`
+- facts code computes from the corpus: `paper_stats`, `anchor`, `level`,
+  `hasCitationGraph`, `hasEmbeddingIndex`, `expertiseCitesPaperIds`
+- the file manifest: `hasPart`, `subjectOf`
+- format markers and bookkeeping: `@context`, `@type`, `conformsTo`, `url`,
+  `dateModified`
+- visibility, which has its own route: `visibility`, `rp:sectionVisibility`
+
+Everything else is editable, and
+`researcher_profiles.profile.edit.EDITABLE_METADATA_FIELDS` is that set.
+A patch names fields by their Python names (`job_title`, `license_`), not
+their JSON-LD terms.
 
 `interests` and `not_interests` are a view of `research_interests`. Patching
 either list writes declared text-only entries (+0.5 / -0.5, generator `user`)
 in place of the earlier text-only entries for that list, and the list is
 rebuilt from them.
 
-A key outside that set (`rid`, `provenance`, `visibility`, and everything a
-build tool generates) is a hard `400`, never a silent drop. `slug`
-is popped by the route, so renaming is not an edit. `personality/expertise.md`
-is unrouted: it is synthesized from the paper corpus and cites
-paper ids, and it is a different thing from the editable `expertise` labels
-despite the shared name.
+A locked key is a hard `400`, never a silent drop. `slug` is popped by the
+route, so renaming is not an edit. `personality/expertise.md` is unrouted: it
+is an artifact, not a document field, it cites paper ids, and it is a
+different thing from the editable `expertise` labels despite the shared name.
 
-`training` and `career` arrive as lists of objects and are validated against
-`schema.Training` / `schema.CareerEntry`. A malformed entry is a `400` naming
-the index (`career[0] is not a valid CareerEntry: ...`) and nothing is written.
+Structured fields arrive as objects and are validated against their schema
+models: `training` (`schema.Training`), `career` (`schema.CareerEntry`),
+`research_interests`, `therapeutic_areas`, `research_outputs`
+(`schema.ResearchOutput`), `site_capabilities`, and `career_stage`
+(`schema.CareerStage`). A malformed entry is a `400` naming the field or index
+(`career[0] is not a valid CareerEntry: ...`) and nothing is written. A patch
+replaces a field whole, so a `career_stage` patch carries every required fact,
+not only the one that changed.
 
 ### What an owner may edit on one work
 

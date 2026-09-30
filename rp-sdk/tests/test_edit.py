@@ -17,10 +17,13 @@ import pytest
 from researcher_profiles import ResearcherProfile
 from researcher_profiles.errors import ProfileWriteError
 from researcher_profiles.profile.edit import (
+    EDITABLE_METADATA_FIELDS,
+    LOCKED_METADATA_FIELDS,
     EditError,
     WorkNotFoundError,
 )
 from researcher_profiles.profile.storage import DirectoryArtifactStorage
+from researcher_profiles.schema import ProfileDocument
 
 SLUG = "jane-doe"
 
@@ -576,6 +579,78 @@ class TestAuthoredHistoryIsEditable:
         prof = ResearcherProfile.from_files(jane_doe_dir)
         with pytest.raises(EditError, match="not owner-editable"):
             prof.edit.patch_metadata({"expertise_md": "# mine now"})
+
+
+class TestAiWrittenFieldsAreEditable:
+    """Nothing the build AI writes is locked from its owner.
+
+    An owner fixing an outdated ``current_rank`` must not need a rebuild. Only
+    identity, code-computed facts, the manifest, bookkeeping, and visibility
+    are locked.
+    """
+
+    CAREER_STAGE = {
+        "as_of": "2026-09-30",
+        "current_rank": "professor",
+        "tenure_status": "tenured",
+        "independence": "independent",
+        "evidence": "Stated by the owner.",
+        "confidence": "high",
+    }
+
+    def test_every_field_is_editable_or_locked_not_both(self):
+        fields = set(ProfileDocument.model_fields)
+        assert EDITABLE_METADATA_FIELDS | LOCKED_METADATA_FIELDS == fields
+        assert not EDITABLE_METADATA_FIELDS & LOCKED_METADATA_FIELDS
+
+    def test_career_stage_round_trips(self, jane_doe_dir):
+        prof = ResearcherProfile.from_files(jane_doe_dir)
+        prof.edit.patch_metadata({"career_stage": self.CAREER_STAGE})
+        stage = ResearcherProfile.from_files(jane_doe_dir).metadata.career_stage
+        assert stage is not None
+        assert stage.current_rank == "professor"
+        assert stage.as_of == "2026-09-30"
+
+    def test_invalid_career_stage_is_rejected_and_writes_nothing(self, jane_doe_dir):
+        prof = ResearcherProfile.from_files(jane_doe_dir)
+        before = (jane_doe_dir / "profile.jsonld").read_bytes()
+        with pytest.raises(EditError, match="career_stage"):
+            prof.edit.patch_metadata(
+                {"career_stage": {**self.CAREER_STAGE, "current_rank": "grand_poobah"}}
+            )
+        assert (jane_doe_dir / "profile.jsonld").read_bytes() == before
+
+    def test_list_fields_persist(self, jane_doe_dir):
+        prof = ResearcherProfile.from_files(jane_doe_dir)
+        prof.edit.patch_metadata(
+            {
+                "recurring_positions": ["Chromatin shapes regulation"],
+                "critiques": ["Peak calling hides uncertainty"],
+                "collaborators": ["Ada Lovelace", {"name": "Alan Turing"}],
+                "research_outputs": [
+                    {"type": "software", "name": "gtars", "url": "https://github.com/databio/gtars"}
+                ],
+            }
+        )
+        meta = ResearcherProfile.from_files(jane_doe_dir).metadata
+        assert meta.recurring_positions == ["Chromatin shapes regulation"]
+        assert meta.critiques == ["Peak calling hides uncertainty"]
+        assert meta.collaborators == ["Ada Lovelace", {"name": "Alan Turing"}]
+        assert [o.name for o in meta.research_outputs] == ["gtars"]
+
+    def test_invalid_research_output_is_rejected(self, jane_doe_dir):
+        prof = ResearcherProfile.from_files(jane_doe_dir)
+        with pytest.raises(EditError, match=r"research_outputs\[0\]"):
+            prof.edit.patch_metadata({"research_outputs": [{"type": "software"}]})
+
+    @pytest.mark.parametrize(
+        "patch",
+        [{"rid": "0000-0002-1825-0097"}, {"paper_stats": {"total_papers": 1}}],
+    )
+    def test_locked_fields_stay_locked(self, jane_doe_dir, patch):
+        prof = ResearcherProfile.from_files(jane_doe_dir)
+        with pytest.raises(EditError, match="not owner-editable"):
+            prof.edit.patch_metadata(patch)
 
 
 class TestConcurrencyToken:

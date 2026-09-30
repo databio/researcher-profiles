@@ -50,7 +50,7 @@ it touches.
 
 | action | detail | Prosopia requires |
 |---|---|---|
-| `"metadata"` | `{"fields": ["name", "summary"]}` | `write` on each field's part (`summary`, `focus`, `background`, ...); the host keeps a map keyed by `researcher_profiles.edit.EDITABLE_METADATA_FIELDS` |
+| `"metadata"` | `{"fields": ["name", "summary"]}` | `write` on each field's part (`summary`, `focus`, `background`, ..., or `works` for `research_outputs`); every editable field, AI-written ones included, has a part in the host's map, keyed by `researcher_profiles.edit.EDITABLE_METADATA_FIELDS` |
 | `"soul"` | `{}` | `write` on `soul` |
 | `"works"` | `{"paper_id": "smith2023protein", "fields": ["doi"]}` | `write` on `works`; `fields` is `["*"]` for a whole-record `PUT` and `[]` for a `DELETE` |
 | `"visibility"` | `{"slug": "...", "profile_visibility": "...", "artifacts": [...]}` | never allowed for a key (`403 not_delegable`) |

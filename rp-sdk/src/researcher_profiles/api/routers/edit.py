@@ -82,11 +82,13 @@ def patch_profile_metadata(
     request: Request,
     store: ProfileStore = Depends(get_store),
 ) -> EditResult:
-    """Patch owner-editable metadata (name/affiliation/field/expertise/links).
+    """Patch owner-editable metadata: every content field, AI-written ones included.
 
-    Only the fields present in the body are applied, and only fields in the
-    editable whitelist (:data:`researcher_profiles.profile.edit.EDITABLE_METADATA_FIELDS`)
-    are accepted. The patch is re-validated against the profile schema before it
+    Only the fields present in the body are applied. Every profile field is
+    editable except the locked ones
+    (:data:`researcher_profiles.profile.edit.LOCKED_METADATA_FIELDS`: identity,
+    code-computed facts, the manifest, bookkeeping, and visibility); the
+    editable set is :data:`researcher_profiles.profile.edit.EDITABLE_METADATA_FIELDS`. The patch is re-validated against the profile schema before it
     is written; a patch that would produce an invalid document is a 400 and
     leaves the profile untouched.
 
