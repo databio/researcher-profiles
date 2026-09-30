@@ -1154,8 +1154,10 @@ models: `training` (`schema.Training`), `career` (`schema.CareerEntry`),
 (`schema.ResearchOutput`), `site_capabilities`, and `career_stage`
 (`schema.CareerStage`). A malformed entry is a `400` naming the field or index
 (`career[0] is not a valid CareerEntry: ...`) and nothing is written. A patch
-replaces a field whole, so a `career_stage` patch carries every required fact,
-not only the one that changed.
+replaces a list field whole. A single-object field (`career_stage`,
+`site_capabilities`) is merged instead: `{"career_stage": {"current_rank":
+"professor"}}` changes that one fact and keeps the rest. A key sent as `null`
+clears that key; the field sent as `null` clears the whole object.
 
 ### What an owner may edit on one work
 

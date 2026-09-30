@@ -611,6 +611,25 @@ class TestAiWrittenFieldsAreEditable:
         assert stage.current_rank == "professor"
         assert stage.as_of == "2026-09-30"
 
+    def test_partial_career_stage_keeps_the_other_facts(self, jane_doe_dir):
+        prof = ResearcherProfile.from_files(jane_doe_dir)
+        prof.edit.patch_metadata({"career_stage": self.CAREER_STAGE})
+        prof = ResearcherProfile.from_files(jane_doe_dir)
+        prof.edit.patch_metadata({"career_stage": {"current_rank": "associate_professor"}})
+        stage = ResearcherProfile.from_files(jane_doe_dir).metadata.career_stage
+        assert stage.current_rank == "associate_professor"
+        assert stage.as_of == "2026-09-30"
+        assert stage.tenure_status == self.CAREER_STAGE["tenure_status"]
+
+    def test_null_key_in_career_stage_clears_only_that_key(self, jane_doe_dir):
+        prof = ResearcherProfile.from_files(jane_doe_dir)
+        prof.edit.patch_metadata({"career_stage": self.CAREER_STAGE})
+        prof = ResearcherProfile.from_files(jane_doe_dir)
+        prof.edit.patch_metadata({"career_stage": {"current_rank": None}})
+        stage = ResearcherProfile.from_files(jane_doe_dir).metadata.career_stage
+        assert stage.current_rank is None
+        assert stage.as_of == "2026-09-30"
+
     def test_invalid_career_stage_is_rejected_and_writes_nothing(self, jane_doe_dir):
         prof = ResearcherProfile.from_files(jane_doe_dir)
         before = (jane_doe_dir / "profile.jsonld").read_bytes()

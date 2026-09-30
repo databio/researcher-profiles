@@ -185,6 +185,22 @@ _STRUCTURED_SCALAR_FIELDS: dict[str, type[BaseModel]] = {
 }
 
 
+def _merge_object_fields(doc: ProfileDocument, patch: dict[str, Any]) -> dict[str, Any]:
+    """Merge a partial object into the stored one, for single-object fields.
+
+    ``{"career_stage": {"current_rank": "professor"}}`` changes that one fact
+    and keeps the rest, so an owner never has to resend the whole block. A key
+    sent as ``null`` clears that key; the field sent as ``null`` clears it all.
+    """
+    out = dict(patch)
+    for key in _STRUCTURED_SCALAR_FIELDS:
+        raw = out.get(key)
+        current = getattr(doc, key, None)
+        if isinstance(raw, dict) and current is not None:
+            out[key] = {**current.model_dump(mode="json"), **raw}
+    return out
+
+
 def _coerce_structured(patch: dict[str, Any]) -> dict[str, Any]:
     out = dict(patch)
     for key, model in STRUCTURED_METADATA_FIELDS.items():
@@ -343,7 +359,7 @@ class EditManager:
             )
         if not patch:
             return self._profile.metadata
-        coerced = _coerce_structured(patch)
+        coerced = _coerce_structured(_merge_object_fields(self._profile.metadata, patch))
         if "interests" in coerced or "not_interests" in coerced:
             coerced = _declare_text_interests(self._profile.metadata, coerced)
         updated = self._profile.metadata.model_copy(update=coerced)
