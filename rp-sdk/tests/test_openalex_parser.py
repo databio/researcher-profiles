@@ -410,6 +410,32 @@ class TestFetchNewWorks:
         assert "type:!preprint" in calls[0]["filter"]
         assert "type:!software" not in calls[0]["filter"]
 
+    def test_tags_each_work_with_the_queries_that_found_it(self, monkeypatch):
+        from researcher_profiles.openalex import fetch_new_works
+
+        def respond(params):
+            f = params["filter"]
+            if "topics.id:" in f:
+                results = [_fetch_work("W1", "By topic")]
+            elif "title_and_abstract.search:" in f:
+                results = [_fetch_work("W1", "By topic"), _fetch_work("W2", "By text")]
+            else:
+                cited = _fetch_work("W3", "Cites you")
+                cited["referenced_works"] = ["https://openalex.org/S1", "https://openalex.org/X"]
+                results = [cited]
+            return {"results": results, "meta": {"next_cursor": None}}
+
+        self._stub(monkeypatch, respond)
+        out = fetch_new_works(
+            since="2026-01-01", topics=["T10", "chromatin"], seed_work_ids=["S1", "S2"]
+        )
+        by_id = {w.openalex_id: w for w in out}
+        assert [w.openalex_id for w in out] == ["W1", "W2", "W3"]
+        assert by_id["W1"].found_by == ["topic", "text"]
+        assert by_id["W2"].found_by == ["text"]
+        assert by_id["W3"].found_by == ["cites"]
+        assert by_id["W3"].cites_works == ["S1"]
+
 
 class TestProfileQueryTerms:
     def test_terms_from_fixture_profile(self, jane_doe_readonly):
@@ -490,6 +516,133 @@ class TestProfileQueryTerms:
         terms = profile_query_terms(prof)
         assert terms["topics"] == ["x", "y"]
         assert terms["seed_work_ids"] == ["W123", "W456"]
+        assert terms["source"] == "subfields"
+
+
+def _md(**kw):
+    from types import SimpleNamespace
+
+    base = {
+        "research_interests": [],
+        "subfields": [],
+        "interests": [],
+        "expertise": [],
+        "field": None,
+    }
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
+def _paper(title, summary=None, openalex_id=None):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(title=title, summary=summary, openalex_id=openalex_id)
+
+
+class TestQueryTermFallback:
+    """Each source is used only when every earlier one is empty."""
+
+    PAPERS = [
+        _paper(
+            "Region set enrichment for chromatin accessibility", "We test region set enrichment."
+        ),
+        _paper("Fast region set enrichment in Python"),
+        _paper("Chromatin accessibility in single cells"),
+    ]
+
+    def _terms(self, md, papers=()):
+        from types import SimpleNamespace
+
+        from researcher_profiles.openalex import profile_query_terms
+
+        return profile_query_terms(SimpleNamespace(metadata=md, papers=list(papers)))
+
+    def test_expertise_when_no_interests_or_subfields(self):
+        t = self._terms(_md(expertise=["Genomic intervals", "ATAC-seq"], field="Genomics"))
+        assert t["source"] == "expertise"
+        assert t["topics"] == ["Genomic intervals", "ATAC-seq"]
+
+    def test_field_when_no_expertise(self):
+        t = self._terms(_md(field="Genomics"), self.PAPERS)
+        assert t == {"topics": ["Genomics"], "seed_work_ids": [], "source": "field"}
+
+    def test_paper_text_last(self):
+        t = self._terms(_md(field="  "), self.PAPERS)
+        assert t["source"] == "paper_text"
+        assert t["topics"][:2] == ["region set enrichment", "chromatin accessibility"]
+
+    def test_none_when_nothing(self):
+        t = self._terms(_md(), [_paper("One lonely paper")])
+        assert t["source"] == "none"
+        assert t["topics"] == []
+
+    def test_free_text_capped_ids_not(self):
+        from researcher_profiles.openalex import MAX_FREE_TEXT_TERMS
+
+        t = self._terms(_md(subfields=[f"term {i}" for i in range(20)] + ["T123"]))
+        text = [x for x in t["topics"] if x != "T123"]
+        assert len(text) == MAX_FREE_TEXT_TERMS
+        assert "T123" in t["topics"]
+
+    def test_seed_ids_kept_with_any_source(self):
+        t = self._terms(_md(field="Genomics"), [_paper("x", openalex_id="W9")])
+        assert t["seed_work_ids"] == ["W9"]
+
+
+class TestPaperKeyPhrases:
+    def test_shared_phrases_counted_once_per_paper(self):
+        from researcher_profiles.openalex import paper_key_phrases
+
+        papers = [
+            _paper("Region set enrichment", "Region set enrichment, again region set enrichment."),
+            _paper("Region set enrichment for all"),
+            _paper("Unrelated topic entirely"),
+        ]
+        assert paper_key_phrases(papers) == ["region set enrichment"]
+
+    def test_min_papers_and_stopword_breaks(self):
+        from researcher_profiles.openalex import paper_key_phrases
+
+        papers = [
+            _paper("A model of the genome"),
+            _paper("A model of the genome"),
+        ]
+        # "of the" breaks the run: no phrase spans a stopword.
+        assert paper_key_phrases(papers) == []
+        assert paper_key_phrases(papers, min_papers=1) == []
+
+    def test_top_n_and_dicts(self):
+        from researcher_profiles.openalex import paper_key_phrases
+
+        papers = [{"name": "deep learning; gene regulation"}] * 3
+        assert paper_key_phrases(papers, top_n=1) == ["deep learning"]
+
+
+class TestTopicMatches:
+    def test_declared_positive_and_inferred_count(self):
+        from researcher_profiles.openalex import topic_matches
+        from researcher_profiles.schema import ResearchInterest
+
+        def ri(code, weight=None, share=None):
+            return ResearchInterest.model_validate(
+                {
+                    "concept": {
+                        "@id": f"https://openalex.org/{code}",
+                        "system": "https://openalex.org/topics",
+                        "code": code,
+                        "display": f"Topic {code}",
+                    },
+                    "weight": weight,
+                    "method": "declared" if weight is not None else "inferred",
+                    "generator": "user" if weight is not None else "openalex-topics@2026-09",
+                    "assertedAt": "2026-09-25T12:00:00Z",
+                    "evidence": {"papers": ["W1"], "share": share} if share else None,
+                }
+            )
+
+        interests = [ri("T1", 1), ri("T2", -0.5), ri("T3", share=0.3), ri("T4")]
+        got = topic_matches(["T4", "https://openalex.org/T3", "T2", "T1", "T9"], interests)
+        assert got == ["Topic T3", "Topic T1"]
 
 
 # ---------------------------------------------------------------------------
@@ -626,3 +779,58 @@ class TestTopicScore:
         )
         score = topic_score(["https://openalex.org/T1", "T2"], [interest])
         assert score == (None if expected is None else pytest.approx(expected))
+
+
+class TestMatchPapers:
+    def test_exact_first_then_close_same_year(self):
+        from researcher_profiles.openalex import match_papers
+        from researcher_profiles.schema import PaperRecord
+
+        works = [
+            PaperRecord(title="Region sets: a new method!", year=2020, openalex_id="W1"),
+            PaperRecord(
+                title="Chromatin accessibility in single cells", year=2021, openalex_id="W2"
+            ),
+            PaperRecord(
+                title="Chromatin accessibility in single cell", year=2019, openalex_id="W3"
+            ),
+        ]
+        papers = [
+            _paper("Region Sets - A New Method"),
+            _paper("Chromatin accessibility in single cell"),
+            _paper("Unmatched"),
+        ]
+        papers[0].year = 2020
+        papers[1].year = 2021
+        papers[2].year = 2021
+        pairs = match_papers(papers, works)
+        got = {p.title: w.openalex_id for p, w in pairs}
+        # The second paper's exact twin is W3 (different year is fine for exact).
+        assert got == {
+            "Region Sets - A New Method": "W1",
+            "Chromatin accessibility in single cell": "W3",
+        }
+
+    def test_close_needs_same_year(self):
+        from researcher_profiles.openalex import title_match
+
+        a = _paper("Chromatin accessibility in single cells")
+        b = _paper("Chromatin accessibility in single-cell")
+        a.year, b.year = 2021, 2021
+        assert title_match(a, b)
+        b.year = 2020
+        assert not title_match(a, b)
+
+    def test_author_works_queries_by_orcid(self, monkeypatch):
+        import researcher_profiles.openalex as oa
+
+        calls = []
+
+        def fake(url, params):
+            calls.append(params)
+            return {"results": [_fetch_work("W1", "Mine")], "meta": {"next_cursor": None}}
+
+        monkeypatch.setattr(oa, "_http_get_json", fake)
+        out = oa.fetch_author_works("https://orcid.org/0000-0001-2345-6789")
+        assert [w.openalex_id for w in out] == ["W1"]
+        assert calls[0]["filter"] == "author.orcid:0000-0001-2345-6789"

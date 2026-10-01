@@ -17,12 +17,17 @@ Public API:
     parse_work(raw) -> PaperRecord | None: raw work -> PaperRecord
     to_work_dict(raw) -> dict: {..., coauthors} lite shape
     to_normalized_dict(raw) -> dict: {..., authors} lite shape
-    profile_query_terms(profile) -> dict: {topics, seed_work_ids}
+    profile_query_terms(profile) -> dict: {topics, seed_work_ids, source}
+    paper_key_phrases(papers) -> list[str]: shared phrases in titles/summaries
     work_topic_ids(raw) -> list[str]: a raw work's topic ids, primary first
     topic_prevalence(papers) -> list[ResearchInterest]: inferred topic interests
     topic_score(work_topics, interests) -> float | None: interest boost / exclude
+    topic_matches(work_topics, interests) -> list[str]: topics that raised a work
     fetch_new_works(...) -> list[PaperRecord]: query OpenAlex for candidates
     fetch_work(id) -> PaperRecord | None: point lookup of one work
+    fetch_author_works(orcid) -> list[PaperRecord]: works OpenAlex credits to an ORCID
+    search_work_by_title(title) -> PaperRecord | None: top title-search hit
+    match_papers(papers, works) -> [(paper, work)]: pair records by title
 """
 
 import logging
@@ -370,6 +375,33 @@ def topic_score(work_topics: Iterable[str], interests: Iterable[ResearchInterest
     return score
 
 
+def topic_matches(work_topics: Iterable[str], interests: Iterable[ResearchInterest]) -> list[str]:
+    """Display names of a work's topics that raise it under :func:`topic_score`.
+
+    The same exact-id lookup: a topic counts when the person declared a
+    positive weight on it, or has an unweighted inferred entry with a share.
+    Order follows the work's topics (primary first).
+    """
+    from .vocab import OPENALEX_SYSTEM
+
+    by_code = {
+        e.concept.code: e
+        for e in effective_interests(interests)
+        if not e.concept.unmapped and e.concept.system == OPENALEX_SYSTEM
+    }
+    out: list[str] = []
+    for t in dict.fromkeys(str(t).rsplit("/", 1)[-1].upper() for t in work_topics):
+        ri = by_code.get(t)
+        if ri is None:
+            continue
+        if ri.weight is not None and ri.method == "declared":
+            if ri.weight > 0:
+                out.append(ri.concept.display or t)
+        elif ri.evidence and ri.evidence.share:
+            out.append(ri.concept.display or t)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Authorship evidence: the corpus contamination filter's inputs
 # ---------------------------------------------------------------------------
@@ -561,51 +593,172 @@ def _typed_query_terms(md) -> tuple[list[str], list[str]]:
     return ids, text
 
 
-def profile_query_terms(profile) -> dict:
-    """Extract the OpenAlex query seeds a profile offers.
+#: Most free-text terms one query carries. They are OR-joined into a single
+#: ``title_and_abstract.search`` clause, which gets slow and vague past this.
+MAX_FREE_TEXT_TERMS = 12
 
-    Returns ``{"topics": [...], "seed_work_ids": [...]}``. ``topics`` mixes
-    OpenAlex topic ids (``T…``, queried as ``topics.id:`` filters) and free-text
-    labels (queried by title/abstract search), order-preserving and deduped:
+#: How many key phrases from paper titles and summaries the last-resort
+#: search uses, and in how many papers a phrase must appear to count.
+PAPER_PHRASES = 8
+PAPER_PHRASE_MIN_PAPERS = 2
 
-    - with typed ``research_interests``: positively weighted OpenAlex topics,
-      the top inferred topics by share of papers, the labels of other
-      positively weighted interests, and ``subfields`` unless there are at
-      least :data:`SUBFIELDS_DROPPED_AT` topic ids;
-    - without: ``subfields`` + ``interests``, as free text.
-
-    ``seed_work_ids`` are the OpenAlex work ids of the profile's own papers
-    (the citation neighborhood, usually higher precision for specialists).
+#: Words that end a key phrase: generic English plus the boilerplate of
+#: scientific titles and summaries. Domain words ("data", "analysis") stay,
+#: since they are often half of a real phrase ("single-cell data").
+_PHRASE_STOPWORDS: frozenset[str] = frozenset(
     """
-    md = profile.metadata
-    if getattr(md, "research_interests", None):
-        ids, text = _typed_query_terms(md)
-        subfields = [] if len(ids) >= SUBFIELDS_DROPPED_AT else list(md.subfields or [])
-        candidates = ids + subfields + text
-    else:
-        candidates = list(md.subfields or []) + list(md.interests or [])
-    topics: list[str] = []
-    seen: set[str] = set()
-    for term in candidates:
-        term = (term or "").strip()
-        if term and term.lower() not in seen:
-            seen.add(term.lower())
-            topics.append(term)
-    seed_work_ids = []
+    a an the and or of for to in on at by as is are was were be been being it
+    its this that these those with from into onto over under than then thus
+    also such same each other more most much many both few own out off via per
+    upon about above after again against among because before below between
+    during further here once only some very will would could should may might
+    must can not no but all any has have had do does did we our us they their
+    them he his she her who whom which what when where why how while toward
+    towards across within without using use used uses based new novel study
+    studies show shows shown showed provide provides present presents propose
+    proposed proposes paper work works approach approaches toward via versus
+    vs through its their one two three first second
+    """.split()
+)
+
+_PHRASE_WORD_RE = re.compile(r"[a-z0-9][a-z0-9-]*")
+_PHRASE_BREAK_RE = re.compile(r"[^a-z0-9\s-]+")
+
+
+def _phrase_chunks(text: str) -> list[list[str]]:
+    """Runs of content words, split at punctuation, stopwords and bare numbers."""
+    chunks: list[list[str]] = []
+    for segment in _PHRASE_BREAK_RE.split(text.lower()):
+        run: list[str] = []
+        for w in _PHRASE_WORD_RE.findall(segment):
+            w = w.strip("-")
+            if not w or w in _PHRASE_STOPWORDS or w.isdigit() or len(w) < 2:
+                if run:
+                    chunks.append(run)
+                run = []
+            else:
+                run.append(w)
+        if run:
+            chunks.append(run)
+    return chunks
+
+
+def paper_key_phrases(
+    papers: Iterable[Any],
+    *,
+    top_n: int = PAPER_PHRASES,
+    min_papers: int = PAPER_PHRASE_MIN_PAPERS,
+) -> list[str]:
+    """The 2- and 3-word phrases most shared across paper titles and summaries.
+
+    Each paper counts once per phrase. A phrase must appear in at least
+    ``min_papers`` papers. Ranked by paper count, longer phrases first on a
+    tie; a phrase inside one already kept (or containing one) is skipped, so
+    "single cell" and "single cell atac" do not both use up a slot.
+    """
+    counts: dict[str, int] = {}
+    for p in papers:
+        title = _get(p, "title") or _get(p, "name") or ""
+        text = f"{title}. {_get(p, 'summary') or ''}"
+        found: set[str] = set()
+        for chunk in _phrase_chunks(text):
+            for n in (2, 3):
+                for i in range(len(chunk) - n + 1):
+                    found.add(" ".join(chunk[i : i + n]))
+        for ph in found:
+            counts[ph] = counts.get(ph, 0) + 1
+    ranked = sorted(
+        (ph for ph, c in counts.items() if c >= min_papers),
+        key=lambda ph: (-counts[ph], -len(ph.split()), ph),
+    )
+    out: list[str] = []
+    for ph in ranked:
+        if any(f" {ph} " in f" {k} " or f" {k} " in f" {ph} " for k in out):
+            continue
+        out.append(ph)
+        if len(out) >= top_n:
+            break
+    return out
+
+
+def _profile_papers(profile) -> list:
     try:
-        papers = profile.papers
+        return list(profile.papers)
     except (OSError, ProfileError, ValidationError):
         logger.warning(
-            "could not read papers for %r; querying on topics only",
+            "could not read papers for %r; querying on metadata only",
             getattr(profile, "slug", profile),
             exc_info=True,
         )
-        papers = []
-    for p in papers:
-        oid = getattr(p, "openalex_id", None)
-        if oid:
-            seed_work_ids.append(str(oid).rsplit("/", 1)[-1])
-    return {"topics": topics, "seed_work_ids": seed_work_ids}
+        return []
+
+
+def _term_sources(md, papers: list):
+    """``(source, terms)`` in fallback order; later ones are built only if reached."""
+    subfields = list(getattr(md, "subfields", None) or [])
+    if getattr(md, "research_interests", None):
+        ids, text = _typed_query_terms(md)
+        if ids or text:
+            yield "interests", ids + ([] if len(ids) >= SUBFIELDS_DROPPED_AT else subfields) + text
+    yield "subfields", subfields + list(getattr(md, "interests", None) or [])
+    yield "expertise", list(getattr(md, "expertise", None) or [])
+    yield "field", [getattr(md, "field", None) or ""]
+    yield "paper_text", paper_key_phrases(papers)
+
+
+def _dedupe_terms(terms: Iterable[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for term in terms:
+        term = (term or "").strip()
+        if term and term.lower() not in seen:
+            seen.add(term.lower())
+            out.append(term)
+    return out
+
+
+def profile_query_terms(profile) -> dict:
+    """Extract the OpenAlex query seeds a profile offers.
+
+    Returns ``{"topics": [...], "seed_work_ids": [...], "source": str}``.
+    ``topics`` mixes OpenAlex topic ids (``T…``, queried as ``topics.id:``
+    filters) and free-text labels (queried by title/abstract search),
+    order-preserving and deduped. They come from the FIRST of these sources
+    that yields anything, named in ``source``:
+
+    - ``interests``: typed ``research_interests``: positively weighted OpenAlex
+      topics, the top inferred topics by share of papers, the labels of other
+      positively weighted interests, and ``subfields`` unless there are at
+      least :data:`SUBFIELDS_DROPPED_AT` topic ids;
+    - ``subfields``: ``subfields`` + free-text ``interests``;
+    - ``expertise``: the expertise entries;
+    - ``field``: the profile's field;
+    - ``paper_text``: :func:`paper_key_phrases` over paper titles and summaries;
+    - ``none``: nothing at all.
+
+    Free-text terms are capped at :data:`MAX_FREE_TEXT_TERMS`; topic ids are not.
+    So the feed works to some degree on any profile with papers, and OpenAlex
+    ids are never required.
+
+    ``seed_work_ids`` are the OpenAlex work ids of the profile's own papers
+    (the citation neighborhood, usually higher precision for specialists),
+    whatever the source.
+    """
+    papers = _profile_papers(profile)
+    source, topics = "none", []
+    for name, terms in _term_sources(profile.metadata, papers):
+        terms = _dedupe_terms(terms)
+        if terms:
+            source, topics = name, terms
+            break
+    ids = [t for t in topics if _TOPIC_ID_RE.match(t)]
+    text = [t for t in topics if not _TOPIC_ID_RE.match(t)][:MAX_FREE_TEXT_TERMS]
+    keep = set(ids) | set(text)
+    topics = [t for t in topics if t in keep]
+    seed_work_ids = [
+        str(oid).rsplit("/", 1)[-1] for p in papers if (oid := getattr(p, "openalex_id", None))
+    ]
+    return {"topics": topics, "seed_work_ids": seed_work_ids, "source": source}
 
 
 def _topic_filters(topics: list[str]) -> list[str]:
@@ -700,6 +853,10 @@ def fetch_new_works(
     shrinks the fetch so more real papers fit the page budget) and re-checked
     post-parse against :attr:`PaperRecord.type` as a guarantee.
 
+    Each work carries two extra fields saying why it was found: ``found_by``
+    (query kinds ``topic``, ``text``, ``cites``) and, for a citing work,
+    ``cites_works`` (which seed ids it references).
+
     A transport failure on any page propagates and discards the works already
     collected, unlike :func:`fetch_work`, which returns ``None`` instead.
     """
@@ -707,18 +864,36 @@ def fetch_new_works(
         exclude_types = DEFAULT_EXCLUDE_TYPES
     drop_types = {t.strip().lower() for t in exclude_types if t and t.strip()}
     queries = _new_works_queries(since, topics, seed_work_ids, drop_types)
+    seeds = {str(s).rsplit("/", 1)[-1] for s in (seed_work_ids or []) if s}
 
     url = f"{base_url}/works"
-    out: list[PaperRecord] = []
-    seen_ids: set[str] = set()
-    for filt in queries:
+    by_key: dict[str, PaperRecord] = {}
+    for kind, filt in queries:
         for raw in _iter_work_results(
             url, filt, mailto=mailto, per_page=per_page, max_pages=max_pages
         ):
-            rec = _accept_new_work(raw, drop_types, seen_ids)
-            if rec is not None:
-                out.append(rec)
-    return out
+            rec = _accept_new_work(raw, drop_types)
+            if rec is None:
+                continue
+            rec = by_key.setdefault(rec.openalex_id or f"title:{rec.title.lower()}", rec)
+            _tag_found_by(rec, kind, raw, seeds)
+    return list(by_key.values())
+
+
+def _tag_found_by(rec: PaperRecord, kind: str, raw: dict, seeds: set[str]) -> None:
+    """Record which query found a work (extra fields; ``PaperRecord`` allows them).
+
+    ``found_by`` lists the query kinds (``topic``, ``text``, ``cites``) in the
+    order they found it. For ``cites``, ``cites_works`` lists which of the
+    profile's own works (bare ids) it references.
+    """
+    found = list(getattr(rec, "found_by", None) or [])
+    if kind not in found:
+        found.append(kind)
+    rec.found_by = found
+    if kind == "cites":
+        refs = {str(r).rsplit("/", 1)[-1] for r in raw.get("referenced_works") or []}
+        rec.cites_works = sorted(seeds & refs)
 
 
 def _new_works_queries(
@@ -726,18 +901,20 @@ def _new_works_queries(
     topics: list[str] | None,
     seed_work_ids: list[str] | None,
     drop_types: set[str],
-) -> list[str]:
-    """One OpenAlex filter string per query mode (topics, then cites)."""
+) -> list[tuple[str, str]]:
+    """``(kind, filter)`` per query mode: topic ids, free text, then cites."""
     since_str = since.isoformat() if hasattr(since, "isoformat") else str(since)
     base_filter = f"from_publication_date:{since_str}"
     type_clause = "".join(f",type:!{t}" for t in sorted(drop_types))
 
-    queries: list[str] = []
+    queries: list[tuple[str, str]] = []
     for clause in _topic_filters(list(topics or [])):
-        queries.append(f"{base_filter},{clause}{type_clause}")
+        kind = "text" if clause.startswith("title_and_abstract.search:") else "topic"
+        queries.append((kind, f"{base_filter},{clause}{type_clause}"))
     seeds = [str(s).rsplit("/", 1)[-1] for s in (seed_work_ids or []) if s]
     if seeds:
-        queries.append(f"{base_filter},cites:" + "|".join(seeds[:_MAX_CITES_SEEDS]) + type_clause)
+        cites = "|".join(seeds[:_MAX_CITES_SEEDS])
+        queries.append(("cites", f"{base_filter},cites:{cites}{type_clause}"))
     if not queries:
         raise ValueError("fetch_new_works needs topics and/or seed_work_ids")
     return queries
@@ -764,17 +941,120 @@ def _iter_work_results(
             break
 
 
-def _accept_new_work(raw: dict, drop_types: set[str], seen_ids: set[str]) -> PaperRecord | None:
-    """Parse one raw work; None when unusable, an excluded type, or already seen."""
+# ---------------------------------------------------------------------------
+# Matching a profile's papers to OpenAlex works
+# ---------------------------------------------------------------------------
+
+#: How close two normalized titles must be (``difflib`` ratio) to count as the
+#: same work when they are not identical; the years must also agree.
+TITLE_MATCH_RATIO = 0.92
+
+_TITLE_STRIP_RE = re.compile(r"[^a-z0-9 ]+")
+
+
+def normalize_title(title: str | None) -> str:
+    """Lowercased, punctuation stripped, whitespace collapsed."""
+    return " ".join(_TITLE_STRIP_RE.sub(" ", (title or "").lower()).split())
+
+
+def title_match(paper: Any, work: Any) -> bool:
+    """Whether ``work`` is ``paper``: exact normalized title, else a close one
+    (:data:`TITLE_MATCH_RATIO`) with the same year."""
+    from difflib import SequenceMatcher
+
+    a = normalize_title(_get(paper, "title") or _get(paper, "name"))
+    b = normalize_title(_get(work, "title") or _get(work, "name"))
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    ya, yb = _get(paper, "year"), _get(work, "year")
+    if ya is None or yb is None or int(ya) != int(yb):
+        return False
+    return SequenceMatcher(None, a, b).ratio() >= TITLE_MATCH_RATIO
+
+
+def fetch_author_works(
+    orcid: str,
+    *,
+    mailto: str | None = None,
+    max_pages: int = 10,
+    base_url: str = OPENALEX_BASE_URL,
+) -> list[PaperRecord]:
+    """Every work OpenAlex attributes to an ORCID (``author.orcid:`` filter)."""
+    bare = str(orcid).strip().rsplit("/", 1)[-1]
+    out: list[PaperRecord] = []
+    for raw in _iter_work_results(
+        f"{base_url}/works",
+        f"author.orcid:{bare}",
+        mailto=mailto,
+        per_page=200,
+        max_pages=max_pages,
+    ):
+        rec = parse_work(raw)
+        if rec is not None:
+            out.append(rec)
+    return out
+
+
+def search_work_by_title(
+    title: str,
+    *,
+    mailto: str | None = None,
+    base_url: str = OPENALEX_BASE_URL,
+) -> PaperRecord | None:
+    """OpenAlex's top ``title.search`` hit for ``title``, or ``None``."""
+    # Commas and pipes are filter syntax; inside a title they only confuse it.
+    clean = re.sub(r"[,|:]+", " ", title or "").strip()
+    if not clean:
+        return None
+    params: dict = {"filter": f"title.search:{clean}", "per-page": 1}
+    if mailto:
+        params["mailto"] = mailto
+    results = _http_get_json(f"{base_url}/works", params).get("results") or []
+    return parse_work(results[0]) if results else None
+
+
+def match_papers(
+    papers: Iterable[Any], works: Iterable[PaperRecord]
+) -> list[tuple[Any, PaperRecord]]:
+    """Pair each paper with the first work that :func:`title_match` accepts.
+
+    Exact title matches are taken before close ones, and each work is used
+    once, so two similar titles cannot both claim the same work.
+    """
+    works = list(works)
+    by_title: dict[str, list[int]] = {}
+    for i, w in enumerate(works):
+        by_title.setdefault(normalize_title(w.title), []).append(i)
+    used: set[int] = set()
+    pairs: list[tuple[Any, PaperRecord]] = []
+    pending = []
+    for p in papers:
+        exact = [
+            i
+            for i in by_title.get(normalize_title(_get(p, "title") or _get(p, "name")), [])
+            if i not in used
+        ]
+        if exact:
+            used.add(exact[0])
+            pairs.append((p, works[exact[0]]))
+        else:
+            pending.append(p)
+    for p in pending:
+        for i, w in enumerate(works):
+            if i not in used and title_match(p, w):
+                used.add(i)
+                pairs.append((p, w))
+                break
+    return pairs
+
+
+def _accept_new_work(raw: dict, drop_types: set[str]) -> PaperRecord | None:
+    """Parse one raw work; None when unusable or an excluded type."""
     rec = parse_work(raw)
-    if rec is None:
+    if rec is None or rec.type in drop_types:
         return None
-    if rec.type in drop_types:
-        return None
-    key = rec.openalex_id or f"title:{rec.title.lower()}"
-    if key in seen_ids:
-        return None
-    seen_ids.add(key)
     return rec
 
 
@@ -782,10 +1062,19 @@ __all__ = [
     "DEFAULT_EXCLUDE_TYPES",
     "authorship_evidence",
     "decode_abstract_inverted_index",
+    "fetch_author_works",
     "fetch_new_works",
     "fetch_work",
+    "match_papers",
+    "normalize_title",
+    "search_work_by_title",
+    "title_match",
+    "paper_key_phrases",
     "parse_work",
     "profile_query_terms",
+    "topic_matches",
+    "topic_prevalence",
+    "topic_score",
     "to_work_dict",
     "to_normalized_dict",
 ]
