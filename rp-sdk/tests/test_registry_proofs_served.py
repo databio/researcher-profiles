@@ -159,8 +159,8 @@ def test_section_projection_keeps_the_proof(client, store):
 
     prof = store.get("ada")
     doc = prof.metadata
-    doc.summary = "A restricted summary."
-    doc.section_visibility = [SectionVisibility(section="summary", visibility="restricted")]
+    doc.summary = "A private summary."
+    doc.section_visibility = [SectionVisibility(section="summary", visibility="private")]
     prof.save_profile(doc)
     store.evict("ada")
     for url in (

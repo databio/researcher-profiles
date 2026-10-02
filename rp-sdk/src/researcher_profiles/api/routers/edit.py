@@ -305,7 +305,7 @@ def get_profile_visibility(
     explain = explain_tiers(prof.metadata)
     floor = get_profile_tier_floor(request, prof, slug)
 
-    viewers: dict[str, ViewerTier] = {"anonymous": "public", "lab": "internal", "you": "restricted"}
+    viewers: dict[str, ViewerTier] = {"anonymous": "public", "lab": "limited", "you": "private"}
     counts = dict.fromkeys(viewers, 0)
     artifacts: list[ArtifactTier] = []
     for entry in explain.values():

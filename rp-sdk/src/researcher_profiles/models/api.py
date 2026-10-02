@@ -432,7 +432,7 @@ class ArtifactTier(_APIModel):
     #: What actually governs, after the profile default and the derivation rule.
     effective: str
     #: Concrete causes holding it above ``declared`` ("derived from
-    #: sources/cv.md (restricted)"), for display on this row.
+    #: sources/cv.md (private)"), for display on this row.
     raised_by: list[str] = []
     #: Subset of ``["anonymous", "lab", "you"]``.
     visible_to: list[str] = []

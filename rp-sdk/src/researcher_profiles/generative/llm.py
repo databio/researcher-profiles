@@ -322,7 +322,7 @@ def _source_type_kwargs(source_types: Optional[list[str]]) -> dict:
 
     Empty for ``None``: a caller entitled to every source type queries exactly
     the index an unfiltered call would, down to the call itself. The
-    restriction is applied at the query so restricted chunks cannot crowd out
+    restriction is applied at the query so private chunks cannot crowd out
     the ones the caller may actually be shown, rather than being dropped after
     the fact.
     """

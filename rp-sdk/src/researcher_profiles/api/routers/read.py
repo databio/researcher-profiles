@@ -22,7 +22,7 @@ from ...models.api import (
 )
 from ...models.published import ProfileCard, ProfileCollection
 from ...privacy import (
-    ALWAYS_RESTRICTED_PREFIXES,
+    ALWAYS_PRIVATE_PREFIXES,
     ViewerTier,
     effective_tiers,
     explain_tiers,
@@ -397,8 +397,8 @@ def get_profile_artifact(
     whole profile, every tier, in one store, so an owner-or-nothing route
     would be the wrong shape: it would lock a signed-in owner out of the public
     view and give nobody a way to read the public tier without a credential.
-    An owner reads their own ``restricted`` CV because a management host's
-    resolver gives them the ``restricted`` viewer tier, not because this path
+    An owner reads their own ``private`` CV because a management host's
+    resolver gives them the ``private`` viewer tier, not because this path
     is reserved for them.
 
     Three refusals, in order:
@@ -453,7 +453,7 @@ def get_profile_artifact(
         raise unknown
 
     # Hard floors: never served, to anybody, at any tier.
-    if any(artifact.startswith(prefix) for prefix in ALWAYS_RESTRICTED_PREFIXES):
+    if any(artifact.startswith(prefix) for prefix in ALWAYS_PRIVATE_PREFIXES):
         raise HTTPException(
             status_code=403,
             detail="build-local derived state is not a servable artifact",

@@ -49,6 +49,7 @@ VERBS_TOP = (
     "push",
     "render",
     "site",
+    "publish",
     "install",
     "seek",
     "list",
@@ -1328,7 +1329,7 @@ class TestManagementClientDispatch:
         from researcher_profiles.cli.auth.agent import AgentAPIError
 
         calls = self._install(monkeypatch, fail=AgentAPIError(403, "denied"))
-        assert main(["profile", "visibility", "set", "--tier", "internal"]) == 1
+        assert main(["profile", "visibility", "set", "--tier", "limited"]) == 1
         assert calls == []
         assert "Error: denied" in capsys.readouterr().err
 

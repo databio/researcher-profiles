@@ -506,13 +506,13 @@ class TestFlatExport:
 
     The load-bearing property: rows drop out of the public export by the GENERAL
     derivation rule (a chunk's tier is its source's tier), not a hand-rolled
-    ``PUBLISHED_SOURCE_TYPES`` allowlist. cv/web/grant chunks are ``restricted``
+    ``PUBLISHED_SOURCE_TYPES`` allowlist. cv/web/grant chunks are ``private``
     and never reach the blob or the chunks file.
     """
 
     @pytest.fixture
     def deep_profile(self, tmp_path: Path) -> Path:
-        """A deep profile whose sqlite mixes public and restricted (cv/web/grant) chunks."""
+        """A deep profile whose sqlite mixes public and private (cv/web/grant) chunks."""
         return build_profile_dir(
             tmp_path / "tester-deep",
             name="Tester Deep",
@@ -587,11 +587,11 @@ class TestFlatExport:
     # Privacy filtering: the derivation rule, not an allowlist
     # ----------------------------------------------------------------------
 
-    def test_restricted_source_chunks_are_dropped(self, deep_profile: Path):
+    def test_private_source_chunks_are_dropped(self, deep_profile: Path):
         idx = SqliteEmbeddingIndex(deep_profile)
         idx.build_index(backend=FakeBackend())
 
-        # The sqlite contains restricted chunk types.
+        # The sqlite contains private chunk types.
         conn = connect_vec(idx.db_path)
         sqlite_types = {r[0] for r in conn.execute("SELECT DISTINCT source_type FROM chunks")}
         conn.close()
@@ -616,7 +616,7 @@ class TestFlatExport:
 
     def test_internal_profile_exports_nothing(self, tmp_path: Path):
         p = build_profile_dir(
-            tmp_path / "tester-internal", name="Tester Internal", visibility="internal"
+            tmp_path / "tester-limited", name="Tester Limited", visibility="limited"
         )
         SqliteEmbeddingIndex(p).build_index(backend=FakeBackend())
 

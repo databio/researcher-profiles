@@ -671,7 +671,7 @@ class FilesystemProfileStore(_HookedStore, _AnalyticsAccessors):
         """The profile's vectors: the build-local sqlite, else the served flat form.
 
         sqlite first because it is the richer index: it carries every chunk,
-        including the restricted ones the public export drops, and its hits
+        including the private ones the public export drops, and its hits
         carry text. A directory that only holds a published profile (no
         ``.cache/``) still ranks, at the public subset, through the flat form.
 

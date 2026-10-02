@@ -42,7 +42,7 @@ Read endpoints resolve a [viewer tier](authentication.md#viewer-tiers) from
 the caller's credentials and project each response accordingly.
 
 A read endpoint MAY accept a preview query parameter `?as=anonymous|lab|owner`
-that caps the resolved tier at `public`, `internal`, or `restricted`
+that caps the resolved tier at `public`, `limited`, or `private`
 respectively. The cap MUST only narrow the caller's tier, never widen it. An
 unknown value returns `400`.
 
@@ -656,7 +656,7 @@ Each `artifacts` entry supplies exactly one selector plus the target tier:
 | `content_url` | string \| null | Selector: one artifact |
 | `paper_id` | string \| null | Selector: every artifact for one paper |
 | `role` | string \| null | Selector: every artifact with this manifest role |
-| `visibility` | string | REQUIRED. `public`, `internal`, or `restricted` |
+| `visibility` | string | REQUIRED. `public`, `limited`, or `private` |
 
 Artifacts not selected keep their current tier. Supports the same `base_hash`
 optimistic concurrency as metadata edits.

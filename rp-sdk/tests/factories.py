@@ -146,7 +146,7 @@ def write_papers(profile_dir: Path, papers: list[dict], *, about: str | None = N
 
 
 def write_grants(profile_dir: Path, grants: list[dict] | None = None) -> Path:
-    """Write ``sources/grants.jsonld``: a deep-level, restricted source."""
+    """Write ``sources/grants.jsonld``: a deep-level, private source."""
     doc = GrantsDocument.model_validate({"hasPart": grants or DEFAULT_GRANTS})
     path = profile_dir / "sources" / "grants.jsonld"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -208,7 +208,7 @@ def write_summaries(profile_dir: Path, mapping: Mapping[str, str]) -> Path:
 
 
 def write_cv(profile_dir: Path, text: str = DEFAULT_CV) -> Path:
-    """Write ``sources/cv.md``: a deep-level, restricted source."""
+    """Write ``sources/cv.md``: a deep-level, private source."""
     path = profile_dir / "sources" / "cv.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
@@ -216,7 +216,7 @@ def write_cv(profile_dir: Path, text: str = DEFAULT_CV) -> Path:
 
 
 def write_web(profile_dir: Path, mapping: Mapping[str, str] | None = None) -> Path:
-    """Write ``sources/web/<page_id>.md``: deep-level, restricted sources."""
+    """Write ``sources/web/<page_id>.md``: deep-level, private sources."""
     d = profile_dir / "sources" / "web"
     d.mkdir(parents=True, exist_ok=True)
     for page_id, body in (mapping or DEFAULT_WEB).items():
@@ -425,34 +425,3 @@ def stub_llm(profile, response_text: str | None = None):
 # ---------------------------------------------------------------------------
 # Publish / serve
 # ---------------------------------------------------------------------------
-
-
-def sync_with_publishignore(src: Path, dst: Path) -> None:
-    """Copy ``src`` -> ``dst`` honoring only ``.publishignore``.
-
-    Mirrors ``rsync -a --exclude-from=<src>/.publishignore`` for the pattern
-    forms this project emits: a line ending in ``/`` excludes that directory
-    subtree; any other line excludes that exact relative path.
-    """
-    patterns = [
-        ln.strip()
-        for ln in (src / ".publishignore").read_text().splitlines()
-        if ln.strip() and not ln.strip().startswith("#")
-    ]
-    dir_prefixes = tuple(p for p in patterns if p.endswith("/"))
-    exact = {p for p in patterns if not p.endswith("/")}
-
-    def excluded(rel: str) -> bool:
-        if rel in exact:
-            return True
-        return any(rel == d.rstrip("/") or rel.startswith(d) for d in dir_prefixes)
-
-    for f in src.rglob("*"):
-        if not f.is_file():
-            continue
-        rel = f.relative_to(src).as_posix()
-        if excluded(rel):
-            continue
-        out = dst / rel
-        out.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(f, out)

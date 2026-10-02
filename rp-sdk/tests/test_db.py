@@ -338,8 +338,8 @@ class TestWrites:
         store, rid = jane_store
         db = store.get(rid)
         db.edit.set_visibility(
-            profile_visibility="internal",
-            artifacts=[{"role": "soul", "visibility": "restricted"}],
+            profile_visibility="limited",
+            artifacts=[{"role": "soul", "visibility": "private"}],
         )
         with store.session() as s:
             row = s.get(ProfileRow, rid)
@@ -348,10 +348,10 @@ class TestWrites:
                 .where(ArtifactRow.profile_rid == rid)
                 .where(ArtifactRow.content_url == "personality/SOUL.md")
             ).first()
-        assert row.visibility == "internal"
-        assert soul.visibility == "restricted"
+        assert row.visibility == "limited"
+        assert soul.visibility == "private"
         # And the document's manifest, regenerated from the rows, agrees.
-        assert store.get(rid).metadata.subject_of[0].visibility == "restricted"
+        assert store.get(rid).metadata.subject_of[0].visibility == "private"
 
     @pytest.mark.parametrize(
         "patch",
@@ -504,7 +504,7 @@ class TestBuildState:
 class TestPrivacy:
     """Tiers on the rows must match what ``privacy.effective_tiers`` computes."""
 
-    def test_restricted_artifacts_are_filterable_in_sql(self, store, deep_dir):
+    def test_private_artifacts_are_filterable_in_sql(self, store, deep_dir):
         prof = ResearcherProfile.from_files(deep_dir)
         rid = store.put(prof)
         with store.session() as s:

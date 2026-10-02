@@ -60,13 +60,13 @@ From the manifest, note (silently, see "Talk like a person" below):
   the manifest's own URL. Never construct an artifact URL by convention.
   Always resolve it through a manifest entry. Ignore entries whose `role`
   you don't recognize; an unfamiliar `role` is not an error.
-- `visibility`: the entry's privacy tier, one of `public`, `internal`, or
-  `restricted`. An entry without the field is `public`. A manifest
+- `visibility`: the entry's privacy tier, one of `public`, `limited`, or
+  `private`. An entry without the field is `public`. A manifest
   lists artifacts a public reader cannot fetch. Skip any entry
   whose `visibility` is present and not `public` unless you hold
   credentials for that tier: don't fetch it, don't spend budget on it, and
   don't count it as a gap or a dangling reference when it 404s. Full text
-  of published papers is always `restricted` and is routinely a third of a
+  of published papers is always `private` and is routinely a third of a
   real profile's manifest, so this is the normal case, not a broken profile.
 
 The `role` tokens you will use (`expertise` and `soul` live in `subjectOf`,

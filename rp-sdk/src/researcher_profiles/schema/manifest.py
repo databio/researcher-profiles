@@ -33,7 +33,7 @@ JSON = "application/json"
 SQLITE = "application/vnd.sqlite3"
 
 #: Files under ``.cache/`` listed in the manifest. ``embeddings.sqlite`` is a
-#: derived index served at tier ``restricted``; the public servable embeddings
+#: derived index served at tier ``private``; the public servable embeddings
 #: are the flat blob/index/chunks under ``embeddings/``.
 PUBLISHED_CACHE = ("embeddings.sqlite",)
 
@@ -79,7 +79,7 @@ def _part(
     paper_id: str | None = None,
 ) -> ArtifactRef:
     # The ArtifactRef model applies the role's default tier (cv/web/full-text ->
-    # restricted) when `visibility` is not passed, so it is omitted here.
+    # private) when `visibility` is not passed, so it is omitted here.
     return ArtifactRef(
         type_=type_,
         name=name,
@@ -149,7 +149,7 @@ _PART_SPECS: tuple[_FileSpec, ...] = (
     _FileSpec("SKILL.md", "Agent entry point", "agent_entry_point", MARKDOWN),
     _FileSpec("sources/papers.jsonld", "Works", "works", JSONLD, type_="Collection"),
     _FileSpec("sources/grants.jsonld", "Grants", "grants", JSONLD, type_="Collection"),
-    # Optional clinical extension; ``internal`` by role default.
+    # Optional clinical extension; ``limited`` by role default.
     _FileSpec("sources/trials.jsonld", "Clinical trials", "trials", JSONLD, type_="Collection"),
     _FileSpec("sources/citations.json", "Citations", "citations", JSON),
     _FileSpec("sources/cv.md", "CV", "cv", MARKDOWN),
@@ -214,7 +214,7 @@ def _dir_parts(root: Path, spec: _DirSpec) -> list[ArtifactRef]:
 
 
 def _cache_parts(root: Path) -> list[ArtifactRef]:
-    """The derived sqlite index (tier restricted): reachable by an authorized
+    """The derived sqlite index (tier private): reachable by an authorized
     consumer, excluded from a public sync. Profile-adjacent under ``.cache/``.
     """
     return [

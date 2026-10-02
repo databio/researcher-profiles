@@ -1,14 +1,14 @@
 """The read projection: tier x viewer kind x artifact role, over HTTP.
 
 Without ``privacy.effective_tiers`` on every read route, a profile whose
-document says ``visibility: internal`` would be served byte-identically to one
+document says ``visibility: limited`` would be served byte-identically to one
 that says ``public``, and the only thing standing between a hosted registry and
 the open web would be a single site-wide switch. This file is the enforcement
 half: every combination of
 
-* a **profile-level tier** (``public`` / ``internal`` / ``restricted``),
+* a **profile-level tier** (``public`` / ``limited`` / ``private``),
 * a **viewer kind** (anonymous, signed-in stranger, consumer key at ``public``
-  and at ``internal``, operator, owner),
+  and at ``limited``, operator, owner),
 * an **artifact role** (the full manifest role set, including the hard floors),
 
 is asserted against the live HTTP surface. A tier system without this matrix is
@@ -31,7 +31,7 @@ from fastapi import HTTPException
 
 from researcher_profiles import ResearcherProfile
 from researcher_profiles.api.deps import ConsumerIdentity, TierFloor
-from researcher_profiles.privacy import publishignore_lines
+from researcher_profiles.privacy import effective_tiers
 from researcher_profiles.schema import ArtifactRef
 
 from .factories import ADA, build_profile_dir
@@ -64,30 +64,30 @@ ROLE_DEFAULT: dict[str, str] = {
     "grants": "public",
     "paper_summary": "public",
     "embedding_index": "public",
-    "cv": "restricted",
-    "web": "restricted",
-    "embedding_index_sqlite": "restricted",
-    "paper_fulltext": "restricted",
+    "cv": "private",
+    "web": "private",
+    "embedding_index_sqlite": "private",
+    "paper_fulltext": "private",
 }
 
 #: Withheld from EVERY viewer, owner included: build-local derived state under
 #: ``.cache/`` (a path-prefix floor, not a role floor). These are the ``.`` rows
 #: that stay ``.`` all the way across. ``paper_fulltext`` is NOT here: it is an
-#: ordinary restricted-default role the owner may re-tier freely.
+#: ordinary private-default role the owner may re-tier freely.
 HARD_FLOORS = frozenset({"embedding_index_sqlite"})
 
 VIEWER_TIERS = {
     "anonymous": "public",
     "stranger": "public",
     "consumer_public": "public",
-    "consumer_lab": "internal",
-    "operator": "restricted",
-    "owner": "restricted",
+    "consumer_lab": "limited",
+    "operator": "private",
+    "owner": "private",
 }
 VIEWER_KINDS = list(VIEWER_TIERS)
 
 #: Tier ordering, lowest first. The one place it is written down.
-TIER_ORDER = ("public", "internal", "restricted")
+TIER_ORDER = ("public", "limited", "private")
 
 PROFILE_TIERS = list(TIER_ORDER)
 
@@ -194,7 +194,7 @@ def matrix_client(make_api_client, tmp_path):
 
 
 SCOPES = ("read", "match", "persona", "push")
-CONSUMER_KEYS = {"rpk_public": "public", "rpk_lab": "internal"}
+CONSUMER_KEYS = {"rpk_public": "public", "rpk_lab": "limited"}
 
 #: How each viewer kind authenticates.
 VIEWER_HEADERS: dict[str, dict[str, str]] = {
@@ -234,7 +234,7 @@ def _sees(role: str, viewer: str, profile_tier: str, declared: str | None = None
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("profile_tier", ["public", "internal", "restricted"])
+@pytest.mark.parametrize("profile_tier", ["public", "limited", "private"])
 @pytest.mark.parametrize("viewer", VIEWER_KINDS)
 class TestProfileGate:
     """Gate one: may this viewer see the profile at all?"""
@@ -298,8 +298,8 @@ class TestBodiesOnProfileDetail:
             assert body is None
 
 
-@pytest.mark.parametrize("declared", ["public", "internal", "restricted"])
-@pytest.mark.parametrize("profile_tier", ["public", "internal", "restricted"])
+@pytest.mark.parametrize("declared", ["public", "limited", "private"])
+@pytest.mark.parametrize("profile_tier", ["public", "limited", "private"])
 class TestMostRestrictiveComposition:
     """A declared tier composes with the profile default; neither one wins alone."""
 
@@ -326,13 +326,13 @@ class TestMostRestrictiveComposition:
 
 class TestPapersAndSummaries:
     def test_works_withheld_404s_the_papers_list(self, matrix_client):
-        c = matrix_client(overrides={"works": "restricted"})
+        c = matrix_client(overrides={"works": "private"})
         assert _get(c, f"/api/v1/profiles/{SLUG}/papers", "anonymous").status_code == 404
         assert _get(c, f"/api/v1/profiles/{SLUG}/papers", "owner").status_code == 200
 
     def test_summary_available_reflects_this_viewer(self, matrix_client):
         """It must not advertise a summary the caller would then 404 on."""
-        c = matrix_client(overrides={"paper_summary": "internal"})
+        c = matrix_client(overrides={"paper_summary": "limited"})
         anon = _get(c, f"/api/v1/profiles/{SLUG}/papers", "anonymous").json()
         lab = _get(c, f"/api/v1/profiles/{SLUG}/papers", "consumer_lab").json()
         assert all(p["summary_available"] is False for p in anon)
@@ -354,7 +354,7 @@ class TestRefusalIsIndistinguishableFromAbsence:
         ["/api/v1/profiles/{slug}", "/api/v1/profiles/{slug}/profile.jsonld"],
     )
     def test_bodies_are_byte_identical(self, matrix_client, path):
-        c = matrix_client(visibility="restricted")
+        c = matrix_client(visibility="private")
         held = _get(c, path.format(slug=SLUG), "anonymous")
         absent = _get(c, path.format(slug=SLUG), "anonymous")
         missing = _get(c, path.format(slug="nobody-at-all"), "anonymous")
@@ -364,7 +364,7 @@ class TestRefusalIsIndistinguishableFromAbsence:
         assert held.json()["detail"].replace(SLUG, "nobody-at-all") == missing.json()["detail"]
 
     def test_papers_and_summary_refusals_are_404(self, matrix_client):
-        c = matrix_client(visibility="internal")
+        c = matrix_client(visibility="limited")
         assert _get(c, f"/api/v1/profiles/{SLUG}/papers", "anonymous").status_code == 404
         r = _get(c, f"/api/v1/profiles/{SLUG}/summary/paperA", "anonymous")
         assert r.status_code == 404
@@ -385,7 +385,7 @@ class TestPreviewCap:
         assert preview.headers["X-RP-Viewer-Tier"] == "public"
 
     def test_preview_matches_on_papers_and_summaries_too(self, matrix_client):
-        c = matrix_client(overrides={"paper_summary": "internal"})
+        c = matrix_client(overrides={"paper_summary": "limited"})
         owner_preview = _get(
             c, f"/api/v1/profiles/{SLUG}/papers", "owner", params={"as": "anonymous"}
         )
@@ -410,10 +410,10 @@ class TestPreviewCap:
         assert widened.headers["X-RP-Viewer-Tier"] == "public"
 
     def test_lab_preview_sits_between(self, matrix_client):
-        c = matrix_client(overrides={"paper_summary": "internal"})
+        c = matrix_client(overrides={"paper_summary": "limited"})
         r = _get(c, f"/api/v1/profiles/{SLUG}/summary/paperA", "owner", params={"as": "lab"})
         assert r.status_code == 200
-        assert r.headers["X-RP-Viewer-Tier"] == "internal"
+        assert r.headers["X-RP-Viewer-Tier"] == "limited"
 
     def test_unknown_viewer_is_a_loud_400(self, matrix_client):
         """Ignoring it would show an owner their own view believing otherwise."""
@@ -433,10 +433,10 @@ class TestArchiveProjection:
         with tarfile.open(fileobj=io.BytesIO(resp.content), mode="r:*") as tf:
             return {m.name for m in tf.getmembers() if m.isfile()}
 
-    def test_public_caller_gets_nothing_in_the_publishignore(self, matrix_client, tmp_path):
+    def test_public_caller_gets_nothing_above_public(self, matrix_client, tmp_path):
         c = matrix_client()
         prof = ResearcherProfile.from_files(tmp_path / "profiles-public-0" / SLUG)
-        excluded = set(publishignore_lines(prof.metadata))
+        excluded = {u for u, t in effective_tiers(prof.metadata).items() if t != "public"}
 
         r = _get(c, f"/api/v1/profiles/{SLUG}/archive", "consumer_public")
         assert r.status_code == 200
@@ -444,7 +444,7 @@ class TestArchiveProjection:
         members = self._members(r)
         assert members
         for name in members:
-            assert name not in excluded, f"{name} is in .publishignore but shipped"
+            assert name not in excluded, f"{name} is above public but shipped"
             assert not name.startswith(".cache/")
 
     def test_the_cv_ships_only_to_a_caller_entitled_to_it(self, matrix_client):
@@ -455,8 +455,8 @@ class TestArchiveProjection:
         assert "sources/cv.md" in operator
 
     def test_fulltext_ships_only_to_a_caller_entitled_to_it(self, matrix_client):
-        # Paper full text is an ordinary restricted-default artifact: withheld
-        # from a public caller, shipped to a restricted (operator/owner) one,
+        # Paper full text is an ordinary private-default artifact: withheld
+        # from a public caller, shipped to a private (operator/owner) one,
         # exactly like the CV. No role floor holds it back from everyone.
         c = matrix_client()
         public = self._members(_get(c, f"/api/v1/profiles/{SLUG}/archive", "consumer_public"))
@@ -498,7 +498,7 @@ class TestSearchProjection:
         "viewer, leaks_allowed",
         [("consumer_public", False), ("consumer_lab", False), ("operator", True)],
     )
-    def test_restricted_chunks_are_dropped(self, searchable, viewer, leaks_allowed):
+    def test_private_chunks_are_dropped(self, searchable, viewer, leaks_allowed):
         c, _captured = searchable
         r = c.post(
             f"/api/v1/profiles/{SLUG}/search",
@@ -511,7 +511,7 @@ class TestSearchProjection:
         if leaks_allowed:
             assert {"cv", "web", "grant"} <= types
         else:
-            assert not (types & {"cv", "web", "grant"}), f"{viewer} was shown restricted chunks"
+            assert not (types & {"cv", "web", "grant"}), f"{viewer} was shown private chunks"
 
     def test_the_restriction_is_pushed_into_the_query(self, searchable):
         c, captured = searchable
@@ -529,8 +529,8 @@ class TestSearchProjection:
 
 
 class TestVisibilityWritesAreHonest:
-    def test_fulltext_tier_is_choosable_and_defaults_to_restricted(self, matrix_client):
-        # paper_fulltext defaults to restricted (nothing silently becomes
+    def test_fulltext_tier_is_choosable_and_defaults_to_private(self, matrix_client):
+        # paper_fulltext defaults to private (nothing silently becomes
         # public), but the owner may raise it: a PATCH to public succeeds and
         # the report reflects the new effective tier. No floor, no `locked`.
         c = matrix_client()
@@ -538,7 +538,7 @@ class TestVisibilityWritesAreHonest:
 
         before = _get(c, f"/api/v1/profiles/{SLUG}/visibility", "owner").json()
         ft = next(a for a in before["artifacts"] if a["content_url"] == url)
-        assert ft["effective"] == "restricted"
+        assert ft["effective"] == "private"
         assert ft.get("locked", False) is False
         assert ft.get("lock_reason") is None
 
@@ -564,7 +564,7 @@ class TestVisibilityWritesAreHonest:
 
         r = c.patch(
             f"/api/v1/profiles/{SLUG}/visibility",
-            json={"artifacts": [{"role": "paper_summary", "visibility": "internal"}]},
+            json={"artifacts": [{"role": "paper_summary", "visibility": "limited"}]},
             headers=VIEWER_HEADERS["owner"],
         )
         assert r.status_code == 200, r.text
@@ -572,14 +572,14 @@ class TestVisibilityWritesAreHonest:
 
         after = _get(c, f"/api/v1/profiles/{SLUG}/visibility", "owner").json()
         assert all(
-            a["effective"] == "internal" for a in after["artifacts"] if a["role"] == "paper_summary"
+            a["effective"] == "limited" for a in after["artifacts"] if a["role"] == "paper_summary"
         )
 
     def test_a_selector_matching_nothing_is_a_400(self, matrix_client):
         c = matrix_client()
         r = c.patch(
             f"/api/v1/profiles/{SLUG}/visibility",
-            json={"artifacts": [{"role": "no-such-role", "visibility": "internal"}]},
+            json={"artifacts": [{"role": "no-such-role", "visibility": "limited"}]},
             headers=VIEWER_HEADERS["owner"],
         )
         assert r.status_code == 400
@@ -597,10 +597,10 @@ class TestVisibilityReport:
                 assert a["visible_to"] == []
 
     def test_why_names_the_specific_cause_on_the_row(self, matrix_client):
-        c = matrix_client(visibility="internal")
+        c = matrix_client(visibility="limited")
         report = _get(c, f"/api/v1/profiles/{SLUG}/visibility", "owner").json()
         soul = next(a for a in report["artifacts"] if a["role"] == "soul")
-        assert soul["effective"] == "internal"
+        assert soul["effective"] == "limited"
         assert any("profile default" in phrase for phrase in soul["raised_by"])
 
     def test_a_derived_artifact_names_its_source(self, matrix_client, tmp_path):
@@ -624,7 +624,7 @@ class TestVisibilityReport:
         report = _get(c, f"/api/v1/profiles/{SLUG}/visibility", "owner").json()
         note = next(a for a in report["artifacts"] if a["content_url"] == "derived-note.md")
         assert note["declared"] == "public"
-        assert note["effective"] == "restricted"
+        assert note["effective"] == "private"
         assert any("sources/cv.md" in phrase for phrase in note["raised_by"])
         # And an anonymous reader never receives it.
         assert "derived-note.md" in set(_detail(c, "anonymous").json()["withheld"])
@@ -639,7 +639,7 @@ def _content(client, viewer, artifact, **kwargs):
     return _get(client, f"/api/v1/profiles/{SLUG}/content/{artifact}", viewer, **kwargs)
 
 
-@pytest.mark.parametrize("profile_tier", ["public", "internal", "restricted"])
+@pytest.mark.parametrize("profile_tier", ["public", "limited", "private"])
 @pytest.mark.parametrize("viewer", VIEWER_KINDS)
 class TestContentRouteMatrix:
     """``GET /profiles/{slug}/content/{artifact}``, tier by viewer by role.
@@ -657,7 +657,7 @@ class TestContentRouteMatrix:
         self, matrix_client, viewer, profile_tier, role
     ):
         c = matrix_client(visibility=profile_tier)
-        order = ("public", "internal", "restricted")
+        order = ("public", "limited", "private")
         profile_ok = order.index(profile_tier) <= order.index(VIEWER_TIERS[viewer])
         r = _content(c, viewer, ROLE_ARTIFACTS[role])
 
@@ -684,7 +684,7 @@ class TestContentRouteMatrix:
         and follows relative ``contentUrl``s from the document it finds there.
         """
         c = matrix_client(visibility=profile_tier)
-        order = ("public", "internal", "restricted")
+        order = ("public", "limited", "private")
         profile_ok = order.index(profile_tier) <= order.index(VIEWER_TIERS[viewer])
         via_content = _content(c, viewer, "profile.jsonld")
         direct = _get(c, f"/api/v1/profiles/{SLUG}/profile.jsonld", viewer)
@@ -703,7 +703,7 @@ class TestContentRouteRefusalsAreOpaque:
         ].replace("sources/not-a-file.md", "X")
 
     def test_a_hidden_profile_hides_its_artifacts_the_same_way(self, matrix_client):
-        c = matrix_client(visibility="internal")
+        c = matrix_client(visibility="limited")
         r = _content(c, "anonymous", "personality/SOUL.md")
         missing = _get(c, "/api/v1/profiles/no-such-slug/content/personality/SOUL.md", "anonymous")
         assert r.status_code == missing.status_code == 404
@@ -737,7 +737,7 @@ class TestProfileCollection:
         assert r.status_code == 200, r.text
         return r.json()
 
-    @pytest.mark.parametrize("profile_tier", ["public", "internal", "restricted"])
+    @pytest.mark.parametrize("profile_tier", ["public", "limited", "private"])
     @pytest.mark.parametrize("viewer", VIEWER_KINDS)
     def test_membership_matches_the_listing_exactly(self, matrix_client, viewer, profile_tier):
         c = matrix_client(visibility=profile_tier)
@@ -775,7 +775,7 @@ class TestProfileCollection:
             assert card[field] == summary[field], field
 
     def test_an_empty_registry_is_an_empty_bundle_not_an_error(self, matrix_client):
-        c = matrix_client(visibility="restricted")
+        c = matrix_client(visibility="private")
         bundle = self._bundle(c, "anonymous")
         assert bundle["cards"] == []
         assert bundle["count"] == 0
@@ -790,7 +790,7 @@ class TestProfileCollection:
     def test_it_is_stamped_with_the_viewer_tier(self, matrix_client):
         c = matrix_client()
         assert _get(c, "/api/v1/collection.json", "operator").headers["X-RP-Viewer-Tier"] == (
-            "restricted"
+            "private"
         )
         assert (
             _get(c, "/api/v1/collection.json", "anonymous").headers["X-RP-Viewer-Tier"] == "public"
@@ -816,7 +816,7 @@ class TestHostFloorHook:
         assert _detail(c, "anonymous").status_code == 200
 
         c.app.state.profile_tier_floor = lambda request, prof, slug: TierFloor(
-            "internal", "held back"
+            "limited", "held back"
         )
         assert _detail(c, "anonymous").status_code == 404
         assert _get(c, "/api/v1/profiles", "anonymous").json()["profiles"] == []
@@ -824,7 +824,7 @@ class TestHostFloorHook:
     def test_the_floor_is_a_narrowing_not_a_blackout(self, matrix_client):
         c = matrix_client()
         c.app.state.profile_tier_floor = lambda request, prof, slug: TierFloor(
-            "internal", "held back"
+            "limited", "held back"
         )
         assert _detail(c, "consumer_lab").status_code == 200
         assert _detail(c, "owner").status_code == 200
@@ -832,17 +832,17 @@ class TestHostFloorHook:
     def test_the_report_carries_the_reason_the_hook_returned(self, matrix_client):
         c = matrix_client()
         c.app.state.profile_tier_floor = lambda request, prof, slug: TierFloor(
-            "internal", "you have not published this profile."
+            "limited", "you have not published this profile."
         )
         report = _get(c, f"/api/v1/profiles/{SLUG}/visibility", "owner").json()
-        assert report["profile_floor"] == "internal"
+        assert report["profile_floor"] == "limited"
         assert report["profile_floor_reason"] == "you have not published this profile."
 
     def test_the_reason_varies_with_the_profile(self, matrix_client):
         """One static string could not do this, which is why it is gone."""
         c = matrix_client()
         c.app.state.profile_tier_floor = lambda request, prof, slug: TierFloor(
-            "internal", f"{slug} is held back"
+            "limited", f"{slug} is held back"
         )
         report = _get(c, f"/api/v1/profiles/{SLUG}/visibility", "owner").json()
         assert report["profile_floor_reason"] == f"{SLUG} is held back"

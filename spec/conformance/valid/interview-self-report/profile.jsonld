@@ -50,7 +50,7 @@
     {
       "@type": "DigitalDocument",
       "name": "Interview digest",
-      "visibility": "restricted",
+      "visibility": "private",
       "role": "interview",
       "encodingFormat": "text/markdown",
       "contentUrl": "sources/interview.md",

@@ -16,7 +16,7 @@ function fileName(href: string): string {
 
 function tierClass(tier: string): string {
   if (tier === "public") return "badge--accent";
-  if (tier === "internal") return "badge--warn";
+  if (tier === "limited") return "badge--warn";
   return "badge--danger";
 }
 

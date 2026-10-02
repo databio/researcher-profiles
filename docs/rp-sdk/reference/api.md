@@ -135,13 +135,13 @@ See the [CLI reference](cli.md) for the commands that read these.
   `/health` is not authenticated.
 - The **read** routes have no credential gate. They resolve a *viewer tier* and
   project each response through it. A caller with no credential is the viewer
-  whose tier is `public`. The operator token widens that tier to `restricted`.
+  whose tier is `public`. The operator token widens that tier to `private`.
 - Header format: `Authorization: Bearer <token>`.
 - Failed auth returns `401` with body `{"detail": "invalid or missing bearer token"}`.
 - A read refusal is `404`, indistinguishable from a nonexistent profile. Every
   read response carries `X-RP-Viewer-Tier`.
 - Any read route accepts `?as=anonymous|lab|owner`, a preview cap that maps to
-  the `public`, `internal`, and `restricted` tiers. It can only narrow the tier
+  the `public`, `limited`, and `private` tiers. It can only narrow the tier
   the caller already holds, never widen it, so it needs no credential of its
   own. An unknown value is a `400`
   `{"detail": "unknown viewer '<value>' (anonymous | lab | owner)"}`.
@@ -563,7 +563,7 @@ can verify the transfer before committing it to its cache),
 Resolve a person descriptor (a rid, or a free-text name) to the rid that
 identifies them in this registry. Requires the `resolve` scope: a write
 scope, not `match`, because a true miss mints a stub profile (`level=lite`,
-`visibility=internal`, `provenance=third_party`). Putting this behind the
+`visibility=limited`, `provenance=third_party`). Putting this behind the
 read-tier match scope would let every match-keyed consumer create people.
 Resolution is deterministic and cautious: the same person resolved the same
 way twice converges on the same rid, and undecidable evidence defers rather

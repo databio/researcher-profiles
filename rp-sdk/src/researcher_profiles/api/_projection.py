@@ -25,7 +25,7 @@ from ..models.api import (
     ProfileSummary,
 )
 from ..privacy import (
-    ALWAYS_RESTRICTED_PREFIXES,
+    ALWAYS_PRIVATE_PREFIXES,
     CHUNK_SOURCE_TYPE_ROLE,
     TierExplanation,
     ViewerTier,
@@ -268,7 +268,7 @@ def _is_hard_floor(content_url: str) -> bool:
     ``.cache/``/``.keys/`` is build-local derived state and key material, not a
     servable artifact.
     """
-    return any(content_url.startswith(prefix) for prefix in ALWAYS_RESTRICTED_PREFIXES)
+    return any(content_url.startswith(prefix) for prefix in ALWAYS_PRIVATE_PREFIXES)
 
 
 def artifact_visible(
@@ -346,7 +346,7 @@ def _visible_hits(prof_md, viewer: ViewerTier, hits) -> list:
     This is the general derivation rule, applied to the served sqlite index exactly as
     ``embeddings/flat.py`` applies it to the exported one. Without this a
     ``match``-scoped consumer reads a researcher's CV back verbatim, chunk by
-    chunk, from a profile whose CV is ``restricted``.
+    chunk, from a profile whose CV is ``private``.
     """
     hits = list(hits or [])
     if not hits:

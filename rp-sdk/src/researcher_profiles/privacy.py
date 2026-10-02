@@ -1,15 +1,15 @@
-"""Privacy tiers, the derivation rule, and ``.publishignore`` generation.
+"""Privacy tiers, the derivation rule, and the document projection.
 
-Privacy is data *declared in the profile* (a tier on every artifact plus a
-profile-level default) and *expressed in the layout* (a ``.publishignore``
-exclude list), so a dumb sync is a correct sync: no registry-side
-``.visibility.json`` sidecar, no Python egress filter.
+Privacy is data *declared in the profile*: a tier on every artifact, a tier on
+every inline section, and a profile-level default. Nothing on disk encodes an
+audience. Every egress (the HTTP routes, the viewer archive, ``rp publish``)
+projects the profile for one viewer tier at the moment it leaves.
 
 The single authority is :func:`effective_tiers`: the effective tier of an
 artifact is the most restrictive of the profile default, the artifact's own
 tier, and the tiers of everything it was derived from. Everything calls it:
-a sync's ``.publishignore``, the embedding-chunk exporter, the validator.
-There is no second implementation.
+the static export, the embedding-chunk exporter, the validator. There is no
+second implementation.
 """
 
 from dataclasses import dataclass, field
@@ -52,7 +52,7 @@ SECTION_FIELDS: dict[str, tuple[str, ...]] = {
 #: default tier governs it. For every source the two names coincide today; the
 #: map is written explicitly so the chunk -> role -> tier derivation is
 #: auditable rather than incidental. ``cv``/``web``/``grant`` resolve to
-#: ``restricted`` by :data:`schema.ROLE_DEFAULT_VISIBILITY`; the rest are public.
+#: ``private`` by :data:`schema.ROLE_DEFAULT_VISIBILITY`; the rest are public.
 CHUNK_SOURCE_TYPE_ROLE: dict[str, str] = {
     "soul": "soul",
     "expertise": "expertise",
@@ -63,15 +63,13 @@ CHUNK_SOURCE_TYPE_ROLE: dict[str, str] = {
     "grant": "grant",
 }
 
-#: Directory prefixes (relative to the profile content root) excluded from a
-#: public sync unconditionally: profile-adjacent serve-time caches and local key
+#: Directory prefixes (relative to the profile content root) that no export
+#: ships at any tier: profile-adjacent serve-time caches and local key
 #: material. ``.cache/`` holds derived caches (``embeddings.sqlite``,
-#: ``topics.json``, …) that are regenerable and never part of the public record;
-#: ``embeddings.sqlite`` is still reachable by an authorized (``restricted``-tier)
-#: consumer through the manifest, which governs restricted retrieval separately
-#: from this public-sync exclude list. Build-session bookkeeping is not a
-#: concern here: it lives in the build root outside the content tree entirely.
-ALWAYS_RESTRICTED_PREFIXES: tuple[str, ...] = (".cache/", ".keys/")
+#: ``topics.json``, ...) that are regenerable and never part of the published
+#: record. Build-session bookkeeping is not a concern here: it lives in the
+#: build root outside the content tree entirely.
+ALWAYS_PRIVATE_PREFIXES: tuple[str, ...] = (".cache/", ".keys/")
 
 
 def tier_allows(viewer: ViewerTier, artifact: Visibility) -> bool:
@@ -157,11 +155,11 @@ class DerivationCycleError(ValueError):
     """``derivedFrom`` forms a cycle, so no artifact in it has a tier.
 
     The derivation rule is defined over a DAG: an artifact is at least as
-    restricted as everything it came from. A cycle makes that rule
+    private as everything it came from. A cycle makes that rule
     self-referential, and guessing a tier for a document whose own declaration
     is incoherent is exactly the silent widening privacy projection exists to
     prevent. Raised rather than swallowed: every caller
-    (``.publishignore``, the manifest read, the preview) would otherwise
+    (the static export, the manifest read, the preview) would otherwise
     publish a tier nothing supports.
     """
 
@@ -186,7 +184,7 @@ def explain_tiers(profile: ProfileDocument) -> dict[str, TierExplanation]:
     own declared tier, and the *effective* tiers of everything in its
     ``derivedFrom`` (resolved by ``paperId`` or by ``role``). Effective, not
     declared: the restriction is transitive, so a public summary of a public
-    digest of a restricted CV is restricted. Resolution is a memoized
+    digest of a private CV is private. Resolution is a memoized
     depth-first walk, and a cycle raises :class:`DerivationCycleError` rather
     than settling on whichever tier the walk happened to reach first.
 
@@ -304,36 +302,11 @@ def profile_visible(
 
     ``floor`` is a host-supplied constraint ("regardless of what this document
     declares, it may not go above X here"): a registry pins an unclaimed profile
-    to ``internal`` this way, because nobody has consented to publish it. Folded
+    to ``limited`` this way, because nobody has consented to publish it. Folded
     in with :func:`~researcher_profiles.schema.most_restrictive`, so a floor can
     only ever narrow.
     """
     return tier_allows(viewer, most_restrictive(profile.visibility, floor))
-
-
-def publishignore_lines(profile: ProfileDocument) -> list[str]:
-    """Lines for ``.publishignore``: every path whose effective tier > public.
-
-    Includes manifest artifacts above ``public`` plus the always-restricted
-    directory prefixes (``.cache/``, ``.keys/``) and ``.publishignore`` itself.
-    Sorted and de-duplicated so the file diffs cleanly.
-    """
-    lines: set[str] = set(ALWAYS_RESTRICTED_PREFIXES)
-    lines.add(".publishignore")
-    for content_url, tier in effective_tiers(profile).items():
-        if tier != "public":
-            lines.add(content_url)
-    return sorted(lines)
-
-
-def render_publishignore(profile: ProfileDocument) -> str:
-    """The ``.publishignore`` file body (a trailing newline, stable order)."""
-    return "\n".join(publishignore_lines(profile)) + "\n"
-
-
-def is_publishable(content_url: str, effective: dict[str, Visibility]) -> bool:
-    """True if ``content_url``'s effective tier is ``public``."""
-    return effective.get(content_url, "public") == "public"
 
 
 def chunk_source_tiers(
@@ -348,10 +321,10 @@ def chunk_source_tiers(
     :func:`effective_tiers` uses: the profile-level default floored with the
     role default for the source type
     (:func:`schema.role_default_visibility`). ``cv``/``web``/``grant`` chunks
-    come back ``restricted``; ``expertise``/``soul``/``paper_summary``/
+    come back ``private``; ``expertise``/``soul``/``paper_summary``/
     ``paper_abstract`` come back ``public`` (unless the whole profile is held
     back by its default). The embedding exporter drops every key whose tier
-    exceeds ``public`` via :func:`drop_above_public`.
+    exceeds its audience via :func:`tier_allows`.
 
     ``profile`` may be ``None`` (an unloadable ``profile.jsonld``), in which
     case the profile default is treated as ``public`` and only the role
@@ -365,20 +338,8 @@ def chunk_source_tiers(
     return out
 
 
-def drop_above_public(
-    items: Iterable[tuple[str, Visibility]],
-) -> list[str]:
-    """Given ``(id, tier)`` pairs, return the ids whose tier is ``public``.
-
-    The embedding-chunk exporter uses this to drop any row whose source tier
-    exceeds ``public``, the general form of the former ``PUBLISHED_SOURCE_TYPES``
-    allowlist.
-    """
-    return [ident for ident, tier in items if tier == "public"]
-
-
 __all__ = [
-    "ALWAYS_RESTRICTED_PREFIXES",
+    "ALWAYS_PRIVATE_PREFIXES",
     "CHUNK_SOURCE_TYPE_ROLE",
     "DerivationCycleError",
     "TierExplanation",
@@ -389,11 +350,7 @@ __all__ = [
     "profile_visible",
     "tier_allows",
     "chunk_source_tiers",
-    "drop_above_public",
     "effective_tiers",
-    "is_publishable",
-    "publishignore_lines",
-    "render_publishignore",
     "SECTION_FIELDS",
     "project_document",
     "section_tiers",

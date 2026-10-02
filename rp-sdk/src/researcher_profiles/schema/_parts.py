@@ -484,7 +484,7 @@ class ArtifactRef(JsonLdModel):
     sha256: str | None = None
     #: This artifact's declared privacy tier. When not explicitly set it
     #: defaults to the role default (:func:`role_default_visibility`); e.g. a
-    #: ``cv``/``web``/``paper_fulltext`` artifact defaults to ``restricted``.
+    #: ``cv``/``web``/``paper_fulltext`` artifact defaults to ``private``.
     #: Every role's tier is fully choosable by the owner; the default is a
     #: default, not a floor. The *effective* tier also folds in
     #: ``derived_from``; see :func:`researcher_profiles.privacy.effective_tiers`.

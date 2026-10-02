@@ -74,6 +74,7 @@ from ..schema import (
     effective_interests,
     interests_from_text,
 )
+from ..schema._common import RENAMED_TIERS
 
 if TYPE_CHECKING:  # pragma: no cover
     from . import ResearcherProfile
@@ -480,7 +481,18 @@ class EditManager:
         surface that knows about the host ceiling, and a second way to set a
         tier is a second privacy implementation.
         """
-        valid_tiers = {"public", "internal", "restricted"}
+        valid_tiers = {"public", "limited", "private"}
+
+        def _check_tier(tier: Any, where: str) -> None:
+            if tier in RENAMED_TIERS:
+                raise EditError(
+                    f"visibility {tier!r}{where} was renamed to {RENAMED_TIERS[tier]!r} (rp spec 2026-10)"
+                )
+            if tier not in valid_tiers:
+                raise EditError(
+                    f"invalid visibility {tier!r}{where} (one of {sorted(valid_tiers)})"
+                )
+
         doc = self._profile.metadata
         update: dict[str, Any] = {}
         changed = 0
@@ -504,23 +516,18 @@ class EditManager:
                 target.visibility = tier  # type: ignore[assignment]
 
         if profile_visibility is not None:
-            if profile_visibility not in valid_tiers:
-                raise EditError(
-                    f"invalid visibility {profile_visibility!r} (one of {sorted(valid_tiers)})"
-                )
+            _check_tier(profile_visibility, "")
             update["visibility"] = profile_visibility
         if artifacts:
             for entry in artifacts:
                 tier = entry.get("visibility")
-                if tier not in valid_tiers:
-                    raise EditError(f"invalid visibility {tier!r} for artifact {entry!r}")
+                _check_tier(tier, f" for artifact {entry!r}")
                 _retier(entry, tier)
         if sections:
             declared = {x.section: x.visibility for x in doc.section_visibility}
             for entry in sections:
                 tier = entry.get("visibility")
-                if tier not in valid_tiers:
-                    raise EditError(f"invalid visibility {tier!r} for section {entry!r}")
+                _check_tier(tier, f" for section {entry!r}")
                 try:
                     parsed = SectionVisibility.model_validate(entry)
                 except ValidationError as e:

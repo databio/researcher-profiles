@@ -4,7 +4,7 @@ Two layers:
 
 - :mod:`researcher_profiles.profile.edit`: the on-disk mutation helpers (patch metadata,
   set soul, set visibility, patch/add/remove one work), including the
-  re-validation guarantee and the legal ``paper_fulltext`` restricted pin.
+  re-validation guarantee and the legal ``paper_fulltext`` private pin.
 - the ``PATCH/PUT /api/v1/profiles/{slug}/...`` endpoints via ``require_owner``:
   the operator-token fallback on bare rp-sdk, and the owner/non-owner/no-session
   behavior when a management host installs an ``owner_verifier``.
@@ -68,8 +68,8 @@ class TestEditHelpers:
 
     def test_set_profile_visibility(self, jane_doe_dir):
         prof = ResearcherProfile.from_files(jane_doe_dir)
-        prof.edit.set_visibility(profile_visibility="internal")
-        assert ResearcherProfile.from_files(jane_doe_dir).metadata.visibility == "internal"
+        prof.edit.set_visibility(profile_visibility="limited")
+        assert ResearcherProfile.from_files(jane_doe_dir).metadata.visibility == "limited"
 
     def test_set_visibility_rejects_bad_tier(self, jane_doe_dir):
         prof = ResearcherProfile.from_files(jane_doe_dir)
@@ -78,15 +78,15 @@ class TestEditHelpers:
 
     def test_artifact_visibility_by_role(self, jane_doe_dir):
         prof = ResearcherProfile.from_files(jane_doe_dir)
-        prof.edit.set_visibility(artifacts=[{"role": "soul", "visibility": "internal"}])
+        prof.edit.set_visibility(artifacts=[{"role": "soul", "visibility": "limited"}])
         reloaded = ResearcherProfile.from_files(jane_doe_dir)
         soul_ref = [p for p in reloaded.metadata.subject_of if p.role == "soul"][0]
-        assert soul_ref.visibility == "internal"
+        assert soul_ref.visibility == "limited"
 
     def test_paper_fulltext_tier_is_choosable(self, jane_doe_dir):
         """paper_fulltext is an ordinary role: the owner may raise it to public.
 
-        It defaults to restricted, but that is a default, not a floor. Setting
+        It defaults to private, but that is a default, not a floor. Setting
         it to public succeeds and the change survives a reload.
         """
         prof = ResearcherProfile.from_files(jane_doe_dir)
@@ -108,14 +108,14 @@ class TestEditHelpers:
         """
         prof = ResearcherProfile.from_files(jane_doe_dir)
         _doc, changed = prof.edit.set_visibility(
-            sections=[{"section": "soul", "visibility": "internal"}]
+            sections=[{"section": "soul", "visibility": "limited"}]
         )
         assert changed >= 1
         reloaded = ResearcherProfile.from_files(jane_doe_dir)
         soul_refs = [p for p in reloaded.metadata.subject_of if p.role == "soul"]
-        assert soul_refs and all(p.visibility == "internal" for p in soul_refs)
+        assert soul_refs and all(p.visibility == "limited" for p in soul_refs)
         declared = {x.section: x.visibility for x in reloaded.metadata.section_visibility}
-        assert declared["soul"] == "internal"
+        assert declared["soul"] == "limited"
 
     def test_metadata_patch_stamps_date_modified(self, jane_doe_dir):
         import json
@@ -141,7 +141,7 @@ class TestEditHelpers:
         import json
 
         prof = ResearcherProfile.from_files(jane_doe_dir)
-        prof.edit.set_visibility(profile_visibility="internal")
+        prof.edit.set_visibility(profile_visibility="limited")
         doc = json.loads((jane_doe_dir / "profile.jsonld").read_text())
         assert "dateModified" in doc
 
@@ -292,7 +292,7 @@ class TestEditAgainstAReadOnlyBackend:
         prof = self._read_only_over(jane_doe_dir)
         before = (jane_doe_dir / "profile.jsonld").read_text()
         with pytest.raises(EditError):
-            prof.edit.set_visibility(profile_visibility="internal")
+            prof.edit.set_visibility(profile_visibility="limited")
         assert (jane_doe_dir / "profile.jsonld").read_text() == before
 
 
@@ -341,7 +341,7 @@ class TestEditEndpointsOperatorFallback:
         assert r.json()["updated"] == ["soul"]
         r = c.patch(
             f"/api/v1/profiles/{SLUG}/visibility",
-            json={"profile_visibility": "internal"},
+            json={"profile_visibility": "limited"},
         )
         assert r.status_code == 200, r.text
         assert "visibility" in r.json()["updated"]
@@ -362,21 +362,21 @@ class TestEditEndpointsOperatorFallback:
     def test_soul_section_patch_retiers_artifact_and_round_trips(
         self, make_api_client, fixture_profiles_root
     ):
-        """PATCH sections=[{soul: internal}] re-tiers the soul artifact, and the
-        report reads the declared tier back as internal."""
+        """PATCH sections=[{soul: limited}] re-tiers the soul artifact, and the
+        report reads the declared tier back as limited."""
         c = make_api_client(fixture_profiles_root(SLUG))
         r = c.patch(
             f"/api/v1/profiles/{SLUG}/visibility",
-            json={"sections": [{"section": "soul", "visibility": "internal"}]},
+            json={"sections": [{"section": "soul", "visibility": "limited"}]},
         )
         assert r.status_code == 200, r.text
         assert "sections" in r.json()["updated"]
         assert r.json()["artifacts_changed"] >= 1
         report = c.get(f"/api/v1/profiles/{SLUG}/visibility").json()
         soul_row = next(s for s in report["sections"] if s["section"] == "soul")
-        assert soul_row["declared"] == "internal"
+        assert soul_row["declared"] == "limited"
         soul_artifacts = [a for a in report["artifacts"] if a.get("role") == "soul"]
-        assert soul_artifacts and all(a["declared"] == "internal" for a in soul_artifacts)
+        assert soul_artifacts and all(a["declared"] == "limited" for a in soul_artifacts)
 
 
 class TestWorkEndpoints:
@@ -753,12 +753,12 @@ class TestConcurrencyToken:
         c.patch(f"/api/v1/profiles/{SLUG}/metadata", json={"field": "Somebody Else's Edit"})
         r = c.patch(
             f"/api/v1/profiles/{SLUG}/visibility",
-            json={"profile_visibility": "internal", "base_hash": stale},
+            json={"profile_visibility": "limited", "base_hash": stale},
         )
         assert r.status_code == 409, r.text
         assert r.headers["X-RP-Content-Hash"].startswith("sha256:")
         assert c.get(f"/api/v1/profiles/{SLUG}/visibility").json()["profile_visibility"] != (
-            "internal"
+            "limited"
         )
 
     def test_matching_visibility_base_hash_is_accepted(
@@ -768,7 +768,7 @@ class TestConcurrencyToken:
         before = c.get(f"/api/v1/profiles/{SLUG}").json()["content_hash"]
         r = c.patch(
             f"/api/v1/profiles/{SLUG}/visibility",
-            json={"profile_visibility": "internal", "base_hash": before},
+            json={"profile_visibility": "limited", "base_hash": before},
         )
         assert r.status_code == 200, r.text
         assert r.json()["updated"] == ["visibility"]
@@ -801,7 +801,7 @@ class TestAuthoredHistoryOverHttp:
         assert md["career"][0]["role"] == "PI"
         # The document's own tier is readable, so an editor can say what it is
         # without guessing. It is not settable here.
-        assert md["visibility"] in {"public", "internal", "restricted"}
+        assert md["visibility"] in {"public", "limited", "private"}
 
     def test_malformed_training_over_http_is_a_400(self, make_api_client, fixture_profiles_root):
         c = make_api_client(fixture_profiles_root(SLUG))

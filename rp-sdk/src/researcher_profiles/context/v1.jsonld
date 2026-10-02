@@ -47,7 +47,15 @@
     "contentSize": "schema:contentSize",
     "role": "rp:role",
     "paperId": "rp:paperId",
-    "visibility": "rp:visibility",
+    "visibility": {
+      "@id": "rp:visibility",
+      "@type": "@vocab",
+      "@context": {
+        "public": "rp:Public",
+        "limited": "rp:Limited",
+        "private": "rp:Private"
+      }
+    },
     "derivedFrom": "rp:derivedFrom",
     "bytes": "rp:bytes",
     "sha256": "rp:sha256",
@@ -242,5 +250,37 @@
     "DigitalDocument": "schema:DigitalDocument",
     "DataDownload": "schema:DataDownload",
     "Collection": "schema:Collection"
-  }
+  },
+
+  "@graph": [
+    {
+      "@id": "rp:Public",
+      "@type": "skos:Concept",
+      "skos:prefLabel": "public",
+      "skos:definition": "Anyone may access.",
+      "skos:closeMatch": [
+        { "@id": "http://publications.europa.eu/resource/authority/access-right/PUBLIC" },
+        { "@id": "http://purl.org/coar/access_right/c_abf2" }
+      ]
+    },
+    {
+      "@id": "rp:Limited",
+      "@type": "skos:Concept",
+      "skos:prefLabel": "limited",
+      "skos:definition": "Only readers the owner or the host has granted access.",
+      "skos:closeMatch": [
+        { "@id": "http://publications.europa.eu/resource/authority/access-right/RESTRICTED" },
+        { "@id": "http://purl.org/coar/access_right/c_16ec" }
+      ]
+    },
+    {
+      "@id": "rp:Private",
+      "@type": "skos:Concept",
+      "skos:prefLabel": "private",
+      "skos:definition": "Only the owner and agents acting for the owner.",
+      "skos:closeMatch": [
+        { "@id": "http://publications.europa.eu/resource/authority/access-right/NON_PUBLIC" }
+      ]
+    }
+  ]
 }

@@ -30,13 +30,7 @@ from typing import TYPE_CHECKING, Literal, get_args
 import pydantic
 
 from ..errors import ProfileError
-from ..privacy import (
-    ALWAYS_RESTRICTED_PREFIXES,
-    ViewerTier,
-    explain_tiers,
-    project_document,
-    tier_allows,
-)
+from ..privacy import ViewerTier
 
 # ``SLUG_RE`` is the directory-name grammar, re-exported from the single
 # canonical definition in ``schema/``. This is not an identity check. Never
@@ -357,75 +351,24 @@ def build_viewer_archive(profile_dir: str | os.PathLike, *, viewer: ViewerTier) 
 
     This is the egress archive: the one an HTTP caller can reach. Where
     :func:`build_profile_archive` hands another machine the whole record (a
-    push, a migration), this answers "what may this reader have", using the same
-    ``privacy.explain_tiers`` projection every other read route uses.
-
-    Rules, in order:
-
-    * a manifest artifact ships when ``tier_allows(viewer, effective_tier)``;
-    * ``ALWAYS_RESTRICTED_PREFIXES`` (``.cache/``, ``.keys/``) never ships;
-    * ``profile.jsonld`` always ships, but **projected**: the manifest inside
-      it is tier-invariant (spec section 6), while its inline sections are not,
-      and an exclude list cannot redact a field out of a document that is
-      already in the tarball. It is otherwise gated at the profile level by the
-      caller's route.
+    push, a migration), this answers "what may this reader have". What ships
+    is decided by :func:`~researcher_profiles.publish._export.plan_profile_export`,
+    the same projection ``rp publish`` writes to a static tree, so the archive
+    and a static export cannot drift. The whole-profile gate is the caller's
+    route.
     """
+    from ..publish._export import PROFILE_DOCUMENT, plan_profile_export
+
     src = Path(profile_dir).expanduser().resolve()
-    doc = src / "profile.jsonld"
-    if not doc.is_file():
-        raise FileNotFoundError(f"not a profile directory (no profile.jsonld): {src}")
-
-    from ..schema import ProfileDocument
-
-    profile = ProfileDocument.model_validate_json(doc.read_bytes())
-    explain = explain_tiers(profile)
-
-    def _ships(rel: str) -> bool:
-        if rel == "profile.jsonld":
-            # Never from disk: the projected copy is added separately below.
-            return False
-        if any(rel.startswith(prefix) for prefix in ALWAYS_RESTRICTED_PREFIXES):
-            return False
-        entry = explain.get(rel)
-        if entry is None:
-            # Not a manifest artifact: it is not part of the published record,
-            # so it does not travel. (This is what retires the old whitelist:
-            # the manifest already says what a profile contains.)
-            return False
-        return tier_allows(viewer, entry.effective)
-
-    def _filter(ti: tarfile.TarInfo) -> tarfile.TarInfo | None:
-        rel = ti.name
-        if any(part.startswith(".") for part in Path(rel).parts):
-            return None
-        if ti.isdir():
-            # Keep a directory only when something under it actually ships. An
-            # empty ``sources/papers/`` would otherwise still announce that the
-            # profile holds full text it would not hand over.
-            prefix = rel.rstrip("/") + "/"
-            if not any(url.startswith(prefix) and _ships(url) for url in explain):
-                return None
-        elif not _ships(rel):
-            return None
-        ti.uid = ti.gid = 0
-        ti.uname = ti.gname = ""
-        return ti
-
-    from ..schema.jsonld import canonical_dumps
-
-    document = canonical_dumps(project_document(profile, viewer).model_dump(mode="json")).encode(
-        "utf-8"
-    )
+    plan = plan_profile_export(src, viewer)
 
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tf:
-        info = tarfile.TarInfo("profile.jsonld")
-        info.size = len(document)
-        tf.addfile(info, io.BytesIO(document))
-        for child in sorted(src.iterdir()):
-            if child.name.startswith("."):
-                continue
-            tf.add(child, arcname=child.name, filter=_filter)
+        info = tarfile.TarInfo(PROFILE_DOCUMENT)
+        info.size = len(plan.document)
+        tf.addfile(info, io.BytesIO(plan.document))
+        for rel in plan.files:
+            tf.add(src / rel, arcname=rel, filter=_normalize)
     return buf.getvalue()
 
 

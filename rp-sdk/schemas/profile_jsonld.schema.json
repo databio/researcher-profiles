@@ -180,8 +180,8 @@
           "default": "public",
           "enum": [
             "public",
-            "internal",
-            "restricted"
+            "limited",
+            "private"
           ],
           "title": "Visibility",
           "type": "string"
@@ -1238,8 +1238,8 @@
         "visibility": {
           "enum": [
             "public",
-            "internal",
-            "restricted"
+            "limited",
+            "private"
           ],
           "title": "Visibility",
           "type": "string"
@@ -1903,8 +1903,8 @@
       "default": "public",
       "enum": [
         "public",
-        "internal",
-        "restricted"
+        "limited",
+        "private"
       ],
       "title": "Visibility",
       "type": "string"

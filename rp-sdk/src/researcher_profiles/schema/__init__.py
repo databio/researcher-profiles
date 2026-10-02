@@ -39,9 +39,10 @@ from scholarcore.identity import LOCAL_RID_RE, is_local, is_rid, orcid_of
 
 from ._common import _VISIBILITY_ORDER as _VISIBILITY_ORDER
 from ._common import (
-    ALWAYS_RESTRICTED_ROLES,
+    ALWAYS_PRIVATE_ROLES,
     FORMAT_HINT,
     KNOWN_PROVENANCE,
+    RENAMED_TIERS,
     ROLE_DEFAULT_VISIBILITY,
     ProfileLevel,
     Provenance,
@@ -97,7 +98,7 @@ from ._sources import (
 )
 
 __all__ = [
-    "ALWAYS_RESTRICTED_ROLES",
+    "ALWAYS_PRIVATE_ROLES",
     "LOCAL_RID_RE",
     "SLUG_RE",
     "ANCHOR_FIELDS",
@@ -122,6 +123,7 @@ __all__ = [
     "Proof",
     "REGISTRY_ISSUED_PROOF_KINDS",
     "Provenance",
+    "RENAMED_TIERS",
     "ROLE_DEFAULT_VISIBILITY",
     "ResearchOutput",
     "SectionVisibility",

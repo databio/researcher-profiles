@@ -157,14 +157,14 @@ class TestManagementClient:
                 "patch_visibility",
                 (SLUG,),
                 {
-                    "profile_visibility": "internal",
-                    "artifacts": [{"role": "soul", "visibility": "restricted"}],
+                    "profile_visibility": "limited",
+                    "artifacts": [{"role": "soul", "visibility": "private"}],
                 },
                 "patch",
                 f"/api/v1/profiles/{SLUG}/visibility",
                 {
-                    "profile_visibility": "internal",
-                    "artifacts": [{"role": "soul", "visibility": "restricted"}],
+                    "profile_visibility": "limited",
+                    "artifacts": [{"role": "soul", "visibility": "private"}],
                 },
             ),
             (
@@ -285,7 +285,7 @@ class TestManagementClient:
         session.patch.return_value = response
 
         with pytest.raises(AgentAPIError) as error:
-            client.profile.patch_visibility(SLUG, profile_visibility="internal")
+            client.profile.patch_visibility(SLUG, profile_visibility="limited")
 
         assert not isinstance(error.value, InsufficientAccessError)
         assert error.value.detail == "Apps and API keys may not make this change."
@@ -547,7 +547,7 @@ class TestServerCore:
     ):
         # A site-wide "is the surface open" switch would be the wrong axis; the
         # question is "how much of this profile may this caller see". The token
-        # widens the caller's tier to ``restricted``; it does not unlock a door.
+        # widens the caller's tier to ``private``; it does not unlock a door.
         c = make_api_client(fixture_profiles_root(SLUG), token="secret-token")
         anon = c.get("/api/v1/profiles")
         assert anon.status_code == 200
@@ -557,13 +557,13 @@ class TestServerCore:
             headers={"Authorization": "Bearer secret-token"},
         )
         assert operator.status_code == 200
-        assert operator.headers["X-RP-Viewer-Tier"] == "restricted"
+        assert operator.headers["X-RP-Viewer-Tier"] == "private"
 
     def test_a_private_profile_is_withheld_from_anonymous_but_not_the_operator(
         self, make_api_client, fixture_profiles_root, tmp_path
     ):
         # The private-registry posture, expressed per profile: the document
-        # itself declares ``internal``, so an anonymous caller gets the same 404
+        # itself declares ``limited``, so an anonymous caller gets the same 404
         # a nonexistent slug gets, and the operator gets the profile.
         import shutil
 
@@ -574,7 +574,7 @@ class TestServerCore:
         shutil.copytree(fixture_profiles_root(SLUG) / SLUG, root / SLUG)
         prof = ResearcherProfile.from_files(root / SLUG)
         doc = prof.metadata
-        doc.visibility = "internal"
+        doc.visibility = "limited"
         prof.save_profile(doc)
 
         c = make_api_client(root, token="secret-token")
@@ -1220,11 +1220,11 @@ class TestArchiveAndInstall:
     def test_fulltext_does_not_ship_to_a_public_caller(
         self, make_api_client, server_root, cache_root
     ):
-        """Paper full text defaults to ``restricted``, so a public install omits it.
+        """Paper full text defaults to ``private``, so a public install omits it.
 
         The archive is projected through the caller's tier by
         ``build_viewer_archive``. This install resolves to the ``public`` tier,
-        and ``paper_fulltext`` defaults to ``restricted``, so it is withheld here
+        and ``paper_fulltext`` defaults to ``private``, so it is withheld here
         (an owner-tier caller who has not re-tiered it would still receive it).
         """
         http = make_api_client(server_root)

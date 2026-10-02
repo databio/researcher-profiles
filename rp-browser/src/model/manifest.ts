@@ -36,7 +36,7 @@ export interface ArtifactRef {
   /** For per-paper entries (e.g. role `paper_summary`), the paper it belongs to. */
   paperId?: string | null;
   /** Publication scope of the file. */
-  visibility?: "public" | "internal" | "restricted" | string | null;
+  visibility?: "public" | "limited" | "private" | string | null;
   derivedFrom?: string | null;
   bytes?: number | null;
   sha256?: string | null;

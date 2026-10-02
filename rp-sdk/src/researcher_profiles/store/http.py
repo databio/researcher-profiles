@@ -20,7 +20,7 @@ Two things follow from the published form, and both are by design rather than
 by omission:
 
 * **Public subset only.** ``.cache/embeddings.sqlite`` never leaves the build
-  machine, so a chunk whose source is ``restricted`` has no row in any ``.bin``
+  machine, so a chunk whose source is ``private`` has no row in any ``.bin``
   here (spec section 6). Ranking through this store is ranking over what the
   site publishes, which is the correct answer for a consumer that only ever had
   the site.
@@ -355,7 +355,7 @@ class HttpProfileStore(_HookedStore, _AnalyticsAccessors):
         if index_json is None:
             raise IndexNotBuiltError(
                 f"profile {slug!r} at {self.base_url} publishes no embeddings/index.json; "
-                "it was built without a searchable index, or every chunk was restricted"
+                "it was built without a searchable index, or every chunk was private"
             )
         index = json.loads(index_json)
         blob = self._get(f"{base}/{index['file']}")
@@ -503,7 +503,7 @@ class HttpProfileStore(_HookedStore, _AnalyticsAccessors):
         names, and the flat embedding form. What comes back is the published
         record, which is the same thing
         :meth:`FilesystemProfileStore.export_directory` produces and less than
-        the build directory held (no ``.cache/``, no restricted sources).
+        the build directory held (no ``.cache/``, no private sources).
         """
         slug = self.resolve_slug(ref)
         out = Path(dest).expanduser()

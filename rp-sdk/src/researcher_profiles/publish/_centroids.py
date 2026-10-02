@@ -28,7 +28,7 @@ def _collect_centroid(
     """Append ``(slug, backend_spec, centroid, probe)`` when the profile is Searchable.
 
     A profile is Searchable when it ships ``embeddings/index.json``. The
-    centroid is computed from the local sqlite (all chunks, including restricted
+    centroid is computed from the local sqlite (all chunks, including private
     sources, since a single averaged vector is not invertible, spec §6), so this is
     a no-op wrapped in a guard when the sqlite is absent or unreadable.
     """
@@ -255,8 +255,7 @@ def _write_collection_bundle(
 
 
 def _write_topics_index(
-    root: Path,
-    slugs: list[str],
+    dirs: dict[str, Path],
     write: _Writer,
     result: "SiteResult",  # noqa: ARG001
     timestamp: str,
@@ -265,8 +264,7 @@ def _write_topics_index(
     from ..embeddings import IndexNotBuiltError
 
     index: dict[str, list[str]] = {}
-    for slug in slugs:
-        entry = root / slug
+    for slug, entry in dirs.items():
         try:
             prof = ResearcherProfile.from_files(entry)
             topics = prof.topics.get(method="cached")

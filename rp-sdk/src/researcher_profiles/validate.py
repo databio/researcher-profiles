@@ -795,7 +795,7 @@ def _check_content_urls(root: Path, profile_doc: dict, report: ProfileValidation
 def _check_derivation(profile_doc: dict, report: ProfileValidationReport) -> None:
     """Every ``derivedFrom`` reference resolves, and the graph has no cycle.
 
-    The derivation rule makes an artifact at least as restricted as everything
+    The derivation rule makes an artifact at least as private as everything
     it came from, so a reference that resolves to nothing is not a harmless
     dangling link: it is a restriction the projection silently failed to
     apply. :func:`~researcher_profiles.privacy.derivation_errors` is the one

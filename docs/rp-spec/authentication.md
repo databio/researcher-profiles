@@ -27,8 +27,8 @@ Three tiers are defined:
 | Tier | Sees |
 |------|------|
 | `public` | Public artifacts only |
-| `internal` | Public + internal artifacts |
-| `restricted` | All artifacts |
+| `limited` | Public + limited artifacts |
+| `private` | All artifacts |
 
 An unauthenticated caller defaults to the `public` tier. A server that does not
 implement tiers treats all callers as `public`.
@@ -157,7 +157,7 @@ profile the caller may read nothing of returns `404` too.
 
 An app or key that reads some parts but not all is served at viewer tier
 `public` with a copy of the document rewritten for it: the parts it may read
-are declared `public`, the rest `restricted`. Those declarations describe that
+are declared `public`, the rest `private`. Those declarations describe that
 caller's view, not the open web's.
 
 ### Writes

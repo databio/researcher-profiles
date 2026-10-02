@@ -2,7 +2,7 @@
 
 ``POST /identity/resolve`` is the identity function: a rid or name goes in, a
 rid comes out, and a true miss creates the identity (a ``lite``,
-``internal``, ``third_party`` stub). It is a write route and is gated like
+``limited``, ``third_party`` stub). It is a write route and is gated like
 one; putting it behind ``match`` would let every read-tier key mint people.
 See ``researcher_profiles.resolve`` for the pipeline.
 """

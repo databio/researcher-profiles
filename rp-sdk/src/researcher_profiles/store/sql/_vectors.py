@@ -21,7 +21,7 @@ remotely, and SQL rows feed it here.
 Privacy: the shredded rows are the *public* subset, filtered exactly as
 :func:`~researcher_profiles.embeddings.flat.write_flat_export` filters, because
 embeddings are partially invertible (spec section 6). The centroid is computed
-over the whole index including restricted chunks, exactly as the published
+over the whole index including private chunks, exactly as the published
 ``collection/embeddings/`` blob is: one averaged vector is not invertible.
 
 ``numpy`` and ``sqlite_vec`` are imported inside functions, never at module
@@ -128,13 +128,13 @@ def _from_sqlite(profile: "ResearcherProfile"):
 
     from ...build_state import BuildState
     from ...embeddings._sqlite import IndexNotBuiltError
-    from ...embeddings.flat import _public_rows, _read_rows
+    from ...embeddings.flat import _read_rows, _servable_rows
     from ...embeddings.profile_vec import _centroid_vec
 
     rows, dim, backend_spec = _read_rows(db_path)
     if not backend_spec or dim <= 0:
         return None
-    kept = _public_rows(rows, profile.metadata, BuildState.load(directory))
+    kept = _servable_rows(rows, profile.metadata, BuildState.load(directory))
     chunks = [
         {
             "source_type": r[0],

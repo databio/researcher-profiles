@@ -80,8 +80,8 @@ capability matrix.
 - [Specification](../rp-spec/index.md): terminology, the `profile.jsonld`
   document and its `hasPart`/`subjectOf` manifest, the file layout, the
   vocabulary, and the conformance levels
-- [Privacy](../rp-spec/privacy.md): `public`/`internal`/`restricted`, the
-  derivation rule, and `.publishignore`
+- [Privacy](../rp-spec/privacy.md): `public`/`limited`/`private`, the
+  derivation rule, and the static export rule
 - [Embeddings](../rp-spec/embeddings.md): the Searchable conformance level
 - [Static API](../rp-spec/static-api.md): CORS, content types, caching,
   URL resolution, profile lists, and the normative hosting and transport

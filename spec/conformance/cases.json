@@ -23,7 +23,7 @@
     },
     {
       "dir": "valid/interview-self-report",
-      "description": "Valid interview-built profile: level full, provenance self_published with a provenanceNote, an empty works Collection, a restricted `interview` part (sources/interview.md), and SOUL/expertise persona docs that open with a self-reported disclosure line and cite no paper_ids.",
+      "description": "Valid interview-built profile: level full, provenance self_published with a provenanceNote, an empty works Collection, a private `interview` part (sources/interview.md), and SOUL/expertise persona docs that open with a self-reported disclosure line and cite no paper_ids.",
       "cli": {
         "valid": true
       },

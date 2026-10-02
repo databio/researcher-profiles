@@ -96,10 +96,10 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
         "visibility",
         "Get or set profile visibility",
         "rp profile visibility get",
-        "rp profile visibility set --tier internal",
+        "rp profile visibility set --tier limited",
     )
     p_vis.add_argument("visibility_cmd", choices=["get", "set"], help="get or set")
-    p_vis.add_argument("--tier", help="Visibility tier (for set)")
+    p_vis.add_argument("--tier", help="Visibility tier (for set): public, limited, or private")
     _add_host(p_vis)
 
 

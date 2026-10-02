@@ -25,7 +25,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from ..errors import ProfileError
-from ..privacy import ViewerTier, chunk_source_tiers, drop_above_public, project_document
+from ..privacy import ViewerTier, chunk_source_tiers, project_document, tier_allows
 from ..schema import (
     CareerEntry,
     PaperRecord,
@@ -309,7 +309,7 @@ def _public_body_keys(
     """
     keys = [(kind, pid) for pid in paper_ids for kind in ("paper_summary", "paper_abstract")]
     tiers = chunk_source_tiers(profile.metadata, keys)
-    return set(drop_above_public(tiers.items()))
+    return {key for key, tier in tiers.items() if tier_allows("public", tier)}
 
 
 def _export_candidates(profile: ResearcherProfile, opts: ExportOptions) -> list[_Candidate]:
@@ -633,7 +633,7 @@ def export_viewer(options: ExportOptions) -> ViewerTier:
     operator passes to export their own held-back profile, and it raises the
     viewer with it, exactly as it already relaxes the persona-document tiers.
     """
-    return "restricted" if options.allow_nonpublic else "public"
+    return "private" if options.allow_nonpublic else "public"
 
 
 def render_export_text(

@@ -149,7 +149,7 @@ conformant document once loaded and re-saved.
 | `level` | required on the wire, defaulted on load | `lite`, `full`, or `deep` (see below); absent is filled in as `full` |
 | `license` | RECOMMENDED | SPDX IRI or license URL |
 | `dateModified` | RECOMMENDED | ISO 8601 timestamp |
-| `visibility` | optional | `public`, `internal`, or `restricted` (default: `public`) |
+| `visibility` | optional | `public`, `limited`, or `private` (default: `public`) |
 | `expertise` | optional | Array of topic labels |
 | `interests` | optional | Interest labels. When `rp:researchInterests` is present, rebuilt from it: the entries with a positive weight (see [Research interests](#research-interests)) |
 | `not_interests` | optional | Authoritative non-interests. When `rp:researchInterests` is present, rebuilt from it: the entries with a negative weight |
@@ -366,10 +366,10 @@ by `role` (or `paperId`) and read its `contentUrl`.
 | `paper_summary` | hasPart | `sources/summaries/<paper_id>.summary.md` |
 | `paper_fulltext` | hasPart | `sources/papers/<paper_id>.md` |
 | `cv` | hasPart | `sources/cv.md` |
-| `interview` | hasPart | `sources/interview.md` (tier `restricted`) |
+| `interview` | hasPart | `sources/interview.md` (tier `private`) |
 | `web` | hasPart | `sources/web/<n>-<host>.md` |
 | `embedding_index` | hasPart | `embeddings/index.json` |
-| `embedding_index_sqlite` | hasPart | `.cache/embeddings.sqlite` (tier `restricted`) |
+| `embedding_index_sqlite` | hasPart | `.cache/embeddings.sqlite` (tier `private`) |
 | `agent_entry_point` | hasPart | `SKILL.md` |
 | `html` | hasPart | `index.html` |
 
@@ -448,7 +448,6 @@ These files hold data that is too large, or the wrong shape, to embed in JSON.
 ```
 <slug>/
   profile.jsonld              # REQUIRED. The record and manifest
-  .publishignore              # derived exclude list (see Privacy)
   index.html                  # landing page (written by `rp render`)
   SKILL.md                    # agent instructions (optional)
   personality/
@@ -460,7 +459,7 @@ These files hold data that is too large, or the wrong shape, to embed in JSON.
     grants.jsonld             # when grant records exist
     citations.json            # citation graph (optional)
     summaries/<paper_id>.summary.md
-    papers/<paper_id>.md      # full text. RESTRICTED, never served
+    papers/<paper_id>.md      # full text. PRIVATE by default
     cv.md                     # deep profiles
     web/<n>-<host>.md         # deep profiles
   embeddings/
@@ -468,8 +467,8 @@ These files hold data that is too large, or the wrong shape, to embed in JSON.
     <backend>.bin
     <backend>.chunks.json
   .cache/
-    embeddings.sqlite         # derived local index. RESTRICTED, never served
-  .keys/                      # signing keys. RESTRICTED, never served
+    embeddings.sqlite         # derived local index. PRIVATE
+  .keys/                      # signing keys. Never served
 ```
 
 Build state lives in `.build/<slug>/`, outside the profile directory.
@@ -624,10 +623,10 @@ Both clinical files are ordinary manifest entries and are optional everywhere:
 
 | Path | Slot | `role` | Default tier |
 |---|---|---|---|
-| `sources/trials.jsonld` | `hasPart` | `trials` | `internal` |
+| `sources/trials.jsonld` | `hasPart` | `trials` | `limited` |
 | `personality/clinical_expertise.md` | `subjectOf` | `clinical_expertise` | `public` |
 
-Trials default to `internal` because trial participation is site and
+Trials default to `limited` because trial participation is site and
 patient-adjacent operational detail; the narrative describing it is authored
 for publication and stays `public`. Trial statistics are **derived** from the
 records present, never authored: a count that can disagree with the collection

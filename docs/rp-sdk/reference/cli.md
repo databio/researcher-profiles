@@ -18,7 +18,8 @@ rp <subcommand> [options]
 | [`graph`](#graph) | Build or inspect the derived profile graph (coauthor / COI / advising edges) | core |
 | [`db`](#db) | Push, pull and inspect profiles in a SQL profile store | `[sql]` |
 | [`push`](#push) | Upload a built profile directory to a remote API server | `[client]` |
-| [`render`](#render) | Render `index.html` into a profile folder and refresh its manifest and `.publishignore` (in place) | core |
+| [`render`](#render) | Render `index.html` into a profile folder and refresh its manifest (in place) | core |
+| [`publish`](#publish) | Write the static site one audience may see into a folder any sync tool can upload as is | core |
 | [`site`](#site) | Write the collection files (index.json, by-rid.json, SKILL.md, sitemap.xml, ...) for a set of profiles | core |
 | [`install`](#install) | Pull profiles from a registry into the local cache | `[client]` |
 | [`seek`](#seek) | Print the local path of an installed profile | core |
@@ -527,12 +528,9 @@ target refused the upload. See the
 
 ## render
 
-Render a single profile's `index.html` in place, and refresh the two derived
-files that must stay in step with the profile on disk: its manifest
-(`hasPart` / `subjectOf` in `profile.jsonld`) and `.publishignore` (the list of
-`internal`/`restricted` artifacts a dumb sync must not carry). There is no
-transform and no separate output tree: the folder is publishable by
-construction.
+Render a single profile's `index.html` in place (at `public`), and refresh its
+manifest (`hasPart` / `subjectOf` in `profile.jsonld`). A profile folder is not
+itself safe to upload: to deploy, use [`publish`](#publish).
 
 ```
 rp render <profile> [--root DIR] [--base-url URL] [--no-index]
@@ -549,13 +547,53 @@ found.
 
 ---
 
+## publish
+
+Write the static tree one audience may see into an output folder. For each
+profile that audience may see, `profiles/<slug>/` gets a `profile.jsonld` with
+every section above the audience removed, only the files the audience may
+read, and an `index.html` and `embeddings/` built for the audience. The
+collection files (as [`site`](#site) writes them) are built for the same
+audience. Upload is a separate step: the folder needs no filtering.
+
+```
+rp publish <profiles> --out DIR [--who {public,limited,private}] [--root DIR]
+                      [--base-url URL] [--no-index] [--now ISO8601]
+                      [--dry-run] [--json]
+```
+
+| Argument / flag | Default | Description |
+|---|---|---|
+| `profiles` | none | A profiles root, or one profile (a directory, a rid, or a slug). |
+| `-o`, `--out DIR` | none | Output folder. Required. Must be new, empty, or a previous `rp publish` output. |
+| `--who TIER` | `public` | The audience. `limited` and `private` exports also get `noindex` pages and a disallow-all `robots.txt`. `private` prints a warning: it holds what only the owner may see. |
+| `--base-url URL` | none | Base URL for canonical links, `sitemap.xml` and `robots.txt`. |
+| `--no-index` | off | Add `noindex` directives. |
+| `--now ISO8601` | now | Pin timestamps for deterministic output. |
+| `--dry-run` | off | Print, per profile, what ships and what is withheld and why, plus skipped profiles. Writes nothing. |
+| `--json` | off | Print the same as data. |
+
+A re-run into the same folder removes files the previous run wrote and this
+one does not, so a tier tightened since the last export disappears.
+
+```bash
+rp publish ~/researcher-profiles --out ./_site
+aws s3 sync ./_site s3://my-bucket/ --delete
+```
+
+Exit code 1 when a profile's `derivedFrom` chain does not resolve (a
+restriction that cannot be computed is refused, not guessed) or the output
+folder holds files `rp publish` did not write. Exit code 2 when the profiles
+folder cannot be found.
+
+---
+
 ## site
 
 Write the collection files for a *set* of profiles into an output directory:
 `index.json`, `by-rid.json`, `SKILL.md`, `style.css`, `sitemap.xml`, and the
-rest. Deployment is then a dumb sync of the folders. `site` produces the
-collection-level index, not per-profile pages (use [`render`](#render) for
-those).
+rest, at `public`. `site` produces the collection-level index only; to build a
+deployable folder, use [`publish`](#publish), which includes these files.
 
 ```
 rp site <profiles_dir> --out DIR [--base-url URL]
@@ -1043,7 +1081,7 @@ rp profile visibility get|set [--tier TIER] [--host NAME]
 | `--if-match HASH` (`push`) | Base hash to send instead of the one in the frontmatter. |
 | `--force` (`push`) | Send no `base_hash`, so the write is last-writer-wins. |
 | `--dry-run` (`push`) | Print what would change and send nothing. |
-| `--tier TIER` (`visibility set`) | `public`, `internal`, or `restricted`. Required for `set`. |
+| `--tier TIER` (`visibility set`) | `public`, `limited`, or `private`. Required for `set`. |
 | `--host NAME` | Which `[hosts.<name>]` block to use. |
 
 The pull document is YAML frontmatter followed by the SOUL narrative as the

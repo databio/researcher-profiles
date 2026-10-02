@@ -7,7 +7,7 @@ siblings, so every model module can depend on it without a cycle.
 
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, WithJsonSchema
+from pydantic import BaseModel, BeforeValidator, ConfigDict, WithJsonSchema
 
 #: The error text naming the one on-disk format.
 FORMAT_HINT = "a profile is profile.jsonld + sources/papers.jsonld"
@@ -34,48 +34,68 @@ ProfileLevel = Literal["lite", "full", "deep"]
 #: artifact and as a profile-level default) so a profile is self-describing and
 #: a dumb sync is a correct sync, with no registry-side ``.visibility.json`` sidecar.
 #:
-#: ``public``      served on the open web; syncs anywhere.
-#: ``internal``    lab-visible only; syncs to authenticated/internal hosts.
-#: ``restricted``  never leaves the machine; syncs nowhere.
-Visibility = Literal["public", "internal", "restricted"]
+#: ``public``   anyone may access; served on the open web, syncs anywhere.
+#: ``limited``  only readers the owner or host has granted access (named apps,
+#:              keys, collaborators, or a host-defined signed-in group).
+#: ``private``  only the owner and agents acting for the owner; never served
+#:              to anyone else.
+#:
+#: Order: ``public < limited < private``. See docs/rp-spec/privacy.md for the
+#: mapping to the EU access-right, COAR and ORCID vocabularies.
+VisibilityTier = Literal["public", "limited", "private"]
+
+#: Tier names retired in the 2026-10 rename. Rejected, never aliased.
+RENAMED_TIERS: dict[str, str] = {"internal": "limited", "restricted": "private"}
+
+
+def reject_renamed_tier(value: Any) -> Any:
+    """Fail a retired tier name with a message that names its replacement."""
+    if isinstance(value, str) and value in RENAMED_TIERS:
+        raise ValueError(
+            f"visibility '{value}' was renamed to '{RENAMED_TIERS[value]}' (rp spec 2026-10)"
+        )
+    return value
+
+
+Visibility = Annotated[VisibilityTier, BeforeValidator(reject_renamed_tier)]
 
 #: Ordered most-permissive -> least-permissive. Index = restrictiveness rank.
-_VISIBILITY_ORDER: tuple[Visibility, ...] = ("public", "internal", "restricted")
+_VISIBILITY_ORDER: tuple[VisibilityTier, ...] = ("public", "limited", "private")
 
 #: Default tier by manifest ``role`` when the artifact does not declare its own.
 #: Everything unlisted defaults to ``public`` (authored, servable content).
 ROLE_DEFAULT_VISIBILITY: dict[str, Visibility] = {
-    # Supplied private inputs, restricted by default but freely re-tierable by
-    # the owner. ``paper_fulltext`` defaults to ``restricted`` so nothing
+    # Supplied private inputs, private by default but freely re-tierable by
+    # the owner. ``paper_fulltext`` defaults to ``private`` so nothing
     # silently becomes public; it is a default, not a floor.
-    "paper_fulltext": "restricted",
-    "cv": "restricted",
-    "web": "restricted",
+    "paper_fulltext": "private",
+    "cv": "private",
+    "web": "private",
     # The interview digest is the researcher's own private account of their
     # work; the public documents derived from it carry a disclosure line
-    # instead, so the digest itself never needs to leave the machine.
-    "interview": "restricted",
-    # Grant-derived embedding text (title + abstract) is restricted. This is the
+    # instead, so the digest itself never needs to reach anyone but the owner.
+    "interview": "private",
+    # Grant-derived embedding text (title + abstract) is private. This is the
     # singular chunk source_type produced by ``chunk_grant``; the manifest
     # collection role for grants is the plural ``grants`` (a public bibliographic
     # record), which no artifact resolves through this map. So this entry governs
     # only embedding-chunk tier resolution and makes cv/web/grant/paper_fulltext-
     # derived chunks all drop out of the public export by the one derivation rule.
-    "grant": "restricted",
+    "grant": "private",
     # Build-local sqlite index; the servable embeddings are the flat artifacts.
-    "embedding_index_sqlite": "restricted",
+    "embedding_index_sqlite": "private",
     # The optional clinical trials collection. Trial participation is site and
-    # patient-adjacent operational detail, so it starts lab-visible and an owner
+    # patient-adjacent operational detail, so it starts limited and an owner
     # opts it into the open web deliberately. The narrative that describes it
     # (``clinical_expertise``) is authored for publication and stays public.
-    "trials": "internal",
+    "trials": "limited",
 }
 
 #: No role carries a hard privacy floor: every artifact's tier is the owner's
 #: to choose. Kept as an (empty) name so the wire/schema exports and any
 #: consumer importing it stay stable; a role's *default* tier lives in
 #: :data:`ROLE_DEFAULT_VISIBILITY`.
-ALWAYS_RESTRICTED_ROLES: frozenset[str] = frozenset()
+ALWAYS_PRIVATE_ROLES: frozenset[str] = frozenset()
 
 
 def role_default_visibility(role: str | None) -> Visibility:
@@ -88,7 +108,7 @@ def most_restrictive(*tiers: str | None) -> Visibility:
 
     This is the derivation rule: an artifact's effective tier is the most
     restrictive of its own tier and those of everything it was derived from. A
-    summary of a ``restricted`` paper is not ``public`` merely because nobody
+    summary of a ``private`` paper is not ``public`` merely because nobody
     marked it.
     """
     rank = 0

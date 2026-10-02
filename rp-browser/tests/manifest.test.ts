@@ -181,7 +181,7 @@ describe("profileFiles carries the declared tier", () => {
     rid: "0000-0000-0000-0001",
     level: "full",
     hasPart: [
-      { contentUrl: "sources/cv.md", role: "cv", visibility: "restricted" },
+      { contentUrl: "sources/cv.md", role: "cv", visibility: "private" },
       { contentUrl: "sources/papers.jsonld", role: "works", visibility: "public" },
       { contentUrl: "sources/notes.md", role: "notes" },
     ],
@@ -190,7 +190,7 @@ describe("profileFiles carries the declared tier", () => {
   it("keeps each entry's visibility instead of dropping it on the floor", () => {
     const files = profileFiles({ manifest, base: manifest["@id"] } as ResolvedProfile);
     const byRole = Object.fromEntries(files.map((f) => [f.role, f.visibility]));
-    expect(byRole.cv).toBe("restricted");
+    expect(byRole.cv).toBe("private");
     expect(byRole.works).toBe("public");
   });
 

@@ -78,7 +78,7 @@ def search_profile(
     The served index (``.cache/embeddings.sqlite``) holds ``cv``, ``web``, and
     ``grant`` chunks as well as public ones, and this route returns chunk text
     verbatim, so without the projection a ``match``-scoped consumer reads a
-    researcher's CV back a chunk at a time. Restricted source types are
+    researcher's CV back a chunk at a time. Private source types are
     excluded from the query and dropped from the result: the first keeps them
     from crowding out results the caller may actually have, the second is the
     guarantee.

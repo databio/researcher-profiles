@@ -10,19 +10,41 @@ no application to run and no database to provision.
 
 ## What to deploy
 
-Copy the profile directory to your host. The entry point is `profile.jsonld`;
-every other file is reachable from its manifest.
+Deploying is two steps: export, then upload.
 
-Privacy filtering happens at deploy time via `.publishignore`, a newline-delimited
-list of artifacts above `public` tier (see [Privacy tiers](../rp-spec/privacy.md)):
+**1. Export the folder for one audience.** `rp publish` writes a folder that
+holds exactly what one audience may see (see
+[Privacy tiers](../rp-spec/privacy.md)):
 
 ```bash
-rsync -a --exclude-from=profiles/doe-jane/.publishignore \
-  profiles/doe-jane/ <dest>/
+rp publish ~/researcher-profiles --out ./_site                # the open web (--who public)
+rp publish ~/researcher-profiles --who limited --out ./_lab   # a mirror for granted readers
 ```
 
-This drops `restricted` artifacts (`.cache/`, `sources/papers/` full text,
-`sources/cv.md`, `sources/web/`) automatically.
+Each profile lands in `profiles/<slug>/` with its `profile.jsonld` trimmed to
+that audience, only the files that audience may read, and its page and
+embeddings rebuilt for that audience. The collection files (`index.json`,
+`by-rid.json`, `SKILL.md`, ...) sit at the top. Run it again into the same
+folder to refresh it; files that are no longer allowed are removed. Add
+`--dry-run` to see what ships and what is held back, and why.
+
+**2. Upload the folder as is.** Nothing in it needs filtering, so any sync
+tool works:
+
+```bash
+aws s3 sync ./_site s3://my-bucket/ --delete                       # Amazon S3
+aws s3 sync ./_site s3://my-bucket/ --delete \
+  --endpoint-url https://<account>.r2.cloudflarestorage.com        # Cloudflare R2
+npx wrangler deploy                                                # Cloudflare Workers (assets dir = ./_site)
+rclone sync ./_site remote:my-bucket                               # anything rclone supports
+```
+
+For GitHub Pages, commit the folder's contents to the branch Pages serves (see
+the note below about headers).
+
+Never upload a profile folder directly. Its `profile.jsonld` holds every
+section the owner wrote, including ones marked `limited` or `private`, and its
+`sources/` holds private files such as full text and the CV.
 
 ## Host requirements
 

@@ -16,6 +16,7 @@ rp list                    # every profile in the local cache
 rp where voss-elena           # path to one profile (accepts a slug OR an ORCID)
 rp validate <profile>      # does the profile conform to the format?
 rp render <profile>        # render index.html + refresh the manifest, in place
+rp publish <profiles> -o DIR  # the static folder one audience may see (--who)
 rp index <profile>         # build/update the embedding index  ([vectors,st])
 rp search <profile> "..."  # query that index                  ([vectors,st])
 rp export <profile>        # one text blob + metadata, for a knowledge base
@@ -200,8 +201,8 @@ accident. Everything else is noise that makes a real failure harder to find.
 Keep a test that pins:
 
 - an on-disk format: `profile.jsonld` and its manifest, `papers.jsonld`,
-  `grants.jsonld`, the flat `embeddings/` form, `.publishignore`, the
-  `build_site` collection files, or the byte-level canonical JSON-LD
+  `grants.jsonld`, the flat `embeddings/` form, the `rp publish` export tree,
+  the `build_site` collection files, or the byte-level canonical JSON-LD
   serialization;
 - a privacy or refusal guarantee: what never leaves the machine, what never
   reaches the published tree, when the model is not called;

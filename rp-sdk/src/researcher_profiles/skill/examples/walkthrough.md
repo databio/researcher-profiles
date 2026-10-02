@@ -111,9 +111,9 @@ against the URL the document was fetched from:
       "contentUrl": "sources/summaries/darwin1839voyage.summary.md", "bytes": 3481 },
     "... (47 paper_summary entries total)",
     { "@type": "DigitalDocument", "name": "Full text: darwin1854cirripedia", "role": "paper_fulltext",
-      "paperId": "darwin1854cirripedia", "encodingFormat": "text/markdown", "visibility": "restricted",
+      "paperId": "darwin1854cirripedia", "encodingFormat": "text/markdown", "visibility": "private",
       "contentUrl": "sources/papers/darwin1854cirripedia.md", "bytes": 59392 },
-    "... (12 paper_fulltext entries total, all restricted)"
+    "... (12 paper_fulltext entries total, all private)"
   ]
 }
 ```
@@ -143,7 +143,7 @@ The works themselves are not in this document. They live in
 `sources/papers.jsonld`, the entry with `role: "works"`, and nothing in
 Traces A to C needs them: `paper_id`s harvested from `expertise.md` resolve
 straight to `paper_summary` entries by `paperId`. The 12 `paper_fulltext`
-entries carry `visibility: "restricted"`; a reader without credentials for
+entries carry `visibility: "private"`; a reader without credentials for
 that tier skips them without counting them as gaps (see Trace C).
 
 ---
@@ -388,7 +388,7 @@ claims, not to substitute for monograph-level detail.
 ### Escalate to Stage 5
 
 The `paper_fulltext` entry for this paper carries `visibility:
-"restricted"` (its default tier here; the owner may re-tier it), so this
+"private"` (its default tier here; the owner may re-tier it), so this
 step is open only to a session that holds credentials for that tier (for
 example, a token accepted by the host serving the profile). A public
 reader stops here, says the summary is as far as the profile goes, and

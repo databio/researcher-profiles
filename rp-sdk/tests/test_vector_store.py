@@ -474,7 +474,7 @@ class TestSqlStoreVectors:
         """The shred applies the export's privacy filter, not a weaker one.
 
         Embeddings are partially invertible (spec section 6), so a chunk built
-        from a restricted source must no more reach a queryable table than it
+        from a private source must no more reach a queryable table than it
         reaches a published ``.bin``. The assertion is against
         ``public_chunk_keys``, which is the exporter's own answer.
         """

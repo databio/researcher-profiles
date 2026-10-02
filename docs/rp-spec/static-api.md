@@ -87,8 +87,8 @@ Recommended `Cache-Control`:
 | Other | `public, max-age=3600` |
 
 Servers that implement [viewer tiers](authentication.md#viewer-tiers) SHOULD
-use `private` instead of `public` for tier-restricted responses, so shared
-caches (CDNs, proxies) do not serve a restricted artifact to a lower-tier
+use `private` instead of `public` for responses above the `public` tier, so shared
+caches (CDNs, proxies) do not serve a private artifact to a lower-tier
 caller.
 
 ---

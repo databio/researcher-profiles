@@ -72,7 +72,7 @@ class ProfileDocument(JsonLdModel):
     date_modified: str | None = Field(default=None, alias="dateModified")
 
     #: Profile-level default privacy tier. Artifacts inherit it when they do not
-    #: declare their own ``visibility``. Set to ``internal``/``restricted`` to
+    #: declare their own ``visibility``. Set to ``limited``/``private`` to
     #: hold a whole profile back. This replaces the ``.visibility.json`` sidecar.
     visibility: Visibility = "public"
 

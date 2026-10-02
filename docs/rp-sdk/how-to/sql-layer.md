@@ -66,7 +66,7 @@ The schema has three properties worth knowing:
 
     Only chunks that are safe to publish are stored, the same subset the
     published `.bin` carries: embeddings are partially invertible, so a chunk
-    from a restricted source stays on the build machine. The centroid is
+    from a private source stays on the build machine. The centroid is
     computed over the whole index, because a single averaged vector is not.
 
 Build state is a separate *table* so that publishing can skip it. "Publish this store" means copy

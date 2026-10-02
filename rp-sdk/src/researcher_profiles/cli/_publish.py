@@ -1,8 +1,8 @@
-"""``rp render``, ``rp site`` and ``rp push``: the three ways a profile goes out.
+"""``rp render``, ``rp site``, ``rp publish`` and ``rp push``: how a profile goes out.
 
 ``render`` writes a profile's own HTML in place, ``site`` writes the collection
-files for a set of profiles, and ``push`` uploads a built directory to a remote
-API server.
+files for a set of profiles, ``publish`` writes the static tree one audience
+may see, and ``push`` uploads a built directory to a remote API server.
 """
 
 import argparse
@@ -33,8 +33,8 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
     p_render = add_subcommand(
         sub,
         "render",
-        "Render index.html into a profile folder, refresh its manifest and "
-        ".publishignore (in place; no transform, no separate output tree)",
+        "Render index.html into a profile folder and refresh its manifest "
+        "(in place; to deploy, use rp publish)",
         f"rp render {_EG_SLUG}",
         "rp render ./profiles/voss-elena --base-url https://profiles.example.org",
         "rp render ./profiles/voss-elena --no-index",
@@ -72,6 +72,54 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
         metavar="ISO8601",
         help="Pin timestamps for deterministic output",
     )
+
+    p_publish = add_subcommand(
+        sub,
+        "publish",
+        "Write the static site one audience may see (public by default) into a "
+        "folder that any sync tool can upload as is",
+        "rp publish ~/researcher-profiles --out ./_site",
+        "rp publish ~/researcher-profiles --who limited --out ./_lab",
+        f"rp publish {_EG_SLUG} --out ./_one --dry-run",
+        extra=(
+            "Upload is a separate step; the folder needs no filtering:\n"
+            "  aws s3 sync ./_site s3://my-bucket/ --delete\n"
+            "  aws s3 sync ./_site s3://my-bucket/ --delete "
+            "--endpoint-url https://<account>.r2.cloudflarestorage.com\n"
+            "  rclone sync ./_site remote:my-bucket\n"
+        ),
+    )
+    p_publish.add_argument(
+        "profiles", help="A profiles root, or one profile (a directory, a rid, or a slug)"
+    )
+    _add_root(p_publish, "Profiles root (for a rid/slug)")
+    p_publish.add_argument(
+        "-o", "--out", required=True, help="Output folder (created, or a previous rp publish)"
+    )
+    p_publish.add_argument(
+        "--who",
+        choices=("public", "limited", "private"),
+        default="public",
+        help="The audience: what this tier may see is exactly what is written (default: public)",
+    )
+    p_publish.add_argument(
+        "--base-url",
+        default=None,
+        help="Public base URL of the site (canonical links, sitemap, robots, catalog ids)",
+    )
+    p_publish.add_argument("--no-index", action="store_true", help="Add noindex directives")
+    p_publish.add_argument(
+        "--now",
+        default=None,
+        metavar="ISO8601",
+        help="Pin timestamps for deterministic output",
+    )
+    p_publish.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print what ships and what is withheld, and why. Writes nothing.",
+    )
+    add_json(p_publish, "Emit the export plan and result as JSON")
 
     p_push = add_subcommand(
         sub,
@@ -183,6 +231,66 @@ def _cmd_site(args: argparse.Namespace) -> int:
         return EXIT_USAGE
     for w in getattr(result, "warnings", None) or []:
         print(f"warning: {w}", file=sys.stderr)
+    return EXIT_OK
+
+
+def _resolve_publish_source(ref: str, root: str | None):
+    """A profiles root as given, or one profile resolved like any other verb."""
+    from pathlib import Path
+
+    path = Path(ref).expanduser()
+    if path.is_dir():
+        return path
+    return resolve_profile_arg("publish", ref, root)
+
+
+def _cmd_publish(args: argparse.Namespace) -> int:
+    """Write the static tree one audience may see."""
+    from ..publish import PublishError, publish_collection
+
+    source = _resolve_publish_source(args.profiles, args.root)
+    if source is None:
+        return EXIT_USAGE
+    if args.who == "private":
+        print(
+            "warning: --who private exports everything, including what only the "
+            "owner may see. Never upload it anywhere others can read.",
+            file=sys.stderr,
+        )
+    try:
+        result = publish_collection(
+            source,
+            args.out,
+            viewer=args.who,
+            base_url=args.base_url,
+            no_index=args.no_index,
+            now=args.now,
+            dry_run=args.dry_run,
+        )
+    except PublishError as e:
+        print(f"publish refused: {e}", file=sys.stderr)
+        return EXIT_ERROR
+    except FileNotFoundError as e:
+        print(f"publish failed: {e}", file=sys.stderr)
+        return EXIT_USAGE
+    for w in result.warnings:
+        print(f"warning: {w}", file=sys.stderr)
+    if args.as_json:
+        print(json.dumps(result.as_dict(), indent=2))
+        return EXIT_OK
+    verb = "would write" if args.dry_run else "wrote"
+    for p in result.profiles:
+        print(f"{p.slug}: {len(p.files)} file(s), {len(p.withheld)} withheld")
+        if args.dry_run:
+            for rel in p.files:
+                print(f"  + {rel}")
+            for rel, why in sorted(p.withheld.items()):
+                print(f"  - {rel}  ({why})")
+    for slug, why in sorted(result.skipped.items()):
+        print(f"{slug}: skipped ({why})")
+    for rel in result.removed:
+        print(f"removed {rel}")
+    print(f"{verb} {len(result.profiles)} profile(s) for --who {result.viewer} to {result.out_dir}")
     return EXIT_OK
 
 
@@ -469,5 +577,6 @@ def _report_manifest_counts(summary: dict, plan) -> None:
 COMMANDS: dict[str, Callable[[argparse.Namespace], int]] = {
     "render": _cmd_render,
     "site": _cmd_site,
+    "publish": _cmd_publish,
     "push": _cmd_push,
 }

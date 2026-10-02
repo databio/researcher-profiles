@@ -28,3 +28,13 @@ The recommended vocabularies (OpenAlex topics, then MeSH, then text-only) and
 their system URIs are in [Vocabularies](vocabularies.md). The context
 (`context/v1.jsonld`) gains the SKOS, Weighted Interest Ontology and PROV
 mappings for these entries; no existing term changes meaning.
+
+Visibility tiers renamed. The three tiers are now `public`, `limited`, and
+`private` (were `public`, `internal`, and `restricted`), ordered
+`public < limited < private`. `limited` means readers the owner or host has
+granted access; `private` means the owner and agents acting for the owner.
+The old names are rejected, with no aliases: validation names the
+replacement. [Privacy](privacy.md#mapping-to-other-vocabularies) gains a
+mapping to the EU access-right, COAR and ORCID vocabularies, and the context
+expands `visibility` values to `rp:Public`, `rp:Limited`, and `rp:Private`,
+each a `skos:closeMatch` to those terms.

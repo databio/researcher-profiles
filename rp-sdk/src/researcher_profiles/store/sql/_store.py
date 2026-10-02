@@ -968,7 +968,7 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
 
             raise IndexNotBuiltError(
                 f"profile {ref!r} in {self.url} has no rows in rp_chunk_vectors: "
-                "it was ingested without a built index, or every chunk was restricted"
+                "it was ingested without a built index, or every chunk was private"
             )
 
         from ...embeddings.flat import FlatEmbeddingIndex
@@ -979,7 +979,7 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
         """The profile's stored centroid: one row, already normalized.
 
         Not derived from :meth:`vector_index`. The centroid is computed at
-        ingest over the *whole* index, restricted chunks included (one averaged
+        ingest over the *whole* index, private chunks included (one averaged
         vector is not invertible, spec section 6), exactly as the published
         ``collection/embeddings/`` blob is, while the chunk rows are the public
         subset. Recomputing it from the chunk rows would quietly answer a

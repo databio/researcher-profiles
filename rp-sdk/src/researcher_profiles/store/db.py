@@ -675,7 +675,7 @@ class ChunkVectorRow(SQLModel, table=True):
 
     Rows are the *public* subset, the same one
     :func:`~researcher_profiles.embeddings.flat.write_flat_export` publishes:
-    embeddings are partially invertible, so a chunk built from a restricted
+    embeddings are partially invertible, so a chunk built from a private
     source never reaches this table any more than it reaches a ``.bin``.
     ``text`` is not stored for the same reason the published form drops it.
 

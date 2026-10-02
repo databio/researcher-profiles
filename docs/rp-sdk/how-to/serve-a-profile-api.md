@@ -33,7 +33,7 @@ variables.
 Set `RESEARCHER_PROFILES_TOKEN` to require `Authorization: Bearer <token>` on
 the write, search, match, persona, and edit routes. The read routes stay open
 and instead project each response through the caller's viewer tier, which the
-token widens to `restricted`:
+token widens to `private`:
 
 ```bash
 export RESEARCHER_PROFILES_TOKEN="a-long-random-string"
