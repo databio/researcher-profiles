@@ -184,6 +184,22 @@ class SentenceTransformerBackend:
         return [list(map(float, v)) for v in arr]
 
 
+#: The batch size every fastembed backend uses when it was given none. ``None``
+#: (the default) keeps fastembed's own, 256, which on abstract-length texts
+#: peaks near 4.7 GB. A host on a small machine sets it once at startup with
+#: :func:`set_fastembed_batch_size`, which reaches every backend the SDK builds
+#: internally (index builds, vector refreshes, centroids), not only its own.
+_FASTEMBED_BATCH_SIZE: int | None = None
+
+
+def set_fastembed_batch_size(batch_size: int | None) -> None:
+    """Set the process-wide fastembed batch size; ``None`` restores fastembed's."""
+    global _FASTEMBED_BATCH_SIZE
+    if batch_size is not None and batch_size < 1:
+        raise ValueError(f"batch_size must be a positive integer, got {batch_size!r}")
+    _FASTEMBED_BATCH_SIZE = batch_size
+
+
 class FastEmbedBackend:
     """Local ONNX backend via fastembed. Same weights as ``st:``, no torch.
 
@@ -236,9 +252,8 @@ class FastEmbedBackend:
         self.model_name = model_name
         self.name = f"fastembed:{model_name}"
         self.dim = self._DEFAULT_DIMS.get(model_name, 384)
-        #: Texts per ONNX batch. ``None`` leaves fastembed's own default (256),
-        #: which on abstract-length texts peaks near 4.7 GB; a caller on a small
-        #: machine passes a smaller one (16 peaks near 0.5 GB).
+        #: Texts per ONNX batch. ``None`` falls back to the process-wide
+        #: :func:`set_fastembed_batch_size`, then to fastembed's own (256).
         self.batch_size = batch_size
         self._model = None
 
@@ -272,7 +287,8 @@ class FastEmbedBackend:
             return []
         model = self._load()
         # fastembed's embed() returns a generator of numpy arrays.
-        kw = {"batch_size": self.batch_size} if self.batch_size else {}
+        size = self.batch_size or _FASTEMBED_BATCH_SIZE
+        kw = {"batch_size": size} if size else {}
         vectors = [list(map(float, v)) for v in model.embed(texts, **kw)]
         if vectors:
             self.dim = len(vectors[0])

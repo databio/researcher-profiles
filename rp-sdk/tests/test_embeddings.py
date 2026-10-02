@@ -288,6 +288,31 @@ class TestFastEmbedBackend:
         from_dict = get_backend({"backend": "fastembed", "batch_size": 8})
         assert isinstance(from_dict, FastEmbedBackend) and from_dict.batch_size == 8
 
+    def test_process_wide_batch_size_reaches_backends_built_without_one(self, monkeypatch):
+        from researcher_profiles.embeddings import backends
+
+        class Model:
+            kwargs = None
+
+            def embed(self, texts, **kw):
+                Model.kwargs = kw
+                return [[0.0] * 384 for _ in texts]
+
+        monkeypatch.setattr(backends, "_FASTEMBED_BATCH_SIZE", None)
+        backends.set_fastembed_batch_size(16)
+        b = backends.get_backend("fastembed:all-MiniLM-L6-v2")
+        b._model = Model()
+        b.embed(["a"])
+        assert Model.kwargs == {"batch_size": 16}
+
+        explicit = backends.get_backend("fastembed:all-MiniLM-L6-v2", batch_size=4)
+        explicit._model = Model()
+        explicit.embed(["a"])
+        assert Model.kwargs == {"batch_size": 4}
+
+        with pytest.raises(ValueError, match="positive"):
+            backends.set_fastembed_batch_size(0)
+
     def test_batch_size_refused_for_other_backends(self):
         from researcher_profiles.embeddings.backends import get_backend
 
