@@ -705,7 +705,6 @@ class RankWorksRequest(_APIModel):
     threshold: Optional[float] = None
     use_openalex: bool = False
     works: Optional[list[dict]] = None
-    mailto: Optional[str] = None
     max_pages: int = 5
 
 

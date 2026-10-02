@@ -9,8 +9,11 @@ raw-work-record extraction.
 Corpus-building fetch clients and the ``paper_id`` computation stay with their
 callers. What lives here beyond parsing is one narrow query client,
 :func:`fetch_new_works` ("new works since <date> relevant to a profile"), the
-candidate source for ranking works against a profile. It imports ``httpx``
-lazily (the ``client`` extra), so importing this module stays core-cheap.
+candidate source for ranking works against a profile. Every fetch takes an
+:class:`~researcher_profiles.openalex_client.OpenAlexClient` as its first
+argument; that client is the only code that talks HTTP to OpenAlex and the
+only holder of the API key. This module never imports ``httpx``, so importing
+it stays core-cheap.
 
 Public API:
     decode_abstract_inverted_index(idx) -> str: the abstract de-inversion
@@ -23,10 +26,10 @@ Public API:
     topic_prevalence(papers) -> list[ResearchInterest]: inferred topic interests
     topic_score(work_topics, interests) -> float | None: interest boost / exclude
     topic_matches(work_topics, interests) -> list[str]: topics that raised a work
-    fetch_new_works(...) -> list[PaperRecord]: query OpenAlex for candidates
-    fetch_work(id) -> PaperRecord | None: point lookup of one work
-    fetch_author_works(orcid) -> list[PaperRecord]: works OpenAlex credits to an ORCID
-    search_work_by_title(title) -> PaperRecord | None: top title-search hit
+    fetch_new_works(client, ...) -> list[PaperRecord]: query OpenAlex for candidates
+    fetch_work(client, id) -> PaperRecord | None: point lookup of one work
+    fetch_author_works(client, orcid) -> list[PaperRecord]: works credited to an ORCID
+    search_work_by_title(client, title) -> PaperRecord | None: top title-search hit
     match_papers(papers, works) -> [(paper, work)]: pair records by title
 """
 
@@ -34,12 +37,16 @@ import logging
 import re
 from collections.abc import Iterable
 from datetime import datetime, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
 
 from .errors import ProfileError
+from .openalex_client import OpenAlexHTTPError
 from .schema import PaperRecord, ResearchInterest, effective_interests
+
+if TYPE_CHECKING:
+    from .openalex_client import OpenAlexClient
 
 logger = logging.getLogger("researcher_profiles.openalex")
 _abstract_logger = logging.getLogger("researcher_profiles.openalex.abstract_decode")
@@ -498,8 +505,6 @@ def to_normalized_dict(raw: dict) -> dict:
 # Candidate fetching: the query client behind work ranking
 # ---------------------------------------------------------------------------
 
-OPENALEX_BASE_URL = "https://api.openalex.org"
-
 #: OpenAlex entity ids for topics/concepts ("T10002", "C2778112365"), bare or
 #: as full IRIs. Anything else is treated as a free-text search term.
 _TOPIC_ID_RE = re.compile(r"^(?:https://openalex\.org/)?([TC]\d+)$", re.IGNORECASE)
@@ -521,37 +526,6 @@ _MAX_CITES_SEEDS = 100
 DEFAULT_EXCLUDE_TYPES = frozenset(
     {"software", "other", "paratext", "libguides", "grant", "peer-review", "book"}
 )
-
-
-def _http_get_json(url: str, params: dict) -> dict:
-    """The one networking call site (stub this in tests).
-
-    ``httpx`` is imported here, not at module scope, so a core-only install
-    still imports this module and fails cleanly at call time.
-    """
-    try:
-        import httpx
-    except ImportError as e:
-        raise ImportError(
-            "fetch_new_works requires httpx; requires the 'client' extra, see the "
-            "install instructions in the README"
-        ) from e
-    resp = httpx.get(url, params=params, timeout=30.0, follow_redirects=True)
-    resp.raise_for_status()
-    return resp.json()
-
-
-def _transport_errors() -> tuple[type[BaseException], ...]:
-    """The fetch failures that mean "no usable work", not "the caller is broken".
-
-    ``httpx`` is imported here rather than at module scope for the same reason
-    :func:`_http_get_json` does it: a core-only install must still import this
-    module. An ImportError from a missing ``httpx`` is handled before this is
-    ever evaluated, so the import cannot fail at this point.
-    """
-    import httpx
-
-    return (httpx.HTTPError, ValueError)
 
 
 #: How many inferred topics (by share of papers) join the feed query. They have
@@ -783,51 +757,40 @@ def _topic_filters(topics: list[str]) -> list[str]:
     return out
 
 
-def fetch_work(
-    openalex_id: str,
-    *,
-    mailto: str | None = None,
-    base_url: str = OPENALEX_BASE_URL,
-) -> PaperRecord | None:
+def fetch_work(client: "OpenAlexClient", openalex_id: str) -> PaperRecord | None:
     """Fetch a single OpenAlex work by id and parse it into a ``PaperRecord``.
 
     Accepts either a bare id (``"W2741809807"``) or a full OpenAlex URL
     (``"https://openalex.org/W2741809807"``); only the trailing id segment is
-    used. ``mailto`` joins the polite pool when given. Returns the parsed
-    :class:`PaperRecord`, or ``None`` when the work is missing (any HTTP error,
-    e.g. 404) or unusable (``parse_work`` returns ``None`` for a work with no
+    used. A singleton lookup costs nothing against the daily budget. Returns
+    the parsed :class:`PaperRecord`, or ``None`` when the work is missing (an
+    :class:`OpenAlexHTTPError`, e.g. 404) or unusable (``parse_work`` returns ``None`` for a work with no
     title/year).
 
     Unlike :func:`fetch_new_works`, this is a point lookup for callers that
     hold only a work id and need the full record, abstract included, and a
-    transport failure is reported as ``None`` rather than raised.
+    transport failure is reported as ``None`` rather than raised. A budget
+    (429) or key (401) error still raises.
     """
     wid = str(openalex_id).strip().rsplit("/", 1)[-1]
     if not wid:
         return None
-    url = f"{base_url}/works/{wid}"
-    params: dict = {}
-    if mailto:
-        params["mailto"] = mailto
     try:
-        raw = _http_get_json(url, params)
-    except ImportError:
-        raise
-    except _transport_errors():
+        raw = client.get(f"/works/{wid}")
+    except OpenAlexHTTPError:
         return None
     return parse_work(raw)
 
 
 def fetch_new_works(
+    client: "OpenAlexClient",
     *,
     since,
     topics: list[str] | None = None,
     seed_work_ids: list[str] | None = None,
-    mailto: str | None = None,
-    per_page: int = 200,
+    per_page: int = 100,
     max_pages: int = 5,
     exclude_types: set[str] | frozenset[str] | None = None,
-    base_url: str = OPENALEX_BASE_URL,
 ) -> list[PaperRecord]:
     """Query OpenAlex for works published since ``since`` relevant to a profile.
 
@@ -840,9 +803,9 @@ def fetch_new_works(
     - ``seed_work_ids``: the profile's own works, as a ``cites:`` filter for
       new works citing them (capped at the first 100 seeds).
 
-    ``since`` is a ``datetime.date`` or a ``YYYY-MM-DD`` string. ``mailto``
-    joins the polite pool when given. Pagination is cursor-based, capped at
-    ``max_pages`` pages per query mode. Raw results run through
+    ``since`` is a ``datetime.date`` or a ``YYYY-MM-DD`` string. Pagination is
+    cursor-based, capped at ``max_pages`` pages per query mode; each page is
+    one billed call whatever ``per_page`` is (OpenAlex's max is 100). Raw results run through
     :func:`parse_work`, so callers get ``PaperRecord`` objects; unusable works
     (no title/year) are dropped.
 
@@ -857,8 +820,9 @@ def fetch_new_works(
     (query kinds ``topic``, ``text``, ``cites``) and, for a citing work,
     ``cites_works`` (which seed ids it references).
 
-    A transport failure on any page propagates and discards the works already
-    collected, unlike :func:`fetch_work`, which returns ``None`` instead.
+    A failure on any page (an ``OpenAlexError``) propagates and discards the
+    works already collected, unlike :func:`fetch_work`, which returns ``None``
+    instead.
     """
     if exclude_types is None:
         exclude_types = DEFAULT_EXCLUDE_TYPES
@@ -866,12 +830,9 @@ def fetch_new_works(
     queries = _new_works_queries(since, topics, seed_work_ids, drop_types)
     seeds = {str(s).rsplit("/", 1)[-1] for s in (seed_work_ids or []) if s}
 
-    url = f"{base_url}/works"
     by_key: dict[str, PaperRecord] = {}
     for kind, filt in queries:
-        for raw in _iter_work_results(
-            url, filt, mailto=mailto, per_page=per_page, max_pages=max_pages
-        ):
+        for raw in _iter_work_results(client, filt, per_page=per_page, max_pages=max_pages):
             rec = _accept_new_work(raw, drop_types)
             if rec is None:
                 continue
@@ -921,10 +882,9 @@ def _new_works_queries(
 
 
 def _iter_work_results(
-    url: str,
+    client: "OpenAlexClient",
     filt: str,
     *,
-    mailto: str | None,
     per_page: int,
     max_pages: int,
 ):
@@ -932,9 +892,7 @@ def _iter_work_results(
     cursor = "*"
     for _ in range(max_pages):
         params = {"filter": filt, "per-page": per_page, "cursor": cursor}
-        if mailto:
-            params["mailto"] = mailto
-        page = _http_get_json(url, params)
+        page = client.get("/works", params)
         yield from page.get("results") or []
         cursor = (page.get("meta") or {}).get("next_cursor")
         if not cursor:
@@ -975,21 +933,16 @@ def title_match(paper: Any, work: Any) -> bool:
 
 
 def fetch_author_works(
+    client: "OpenAlexClient",
     orcid: str,
     *,
-    mailto: str | None = None,
     max_pages: int = 10,
-    base_url: str = OPENALEX_BASE_URL,
 ) -> list[PaperRecord]:
     """Every work OpenAlex attributes to an ORCID (``author.orcid:`` filter)."""
     bare = str(orcid).strip().rsplit("/", 1)[-1]
     out: list[PaperRecord] = []
     for raw in _iter_work_results(
-        f"{base_url}/works",
-        f"author.orcid:{bare}",
-        mailto=mailto,
-        per_page=200,
-        max_pages=max_pages,
+        client, f"author.orcid:{bare}", per_page=100, max_pages=max_pages
     ):
         rec = parse_work(raw)
         if rec is not None:
@@ -997,21 +950,14 @@ def fetch_author_works(
     return out
 
 
-def search_work_by_title(
-    title: str,
-    *,
-    mailto: str | None = None,
-    base_url: str = OPENALEX_BASE_URL,
-) -> PaperRecord | None:
+def search_work_by_title(client: "OpenAlexClient", title: str) -> PaperRecord | None:
     """OpenAlex's top ``title.search`` hit for ``title``, or ``None``."""
     # Commas and pipes are filter syntax; inside a title they only confuse it.
     clean = re.sub(r"[,|:]+", " ", title or "").strip()
     if not clean:
         return None
     params: dict = {"filter": f"title.search:{clean}", "per-page": 1}
-    if mailto:
-        params["mailto"] = mailto
-    results = _http_get_json(f"{base_url}/works", params).get("results") or []
+    results = client.get("/works", params).get("results") or []
     return parse_work(results[0]) if results else None
 
 

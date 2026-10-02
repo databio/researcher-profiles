@@ -967,16 +967,20 @@ neighborhood.
 | `threshold` | float \| null | none | Drop works scoring below it. |
 | `use_openalex` | boolean | `false` | Fetch candidates from OpenAlex instead of `works`. |
 | `works` | list of objects \| null | none | Candidate works, `PaperRecord`-shaped. |
-| `mailto` | string \| null | none | OpenAlex polite-pool contact. |
 | `max_pages` | integer | `5` | OpenAlex pagination cap. |
+
+With `use_openalex`, the server calls OpenAlex with its own API key from the
+`OPENALEX_API_KEY` environment variable, sent as an `Authorization: Bearer`
+header. Without it, OpenAlex allows only about $0.10 of usage a day.
 
 **Response 200:** `{slug, rid, works: [...]}`, each a ranked work with its
 score.
 
 **Status codes:** `200`; `400` an invalid candidate work in `works`, neither
 `works` nor `use_openalex` supplied, or a profile with no subfields, interests,
-or OpenAlex work ids to query with; `502` `{"detail": "OpenAlex fetch failed:
-<message>"}`; `500` `{"detail": "work ranking failed: <message>"}`; `503`
+or OpenAlex work ids to query with; `502` `{"detail": "OpenAlex fetch failed"}`;
+`503` `{"detail": "OpenAlex's daily limit is used up; try again after midnight
+UTC"}`; `500` `{"detail": "work ranking failed: <message>"}`; `503`
 `{"detail": "matching unavailable: ..."}` when the server lacks the
 `vectors`/`st` extras or the profile has no built index.
 

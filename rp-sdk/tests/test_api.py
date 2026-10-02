@@ -2381,21 +2381,25 @@ class TestRankWorksEndpoint:
 
         fetch_calls = {}
 
-        def fake_fetch(**kwargs):
+        def fake_fetch(client, **kwargs):
+            fetch_calls["client"] = client
             fetch_calls.update(kwargs)
             return [PaperRecord(title="Fetched work", year=2026)]
 
         monkeypatch.setattr(oa, "fetch_new_works", fake_fetch)
+        monkeypatch.setenv("OPENALEX_API_KEY", "test-key-123")
         r = api_client.post(
             f"/api/v1/profiles/{SLUG}/rank-works",
-            json={"use_openalex": True, "since": "2026-07-01", "mailto": "who@example.org"},
+            json={"use_openalex": True, "since": "2026-07-01"},
         )
         assert r.status_code == 200
         assert r.json()["works"][0]["title"] == "Fetched work"
         # Seeds came from the profile document; request params were forwarded.
         assert fetch_calls["since"] == "2026-07-01"
-        assert fetch_calls["mailto"] == "who@example.org"
         assert "synthetic data science" in fetch_calls["topics"]
+        # The server key went into the client, never into the call.
+        assert fetch_calls["client"].has_key
+        assert "test-key-123" not in repr(fetch_calls)
 
     def test_rank_works_400_without_candidates(self, api_client, rank_stub):
         r = api_client.post(f"/api/v1/profiles/{SLUG}/rank-works", json={})

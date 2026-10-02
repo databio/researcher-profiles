@@ -159,7 +159,7 @@ new that fits this researcher" query. Needs a built embedding index
 rp rank-works <profile> [--root ROOT] [--since YYYY-MM-DD] [--openalex]
                         [--works FILE] [-k N]
                         [--kind {centroid,summary,expertise}] [--threshold X]
-                        [--mailto EMAIL] [--exclude-types T1,T2] [--all-types]
+                        [--exclude-types T1,T2] [--all-types]
                         [--json]
 ```
 
@@ -173,12 +173,14 @@ rp rank-works <profile> [--root ROOT] [--since YYYY-MM-DD] [--openalex]
 | `-k N` | `10` | Number of ranked works to return. |
 | `--kind {centroid,summary,expertise}` | `centroid` | Which profile vector to rank against. |
 | `--threshold X` | none | Drop works scoring below `X`. |
-| `--mailto EMAIL` | none | OpenAlex polite-pool contact. |
 | `--exclude-types T1,T2` | a default deposit-type set | OpenAlex work types to drop from `--openalex` candidates (software, book, etc.). |
 | `--all-types` | off | Keep every work type; disables the deposit-type filter. |
 | `--json` | off | Emit the ranked works as a JSON array. |
 
-Exactly one of `--openalex` or `--works` is required.
+Exactly one of `--openalex` or `--works` is required. `--openalex` reads the
+OpenAlex API key from the `OPENALEX_API_KEY` environment variable (a free key
+from https://openalex.org/settings/api); there is no command-line flag for it,
+so it stays out of shell history.
 
 ```bash
 rp rank-works voss-elena --openalex --since 2026-07-01

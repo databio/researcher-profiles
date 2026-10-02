@@ -530,9 +530,11 @@ def rank_works_for_profile(
         except pydantic.ValidationError as e:
             raise HTTPException(status_code=400, detail=f"invalid candidate work: {e}") from e
     elif body.use_openalex:
+        import os
         from datetime import date, timedelta
 
         from ...openalex import fetch_new_works, profile_query_terms
+        from ...openalex_client import OpenAlexBudgetError, OpenAlexClient
 
         since = body.since or (date.today() - timedelta(days=30)).isoformat()
         terms = profile_query_terms(prof)
@@ -542,17 +544,24 @@ def rank_works_for_profile(
                 detail="profile has no subfields/interests or OpenAlex work ids to query with",
             )
         try:
-            works = fetch_new_works(
-                since=since,
-                topics=terms["topics"],
-                seed_work_ids=terms["seed_work_ids"],
-                mailto=body.mailto,
-                max_pages=body.max_pages,
-            )
-        # Boundary: a live third-party HTTP API.
+            with OpenAlexClient(os.environ.get("OPENALEX_API_KEY")) as client:
+                works = fetch_new_works(
+                    client,
+                    since=since,
+                    topics=terms["topics"],
+                    seed_work_ids=terms["seed_work_ids"],
+                    max_pages=body.max_pages,
+                )
+        except OpenAlexBudgetError as e:
+            raise HTTPException(
+                status_code=503,
+                detail="OpenAlex's daily limit is used up; try again after midnight UTC",
+            ) from e
+        # Boundary: a live third-party HTTP API. The detail is a fixed string:
+        # an exception message can carry the request URL.
         except Exception as e:
             logger.exception("OpenAlex fetch failed for %s", slug)
-            raise HTTPException(status_code=502, detail=f"OpenAlex fetch failed: {e}") from e
+            raise HTTPException(status_code=502, detail="OpenAlex fetch failed") from e
     else:
         raise HTTPException(
             status_code=400, detail="supply candidate works or set use_openalex=true"

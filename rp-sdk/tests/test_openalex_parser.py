@@ -269,21 +269,45 @@ def _fetch_work(oid="W1", title="A Candidate Work", year=2026, wtype="article"):
     }
 
 
+class _ParamsView:
+    """A live list-like view of the params a :class:`FakeClient` was called with."""
+
+    def __init__(self, client):
+        self._client = client
+
+    def _params(self):
+        return [p for _, p in self._client.calls]
+
+    def __len__(self):
+        return len(self._client.calls)
+
+    def __getitem__(self, i):
+        return self._params()[i]
+
+    def __iter__(self):
+        return iter(self._params())
+
+
+class FakeClient:
+    """Stands in for ``OpenAlexClient``: ``respond(path, params) -> body``; records calls."""
+
+    def __init__(self, respond):
+        self.respond = respond
+        self.calls: list[tuple[str, dict]] = []
+
+    def get(self, path, params=None):
+        self.calls.append((path, dict(params or {})))
+        return self.respond(path, dict(params or {}))
+
+
 class TestFetchNewWorks:
-    """Filter construction, pagination, and dedupe over a stubbed HTTP client."""
+    """Filter construction, pagination, and dedupe over a stubbed client."""
 
-    def _stub(self, monkeypatch, respond):
-        """Install ``respond(params) -> page`` on the single call site; record calls."""
-        import researcher_profiles.openalex as oa
-
-        calls: list[dict] = []
-
-        def fake(url, params):
-            calls.append(dict(params))
-            return respond(params)
-
-        monkeypatch.setattr(oa, "_http_get_json", fake)
-        return calls
+    def _stub(self, respond):
+        """A fake client answering ``respond(params) -> page``, and its recorded params."""
+        client = FakeClient(lambda path, params: respond(params))
+        calls = _ParamsView(client)
+        return client, calls
 
     def test_builds_one_query_per_mode_and_dedupes(self, monkeypatch):
         from datetime import date
@@ -291,21 +315,22 @@ class TestFetchNewWorks:
         from researcher_profiles.openalex import fetch_new_works
 
         # Every query returns the SAME work: the result must carry it once.
-        calls = self._stub(
-            monkeypatch, lambda p: {"results": [_fetch_work()], "meta": {"next_cursor": None}}
+        client, calls = self._stub(
+            lambda p: {"results": [_fetch_work()], "meta": {"next_cursor": None}}
         )
         out = fetch_new_works(
+            client,
             since=date(2026, 1, 1),
             topics=["chromatin biology", "T10002"],
             seed_work_ids=["https://openalex.org/W9", "W8"],
-            mailto="who@example.org",
         )
         filters = [c["filter"] for c in calls]
         assert all(f.startswith("from_publication_date:2026-01-01,") for f in filters)
         assert any("topics.id:T10002" in f for f in filters)
         assert any("title_and_abstract.search:chromatin biology" in f for f in filters)
         assert any("cites:W9|W8" in f for f in filters)
-        assert all(c["mailto"] == "who@example.org" for c in calls)
+        assert all(path == "/works" for path, _ in client.calls)
+        assert all(c["per-page"] == 100 for c in calls)
         # Three query modes ran; the shared work deduped to one PaperRecord.
         assert len(calls) == 3
         assert len(out) == 1
@@ -319,19 +344,18 @@ class TestFetchNewWorks:
             "*": {"results": [_fetch_work("W1")], "meta": {"next_cursor": "abc"}},
             "abc": {"results": [_fetch_work("W2")], "meta": {"next_cursor": None}},
         }
-        calls = self._stub(monkeypatch, lambda p: pages[p["cursor"]])
-        out = fetch_new_works(since="2026-01-01", topics=["chromatin"])
+        client, calls = self._stub(lambda p: pages[p["cursor"]])
+        out = fetch_new_works(client, since="2026-01-01", topics=["chromatin"])
         assert [c["cursor"] for c in calls] == ["*", "abc"]
         assert [w.openalex_id for w in out] == ["W1", "W2"]
 
     def test_max_pages_caps_a_runaway_cursor(self, monkeypatch):
         from researcher_profiles.openalex import fetch_new_works
 
-        calls = self._stub(
-            monkeypatch,
+        client, calls = self._stub(
             lambda p: {"results": [_fetch_work(f"W{len(calls)}")], "meta": {"next_cursor": "more"}},
         )
-        out = fetch_new_works(since="2026-01-01", topics=["chromatin"], max_pages=3)
+        out = fetch_new_works(client, since="2026-01-01", topics=["chromatin"], max_pages=3)
         assert len(calls) == 3
         assert len(out) == 3
 
@@ -342,15 +366,15 @@ class TestFetchNewWorks:
             "results": [_fetch_work("W1"), {"id": "https://openalex.org/W2", "title": ""}],
             "meta": {"next_cursor": None},
         }
-        self._stub(monkeypatch, lambda p: page)
-        out = fetch_new_works(since="2026-01-01", topics=["chromatin"])
+        client, _ = self._stub(lambda p: page)
+        out = fetch_new_works(client, since="2026-01-01", topics=["chromatin"])
         assert [w.openalex_id for w in out] == ["W1"]
 
     def test_no_topics_and_no_seeds_is_an_error(self):
         from researcher_profiles.openalex import fetch_new_works
 
         with pytest.raises(ValueError, match="topics and/or seed_work_ids"):
-            fetch_new_works(since="2026-01-01")
+            fetch_new_works(FakeClient(lambda path, params: {}), since="2026-01-01")
 
     def test_default_excludes_deposit_types_but_keeps_papers(self, monkeypatch):
         from researcher_profiles.openalex import fetch_new_works
@@ -369,8 +393,8 @@ class TestFetchNewWorks:
             ],
             "meta": {"next_cursor": None},
         }
-        calls = self._stub(monkeypatch, lambda p: page)
-        out = fetch_new_works(since="2026-01-01", topics=["chromatin"])
+        client, calls = self._stub(lambda p: page)
+        out = fetch_new_works(client, since="2026-01-01", topics=["chromatin"])
         # deposits dropped; article, preprint, and (kept) dataset survive.
         assert [w.openalex_id for w in out] == ["W1", "W2", "W6"]
         # The default set is negated at the query level too.
@@ -389,8 +413,8 @@ class TestFetchNewWorks:
             ],
             "meta": {"next_cursor": None},
         }
-        calls = self._stub(monkeypatch, lambda p: page)
-        out = fetch_new_works(since="2026-01-01", topics=["chromatin"], exclude_types=set())
+        client, calls = self._stub(lambda p: page)
+        out = fetch_new_works(client, since="2026-01-01", topics=["chromatin"], exclude_types=set())
         assert [w.openalex_id for w in out] == ["W1", "W3"]
         assert "type:!" not in calls[0]["filter"]
 
@@ -404,8 +428,10 @@ class TestFetchNewWorks:
             ],
             "meta": {"next_cursor": None},
         }
-        calls = self._stub(monkeypatch, lambda p: page)
-        out = fetch_new_works(since="2026-01-01", topics=["chromatin"], exclude_types={"preprint"})
+        client, calls = self._stub(lambda p: page)
+        out = fetch_new_works(
+            client, since="2026-01-01", topics=["chromatin"], exclude_types={"preprint"}
+        )
         assert [w.openalex_id for w in out] == ["W1"]
         assert "type:!preprint" in calls[0]["filter"]
         assert "type:!software" not in calls[0]["filter"]
@@ -425,9 +451,9 @@ class TestFetchNewWorks:
                 results = [cited]
             return {"results": results, "meta": {"next_cursor": None}}
 
-        self._stub(monkeypatch, respond)
+        client, _ = self._stub(respond)
         out = fetch_new_works(
-            since="2026-01-01", topics=["T10", "chromatin"], seed_work_ids=["S1", "S2"]
+            client, since="2026-01-01", topics=["T10", "chromatin"], seed_work_ids=["S1", "S2"]
         )
         by_id = {w.openalex_id: w for w in out}
         assert [w.openalex_id for w in out] == ["W1", "W2", "W3"]
@@ -650,11 +676,11 @@ class TestTopicMatches:
 # ---------------------------------------------------------------------------
 
 
-def _raises_http_error(url, params):
-    """A ``_http_get_json`` stub that fails the way a real 404 does."""
-    import httpx
+def _raises_http_error(path, params):
+    """A client ``get`` stub that fails the way a real 404 does."""
+    from researcher_profiles.openalex_client import OpenAlexHTTPError
 
-    raise httpx.HTTPError("404 not found")
+    raise OpenAlexHTTPError(f"OpenAlex {path}: HTTP 404")
 
 
 class TestFetchWork:
@@ -672,42 +698,43 @@ class TestFetchWork:
         ["W2741809807", "https://openalex.org/W2741809807"],
         ids=["bare-id", "full-url"],
     )
-    def test_normalizes_the_ref_and_parses(self, ref, monkeypatch):
+    def test_normalizes_the_ref_and_parses(self, ref):
         import researcher_profiles.openalex as oa
 
-        calls = {}
-
-        def fake_get(url, params):
-            calls["url"] = url
-            calls["params"] = params
-            return self._raw()
-
-        monkeypatch.setattr(oa, "_http_get_json", fake_get)
-        rec = oa.fetch_work(ref, mailto="me@example.org")
+        client = FakeClient(lambda path, params: self._raw())
+        rec = oa.fetch_work(client, ref)
         assert rec is not None
         assert rec.title == "A point-lookup paper"
         assert rec.openalex_id == "W2741809807"
         assert rec.abstract == "Novel method"
-        assert calls["url"].endswith("/works/W2741809807")
-        assert calls["params"]["mailto"] == "me@example.org"
+        assert client.calls == [("/works/W2741809807", {})]
 
     @pytest.mark.parametrize(
         "stub,ref",
         [
             (_raises_http_error, "W_missing"),
             # No title/year -> parse_work returns None -> fetch_work returns None.
-            (lambda url, params: {"id": "x"}, "W_bad"),
-            # An empty ref never reaches _http_get_json, so it needs no stub.
+            (lambda path, params: {"id": "x"}, "W_bad"),
+            # An empty ref never reaches the client.
             (None, ""),
         ],
         ids=["http-error", "unparseable-work", "empty-id"],
     )
-    def test_returns_none(self, stub, ref, monkeypatch):
+    def test_returns_none(self, stub, ref):
         import researcher_profiles.openalex as oa
 
-        if stub is not None:
-            monkeypatch.setattr(oa, "_http_get_json", stub)
-        assert oa.fetch_work(ref) is None
+        client = FakeClient(stub or (lambda path, params: pytest.fail("no call expected")))
+        assert oa.fetch_work(client, ref) is None
+
+    def test_budget_error_still_raises(self):
+        import researcher_profiles.openalex as oa
+        from researcher_profiles.openalex_client import OpenAlexBudgetError
+
+        def over_budget(path, params):
+            raise OpenAlexBudgetError("OpenAlex /works/W1: HTTP 429")
+
+        with pytest.raises(OpenAlexBudgetError):
+            oa.fetch_work(FakeClient(over_budget), "W1")
 
 
 # ---------------------------------------------------------------------------
@@ -821,16 +848,15 @@ class TestMatchPapers:
         b.year = 2020
         assert not title_match(a, b)
 
-    def test_author_works_queries_by_orcid(self, monkeypatch):
+    def test_author_works_queries_by_orcid(self):
         import researcher_profiles.openalex as oa
 
-        calls = []
-
-        def fake(url, params):
-            calls.append(params)
-            return {"results": [_fetch_work("W1", "Mine")], "meta": {"next_cursor": None}}
-
-        monkeypatch.setattr(oa, "_http_get_json", fake)
-        out = oa.fetch_author_works("https://orcid.org/0000-0001-2345-6789")
+        client = FakeClient(
+            lambda path, params: {
+                "results": [_fetch_work("W1", "Mine")],
+                "meta": {"next_cursor": None},
+            }
+        )
+        out = oa.fetch_author_works(client, "https://orcid.org/0000-0001-2345-6789")
         assert [w.openalex_id for w in out] == ["W1"]
-        assert calls[0]["filter"] == "author.orcid:0000-0001-2345-6789"
+        assert client.calls[0][1]["filter"] == "author.orcid:0000-0001-2345-6789"

@@ -20,12 +20,15 @@ import time
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import IO, Any
+from typing import IO, TYPE_CHECKING, Any
 
 from . import MESH_FILE, MESH_SYSTEM, OPENALEX_FILE, OPENALEX_SYSTEM
 
-OPENALEX_TOPICS_URL = "https://api.openalex.org/topics"
-PER_PAGE = 200
+if TYPE_CHECKING:
+    from ..openalex_client import OpenAlexClient
+
+#: OpenAlex's largest page size (200 is deprecated).
+PER_PAGE = 100
 #: Entry terms kept per descriptor. The tail is orthographic variants that
 #: match nothing a person types and inflate the file.
 MAX_SYNONYMS = 12
@@ -36,38 +39,31 @@ def package_dir() -> Path:
     return Path(__file__).resolve().parent
 
 
-def fetch_openalex_topics(*, mailto: str | None = None, pause: float = 0.1) -> list[dict]:
+def fetch_openalex_topics(client: OpenAlexClient, *, pause: float = 0.1) -> list[dict]:
     """Every OpenAlex topic as ``{id, display_name, subfield, field, domain}``."""
-    import httpx
-
     topics: list[dict] = []
     cursor = "*"
-    with httpx.Client(timeout=60.0) as client:
-        while True:
-            params: dict[str, Any] = {"per_page": PER_PAGE, "cursor": cursor}
-            if mailto:
-                params["mailto"] = mailto
-            resp = client.get(OPENALEX_TOPICS_URL, params=params)
-            resp.raise_for_status()
-            data = resp.json()
-            results = data.get("results") or []
-            if not results:
-                break
-            for r in results:
-                topics.append(
-                    {
-                        "id": (r.get("id") or "").rsplit("/", 1)[-1],
-                        "display_name": r.get("display_name") or "",
-                        "subfield": (r.get("subfield") or {}).get("display_name") or "",
-                        "field": (r.get("field") or {}).get("display_name") or "",
-                        "domain": (r.get("domain") or {}).get("display_name") or "",
-                    }
-                )
-            nxt = (data.get("meta") or {}).get("next_cursor")
-            if not nxt or nxt == cursor:
-                break
-            cursor = nxt
-            time.sleep(pause)
+    while True:
+        params: dict[str, Any] = {"per-page": PER_PAGE, "cursor": cursor}
+        data = client.get("/topics", params)
+        results = data.get("results") or []
+        if not results:
+            break
+        for r in results:
+            topics.append(
+                {
+                    "id": (r.get("id") or "").rsplit("/", 1)[-1],
+                    "display_name": r.get("display_name") or "",
+                    "subfield": (r.get("subfield") or {}).get("display_name") or "",
+                    "field": (r.get("field") or {}).get("display_name") or "",
+                    "domain": (r.get("domain") or {}).get("display_name") or "",
+                }
+            )
+        nxt = (data.get("meta") or {}).get("next_cursor")
+        if not nxt or nxt == cursor:
+            break
+        cursor = nxt
+        time.sleep(pause)
     topics.sort(key=lambda t: int(t["id"][1:]) if t["id"][1:].isdigit() else 0)
     return topics
 
@@ -156,7 +152,12 @@ def refresh(
     if openalex:
         path = out / OPENALEX_FILE
         before = _ids(path, "topics")
-        topics = fetch_openalex_topics()
+        import os
+
+        from ..openalex_client import OpenAlexClient
+
+        with OpenAlexClient(os.environ.get("OPENALEX_API_KEY")) as client:
+            topics = fetch_openalex_topics(client)
         rel = release or datetime.now(timezone.utc).strftime("%Y-%m")
         write_openalex(topics, rel, out)
         after = {t["id"] for t in topics}
