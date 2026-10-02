@@ -162,9 +162,6 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
         "--threshold", type=float, default=None, metavar="X", help="Drop works scoring below X"
     )
     p_rank_works.add_argument(
-        "--mailto", default=None, metavar="EMAIL", help="OpenAlex polite-pool contact"
-    )
-    p_rank_works.add_argument(
         "--exclude-types",
         default=None,
         metavar="T1,T2",
@@ -402,10 +399,16 @@ def _works_from_file(path: str) -> list:
 
 
 def _works_from_openalex(args: argparse.Namespace, prof) -> list:
-    """Fetch ``--openalex`` candidates, seeded from the profile's own topics."""
+    """Fetch ``--openalex`` candidates, seeded from the profile's own topics.
+
+    The OpenAlex API key comes from ``OPENALEX_API_KEY``, never the command
+    line, where it would land in shell history.
+    """
+    import os
     from datetime import date, timedelta
 
     from ..openalex import fetch_new_works, profile_query_terms
+    from ..openalex_client import OpenAlexClient
 
     since = args.since or (date.today() - timedelta(days=30)).isoformat()
     terms = profile_query_terms(prof)
@@ -422,13 +425,14 @@ def _works_from_openalex(args: argparse.Namespace, prof) -> list:
     else:
         exclude_types = None  # fetch_new_works applies its default set
     try:
-        return fetch_new_works(
-            since=since,
-            topics=terms["topics"],
-            seed_work_ids=terms["seed_work_ids"],
-            mailto=args.mailto,
-            exclude_types=exclude_types,
-        )
+        with OpenAlexClient(os.environ.get("OPENALEX_API_KEY")) as client:
+            return fetch_new_works(
+                client,
+                since=since,
+                topics=terms["topics"],
+                seed_work_ids=terms["seed_work_ids"],
+                exclude_types=exclude_types,
+            )
     except ImportError as e:
         raise _CliError(EXIT_ERROR, f"rp rank-works: {e}") from e
     # Boundary: a live third-party HTTP API. Anything it raises, including a

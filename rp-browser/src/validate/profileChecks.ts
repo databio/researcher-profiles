@@ -15,8 +15,9 @@ import type { FetchOutcome } from "../net/fetchJson";
 import { fetchJson } from "../net/fetchJson";
 import { fetchBinary } from "../net/fetchBinary";
 import { getFix } from "./fixes";
-import { checkOrcidRoundTrip } from "./orcid";
 import { validateAgainstSchema, schemaIdForRole } from "./schemaValidation";
+import { TEXT_ARTIFACT_ROLES, textArtifactProblems } from "./textArtifact";
+import { orcidLoginChecks } from "./orcidLogin";
 
 type Emit = (check: CheckResult) => void;
 
@@ -171,8 +172,10 @@ export async function profileChecks(
   // `@id` identifies the researcher, not the host. When it is an ORCID URL its
   // ORCID must agree with `rid` (a copy-pasted document carrying someone else's
   // identity is a real, silent failure mode). Any other absolute IRI, a bare
-  // relative id that is the tail of the fetched base, or an absent `@id` all
-  // pass. None of those misidentify the subject.
+  // relative id that is the tail of the fetched base, a fragment-only id
+  // (`#me`, the SDK's default for an unpublished profile, which resolves against
+  // the fetched document itself), or an absent `@id` all pass. None of those
+  // misidentify the subject.
   const orcidMatch = /orcid\.org\/([0-9]{4}-[0-9]{4}-[0-9]{4}-[0-9]{3}[0-9X])/i.exec(
     rawId,
   );
@@ -187,7 +190,7 @@ export async function profileChecks(
     identityMessage = identityPassed
       ? `@id ORCID matches rid (${rid}).`
       : `@id ORCID (${idOrcid}) does not match rid (${rid}). A copy-pasted document carrying someone else's identity is a real and silent failure mode.`;
-  } else if (rawId && !/^https?:\/\//i.test(rawId)) {
+  } else if (rawId && !/^https?:\/\//i.test(rawId) && !rawId.startsWith("#")) {
     // A relative @id must be the tail of the base we fetched.
     identityPassed = base.endsWith(rawId);
     identityMessage = identityPassed
@@ -203,11 +206,10 @@ export async function profileChecks(
     evidence: `@id: ${rawId || "(none)"}, base: ${base}`,
   });
 
-  // --- orcid-roundtrip badge ---
-  if (orcidMatch) {
-    const orcidBadge = await checkOrcidRoundTrip(orcidMatch[1], base);
-    add(orcidBadge);
-  }
+  // --- proof-orcid-login / orcid-verified ---
+  // A registry-issued ORCID login proof, trusted only from the origin that
+  // served this document. No proof, no check.
+  for (const c of orcidLoginChecks(manifest, manifestOutcome.finalUrl)) add(c);
 
   // --- required-roles ---
   const entries = entriesOf(manifest);
@@ -240,6 +242,10 @@ export async function profileChecks(
   const unreachable: Array<{ role: string; href: string; detail: string }> = [];
   const mismatches: string[] = [];
   const fetchedJson: Array<{ role: string; data: unknown }> = [];
+  // Paper full texts and summaries fetched below, and the ones that are
+  // garbled (binary decoded as text, raw PDF bytes).
+  let textChecked = 0;
+  const garbled: Array<{ href: string; problems: string[] }> = [];
   let corsFix: CheckResult["fix"] | undefined;
   for (const entry of entries.slice(0, 40)) {
     const contentUrl = entry.contentUrl || "";
@@ -261,6 +267,16 @@ export async function profileChecks(
     }
     if (isJsonPart && "value" in partOutcome && entry.role) {
       fetchedJson.push({ role: entry.role, data: partOutcome.value });
+    }
+    if (
+      !isJsonPart &&
+      entry.role &&
+      TEXT_ARTIFACT_ROLES.has(entry.role) &&
+      partOutcome.value instanceof ArrayBuffer
+    ) {
+      textChecked++;
+      const problems = textArtifactProblems(partOutcome.value);
+      if (problems.length > 0) garbled.push({ href: contentUrl, problems });
     }
     if (entry.encodingFormat && partOutcome.contentType) {
       const declared = entry.encodingFormat.split(";")[0].trim();
@@ -286,6 +302,26 @@ export async function profileChecks(
     evidence: unreachable.length > 0 ? unreachable.map((u) => u.href).join(", ") : undefined,
     fix: corsFix,
   });
+
+  // --- text-artifacts (paper full text and summaries are clean text) ---
+  // Same rule as `rp validate` (researcher_profiles.text_artifact). Only the
+  // files fetched above are checked, so a large profile is sampled, not
+  // exhaustively scanned; `rp validate` checks every file.
+  if (textChecked > 0) {
+    add({
+      id: "text-artifacts",
+      title: "Paper Text Is Clean",
+      severity: "error",
+      passed: garbled.length === 0,
+      message:
+        garbled.length === 0
+          ? `${textChecked} paper text file(s) checked; all are clean text.`
+          : `${garbled.length} of ${textChecked} paper text file(s) are garbled: ${garbled
+              .map((g) => `${g.href} (${g.problems.join("; ")})`)
+              .join("; ")}.`,
+      evidence: garbled.length > 0 ? garbled.map((g) => g.href).join(", ") : undefined,
+    });
+  }
 
   // --- ajv schema validation of fetched auxiliary documents ---
   for (const { role, data } of fetchedJson) {
@@ -438,12 +474,6 @@ export async function profileChecks(
         : `A paper_summary entry${summaryEntry.paperId ? ` for "${summaryEntry.paperId}"` : ""} 404s. This makes the browser's paper rows dead-end.`,
       evidence: summaryUrl,
     });
-  }
-
-  // --- orcid round-trip badge ---
-  if (manifest.orcid) {
-    const orcidResult = await checkOrcidRoundTrip(manifest.orcid, base);
-    add(orcidResult);
   }
 
   return checks;

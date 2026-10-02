@@ -4,6 +4,7 @@ nav:
   - Specification:
     - Specification: rp-spec/index.md
     - Privacy: rp-spec/privacy.md
+    - Vocabularies: rp-spec/vocabularies.md
     - Embeddings: rp-spec/embeddings.md
     - Static API: rp-spec/static-api.md
     - Dynamic API: rp-spec/dynamic-api.md
@@ -34,3 +35,11 @@ nav:
     - Overview: rp-ui-lib/index.md
   - Browser App:
     - Overview: rp-browser/index.md
+renderers:
+  - hub-python-api:
+      package_root:
+        - ../rp-sdk/src
+        - ../scholarcore/src
+      packages: [researcher_profiles, scholarcore]
+      include: [rp-sdk/reference/python-api.md]
+      docstring_style: sphinx

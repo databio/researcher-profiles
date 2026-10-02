@@ -44,6 +44,9 @@
   --color-border-strong: 209, 213, 219;
   --color-border-subtle: 243, 244, 246;
 
+  /* Table header band and row hover: a tint between surface and sunken. */
+  --color-table-head: 247, 248, 250;
+
   /* Controls */
   --color-control-bg: 255, 255, 255;
   --color-control-hover-bg: 243, 244, 246;
@@ -152,6 +155,7 @@
   --rp-color-border: rgb(var(--color-border));
   --rp-color-border-strong: rgb(var(--color-border-strong));
   --rp-color-border-subtle: rgb(var(--color-border-subtle));
+  --rp-color-table-head: rgb(var(--color-table-head));
 
   --rp-color-control-bg: rgb(var(--color-control-bg));
   --rp-color-control-hover-bg: rgb(var(--color-control-hover-bg));
@@ -221,6 +225,7 @@
     --color-border: 55, 65, 81;
     --color-border-strong: 75, 85, 99;
     --color-border-subtle: 31, 41, 55;
+    --color-table-head: 26, 34, 50;
 
     --color-control-bg: 55, 65, 81;
     --color-control-hover-bg: 75, 85, 99;

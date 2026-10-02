@@ -99,7 +99,7 @@ class ConsumerIdentity:
     scopes: frozenset[str] = field(default_factory=frozenset)
     is_operator: bool = False
     #: The most permissive privacy tier this consumer may be shown. Minted per
-    #: key by the host, so a lab integration reads ``internal`` content without
+    #: key by the host, so a lab integration reads ``limited`` content without
     #: the whole registry being open. Defaults to ``public``: a key that never
     #: said otherwise gets the narrowest reading.
     tier: Visibility = "public"
@@ -160,8 +160,8 @@ def check_write_scope(request: Request, action: str, detail: dict) -> None:
 #: tokens. A cap, never a widening; see :func:`get_viewer_tier`.
 PREVIEW_VIEWERS: dict[str, ViewerTier] = {
     "anonymous": "public",
-    "lab": "internal",
-    "owner": "restricted",
+    "lab": "limited",
+    "owner": "private",
 }
 
 
@@ -173,14 +173,14 @@ def resolve_viewer_tier(request: Request, slug: str | None) -> ViewerTier:
     1. an installed ``owner_verifier`` that does not raise for ``slug``:
        the caller can edit this profile, so they may read all of it;
     2. a consumer identity already resolved onto ``request.state.consumer``
-       by :func:`require_scope`: ``restricted`` for the operator, else the
+       by :func:`require_scope`: ``private`` for the operator, else the
        tier minted on that consumer's key;
     3. a valid operator bearer token;
     4. otherwise ``public``: anonymous callers and open dev mode alike.
 
     Rule 4 covers open dev mode. A server with no token configured
     lets every request through the auth gates, and resolving that to
-    ``restricted`` would mean a developer's laptop silently served the tier
+    ``private`` would mean a developer's laptop silently served the tier
     nothing else does. A missing credential is not a permissive credential.
 
     A host replaces this wholesale via ``app.state.viewer_resolver``.
@@ -196,7 +196,7 @@ def resolve_viewer_tier(request: Request, slug: str | None) -> ViewerTier:
                 "owner_verifier raised for slug %r; treating as not-owner", slug, exc_info=True
             )
         else:
-            return "restricted"
+            return "private"
 
     consumer = getattr(request.state, "consumer", None)
     if consumer is None:
@@ -218,12 +218,12 @@ def resolve_viewer_tier(request: Request, slug: str | None) -> ViewerTier:
                 consumer = None
     if consumer is not None:
         if getattr(consumer, "is_operator", False):
-            return "restricted"
+            return "private"
         return getattr(consumer, "tier", "public") or "public"
 
     expected = getattr(request.app.state, "token", None)
     if expected and request.headers.get("authorization") == f"Bearer {expected}":
-        return "restricted"
+        return "private"
 
     return "public"
 
@@ -235,7 +235,7 @@ def viewer_tier_for(request: Request, slug: str | None) -> ViewerTier:
     entitled to their own held-back profile and to nothing else. A route that
     walks many profiles (the profile listing, ``/match``) therefore asks this
     per profile rather than resolving one tier for the whole request, or an
-    owner's own ``internal`` profile would vanish from a list that then showed
+    owner's own ``limited`` profile would vanish from a list that then showed
     it happily at its own URL.
     """
     resolver = getattr(request.app.state, "viewer_resolver", None) or resolve_viewer_tier

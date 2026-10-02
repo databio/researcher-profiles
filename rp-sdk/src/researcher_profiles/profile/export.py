@@ -25,8 +25,16 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from ..errors import ProfileError
-from ..privacy import chunk_source_tiers, drop_above_public
-from ..schema import CareerEntry, PaperRecord, ProfileDocument, Training, normalize_doi, orcid_of
+from ..privacy import ViewerTier, chunk_source_tiers, project_document, tier_allows
+from ..schema import (
+    CareerEntry,
+    PaperRecord,
+    ProfileDocument,
+    Training,
+    effective_interests,
+    normalize_doi,
+    orcid_of,
+)
 from ..schema.jsonld import PROFILE_FORMAT_IRI, canonical_dumps
 from ..utils.clock import now_iso
 from . import ResearcherProfile
@@ -35,7 +43,7 @@ from . import ResearcherProfile
 #: can detect the change and re-ingest. This is a detector, not a switch: there
 #: is exactly one rendering and it is the current one. Never add a ``version=``
 #: parameter that reproduces an older blob.
-EXPORT_VERSION: int = 1
+EXPORT_VERSION: int = 2
 
 #: The ``[abstract-only]`` marker a summary carries when it was written from an
 #: abstract rather than full text. Same marker ``embeddings/chunking.py``
@@ -229,8 +237,9 @@ def explore_url(profile_url: str | None, *, explore_base: str | None = None) -> 
     """The browser-app backlink for a published profile directory.
 
     Returns ``None`` unless both a profile URL and an explore base are given.
-    The hash shape matches what the browser app parses back to the same
-    directory: a trailing slash, ``profile.jsonld`` stripped, percent-encoded.
+    The browser app's profile route, ``/p?u=<directory>``: a trailing slash,
+    ``profile.jsonld`` stripped, percent-encoded. The app loads the document
+    from that directory.
     """
     if not profile_url or not explore_base:
         return None
@@ -244,7 +253,7 @@ def explore_url(profile_url: str | None, *, explore_base: str | None = None) -> 
     if not url.endswith("/"):
         url += "/"
     quoted = urllib.parse.quote(url, safe="")
-    return f"{explore_base.rstrip('/')}/#/p?u={quoted}"
+    return f"{explore_base.rstrip('/')}/p?u={quoted}"
 
 
 def export_paper_body(
@@ -300,7 +309,7 @@ def _public_body_keys(
     """
     keys = [(kind, pid) for pid in paper_ids for kind in ("paper_summary", "paper_abstract")]
     tiers = chunk_source_tiers(profile.metadata, keys)
-    return set(drop_above_public(tiers.items()))
+    return {key for key, tier in tiers.items() if tier_allows("public", tier)}
 
 
 def _export_candidates(profile: ResearcherProfile, opts: ExportOptions) -> list[_Candidate]:
@@ -510,11 +519,11 @@ def _overview_and_field_lines(meta: ProfileDocument) -> list[str]:
 def _profile_bullet_sections(meta: ProfileDocument) -> list[str]:
     """Expertise, interests (with the not-interested trailer), and commitments."""
     out = list(_bullets("Expertise", meta.expertise))
-    not_interests = [i for i in meta.not_interests if i and i.strip()]
+    interests, not_interests = _weighted_interest_labels(meta)
     out.extend(
         _bullets(
             "Interests",
-            meta.interests,
+            interests,
             trailer=(
                 "Not interested in: " + ", ".join(i.strip() for i in not_interests)
                 if not_interests
@@ -524,6 +533,27 @@ def _profile_bullet_sections(meta: ProfileDocument) -> list[str]:
     )
     out.extend(_bullets("Methodological commitments", meta.methodological_commitments))
     return out
+
+
+def _weighted_interest_labels(meta: ProfileDocument) -> tuple[list[str], list[str]]:
+    """The interest lists, each label followed by its weight when typed.
+
+    A profile with ``research_interests`` shows the signed weight beside each
+    label (``ATAC-seq (+0.5)``), so a reader can tell a core interest from a
+    passing one; a profile with only the plain lists shows them as they are.
+    """
+    if not meta.research_interests:
+        return (
+            [i for i in meta.interests if i and i.strip()],
+            [i for i in meta.not_interests if i and i.strip()],
+        )
+    pos: list[str] = []
+    neg: list[str] = []
+    for e in effective_interests(meta.research_interests):
+        if e.weight is None or e.weight == 0:
+            continue
+        (pos if e.weight > 0 else neg).append(f"{e.concept.text.strip()} ({e.weight:+g})")
+    return pos, neg
 
 
 def _career_lines(career: Sequence[CareerEntry]) -> list[str]:
@@ -594,6 +624,18 @@ def _fit_to_budget(head: str, blocks: list[str], char_budget: int | None) -> str
     return text
 
 
+def export_viewer(options: ExportOptions) -> ViewerTier:
+    """The tier an export is rendered at.
+
+    An ordinary export goes to a knowledge base outside this machine, so it is
+    rendered as ``public``: an inline section the owner held back must not ride
+    out inside the blob. ``allow_nonpublic`` is the deliberate override an
+    operator passes to export their own held-back profile, and it raises the
+    viewer with it, exactly as it already relaxes the persona-document tiers.
+    """
+    return "private" if options.allow_nonpublic else "public"
+
+
 def render_export_text(
     profile: ResearcherProfile,
     options: ExportOptions | None = None,
@@ -628,6 +670,7 @@ def render_export_text(
             "exporting it requires allow_nonpublic=True (CLI: --allow-nonpublic)"
         )
 
+    meta = project_document(meta, export_viewer(opts))
     selected = list(papers) if papers is not None else select_export_papers(profile, opts)
 
     doc_tiers = chunk_source_tiers(
@@ -685,7 +728,11 @@ def build_export_bundle(
     selected = list(papers) if papers is not None else select_export_papers(profile, opts)
     text = render_export_text(profile, opts, papers=selected)
 
-    meta = profile.metadata
+    # The same projection the rendered text went through: the bundle's own
+    # fields (``summary`` above all) are the other half of the payload, and a
+    # field withheld from the prose but carried in the envelope has not been
+    # withheld at all.
+    meta = project_document(profile.metadata, export_viewer(opts))
     profile_url = opts.profile_url or meta.url
 
     dois: list[str] = []
@@ -745,6 +792,46 @@ def build_export_bundle(
     return bundle
 
 
+def to_foaf(meta: ProfileDocument) -> dict[str, Any]:
+    """A FOAF view of the person's interests, as a JSON-LD node.
+
+    Emits ``foaf:topic_interest`` for every concept whose effective weight is
+    positive, and nothing else: an unknown (no weight), neutral (0) or negative
+    entry is not an interest, and FOAF has no way to say "not interested".
+    A coded concept is referenced by its ``@id`` (or, lacking one, a node
+    carrying its code and label); a text-only concept is a blank node with its
+    label. Interests are never emitted as ``schema:knowsAbout``, which states
+    expertise, not interest.
+    """
+    topics: list[dict[str, Any]] = []
+    for e in effective_interests(meta.research_interests):
+        if e.weight is None or e.weight <= 0:
+            continue
+        c = e.concept
+        if c.unmapped:
+            topics.append({"skos:prefLabel": c.text})
+        elif c.id_:
+            topics.append({"@id": c.id_, "skos:prefLabel": c.text})
+        else:
+            topics.append(
+                {
+                    "skos:inScheme": {"@id": c.system},
+                    "skos:notation": c.code,
+                    "skos:prefLabel": c.text,
+                }
+            )
+    return {
+        "@context": {
+            "foaf": "http://xmlns.com/foaf/0.1/",
+            "skos": "http://www.w3.org/2004/02/skos/core#",
+        },
+        "@id": meta.id_,
+        "@type": "foaf:Person",
+        "foaf:name": meta.name,
+        "foaf:topic_interest": topics,
+    }
+
+
 __all__ = [
     "EXPORT_VERSION",
     "ExportError",
@@ -756,6 +843,8 @@ __all__ = [
     "explore_url",
     "export_content_hash",
     "export_paper_body",
+    "export_viewer",
     "render_export_text",
     "select_export_papers",
+    "to_foaf",
 ]

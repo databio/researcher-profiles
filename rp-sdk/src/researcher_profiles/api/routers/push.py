@@ -16,6 +16,7 @@ from pydantic import ValidationError
 
 from ...errors import ProfileWriteError
 from ...models.api import (
+    CapabilitiesResponse,
     PushResponse,
 )
 from ...privacy import (
@@ -39,14 +40,37 @@ from ..deps import (
 )
 from ..upload import (
     DEFAULT_MAX_UPLOAD_BYTES,
+    PUSH_MODES,
     SLUG_RE,
     UploadError,
     build_viewer_archive,
     ingest_archive,
 )
-from ._routers import router
+from ._routers import public_router, router
 
 logger = logging.getLogger(__name__)
+
+
+#: Named push behaviours this build implements, advertised at
+#: ``GET /api/v1/capabilities``. ``manifest_splice`` is the guarantee that a
+#: kept file keeps its manifest entry too, so an incoming manifest that drops
+#: entries cannot delete artifacts the server holds.
+PUSH_FEATURES = ["manifest_splice"]
+
+
+@public_router.get("/capabilities", response_model=CapabilitiesResponse)
+def capabilities() -> CapabilitiesResponse:
+    """What this server accepts, for a client to check before it writes.
+
+    Unauthenticated on purpose: it says nothing about any profile, and a push
+    client needs the answer before it has decided whether to authenticate.
+    A 404 here means an older build, which is itself the answer.
+    """
+    return CapabilitiesResponse(
+        version="v1",
+        push_modes=list(PUSH_MODES),
+        features=list(PUSH_FEATURES),
+    )
 
 
 @router.put(
@@ -205,6 +229,13 @@ async def _put_profile_tarball(
     if not data:
         raise HTTPException(status_code=400, detail="empty request body")
 
+    # ``?mode=``: what happens to the live files the archive does not carry.
+    mode = request.query_params.get("mode", "replace")
+    if mode not in PUSH_MODES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"invalid mode {mode!r} (expected one of {', '.join(PUSH_MODES)})",
+        )
     try:
         result = ingest_archive(
             store,
@@ -212,9 +243,13 @@ async def _put_profile_tarball(
             data,
             include_fulltext=bool(getattr(request.app.state, "accept_fulltext", False)),
             gate=lambda rid: _push_gate(request, slug, rid),
+            mode=mode,
         )
     except UploadError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+    except ProfileWriteError as e:
+        # Includes RetiredRidError: an archive whose rid or slug a merge retired.
+        raise HTTPException(status_code=409, detail=str(e)) from e
 
     # Invalidate: cached profile object, in-memory registry snapshot, and the
     # on-disk registry caches. Extraction restores archive mtimes, which can
@@ -229,6 +264,10 @@ async def _put_profile_tarball(
         name=result.name,
         level=result.level,
         indexed=result.indexed,
+        kept=result.kept,
+        spliced=result.spliced,
+        manifest_counts=result.manifest_counts,
+        mode=result.mode,
     )
 
 
@@ -252,13 +291,17 @@ def get_profile_archive(
     Projected through the caller's viewer tier by
     :func:`~researcher_profiles.api.upload.build_viewer_archive`, so the tarball
     contains exactly what the JSON read surface would serve the same caller: no
-    artifact above their tier, and never the hard floors (copyrighted full
-    text, ``.cache/``, ``.keys/``). The former ``serve_fulltext`` operator flag
-    is gone: the full-text floor is the schema's job now, in one place.
+    artifact above their tier, and never the build-local hard floors
+    (``.cache/``, ``.keys/``). Paper full text is an ordinary artifact governed
+    by its effective tier like any other, so it ships to a caller entitled to
+    its tier and is withheld from one who is not.
 
     The response carries ``X-RP-Archive-Digest`` (md5 of the body) so the
     client can verify the transfer before committing it to its cache, and
     ``X-RP-Archive-Tier`` naming the tier it was built for.
+
+    The archive is the stored record and carries no registry-issued proofs:
+    those are computed only when ``profile.jsonld`` is served.
     """
     # A read path accepts either form. Never gate a rid on SLUG_RE: it
     # forbids uppercase and would reject every X-suffixed ORCID.

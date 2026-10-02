@@ -4,7 +4,8 @@ A profile directory is already its published form, so there is no separate
 publish transform. These tests exercise the two pieces that do exist:
 
 - ``render_profile``: refreshes one profile folder in place (manifest,
-  ``index.html``, ``.publishignore``).
+  ``index.html``).
+- ``publish_collection``: writes the static tree one audience may see.
 - ``build_site``: writes the collection files describing a set of profiles.
 
 Plus the framework-free helpers reused by both (markdown, hosting configs).
@@ -28,7 +29,7 @@ from researcher_profiles.publish._markdown import md_to_html
 from researcher_profiles.schema import GrantRecord, PaperRecord
 from researcher_profiles.utils.paths import cache_dir
 
-from .factories import FakeBackend, copy_fixture, sync_with_publishignore
+from .factories import FakeBackend, copy_fixture
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -100,7 +101,7 @@ class TestRenderProfile:
         assert doc["expertiseCitesPaperIds"] is True
 
     def test_embedding_flag_true_iff_flat_form_exists(self, jane_doe_dir):
-        # hasEmbeddingIndex tracks the SERVED flat form, not the restricted
+        # hasEmbeddingIndex tracks the SERVED flat form, not the private
         # sqlite. Building the sqlite and rendering self-heals the flat form.
         from researcher_profiles.embeddings import SqliteEmbeddingIndex
 
@@ -174,98 +175,405 @@ class TestRenderProfile:
 
 
 # ---------------------------------------------------------------------------
-# .publishignore
+# publish_collection: the static tree one audience may see
 # ---------------------------------------------------------------------------
 
+_EMAIL = "secret-contact@example.org"
+_METHOD = "methodsonlyforgrantedreaders"
+_FULLTEXT = "fulltextnobodymaypublish"
 
-class TestPublishIgnore:
-    def _lines(self, profile_dir: Path) -> list[str]:
-        """The exclude PATTERNS only.
 
-        Comments are allowed to name concepts (e.g. a ``# personality/`` note),
-        so they are never patterns and are dropped here.
-        """
-        render_profile(profile_dir)
-        body = (profile_dir / ".publishignore").read_text()
-        return [
-            ln.strip() for ln in body.splitlines() if ln.strip() and not ln.strip().startswith("#")
-        ]
+def _audience_profile(root: Path, slug: str = "ada", **doc_fields) -> Path:
+    """A profile with something at every tier, plus a real local index.
+
+    ``sources/papers/p1.md`` is private (role default), ``sources/grants.jsonld``
+    is declared ``limited``, the ``contact`` section (email) is private and the
+    ``methods`` section is limited.
+    """
+    from researcher_profiles.embeddings import SqliteEmbeddingIndex
+    from researcher_profiles.profile import ResearcherProfile
+    from researcher_profiles.schema import SectionVisibility
+
+    from .factories import build_profile_dir
+
+    pdir = build_profile_dir(root / slug, grants=True, manifest=False)
+    (pdir / "sources" / "papers").mkdir(parents=True, exist_ok=True)
+    (pdir / "sources" / "papers" / "p1.md").write_text(f"{_FULLTEXT}\n", encoding="utf-8")
+    SqliteEmbeddingIndex(pdir).build_index(backend=FakeBackend())
+    render_profile(pdir)
+
+    prof = ResearcherProfile.from_files(pdir)
+    doc = prof.metadata
+    doc.email = _EMAIL
+    doc.methodological_commitments = [_METHOD]
+    doc.section_visibility = [
+        SectionVisibility(section="contact", visibility="private"),
+        SectionVisibility(section="methods", visibility="limited"),
+    ]
+    for part in doc.has_part:
+        if part.content_url == "sources/grants.jsonld":
+            part.visibility = "limited"
+    for name, value in doc_fields.items():
+        setattr(doc, name, value)
+    prof.save_profile(doc)
+    return pdir
+
+
+def _set_part_tier(pdir: Path, content_url: str, tier: str) -> Path:
+    """Declare one manifest artifact of the profile at ``pdir`` at ``tier``."""
+    from researcher_profiles.profile import ResearcherProfile
+
+    prof = ResearcherProfile.from_files(pdir)
+    doc = prof.metadata
+    (part,) = [p for p in [*doc.has_part, *doc.subject_of] if p.content_url == content_url]
+    part.visibility = tier
+    prof.save_profile(doc)
+    return pdir
+
+
+def _add_private_chunk(pdir: Path) -> None:
+    """Put one ``cv`` chunk (private by role default) into the local index.
+
+    The indexer does not chunk a CV, so the row goes in by hand. Its vector
+    points far from the rest, so a centroid that includes it is visibly off.
+    """
+    import numpy as np
+
+    from researcher_profiles.embeddings._sqlite import connect_vec
+
+    conn = connect_vec(cache_dir(pdir) / "embeddings.sqlite")
+    dim = len(conn.execute("SELECT embedding FROM chunk_vec LIMIT 1").fetchone()[0]) // 4
+    cur = conn.execute(
+        "INSERT INTO chunks (source_type, source_id, chunk_index, text, text_hash, "
+        "section, char_count, indexed_at) VALUES ('cv', 'cv', 0, 'x', 'x', NULL, 1, '')"
+    )
+    vec = -np.ones(dim, dtype="<f4") * 50
+    conn.execute(
+        "INSERT INTO chunk_vec (id, embedding) VALUES (?, ?)", (cur.lastrowid, vec.tobytes())
+    )
+    conn.commit()
+    conn.close()
+    for cached in cache_dir(pdir).rglob("*.npz"):
+        cached.unlink()
+
+
+def _tree_text(root: Path) -> str:
+    return "\n".join(
+        f.read_text(encoding="utf-8", errors="ignore") for f in root.rglob("*") if f.is_file()
+    )
+
+
+class TestPublishCollection:
+    @pytest.mark.parametrize(
+        "who, shipped, withheld, present, absent",
+        [
+            (
+                "public",
+                {"sources/summaries", "embeddings/index.json"},
+                {"sources/grants.jsonld", "sources/papers/p1.md"},
+                set(),
+                {_EMAIL, _METHOD, _FULLTEXT},
+            ),
+            (
+                "limited",
+                {"sources/grants.jsonld", "embeddings/index.json"},
+                {"sources/papers/p1.md"},
+                {_METHOD},
+                {_EMAIL, _FULLTEXT},
+            ),
+        ],
+        ids=["public-gets-only-public", "limited-adds-limited-not-private"],
+    )
+    def test_export_holds_exactly_what_the_audience_may_see(
+        self, tmp_path, who, shipped, withheld, present, absent
+    ):
+        from researcher_profiles.publish import publish_collection
+
+        root = tmp_path / "profiles"
+        _audience_profile(root)
+        out = tmp_path / "out"
+        publish_collection(root, out, viewer=who)
+
+        prof_out = out / "profiles" / "ada"
+        for rel in shipped:
+            assert (prof_out / rel).exists(), f"{rel} missing at --who {who}"
+        for rel in withheld:
+            assert not (prof_out / rel).exists(), f"{rel} leaked at --who {who}"
+        assert not list(out.rglob(".cache"))
+        assert not list(out.rglob("*.sqlite"))
+
+        # The projection reaches inside profile.jsonld and index.html.
+        document = (prof_out / "profile.jsonld").read_text(encoding="utf-8")
+        for marker in present:
+            assert marker in document, f"{marker} missing at --who {who}"
+        for name in ("profile.jsonld", "index.html"):
+            text = (prof_out / name).read_text(encoding="utf-8")
+            for marker in absent:
+                assert marker not in text, f"{marker} leaked into {name} at --who {who}"
+        everything = _tree_text(out)
+        for marker in absent:
+            assert marker not in everything
+
+        # Embeddings are exported at the audience's tier: grant, CV and web
+        # chunks are private, so neither audience gets them.
+        chunks_file = next((prof_out / "embeddings").glob("*.chunks.json"))
+        source_types = {c["source_type"] for c in json.loads(chunks_file.read_text())}
+        assert source_types
+        assert not source_types & {"grant", "cv", "web"}
 
     @pytest.mark.parametrize(
-        "pattern, present",
-        [
-            (".cache/", True),
-            ("personality/", False),
-            ("sources/summaries/", False),
-            ("sources/papers.jsonld", False),
-            ("profile.jsonld", False),
-        ],
-        ids=[
-            "cache-excluded",
-            "personality-public",
-            "summaries-public",
-            "papers-jsonld-public",
-            "profile-jsonld-public",
-        ],
+        "who, listed", [("public", False), ("limited", True)], ids=["public", "limited"]
     )
-    def test_pattern_presence(self, jane_doe_dir, pattern, present):
-        assert (pattern in self._lines(jane_doe_dir)) is present
+    def test_a_limited_profile_reaches_only_a_limited_audience(self, tmp_path, who, listed):
+        from researcher_profiles.publish import publish_collection
 
-    def test_full_text_papers_excluded(self, jane_doe_dir):
-        # jane-doe carries sources/papers/*.md (restricted, copyright). The
-        # manifest lists each full-text file, so each is excluded by path.
-        assert (jane_doe_dir / "sources" / "papers").is_dir()
-        lines = self._lines(jane_doe_dir)
-        fulltext = [ln for ln in lines if ln.startswith("sources/papers/")]
-        assert fulltext, "expected full-text papers to be excluded by path"
+        root = tmp_path / "profiles"
+        _audience_profile(root, "ada")
+        _audience_profile(root, "held", rid="0000-0002-1825-0097", visibility="limited")
+        out = tmp_path / "out"
+        result = publish_collection(root, out, viewer=who)
 
-    def test_local_sqlite_index_is_never_served(self, jane_doe_dir):
-        # .cache/embeddings.sqlite is a derived index (tier restricted): it stays
-        # under the excluded .cache/ prefix and is not re-included. The servable
-        # embeddings are the flat embeddings/ files.
-        cache_dir(jane_doe_dir).mkdir(exist_ok=True)
-        (cache_dir(jane_doe_dir) / "embeddings.sqlite").write_bytes(b"SQLite")
-        lines = self._lines(jane_doe_dir)
-        assert ".cache/" in lines
-        assert not any(ln.startswith("!") for ln in lines)
+        index = json.loads((out / "index.json").read_text())
+        by_rid = json.loads((out / "by-rid.json").read_text())
+        assert ("profiles/held/" in index) is listed
+        assert ("0000-0002-1825-0097" in by_rid) is listed
+        assert (out / "profiles" / "held").exists() is listed
+        assert ("held" in result.skipped) is not listed
+        if who != "public":
+            assert "Disallow: /" in (out / "robots.txt").read_text()
+            assert "noindex" in (out / "profiles" / "ada" / "index.html").read_text()
 
+    def test_a_rerun_removes_what_a_tightened_tier_withholds(self, tmp_path):
+        from researcher_profiles.profile import ResearcherProfile
+        from researcher_profiles.publish import publish_collection
 
-# ---------------------------------------------------------------------------
-# End-to-end: syncing with only .publishignore drops all restricted content
-# (plan step 19c: the invariant the tiered layout buys us)
-# ---------------------------------------------------------------------------
+        root = tmp_path / "profiles"
+        pdir = _audience_profile(root)
+        out = tmp_path / "out"
+        publish_collection(root, out)
+        summary = next((out / "profiles" / "ada" / "sources" / "summaries").iterdir())
+        rel = summary.relative_to(out / "profiles" / "ada").as_posix()
 
+        prof = ResearcherProfile.from_files(pdir)
+        doc = prof.metadata
+        for part in doc.has_part:
+            if part.content_url == rel:
+                part.visibility = "limited"
+        prof.save_profile(doc)
 
-class TestPublishIgnoreEndToEnd:
-    def test_synced_tree_has_no_restricted_content(self, jane_doe_dir):
-        from researcher_profiles.privacy import effective_tiers
+        result = publish_collection(root, out)
+        assert not summary.exists()
+        assert f"profiles/ada/{rel}" in result.removed
+
+    def test_refuses_a_folder_it_did_not_write(self, tmp_path):
+        from researcher_profiles.publish import PublishError, publish_collection
+
+        root = tmp_path / "profiles"
+        _audience_profile(root)
+        out = tmp_path / "out"
+        out.mkdir()
+        (out / "keep.txt").write_text("not ours", encoding="utf-8")
+        with pytest.raises(PublishError):
+            publish_collection(root, out)
+        assert sorted(p.name for p in out.iterdir()) == ["keep.txt"]
+
+    @pytest.mark.parametrize("who", ["public", "limited", "private"])
+    def test_viewer_archive_ships_the_same_set_as_the_export(self, tmp_path, who):
+        import io
+        import tarfile
+
+        from researcher_profiles.api.upload import build_viewer_archive
+        from researcher_profiles.publish import plan_profile_export
+
+        pdir = _audience_profile(tmp_path / "profiles")
+        plan = plan_profile_export(pdir, who)
+        with tarfile.open(fileobj=io.BytesIO(build_viewer_archive(pdir, viewer=who))) as tf:
+            members = {m.name for m in tf.getmembers() if m.isfile()}
+            document = tf.extractfile("profile.jsonld").read()
+        assert members == {"profile.jsonld", *plan.files}
+        assert document == plan.document
+
+    def test_cli_refuses_a_broken_derivation_chain(self, tmp_path, capsys):
+        from researcher_profiles.cli import main
         from researcher_profiles.profile import ResearcherProfile
 
-        render_profile(jane_doe_dir)
-        # A restricted local index must exist to make the test meaningful.
-        cache_dir(jane_doe_dir).mkdir(exist_ok=True)
-        (cache_dir(jane_doe_dir) / "embeddings.sqlite").write_bytes(b"SQLite")
+        root = tmp_path / "profiles"
+        pdir = _audience_profile(root)
+        prof = ResearcherProfile.from_files(pdir)
+        doc = prof.metadata
+        doc.has_part[0].derived_from = ["no-such-artifact"]
+        prof.save_profile(doc)
 
-        dst = jane_doe_dir.parent / "published"
-        sync_with_publishignore(jane_doe_dir, dst)
+        out = tmp_path / "out"
+        assert main(["publish", str(root), "--out", str(out)]) == 1
+        assert "derivedFrom" in capsys.readouterr().err
+        assert not out.exists()
 
-        prof = ResearcherProfile.from_files(jane_doe_dir)
-        eff = effective_tiers(prof.metadata)
+    def test_cli_dry_run_json_writes_nothing(self, tmp_path, capsys):
+        from researcher_profiles.cli import main
 
-        # Every artifact above `public` is absent from the synced tree.
-        for url, tier in eff.items():
-            if tier != "public":
-                assert not (dst / url).exists(), f"{url} ({tier}) leaked into sync"
+        root = tmp_path / "profiles"
+        _audience_profile(root)
+        out = tmp_path / "out"
+        assert main(["publish", str(root), "-o", str(out), "--dry-run", "--json"]) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["who"] == "public"
+        (ada,) = payload["profiles"]
+        assert "profile.jsonld" in ada["files"]
+        assert ada["withheld"]["sources/papers/p1.md"].startswith("private")
+        assert not out.exists()
 
-        # And the always-restricted directories never appear at all.
-        assert not (dst / ".cache").exists()
-        assert not (dst / ".keys").exists()
-        assert not (dst / ".publishignore").exists()
-        assert not list(dst.glob("sources/papers/*.md"))
+    # ---- embeddings follow their own artifact's tier ------------------------
 
-        # Sanity: the sync is not trivially empty; public content survives.
-        assert (dst / "profile.jsonld").is_file()
-        assert (dst / "sources" / "papers.jsonld").is_file()
+    @pytest.mark.parametrize("who, ships", [("public", False), ("private", True)])
+    def test_withheld_embeddings_do_not_ship(self, tmp_path, who, ships):
+        from researcher_profiles.publish import publish_collection
+
+        root = tmp_path / "profiles"
+        _set_part_tier(_audience_profile(root), "embeddings/index.json", "private")
+        out = tmp_path / "out"
+        result = publish_collection(root, out, viewer=who)
+
+        prof_out = out / "profiles" / "ada"
+        assert (prof_out / "embeddings").exists() is ships
+        doc = json.loads((prof_out / "profile.jsonld").read_text())
+        assert doc.get("hasEmbeddingIndex", False) is ships
+        (export,) = result.profiles
+        assert any(f.startswith("embeddings/") for f in export.files) is ships
+        # The collection does not advertise a profile whose vectors it withheld.
+        bundle = json.loads((out / "collection.jsonld").read_text())
+        assert bool(bundle["artifacts"]) is ships
+        if not ships:
+            assert not (out / "collection" / "embeddings").exists()
+
+    def test_viewer_archive_drops_the_embedding_flag_with_the_embeddings(self, tmp_path):
+        from researcher_profiles.publish import plan_profile_export
+
+        pdir = _set_part_tier(
+            _audience_profile(tmp_path / "profiles"), "embeddings/index.json", "private"
+        )
+        public = json.loads(plan_profile_export(pdir, "public").document)
+        private = json.loads(plan_profile_export(pdir, "private").document)
+        assert public.get("hasEmbeddingIndex", False) is False
+        assert private["hasEmbeddingIndex"] is True
+
+    def test_collection_centroid_is_the_mean_of_what_ships(self, tmp_path):
+        import numpy as np
+
+        from researcher_profiles.embeddings.flat import FlatEmbeddingIndex
+        from researcher_profiles.profile import ResearcherProfile
+        from researcher_profiles.publish import publish_collection
+
+        root = tmp_path / "profiles"
+        pdir = _audience_profile(root)
+        _add_private_chunk(pdir)
+        out = tmp_path / "out"
+        publish_collection(root, out)
+
+        shipped = FlatEmbeddingIndex.load(out / "profiles" / "ada" / "embeddings").centroid()
+        index = json.loads((out / "collection" / "embeddings" / "index.json").read_text())
+        assert index["rows"] == ["ada"]
+        blob = (out / "collection" / "embeddings" / index["file"]).read_bytes()
+        row = np.frombuffer(blob, dtype="<f4")
+        np.testing.assert_allclose(row, shipped, atol=1e-6)
+        # The private chunk moves the all-chunk centroid, so equality above is
+        # not an accident of every chunk being public.
+        everything = ResearcherProfile.from_files(pdir).index.embedding("centroid")
+        assert not np.allclose(everything, shipped, atol=1e-4)
+
+    # ---- a profile that will not load stops the publish ----------------------
+
+    def test_a_profile_that_will_not_load_fails_the_publish(self, tmp_path, capsys):
+        from researcher_profiles.cli import main
+        from researcher_profiles.publish import PublishError, publish_collection
+
+        root = tmp_path / "profiles"
+        _audience_profile(root, "ada")
+        bad = _audience_profile(root, "bob", rid="0000-0002-1825-0097")
+        out = tmp_path / "out"
+        publish_collection(root, out)
+        assert (out / "profiles" / "bob" / "index.html").is_file()
+        before = _tree_snapshot(out)
+
+        doc = json.loads((bad / "profile.jsonld").read_text())
+        doc["visibility"] = "restricted"
+        (bad / "profile.jsonld").write_text(json.dumps(doc), encoding="utf-8")
+
+        with pytest.raises(PublishError, match="bob"):
+            publish_collection(root, out)
+        assert _tree_snapshot(out) == before
+        assert main(["publish", str(root), "--out", str(out)]) != 0
+        assert "bob" in capsys.readouterr().err
+        assert _tree_snapshot(out) == before
+
+    # ---- the marker ------------------------------------------------------------
+
+    @pytest.mark.parametrize("marker", ["[]", '{"files": "x"}', '"x"', "{}"])
+    def test_refuses_a_marker_of_the_wrong_shape(self, tmp_path, marker):
+        from researcher_profiles.publish import MARKER, PublishError, publish_collection
+
+        root = tmp_path / "profiles"
+        _audience_profile(root)
+        out = tmp_path / "out"
+        out.mkdir()
+        (out / MARKER).write_text(marker, encoding="utf-8")
+        with pytest.raises(PublishError, match="unreadable"):
+            publish_collection(root, out)
+
+    def test_a_crash_before_pruning_is_cleaned_up_next_run(self, tmp_path, monkeypatch):
+        from researcher_profiles.publish import _publish, publish_collection
+
+        root = tmp_path / "profiles"
+        pdir = _audience_profile(root)
+        out = tmp_path / "out"
+        publish_collection(root, out)
+        summary = next((out / "profiles" / "ada" / "sources" / "summaries").iterdir())
+        _set_part_tier(pdir, summary.relative_to(out / "profiles" / "ada").as_posix(), "limited")
+
+        real = _publish._remove_stale
+        monkeypatch.setattr(_publish, "_remove_stale", _boom)
+        with pytest.raises(RuntimeError):
+            publish_collection(root, out)
+        assert summary.exists()
+        monkeypatch.setattr(_publish, "_remove_stale", real)
+
+        publish_collection(root, out)
+        assert not summary.exists()
+
+    def test_dry_run_reports_what_it_would_remove(self, tmp_path, capsys):
+        from researcher_profiles.cli import main
+        from researcher_profiles.publish import publish_collection
+
+        root = tmp_path / "profiles"
+        pdir = _audience_profile(root)
+        out = tmp_path / "out"
+        publish_collection(root, out)
+        summary = next((out / "profiles" / "ada" / "sources" / "summaries").iterdir())
+        rel = summary.relative_to(out / "profiles" / "ada").as_posix()
+        _set_part_tier(pdir, rel, "limited")
+
+        result = publish_collection(root, out, dry_run=True)
+        assert result.would_remove == [f"profiles/ada/{rel}"]
+        assert result.removed == []
+        assert summary.exists()
+
+        assert main(["publish", str(root), "-o", str(out), "--dry-run", "--json"]) == 0
+        assert json.loads(capsys.readouterr().out)["would_remove"] == [f"profiles/ada/{rel}"]
+        assert main(["publish", str(root), "-o", str(out), "--dry-run"]) == 0
+        assert f"would remove profiles/ada/{rel}" in capsys.readouterr().out
+        assert summary.exists()
+
+    @pytest.mark.parametrize("who, sitemap", [("public", True), ("limited", False)])
+    def test_sitemap_only_for_a_public_export(self, tmp_path, who, sitemap):
+        from researcher_profiles.publish import publish_collection
+
+        root = tmp_path / "profiles"
+        _audience_profile(root)
+        out = tmp_path / "out"
+        publish_collection(root, out, viewer=who, base_url="https://example.org")
+        assert (out / "sitemap.xml").exists() is sitemap
+        robots = (out / "robots.txt").read_text()
+        assert ("Disallow: /\n" in robots) is not sitemap
 
 
 # ---------------------------------------------------------------------------

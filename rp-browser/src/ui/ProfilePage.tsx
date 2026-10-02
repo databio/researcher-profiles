@@ -6,7 +6,12 @@ import {
   PapersList,
 } from "@rp/ui-lib";
 import type { ProfileDetail, PaperEntry } from "@rp/ui-lib/types";
-import { loadManifest, profileFiles, type ResolvedProfile } from "../model/manifest";
+import {
+  fulltextUrl,
+  loadManifest,
+  profileFiles,
+  type ResolvedProfile,
+} from "../model/manifest";
 import {
   getProfileDetail,
   getProfilePapers,
@@ -38,9 +43,13 @@ type TabId =
 
 interface ProfilePageProps {
   url?: string;
+  /** Controlled active sub-tab. When set (with onTabChange), the URL owns the tab. */
+  activeTab?: TabId;
+  /** Called when the user selects a tab. Its presence makes the component controlled. */
+  onTabChange?: (id: TabId) => void;
 }
 
-export function ProfilePage({ url: urlProp }: ProfilePageProps = {}) {
+export function ProfilePage({ url: urlProp, activeTab, onTabChange }: ProfilePageProps = {}) {
   const [searchParams] = useSearchParams();
   const url = urlProp ?? searchParams.get("u") ?? "";
   const [detail, setDetail] = useState<ProfileDetail | null>(null);
@@ -48,7 +57,16 @@ export function ProfilePage({ url: urlProp }: ProfilePageProps = {}) {
   const [resolved, setResolved] = useState<ResolvedProfile | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [active, setActive] = useState<TabId>("overview");
+  const controlled = activeTab !== undefined && onTabChange !== undefined;
+  const [internalActive, setInternalActive] = useState<TabId>("overview");
+  const requestedTab = controlled ? activeTab! : internalActive;
+  const setTab = useCallback(
+    (id: TabId) => {
+      onTabChange?.(id);
+      if (!controlled) setInternalActive(id);
+    },
+    [onTabChange, controlled],
+  );
 
   const [emb, setEmb] = useState<ProfileEmbeddings | null>(null);
   const [embLoading, setEmbLoading] = useState(false);
@@ -71,7 +89,7 @@ export function ProfilePage({ url: urlProp }: ProfilePageProps = {}) {
     let cancelled = false;
     setLoading(true);
     setError(null);
-    setActive("overview");
+    if (!controlled) setInternalActive("overview");
     setResolved(null);
     setEmb(null);
     setEmbError(null);
@@ -105,8 +123,40 @@ export function ProfilePage({ url: urlProp }: ProfilePageProps = {}) {
     [url],
   );
 
+  // The profile's own full-text copy of a paper (role `paper_fulltext`), when
+  // the manifest lists one; the row hides the link otherwise.
+  const fullTextHref = useCallback(
+    (paperId: string) => (resolved ? fulltextUrl(resolved.manifest, paperId) : null),
+    [resolved],
+  );
+
+  const tabs = useMemo(() => {
+    if (!detail) return [] as { id: TabId; label: string }[];
+    const t: { id: TabId; label: string }[] = [{ id: "overview", label: "Overview" }];
+    // The content tabs always render, empty or not: a profile that has no
+    // expertise/soul/papers yet still shows the tab (with an empty state) so
+    // the structure is legible rather than silently missing.
+    t.push({ id: "expertise", label: "Expertise" });
+    t.push({ id: "soul", label: "Research Identity" });
+    t.push({ id: "papers", label: `Publications (${papers.length})` });
+    t.push({ id: "embeddings", label: "Embeddings" });
+    t.push({ id: "files", label: "Files" });
+    for (const e of extraTabs) t.push({ id: e.id, label: e.label });
+    return t;
+  }, [detail, papers.length, extraTabs]);
+
+  /**
+   * The tab actually displayed. The content tabs always exist, but owner-only
+   * extra tabs are still data-dependent, so a linked-to segment can be absent --
+   * default to overview rather than rewriting the URL, mirroring meTabOf/adminTabOf.
+   */
+  const resolvedActive = useMemo(
+    () => (tabs.some((t) => t.id === requestedTab) ? requestedTab : "overview"),
+    [tabs, requestedTab],
+  );
+
   useEffect(() => {
-    if (active !== "embeddings" || embRequested) return;
+    if (resolvedActive !== "embeddings" || embRequested) return;
     setEmbRequested(true);
     let cancelled = false;
     setEmbLoading(true);
@@ -123,19 +173,7 @@ export function ProfilePage({ url: urlProp }: ProfilePageProps = {}) {
       }
     })();
     return () => { cancelled = true; };
-  }, [active, embRequested, url]);
-
-  const tabs = useMemo(() => {
-    if (!detail) return [] as { id: TabId; label: string }[];
-    const t: { id: TabId; label: string }[] = [{ id: "overview", label: "Overview" }];
-    if (detail.expertise) t.push({ id: "expertise", label: "Expertise" });
-    if (detail.soul) t.push({ id: "soul", label: "Research Identity" });
-    if (papers.length) t.push({ id: "papers", label: `Publications (${papers.length})` });
-    t.push({ id: "embeddings", label: "Embeddings" });
-    t.push({ id: "files", label: "Files" });
-    for (const e of extraTabs) t.push({ id: e.id, label: e.label });
-    return t;
-  }, [detail, papers.length, extraTabs]);
+  }, [resolvedActive, embRequested, url]);
 
   const files = useMemo(
     () => (resolved ? profileFiles(resolved) : []),
@@ -167,10 +205,6 @@ export function ProfilePage({ url: urlProp }: ProfilePageProps = {}) {
     return results;
   }, [url, centroids, allCards]);
 
-  useEffect(() => {
-    if (tabs.length && !tabs.some((t) => t.id === active)) setActive("overview");
-  }, [tabs, active]);
-
   return (
     <div>
       <div className="profile-chrome">
@@ -197,9 +231,9 @@ export function ProfilePage({ url: urlProp }: ProfilePageProps = {}) {
               <button
                 key={t.id}
                 role="tab"
-                aria-selected={active === t.id}
-                className={`tab-bar__tab ${active === t.id ? "tab-bar__tab--active" : ""}`}
-                onClick={() => setActive(t.id)}
+                aria-selected={resolvedActive === t.id}
+                className={`tab-bar__tab ${resolvedActive === t.id ? "tab-bar__tab--active" : ""}`}
+                onClick={() => setTab(t.id)}
               >
                 {t.label}
               </button>
@@ -207,7 +241,7 @@ export function ProfilePage({ url: urlProp }: ProfilePageProps = {}) {
           </div>
 
           <div className="tab-bar__panel" role="tabpanel">
-            {active === "overview" && (
+            {resolvedActive === "overview" && (
               <>
                 <MetadataPanel metadata={detail.metadata} />
                 {similarProfiles.length > 0 && (
@@ -232,16 +266,30 @@ export function ProfilePage({ url: urlProp }: ProfilePageProps = {}) {
                 )}
               </>
             )}
-            {active === "expertise" && <MarkdownSection title="Expertise narrative" body={detail.expertise} />}
-            {active === "soul" && <MarkdownSection title="Narrative voice (SOUL)" body={detail.soul} />}
-            {active === "papers" && (
-              <PapersList papers={papers} loadSummary={loadSummary} />
+            {resolvedActive === "expertise" &&
+              (detail.expertise?.trim() ? (
+                <MarkdownSection title="Expertise narrative" body={detail.expertise} />
+              ) : (
+                <p className="text-muted">No expertise narrative yet.</p>
+              ))}
+            {resolvedActive === "soul" &&
+              (detail.soul?.trim() ? (
+                <MarkdownSection title="Narrative voice (SOUL)" body={detail.soul} />
+              ) : (
+                <p className="text-muted">No research identity (SOUL) written yet.</p>
+              ))}
+            {resolvedActive === "papers" && (
+              <PapersList
+                papers={papers}
+                loadSummary={loadSummary}
+                fullTextHref={fullTextHref}
+              />
             )}
-            {active === "embeddings" && (
+            {resolvedActive === "embeddings" && (
               <EmbeddingsPanel loading={embLoading} error={embError} data={emb} />
             )}
-            {active === "files" && <FilesPanel files={files} />}
-            {extraTabs.find((t) => t.id === active)?.render(tabCtx)}
+            {resolvedActive === "files" && <FilesPanel files={files} />}
+            {extraTabs.find((t) => t.id === resolvedActive)?.render(tabCtx)}
           </div>
         </div>
       )}

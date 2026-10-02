@@ -112,7 +112,10 @@ class LLMClient:
             messages=messages,
         )
         if temperature is not None:
-            kwargs["temperature"] = temperature
+            # anthropic>=1 dropped ``temperature`` from the create() signature
+            # (TypeError); the API still honours it on models before Opus 4.7,
+            # so send it as a raw body field. Works on 0.x too.
+            kwargs["extra_body"] = {"temperature": temperature}
         if thinking is not None:
             kwargs["thinking"] = thinking
         msg = self._client.messages.create(**kwargs)
@@ -319,7 +322,7 @@ def _source_type_kwargs(source_types: Optional[list[str]]) -> dict:
 
     Empty for ``None``: a caller entitled to every source type queries exactly
     the index an unfiltered call would, down to the call itself. The
-    restriction is applied at the query so restricted chunks cannot crowd out
+    restriction is applied at the query so private chunks cannot crowd out
     the ones the caller may actually be shown, rather than being dropped after
     the fact.
     """

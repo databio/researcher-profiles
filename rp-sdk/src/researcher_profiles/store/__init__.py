@@ -42,6 +42,7 @@ from .protocol import (
     IngestResult,
     ProfileNotFoundError,
     ProfileStore,
+    RetiredRidError,
     UploadError,
     VectorStore,
 )
@@ -54,6 +55,7 @@ __all__ = [
     "IngestResult",
     "ProfileNotFoundError",
     "ProfileStore",
+    "RetiredRidError",
     "SqlProfileStore",
     "SqlArtifactStorage",
     "UploadError",

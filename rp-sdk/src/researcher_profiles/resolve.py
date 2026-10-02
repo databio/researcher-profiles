@@ -62,7 +62,7 @@ The pipeline (:func:`resolve_person`):
    spelling differences (a middle initial) can race-split instead; this is
    accepted, because splits are recoverable and merges are not. If the
    deterministic rid is already occupied by a profile the scan withheld
-   (a restricted one), the mint falls back to a
+   (a private one), the mint falls back to a
    fresh random id rather than returning the hidden profile's rid.
 
 Accepted tradeoffs: a person resolved by name
@@ -70,15 +70,15 @@ first and by ORCID later ends up with a local stub and an ORCID profile.
 The name resolves, then defers with both as candidates, and the caller
 picks (usually the ORCID); the resolver never merges records on its own.
 Two real people sharing a full name resolve only by affiliation, and defer
-without one. A person created via ``create_new`` (or behind a restricted
+without one. A person created via ``create_new`` (or behind a private
 occupant) has a random rid, so an initials-only spelling of their name
 defers rather than self-binding; re-resolve by rid instead. Nickname and
 particle-surname spelling variants can split. The unique-weak bind accepts
 affiliation as the sole deciding evidence for an initials-only name:
 "Doe, J." plus institution is common input for a typical deployment, and a
 second J. Doe at the same institution not yet in the store would be wrongly
-matched. ``visibility="restricted"`` profiles are invisible to name
-matching (that tier never leaves the machine), so resolving a restricted
+matched. ``visibility="private"`` profiles are invisible to name
+matching (that tier is served to nobody but the owner), so resolving a private
 person's name mints a separate stub. Likewise a hidden occupant of the
 deterministic rid whose affiliation conflicts is silently split into a
 fresh person at high confidence, where the same evidence on a visible
@@ -97,7 +97,7 @@ Stub profiles are minted ``provenance="third_party"`` (a real person
 asserted by a calling service, not ``synthetic``, which means "not a real
 person", and not ``orcid_verified``, which requires the ORCID round-trip
 this resolver never performs), ``level="lite"`` and
-``visibility="internal"``, so a later full build supersedes them by rid
+``visibility="limited"``, so a later full build supersedes them by rid
 and nothing minted here leaks onto the public read plane.
 """
 
@@ -336,7 +336,7 @@ def _stub_document(rid: str, name: str, affiliation: Optional[str]) -> ProfileDo
         level="lite",
         # A resolver stub must not appear on the public read plane: nobody
         # has claimed it and nothing in it has been verified.
-        visibility="internal",
+        visibility="limited",
         affiliation=affiliation or None,
         hasCitationGraph=False,
         hasEmbeddingIndex=False,
@@ -437,10 +437,10 @@ def _compatible_profiles(store: Any, fold_key: str, query_givens: list[str]) -> 
             visibility = prof.metadata.visibility
         except ProfileError:  # malformed or concurrently-deleted neighbor
             continue
-        if visibility == "restricted":
-            # The restricted tier never leaves the machine, not even as a
+        if visibility == "private":
+            # The private tier is served to nobody but the owner, not even as a
             # candidate's name in a resolve response. The mint path also
-            # refuses to hand back a restricted occupant's rid (see the
+            # refuses to hand back a private occupant's rid (see the
             # occupied-rid fallback in resolve_person).
             continue
         if not rid or normalize_name(pname) != fold_key:
@@ -492,7 +492,9 @@ def _resolve_by_rid(
     except ValueError as e:
         raise ResolveError(str(e)) from e
     if store.exists(rid):
-        return ResolveResult(rid=rid, created=False, confidence="exact")
+        # ``rid_for`` follows a merge alias, so a retired rid answers with its
+        # live successor and never mints a stub over a retired identity.
+        return ResolveResult(rid=store.rid_for(rid), created=False, confidence="exact")
     if is_local(rid):
         # A local: rid is only ever chosen by this resolver, never
         # supplied from outside: accepting one for a profile that does
@@ -617,7 +619,7 @@ def _mint_on_miss(
     that turns out to be occupied despite the empty scan is bound only when
     the occupant provably is this person: visible, its name computing this
     exact mint key, and no affiliation conflict. That is the concurrent race
-    winner. Any other occupant (restricted, malformed, renamed since mint, or
+    winner. Any other occupant (private, malformed, renamed since mint, or
     a profile pushed onto the computable rid by someone else) must not be
     handed out; a fresh random id is minted instead.
     """
@@ -634,7 +636,7 @@ def _mint_on_miss(
             pass
         if (
             occupant is not None
-            and occupant[1] != "restricted"
+            and occupant[1] != "private"
             and _mint_key(occupant[0]) == mint_key
             and not _affiliations_conflict(affiliation, occupant[2])
         ):

@@ -47,9 +47,45 @@ def test_jcs_is_stable_regardless_of_input_key_order():
     assert a == b
 
 
-def test_jcs_refuses_floats():
-    with pytest.raises(TypeError, match="floats"):
-        signing.jcs({"x": 1.5})
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        # RFC 8785 appendix B vectors, then the shapes interest weights take.
+        (1e30, b"1e+30"),
+        (4.5, b"4.5"),
+        (0.002, b"0.002"),
+        (1e-27, b"1e-27"),
+        (333333333.33333329, b"333333333.3333333"),
+        (-0.0, b"0"),
+        (1e21, b"1e+21"),
+        (1e20, b"100000000000000000000"),
+        (1e-7, b"1e-7"),
+        (0.000001, b"0.000001"),
+        (-1.0, b"-1"),
+        (0.45, b"0.45"),
+    ],
+    ids=[
+        "1e30",
+        "4.50",
+        "2e-3",
+        "1e-27",
+        "shortest-digits",
+        "negative-zero",
+        "1e21-switches-to-exponent",
+        "1e20-stays-fixed",
+        "1e-7-switches-to-exponent",
+        "1e-6-stays-fixed",
+        "integral-weight",
+        "share",
+    ],
+)
+def test_jcs_writes_floats_as_es6_does(value, expected):
+    assert signing.jcs(value) == expected
+
+
+def test_jcs_refuses_nan():
+    with pytest.raises(TypeError, match="NaN"):
+        signing.jcs({"x": float("nan")})
 
 
 def test_preimage_excludes_the_proof_member():

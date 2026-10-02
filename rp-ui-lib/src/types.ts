@@ -6,7 +6,7 @@
  */
 
 /**
- * HTTP wire types for the researcher-profiles API (researcher_profiles.api_models). Generated; do not edit by hand.
+ * HTTP wire types for the researcher-profiles API (researcher_profiles.models.api). Generated; do not edit by hand.
  */
 export interface ResearcherProfileWireContract {
   artifact_tier: ArtifactTier;
@@ -16,6 +16,8 @@ export interface ResearcherProfileWireContract {
   profile_detail: ProfileDetail;
   profile_metadata: ProfileMetadataPayload;
   profile_summary: ProfileSummary;
+  section_tier: SectionTier;
+  section_tier_report: SectionTierReport;
   visibility_patch: VisibilityPatch;
   visibility_report: VisibilityReport;
   [k: string]: unknown;
@@ -32,8 +34,6 @@ export interface ArtifactTier {
   content_url: string;
   declared: string;
   effective: string;
-  lock_reason?: string | null;
-  locked?: boolean;
   name?: string | null;
   paper_id?: string | null;
   raised_by?: string[];
@@ -107,15 +107,29 @@ export interface ProfileMetadataPayload {
   job_title?: string | null;
   level?: string;
   license?: string | null;
+  methodological_commitments?: string[];
   name: string;
   not_interests?: string[];
   openalex_id?: string | null;
   provenance?: string | null;
+  regulatory_experience?: string[];
+  research_interests?: {
+    [k: string]: unknown;
+  }[];
   rid?: string | null;
   same_as?: string[];
   scholar_url?: string | null;
+  section_visibility?: {
+    [k: string]: unknown;
+  }[];
+  site_capabilities?: {
+    [k: string]: unknown;
+  } | null;
   subfields?: string[];
   summary?: string | null;
+  therapeutic_areas?: {
+    [k: string]: unknown;
+  }[];
   training?: {
     [k: string]: unknown;
   }[];
@@ -137,12 +151,43 @@ export interface ProfileSummary {
   [k: string]: unknown;
 }
 /**
- * Set the profile-level default tier and/or per-artifact tiers.
+ * One inline section's declared tier.
+ *
+ * Sections travel on the visibility patch rather than the metadata patch
+ * because a tier is a privacy decision, not a display field: the one surface
+ * that knows about host floors and the full-text lock has to be the one that
+ * sets them.
+ */
+export interface SectionTier {
+  section: string;
+  visibility: string;
+  [k: string]: unknown;
+}
+/**
+ * One inline section's tiers, and who they let in: the read side of the
+ * section mechanism.
+ *
+ * A section has both a tier the owner *declared* and a tier that actually
+ * *governs* after the profile default folds in, and an editor has to show
+ * both: the control sits on ``declared``, the "resolves to" badge on
+ * ``effective``. The old report collapsed the two into one ``{section: tier}``
+ * map, so an owner could not tell what they set from what it became.
+ */
+export interface SectionTierReport {
+  declared: string;
+  effective: string;
+  section: string;
+  visible_to?: string[];
+  [k: string]: unknown;
+}
+/**
+ * Set the profile-level default tier, per-artifact tiers, section tiers.
  */
 export interface VisibilityPatch {
   artifacts?: ArtifactVisibility[];
   base_hash?: string | null;
   profile_visibility?: string | null;
+  sections?: SectionTier[];
   [k: string]: unknown;
 }
 /**
@@ -157,6 +202,7 @@ export interface VisibilityReport {
   profile_floor_reason?: string | null;
   profile_visibility: string;
   rid?: string | null;
+  sections?: SectionTierReport[];
   slug: string;
   [k: string]: unknown;
 }

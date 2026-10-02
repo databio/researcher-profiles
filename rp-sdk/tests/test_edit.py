@@ -3,8 +3,8 @@
 Two layers:
 
 - :mod:`researcher_profiles.profile.edit`: the on-disk mutation helpers (patch metadata,
-  set soul, set visibility), including the re-validation guarantee and the
-  legal ``paper_fulltext`` restricted pin.
+  set soul, set visibility, patch/add/remove one work), including the
+  re-validation guarantee and the legal ``paper_fulltext`` private pin.
 - the ``PATCH/PUT /api/v1/profiles/{slug}/...`` endpoints via ``require_owner``:
   the operator-token fallback on bare rp-sdk, and the owner/non-owner/no-session
   behavior when a management host installs an ``owner_verifier``.
@@ -17,9 +17,13 @@ import pytest
 from researcher_profiles import ResearcherProfile
 from researcher_profiles.errors import ProfileWriteError
 from researcher_profiles.profile.edit import (
+    EDITABLE_METADATA_FIELDS,
+    LOCKED_METADATA_FIELDS,
     EditError,
+    WorkNotFoundError,
 )
 from researcher_profiles.profile.storage import DirectoryArtifactStorage
+from researcher_profiles.schema import ProfileDocument
 
 SLUG = "jane-doe"
 
@@ -64,8 +68,8 @@ class TestEditHelpers:
 
     def test_set_profile_visibility(self, jane_doe_dir):
         prof = ResearcherProfile.from_files(jane_doe_dir)
-        prof.edit.set_visibility(profile_visibility="internal")
-        assert ResearcherProfile.from_files(jane_doe_dir).metadata.visibility == "internal"
+        prof.edit.set_visibility(profile_visibility="limited")
+        assert ResearcherProfile.from_files(jane_doe_dir).metadata.visibility == "limited"
 
     def test_set_visibility_rejects_bad_tier(self, jane_doe_dir):
         prof = ResearcherProfile.from_files(jane_doe_dir)
@@ -74,24 +78,44 @@ class TestEditHelpers:
 
     def test_artifact_visibility_by_role(self, jane_doe_dir):
         prof = ResearcherProfile.from_files(jane_doe_dir)
-        prof.edit.set_visibility(artifacts=[{"role": "soul", "visibility": "internal"}])
+        prof.edit.set_visibility(artifacts=[{"role": "soul", "visibility": "limited"}])
         reloaded = ResearcherProfile.from_files(jane_doe_dir)
         soul_ref = [p for p in reloaded.metadata.subject_of if p.role == "soul"][0]
-        assert soul_ref.visibility == "internal"
+        assert soul_ref.visibility == "limited"
 
-    def test_paper_fulltext_cannot_be_loosened(self, jane_doe_dir):
-        """The legal floor refuses rather than accepting and silently re-pinning.
+    def test_paper_fulltext_tier_is_choosable(self, jane_doe_dir):
+        """paper_fulltext is an ordinary role: the owner may raise it to public.
 
-        Returning success and letting the schema quietly re-pin the tier on
-        re-validation would make the API report a change it had not made. A
-        floor that lies about itself is worse than no floor.
+        It defaults to private, but that is a default, not a floor. Setting
+        it to public succeeds and the change survives a reload.
         """
         prof = ResearcherProfile.from_files(jane_doe_dir)
-        with pytest.raises(EditError, match="legal floor"):
-            prof.edit.set_visibility(artifacts=[{"role": "paper_fulltext", "visibility": "public"}])
+        _doc, changed = prof.edit.set_visibility(
+            artifacts=[{"role": "paper_fulltext", "visibility": "public"}]
+        )
+        assert changed >= 1
         reloaded = ResearcherProfile.from_files(jane_doe_dir)
         ft = [p for p in reloaded.metadata.has_part if p.role == "paper_fulltext"]
-        assert ft and all(p.visibility == "restricted" for p in ft)
+        assert ft and all(p.visibility == "public" for p in ft)
+
+    def test_soul_section_retiers_the_soul_artifact(self, jane_doe_dir):
+        """The `soul` section is the single owner-facing knob for SOUL.md.
+
+        SOUL is a manifest artifact, not an inline field, so a section tier
+        that only wrote `section_visibility` would be a dead knob: the file
+        would keep whatever tier its ArtifactRef declared. Setting the section
+        must therefore re-tier every `soul` part to match.
+        """
+        prof = ResearcherProfile.from_files(jane_doe_dir)
+        _doc, changed = prof.edit.set_visibility(
+            sections=[{"section": "soul", "visibility": "limited"}]
+        )
+        assert changed >= 1
+        reloaded = ResearcherProfile.from_files(jane_doe_dir)
+        soul_refs = [p for p in reloaded.metadata.subject_of if p.role == "soul"]
+        assert soul_refs and all(p.visibility == "limited" for p in soul_refs)
+        declared = {x.section: x.visibility for x in reloaded.metadata.section_visibility}
+        assert declared["soul"] == "limited"
 
     def test_metadata_patch_stamps_date_modified(self, jane_doe_dir):
         import json
@@ -117,9 +141,113 @@ class TestEditHelpers:
         import json
 
         prof = ResearcherProfile.from_files(jane_doe_dir)
-        prof.edit.set_visibility(profile_visibility="internal")
+        prof.edit.set_visibility(profile_visibility="limited")
         doc = json.loads((jane_doe_dir / "profile.jsonld").read_text())
         assert "dateModified" in doc
+
+
+class TestWorkEdits:
+    """``patch_work`` / ``add_work`` / ``remove_work``: one record at a time.
+
+    The corpus used to be reachable only through ``rp push``, which replaces
+    the whole profile directory. These are the field-level writes, and what
+    they owe is the same thing ``patch_metadata`` owes: a refused patch leaves
+    the file exactly as it was.
+    """
+
+    PAPER = "doe2016example"
+
+    def _papers_entry(self, jane_doe_dir: Path) -> dict:
+        """The manifest entry describing ``sources/papers.jsonld``."""
+        import json
+
+        doc = json.loads((jane_doe_dir / "profile.jsonld").read_text())
+        return next(p for p in doc["hasPart"] if p["contentUrl"] == "sources/papers.jsonld")
+
+    def test_patch_persists_and_reloads(self, jane_doe_dir):
+        prof = ResearcherProfile.from_files(jane_doe_dir)
+        prof.edit.patch_work(self.PAPER, {"doi": "10.1038/s41586-023-06000-1", "access": "closed"})
+        reloaded = ResearcherProfile.from_files(jane_doe_dir)
+        record = next(p for p in reloaded.papers if p.paper_id == self.PAPER)
+        assert record.doi == "10.1038/s41586-023-06000-1"
+        assert record.access == "closed"
+
+    def test_datePublished_reaches_the_year_field(self, jane_doe_dir):
+        """The patch speaks the name on disk, not the python attribute.
+
+        ``year`` is stored under ``datePublished``. A patch that landed the
+        value as an extra key would leave the real year untouched and still
+        report success.
+        """
+        prof = ResearcherProfile.from_files(jane_doe_dir)
+        prof.edit.patch_work(self.PAPER, {"datePublished": 2017})
+        reloaded = ResearcherProfile.from_files(jane_doe_dir)
+        assert next(p for p in reloaded.papers if p.paper_id == self.PAPER).year == 2017
+
+    def test_rejects_non_editable_field(self, jane_doe_dir):
+        prof = ResearcherProfile.from_files(jane_doe_dir)
+        before = (jane_doe_dir / "sources" / "papers.jsonld").read_bytes()
+        with pytest.raises(EditError, match="not owner-editable"):
+            prof.edit.patch_work(self.PAPER, {"cited_by_count": 9000})
+        assert (jane_doe_dir / "sources" / "papers.jsonld").read_bytes() == before
+
+    def test_unknown_paper_id_is_its_own_error(self, jane_doe_dir):
+        prof = ResearcherProfile.from_files(jane_doe_dir)
+        with pytest.raises(WorkNotFoundError, match="no work with paper_id"):
+            prof.edit.patch_work("nobody2099", {"doi": "10.1/x"})
+
+    def test_invalid_value_leaves_the_file_untouched(self, jane_doe_dir):
+        prof = ResearcherProfile.from_files(jane_doe_dir)
+        before = (jane_doe_dir / "sources" / "papers.jsonld").read_bytes()
+        with pytest.raises(EditError, match="is invalid"):
+            prof.edit.patch_work(self.PAPER, {"is_corresponding": "maybe"})
+        assert (jane_doe_dir / "sources" / "papers.jsonld").read_bytes() == before
+
+    def test_list_order_is_preserved(self, jane_doe_dir):
+        """A patch is not a reordering: corpus order is the published order."""
+        prof = ResearcherProfile.from_files(jane_doe_dir)
+        before = [p.paper_id for p in prof.papers]
+        prof.edit.patch_work(self.PAPER, {"citation": "Doe et al. (2016)"})
+        assert [p.paper_id for p in ResearcherProfile.from_files(jane_doe_dir).papers] == before
+
+    def test_manifest_digest_follows_the_new_bytes(self, jane_doe_dir):
+        """A manifest that still describes the pre-edit file is a lie about it."""
+        prof = ResearcherProfile.from_files(jane_doe_dir)
+        prof.edit.patch_work(self.PAPER, {"citation": "first"})
+        first = self._papers_entry(jane_doe_dir)
+        assert first["sha256"] and first["bytes"]
+
+        prof = ResearcherProfile.from_files(jane_doe_dir)
+        prof.edit.patch_work(self.PAPER, {"citation": "second, and rather longer"})
+        second = self._papers_entry(jane_doe_dir)
+        assert second["sha256"] != first["sha256"]
+
+    def test_add_work_appends_and_replaces(self, jane_doe_dir):
+        prof = ResearcherProfile.from_files(jane_doe_dir)
+        before = len(prof.papers)
+        prof.edit.add_work({"paper_id": "doe2026new", "name": "A new work", "type": "authored"})
+        reloaded = ResearcherProfile.from_files(jane_doe_dir)
+        assert len(reloaded.papers) == before + 1
+        assert reloaded.papers[-1].paper_id == "doe2026new"
+
+        prof = ResearcherProfile.from_files(jane_doe_dir)
+        prof.edit.add_work({"paper_id": "doe2026new", "name": "Renamed", "type": "authored"})
+        reloaded = ResearcherProfile.from_files(jane_doe_dir)
+        assert len(reloaded.papers) == before + 1
+        assert reloaded.papers[-1].name == "Renamed"
+
+    def test_add_work_needs_a_paper_id(self, jane_doe_dir):
+        prof = ResearcherProfile.from_files(jane_doe_dir)
+        with pytest.raises(EditError, match="needs a paper_id"):
+            prof.edit.add_work({"name": "Nameless", "type": "authored"})
+
+    def test_remove_work(self, jane_doe_dir):
+        prof = ResearcherProfile.from_files(jane_doe_dir)
+        prof.edit.remove_work(self.PAPER)
+        reloaded = ResearcherProfile.from_files(jane_doe_dir)
+        assert self.PAPER not in [p.paper_id for p in reloaded.papers]
+        with pytest.raises(WorkNotFoundError):
+            prof.edit.remove_work(self.PAPER)
 
 
 class TestEditAgainstAReadOnlyBackend:
@@ -164,7 +292,7 @@ class TestEditAgainstAReadOnlyBackend:
         prof = self._read_only_over(jane_doe_dir)
         before = (jane_doe_dir / "profile.jsonld").read_text()
         with pytest.raises(EditError):
-            prof.edit.set_visibility(profile_visibility="internal")
+            prof.edit.set_visibility(profile_visibility="limited")
         assert (jane_doe_dir / "profile.jsonld").read_text() == before
 
 
@@ -213,10 +341,135 @@ class TestEditEndpointsOperatorFallback:
         assert r.json()["updated"] == ["soul"]
         r = c.patch(
             f"/api/v1/profiles/{SLUG}/visibility",
-            json={"profile_visibility": "internal"},
+            json={"profile_visibility": "limited"},
         )
         assert r.status_code == 200, r.text
         assert "visibility" in r.json()["updated"]
+
+    def test_visibility_report_sections_are_rows(self, make_api_client, fixture_profiles_root):
+        """The report's `sections` is a list of {section, declared, effective,
+        visible_to} rows in SECTION_FIELDS order, not a flat {section: tier}
+        map: an editor shows what was declared beside what it resolves to."""
+        c = make_api_client(fixture_profiles_root(SLUG))
+        report = c.get(f"/api/v1/profiles/{SLUG}/visibility").json()
+        sections = report["sections"]
+        assert isinstance(sections, list)
+        by_name = {s["section"]: s for s in sections}
+        assert "soul" in by_name
+        row = by_name["soul"]
+        assert set(row) >= {"section", "declared", "effective", "visible_to"}
+
+    def test_soul_section_patch_retiers_artifact_and_round_trips(
+        self, make_api_client, fixture_profiles_root
+    ):
+        """PATCH sections=[{soul: limited}] re-tiers the soul artifact, and the
+        report reads the declared tier back as limited."""
+        c = make_api_client(fixture_profiles_root(SLUG))
+        r = c.patch(
+            f"/api/v1/profiles/{SLUG}/visibility",
+            json={"sections": [{"section": "soul", "visibility": "limited"}]},
+        )
+        assert r.status_code == 200, r.text
+        assert "sections" in r.json()["updated"]
+        assert r.json()["artifacts_changed"] >= 1
+        report = c.get(f"/api/v1/profiles/{SLUG}/visibility").json()
+        soul_row = next(s for s in report["sections"] if s["section"] == "soul")
+        assert soul_row["declared"] == "limited"
+        soul_artifacts = [a for a in report["artifacts"] if a.get("role") == "soul"]
+        assert soul_artifacts and all(a["declared"] == "limited" for a in soul_artifacts)
+
+
+class TestWorkEndpoints:
+    """``/profiles/{slug}/works/{paper_id}``: the corpus over HTTP.
+
+    The status codes are the contract. 400 and 404 answer different mistakes
+    ("you may not set that" vs "there is no such paper") and a caller retries
+    them differently, so they are pinned here rather than left to whichever
+    exception reached the handler.
+    """
+
+    PAPER = "doe2016example"
+
+    def test_patch_reports_the_fields_it_applied(self, make_api_client, fixture_profiles_root):
+        c = make_api_client(fixture_profiles_root(SLUG))
+        r = c.patch(
+            f"/api/v1/profiles/{SLUG}/works/{self.PAPER}",
+            json={"doi": "10.1038/s41586-023-06000-1", "datePublished": 2017},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["updated"] == ["datePublished", "doi"]
+        record = c.get(f"/api/v1/profiles/{SLUG}/works/{self.PAPER}").json()
+        assert record["doi"] == "10.1038/s41586-023-06000-1"
+        assert record["datePublished"] == "2017"
+
+    def test_disallowed_field_is_a_400(self, make_api_client, fixture_profiles_root):
+        c = make_api_client(fixture_profiles_root(SLUG))
+        r = c.patch(f"/api/v1/profiles/{SLUG}/works/{self.PAPER}", json={"cited_by_count": 9000})
+        assert r.status_code == 400, r.text
+        assert "not owner-editable" in r.json()["detail"]
+
+    def test_unknown_paper_is_a_404(self, make_api_client, fixture_profiles_root):
+        c = make_api_client(fixture_profiles_root(SLUG))
+        r = c.patch(f"/api/v1/profiles/{SLUG}/works/nobody2099", json={"doi": "10.1/x"})
+        assert r.status_code == 404, r.text
+        assert c.get(f"/api/v1/profiles/{SLUG}/works/nobody2099").status_code == 404
+
+    def test_stale_base_hash_is_a_409_and_changes_nothing(
+        self, make_api_client, fixture_profiles_root
+    ):
+        c = make_api_client(fixture_profiles_root(SLUG))
+        stale = c.get(f"/api/v1/profiles/{SLUG}").json()["content_hash"]
+        c.patch(f"/api/v1/profiles/{SLUG}/metadata", json={"field": "Somebody Else's Edit"})
+        r = c.patch(
+            f"/api/v1/profiles/{SLUG}/works/{self.PAPER}",
+            json={"doi": "10.1/mine", "base_hash": stale},
+        )
+        assert r.status_code == 409, r.text
+        assert c.get(f"/api/v1/profiles/{SLUG}/works/{self.PAPER}").json().get("doi") is None
+
+    def test_put_then_delete_one_record(self, make_api_client, fixture_profiles_root):
+        c = make_api_client(fixture_profiles_root(SLUG))
+        r = c.put(
+            f"/api/v1/profiles/{SLUG}/works/doe2026new",
+            json={"paper_id": "ignored", "name": "A new work", "type": "authored"},
+        )
+        assert r.status_code == 200, r.text
+        # The path wins: a record is never filed under a name it was not
+        # addressed by.
+        assert c.get(f"/api/v1/profiles/{SLUG}/works/doe2026new").json()["name"] == "A new work"
+        assert c.get(f"/api/v1/profiles/{SLUG}/works/ignored").status_code == 404
+        assert c.delete(f"/api/v1/profiles/{SLUG}/works/doe2026new").status_code == 200
+        assert c.get(f"/api/v1/profiles/{SLUG}/works/doe2026new").status_code == 404
+
+    def test_a_malformed_put_body_is_a_400_naming_the_field(
+        self, make_api_client, fixture_profiles_root
+    ):
+        c = make_api_client(fixture_profiles_root(SLUG))
+        r = c.put(f"/api/v1/profiles/{SLUG}/works/doe2026new", json={"name": 123})
+        assert r.status_code == 400, r.text
+        assert "name" in r.json()["detail"]
+
+    def test_a_scope_gated_agent_is_refused(self, make_api_client, fixture_profiles_root):
+        """``check_write_scope`` reaches the works routes with the fields named.
+
+        A host that hands out a narrow agent key needs the paper and the fields
+        in the detail, or its verifier can only say yes or no to "edits works
+        at all".
+        """
+        from fastapi import HTTPException
+
+        c = make_api_client(fixture_profiles_root(SLUG))
+        seen: list[tuple[str, dict]] = []
+
+        def _verifier(request, action, detail):  # noqa: ARG001
+            seen.append((action, detail))
+            raise HTTPException(status_code=403, detail="scope profile:works required")
+
+        c.app.state.write_scope_verifier = _verifier
+        r = c.patch(f"/api/v1/profiles/{SLUG}/works/{self.PAPER}", json={"doi": "10.1/x"})
+        assert r.status_code == 403, r.text
+        assert seen == [("works", {"paper_id": self.PAPER, "fields": ["doi"]})]
+        assert c.get(f"/api/v1/profiles/{SLUG}/works/{self.PAPER}").json().get("doi") is None
 
 
 class TestEditEndpointsOwnerScoped:
@@ -328,6 +581,97 @@ class TestAuthoredHistoryIsEditable:
             prof.edit.patch_metadata({"expertise_md": "# mine now"})
 
 
+class TestAiWrittenFieldsAreEditable:
+    """Nothing the build AI writes is locked from its owner.
+
+    An owner fixing an outdated ``current_rank`` must not need a rebuild. Only
+    identity, code-computed facts, the manifest, bookkeeping, and visibility
+    are locked.
+    """
+
+    CAREER_STAGE = {
+        "as_of": "2026-09-30",
+        "current_rank": "professor",
+        "tenure_status": "tenured",
+        "independence": "independent",
+        "evidence": "Stated by the owner.",
+        "confidence": "high",
+    }
+
+    def test_every_field_is_editable_or_locked_not_both(self):
+        fields = set(ProfileDocument.model_fields)
+        assert EDITABLE_METADATA_FIELDS | LOCKED_METADATA_FIELDS == fields
+        assert not EDITABLE_METADATA_FIELDS & LOCKED_METADATA_FIELDS
+
+    def test_career_stage_round_trips(self, jane_doe_dir):
+        prof = ResearcherProfile.from_files(jane_doe_dir)
+        prof.edit.patch_metadata({"career_stage": self.CAREER_STAGE})
+        stage = ResearcherProfile.from_files(jane_doe_dir).metadata.career_stage
+        assert stage is not None
+        assert stage.current_rank == "professor"
+        assert stage.as_of == "2026-09-30"
+
+    def test_partial_career_stage_keeps_the_other_facts(self, jane_doe_dir):
+        prof = ResearcherProfile.from_files(jane_doe_dir)
+        prof.edit.patch_metadata({"career_stage": self.CAREER_STAGE})
+        prof = ResearcherProfile.from_files(jane_doe_dir)
+        prof.edit.patch_metadata({"career_stage": {"current_rank": "associate_professor"}})
+        stage = ResearcherProfile.from_files(jane_doe_dir).metadata.career_stage
+        assert stage.current_rank == "associate_professor"
+        assert stage.as_of == "2026-09-30"
+        assert stage.tenure_status == self.CAREER_STAGE["tenure_status"]
+
+    def test_null_key_in_career_stage_clears_only_that_key(self, jane_doe_dir):
+        prof = ResearcherProfile.from_files(jane_doe_dir)
+        prof.edit.patch_metadata({"career_stage": self.CAREER_STAGE})
+        prof = ResearcherProfile.from_files(jane_doe_dir)
+        prof.edit.patch_metadata({"career_stage": {"current_rank": None}})
+        stage = ResearcherProfile.from_files(jane_doe_dir).metadata.career_stage
+        assert stage.current_rank is None
+        assert stage.as_of == "2026-09-30"
+
+    def test_invalid_career_stage_is_rejected_and_writes_nothing(self, jane_doe_dir):
+        prof = ResearcherProfile.from_files(jane_doe_dir)
+        before = (jane_doe_dir / "profile.jsonld").read_bytes()
+        with pytest.raises(EditError, match="career_stage"):
+            prof.edit.patch_metadata(
+                {"career_stage": {**self.CAREER_STAGE, "current_rank": "grand_poobah"}}
+            )
+        assert (jane_doe_dir / "profile.jsonld").read_bytes() == before
+
+    def test_list_fields_persist(self, jane_doe_dir):
+        prof = ResearcherProfile.from_files(jane_doe_dir)
+        prof.edit.patch_metadata(
+            {
+                "recurring_positions": ["Chromatin shapes regulation"],
+                "critiques": ["Peak calling hides uncertainty"],
+                "collaborators": ["Ada Lovelace", {"name": "Alan Turing"}],
+                "research_outputs": [
+                    {"type": "software", "name": "gtars", "url": "https://github.com/databio/gtars"}
+                ],
+            }
+        )
+        meta = ResearcherProfile.from_files(jane_doe_dir).metadata
+        assert meta.recurring_positions == ["Chromatin shapes regulation"]
+        assert meta.critiques == ["Peak calling hides uncertainty"]
+        assert meta.collaborators == ["Ada Lovelace", {"name": "Alan Turing"}]
+        assert [o.name for o in meta.research_outputs] == ["gtars"]
+
+    def test_invalid_research_output_is_rejected(self, jane_doe_dir):
+        prof = ResearcherProfile.from_files(jane_doe_dir)
+        with pytest.raises(EditError, match=r"research_outputs\[0\]"):
+            prof.edit.patch_metadata({"research_outputs": [{"type": "software"}]})
+
+    @pytest.mark.parametrize(
+        "patch",
+        [{"rid": "0000-0002-1825-0097"}, {"paper_stats": {"total_papers": 1}}],
+    )
+    def test_locked_fields_stay_locked(self, jane_doe_dir, patch):
+        prof = ResearcherProfile.from_files(jane_doe_dir)
+        with pytest.raises(EditError, match="not owner-editable"):
+            prof.edit.patch_metadata(patch)
+
+
 class TestConcurrencyToken:
     """``base_hash`` -> 409. Opt-in: no token means last-writer-wins."""
 
@@ -409,12 +753,12 @@ class TestConcurrencyToken:
         c.patch(f"/api/v1/profiles/{SLUG}/metadata", json={"field": "Somebody Else's Edit"})
         r = c.patch(
             f"/api/v1/profiles/{SLUG}/visibility",
-            json={"profile_visibility": "internal", "base_hash": stale},
+            json={"profile_visibility": "limited", "base_hash": stale},
         )
         assert r.status_code == 409, r.text
         assert r.headers["X-RP-Content-Hash"].startswith("sha256:")
         assert c.get(f"/api/v1/profiles/{SLUG}/visibility").json()["profile_visibility"] != (
-            "internal"
+            "limited"
         )
 
     def test_matching_visibility_base_hash_is_accepted(
@@ -424,7 +768,7 @@ class TestConcurrencyToken:
         before = c.get(f"/api/v1/profiles/{SLUG}").json()["content_hash"]
         r = c.patch(
             f"/api/v1/profiles/{SLUG}/visibility",
-            json={"profile_visibility": "internal", "base_hash": before},
+            json={"profile_visibility": "limited", "base_hash": before},
         )
         assert r.status_code == 200, r.text
         assert r.json()["updated"] == ["visibility"]
@@ -457,7 +801,7 @@ class TestAuthoredHistoryOverHttp:
         assert md["career"][0]["role"] == "PI"
         # The document's own tier is readable, so an editor can say what it is
         # without guessing. It is not settable here.
-        assert md["visibility"] in {"public", "internal", "restricted"}
+        assert md["visibility"] in {"public", "limited", "private"}
 
     def test_malformed_training_over_http_is_a_400(self, make_api_client, fixture_profiles_root):
         c = make_api_client(fixture_profiles_root(SLUG))

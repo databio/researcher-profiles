@@ -193,6 +193,9 @@ class MatchEvidence:
     top_papers: list[str]
     overlapping_topics: list[str]
     centroid_score: float
+    #: OpenAlex topic ids (``T…``) the profile shares with the query's typed
+    #: interests, the ones that moved its score. Empty without query interests.
+    matched_topics: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -200,6 +203,7 @@ class MatchEvidence:
             "top_papers": list(self.top_papers),
             "overlapping_topics": list(self.overlapping_topics),
             "centroid_score": self.centroid_score,
+            "matched_topics": list(self.matched_topics),
         }
 
 

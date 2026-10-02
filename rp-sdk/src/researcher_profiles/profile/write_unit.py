@@ -38,7 +38,7 @@ class WriteContext:
     #: Which artifact(s) this unit is writing: ``"document"``, ``"soul"``,
     #: ``"expertise"``, ``"papers"``, ``"grants"``, ``"citations"``,
     #: ``"summary"``, ``"build_state"``, ``"create"``, ``"delete"``,
-    #: ``"import"``. A hook may filter on it; most will not.
+    #: ``"import"``, ``"merge"``. A hook may filter on it; most will not.
     kind: str
     #: The backend's transaction handle, or ``None`` when the backend has none.
     #: For a SQL store this is the SQLAlchemy ``Session`` the write is going
@@ -53,6 +53,10 @@ class WriteContext:
     #: for CLI, pipeline, and out-of-process writes. A hook that dereferences
     #: this unconditionally will break every non-HTTP write path.
     request: Any | None = None
+    #: For ``kind == "merge"`` only: the rid and slug of the profile this write
+    #: retires into ``rid`` (``SqlProfileStore.merge_into``). ``None`` otherwise.
+    retired_rid: str | None = None
+    retired_slug: str | None = None
 
 
 #: A pre-commit hook: one callable, one :class:`WriteContext`, no return value.

@@ -79,6 +79,22 @@
         "funder": {
           "anyOf": [
             {
+              "additionalProperties": true,
+              "description": "A Organization node.",
+              "properties": {
+                "@id": {
+                  "type": "string"
+                },
+                "@type": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            {
               "type": "string"
             },
             {
@@ -234,6 +250,15 @@
     },
     "about": {
       "anyOf": [
+        {
+          "additionalProperties": true,
+          "properties": {
+            "@id": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
         {
           "type": "string"
         },

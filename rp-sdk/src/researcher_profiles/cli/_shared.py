@@ -136,9 +136,12 @@ def resolve_profile_arg(verb: str, ref: str, root: str | None = None) -> Path | 
     """
     target = Path(ref).expanduser()
     if target.is_dir():
+        # The user typed a path. Echoing it back tells them nothing they did
+        # not just write.
         return target
     resolved = profile_dir_for_ref(ref, root)
     if resolved is not None:
+        _announce_resolution(ref, resolved, root)
         return resolved
     from ..store.config import resolve_profiles_root
 
@@ -152,6 +155,35 @@ def resolve_profile_arg(verb: str, ref: str, root: str | None = None) -> Path | 
         file=sys.stderr,
     )
     return None
+
+
+def _announce_resolution(ref: str, resolved: Path, root: str | None) -> None:
+    """Name the directory a slug or rid resolved to, on stderr, on success.
+
+    Until this existed, the resolved root was printed only on the *failure*
+    path: `validate`, `manifest --write`, `push --dry-run` and `push` could all
+    run happily against a stale copy under a root nobody remembered setting,
+    and none of them ever said which directory they had read. stderr, so a
+    `--json` stdout stays machine-parseable.
+
+    A slug that also exists under another root in the resolution order gets a
+    warning as well. It stays a warning: `--root` is the override, and a second
+    copy is legal, just rarely intended.
+    """
+    from ..store.config import candidate_roots, root_source
+
+    print(f"profile: {resolved}  (root from {root_source(root)})", file=sys.stderr)
+    others = [
+        candidate
+        for candidate in candidate_roots(root)
+        if candidate != resolved.parent and (candidate / resolved.name / "profile.jsonld").is_file()
+    ]
+    for other in others:
+        print(
+            f"warning: {ref!r} also exists under {other}; using {resolved} "
+            f"(from {root_source(root)})",
+            file=sys.stderr,
+        )
 
 
 def _next_steps(*pairs: tuple[str, str]) -> str:

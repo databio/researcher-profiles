@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from ..errors import ProfileLoadError
+from ..privacy import ViewerTier, profile_visible
 from ..profile import ResearcherProfile
 from ..profile.payloads import (
     profile_summary_dict,
@@ -53,9 +54,9 @@ class _SiteStage:
     """Collect the collection files off to one side, then move them into ``out``.
 
     :func:`build_site` does not own the whole output directory. The per-profile
-    folders under ``profiles/`` are rsynced in by the deploy script (honouring
-    each ``.publishignore``) and ``app/`` comes from the explorer build, so a
-    whole-directory swap would destroy them. The commit granularity here is
+    folders under ``profiles/`` are written by :func:`publish_collection` and
+    ``app/`` comes from the explorer build, so a whole-directory swap would
+    destroy them. The commit granularity here is
     therefore a single file: each staged file is moved onto its destination with
     :func:`os.replace`, which is atomic per path on POSIX. Nothing under ``out``
     that the build did not write is read, moved, or removed, not even the
@@ -87,6 +88,13 @@ class _SiteStage:
             path.write_bytes(content)
         else:
             path.write_text(content, encoding="utf-8")
+        self._staged.append(rel)
+
+    def copy(self, rel: str, src: Path) -> None:
+        """Stage a copy of the file at ``src`` at relative path ``rel``."""
+        path = self._files / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(src, path)
         self._staged.append(rel)
 
     def commit(self) -> None:
@@ -145,6 +153,8 @@ class SiteResult:
     slugs: list[str] = field(default_factory=list)
     files: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    #: ``{slug: reason}`` for every profile the audience may not see at all.
+    skipped: dict[str, str] = field(default_factory=dict)
 
     @property
     def profile_count(self) -> int:
@@ -158,6 +168,7 @@ def build_site(
     base_url: str | None = None,
     no_index: bool = False,
     now: str | None = None,
+    viewer: ViewerTier = "public",
 ) -> SiteResult:
     """Write the collection files describing a set of profiles into ``out_dir``.
 
@@ -166,8 +177,14 @@ def build_site(
     configs, the sitemap, and the JSON-LD ``@context`` copy. Each profile's own
     ``profile.jsonld`` is read to build the index and ``by-rid`` map.
 
-    This does not copy profile folders. Deployment rsyncs the folders (honouring
-    each ``.publishignore``) alongside these collection files.
+    ``viewer`` is the audience. A profile whose own ``visibility`` the viewer
+    may not see is left out of every file (reported in
+    :attr:`SiteResult.skipped`), and every summary is projected to ``viewer``.
+    Any audience other than ``public`` also gets ``noindex`` pages and a
+    disallow-all ``robots.txt``: a non-public mirror must never be crawled.
+
+    This does not copy profile folders; :func:`publish_collection` does, and
+    calls this for the collection files.
 
     The write is atomic in this sense: every file is built into a staging
     directory first and only moved into ``out`` once the whole build has
@@ -194,7 +211,7 @@ def build_site(
     stage = _SiteStage(out)
     try:
         try:
-            _build_into(stage, root, result, timestamp, base_url, no_index)
+            _build_into(stage, profile_dirs(root), result, timestamp, base_url, no_index, viewer)
             stage.commit()
         finally:
             stage.close()
@@ -208,15 +225,35 @@ def build_site(
     return result
 
 
+def profile_dirs(root: Path) -> list[Path]:
+    """Every profile folder directly under ``root``, in name order."""
+    return [
+        entry
+        for entry in sorted(root.iterdir())
+        if entry.is_dir()
+        and not entry.name.startswith(".")
+        and (entry / "profile.jsonld").is_file()
+    ]
+
+
 def _build_into(
     stage: _SiteStage,
-    root: Path,
+    entries: list[Path],
     result: SiteResult,
     timestamp: str,
     base_url: str | None,
     no_index: bool,
+    viewer: ViewerTier = "public",
+    centroids: dict[str, tuple[str, Any, dict | None]] | None = None,
 ) -> None:
-    """Stage every collection file. Raising here leaves ``out`` untouched."""
+    """Stage every collection file. Raising here leaves ``out`` untouched.
+
+    ``centroids`` is ``{slug: (backend_spec, centroid, probe)}`` for each
+    profile whose embeddings ship to ``viewer``, computed from the rows that
+    actually ship (:func:`publish_collection` passes it). Without it, each
+    profile's centroid is read from its own flat files (:func:`_collect_centroid`).
+    """
+    no_index = no_index or viewer != "public"
     profile_summaries: list[dict[str, Any]] = []
     by_rid: dict[str, str] = {}
     slugs: list[str] = []
@@ -224,22 +261,29 @@ def _build_into(
     #: served flat index: the raw material for the collection centroid blob.
     centroid_entries: list[tuple[str, str, Any, dict | None]] = []
 
-    for entry in sorted(root.iterdir()):
-        if not entry.is_dir() or entry.name.startswith("."):
-            continue
-        if not (entry / "profile.jsonld").is_file():
-            continue
+    dirs: dict[str, Path] = {}
+
+    for entry in entries:
         try:
             prof = ResearcherProfile.from_files(entry)
         except ProfileLoadError as e:
             result.warnings.append(f"Skipping {entry.name}: {e}")
             logger.warning("Skipping %s: %s", entry.name, e)
             continue
+        if not profile_visible(prof.metadata, viewer):
+            result.skipped[prof.slug] = (
+                f"profile visibility is {prof.metadata.visibility}, above {viewer}"
+            )
+            continue
         slugs.append(prof.slug)
-        profile_summaries.append(profile_summary_dict(prof))
+        dirs[prof.slug] = entry
+        profile_summaries.append(profile_summary_dict(prof, viewer))
         if prof.rid:
             by_rid[prof.rid] = f"profiles/{prof.slug}/profile.jsonld"
-        _collect_centroid(entry, prof, centroid_entries, result)
+        if centroids is None:
+            _collect_centroid(entry, prof, centroid_entries, result, viewer)
+        elif prof.slug in centroids:
+            centroid_entries.append((prof.slug, *centroids[prof.slug]))
 
     result.slugs = slugs
 
@@ -267,7 +311,11 @@ def _build_into(
     # ---- hosting configs ----------------------------------------------
     _write("_headers", cloudflare_headers())
 
-    if base_url:
+    # A non-public export gets no sitemap: it would list every slug, including
+    # the ones only that audience may see, and point crawlers at them.
+    if viewer != "public":
+        _write("robots.txt", robots_txt(no_index=True))
+    elif base_url:
         _write(
             "sitemap.xml",
             sitemap_xml(slugs, base_url=base_url, timestamp=timestamp),
@@ -299,7 +347,7 @@ def _build_into(
         )
 
     # ---- collection centroids (site-level embeddings) -----------------
-    # One L2-normalized centroid per public profile, for ranking profiles
+    # One L2-normalized centroid per searchable profile, for ranking profiles
     # against a query without fetching every profile's chunk set (spec §7).
     centroid_meta = _write_collection_centroids(centroid_entries, _write, result)
 
@@ -314,4 +362,4 @@ def _build_into(
     )
 
     # ---- topics index --------------------------------------------------
-    _write_topics_index(root, slugs, _write, result, timestamp)
+    _write_topics_index(dirs, _write, result, timestamp)

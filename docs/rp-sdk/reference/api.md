@@ -135,13 +135,13 @@ See the [CLI reference](cli.md) for the commands that read these.
   `/health` is not authenticated.
 - The **read** routes have no credential gate. They resolve a *viewer tier* and
   project each response through it. A caller with no credential is the viewer
-  whose tier is `public`. The operator token widens that tier to `restricted`.
+  whose tier is `public`. The operator token widens that tier to `private`.
 - Header format: `Authorization: Bearer <token>`.
 - Failed auth returns `401` with body `{"detail": "invalid or missing bearer token"}`.
 - A read refusal is `404`, indistinguishable from a nonexistent profile. Every
   read response carries `X-RP-Viewer-Tier`.
 - Any read route accepts `?as=anonymous|lab|owner`, a preview cap that maps to
-  the `public`, `internal`, and `restricted` tiers. It can only narrow the tier
+  the `public`, `limited`, and `private` tiers. It can only narrow the tier
   the caller already holds, never widen it, so it needs no credential of its
   own. An unknown value is a `400`
   `{"detail": "unknown viewer '<value>' (anonymous | lab | owner)"}`.
@@ -233,6 +233,30 @@ returns this: it is an override point for a host that runs its own startup check
 when, say, the query-embedding backend is missing. A container HEALTHCHECK then
 stops routing traffic to a deployment whose `/match` would otherwise return an
 empty list forever.
+
+---
+
+### GET /api/v1/capabilities
+
+What this server can be asked for. Unauthenticated: it says nothing about any
+profile, and a push client needs the answer before it has decided whether to
+authenticate.
+
+**Response 200** (`CapabilitiesResponse`):
+
+| Field | Type | Notes |
+|---|---|---|
+| `version` | string | API version served (`v1`). |
+| `push_modes` | array | The `?mode=` values `PUT /profiles/{slug}` accepts. |
+| `features` | array | Named behaviours a client can require. `manifest_splice`: the server adds a manifest entry back for every file it keeps, so a partial incoming manifest cannot delete artifacts the server holds. |
+
+```json
+{"version": "v1", "push_modes": ["replace", "merge", "prune"], "features": ["manifest_splice"]}
+```
+
+A `404` here means a build that predates this route, which is itself the
+answer: `rp push` refuses `--merge` and `--prune` against such a server rather
+than sending a request it would answer `200` to and run as a `replace`.
 
 ---
 
@@ -354,14 +378,25 @@ Full profile detail: metadata + raw `expertise.md` + raw `SOUL.md`.
 
 ### GET /api/v1/profiles/{slug}/profile.jsonld
 
-Serve the stored `profile.jsonld` **verbatim**: the exact bytes the store
-persisted, not a re-serialization from the loaded model. This is what makes
-the `conformsTo` claim retrievable: a crawler or agent fetching this route
-gets the published document byte for byte.
+Serve the profile document: the stored record plus any **registry-issued
+proofs** (`orcid_login`), which the registry computes on each request and never
+stores. A host supplies them through the `app.state.registry_proofs` hook, a
+callable `(request, rid) -> list[Proof]` given the rid of the document being
+served; bare rp-sdk leaves it `None`. A hook that raises is logged and treated
+as no proofs. When there is no section projection and no registry proof, the
+response is the exact bytes the store persisted, not a re-serialization, so a
+crawler or agent gets the published document byte for byte. Any
+registry-issued proof found in a stored document is dropped; only the hook's
+are served.
+
+`/api/v1/profiles/{slug}/content/profile.jsonld` returns the same bytes with
+the same headers. `GET /api/v1/profiles/{slug}` carries the same proofs in
+`metadata.proof`. The archive (`GET /api/v1/profiles/{slug}/archive`) is the
+stored record and carries none.
 
 Supports conditional requests: the response carries a strong `ETag` (a
-SHA-256 over the served bytes) and `Last-Modified`; a matching
-`If-None-Match` gets a `304`.
+SHA-256 over the served bytes, so it changes when a registry proof changes) and
+`Last-Modified`; a matching `If-None-Match` gets a `304`.
 
 **Status codes:** `200`; `304` (conditional hit); `400` bad slug; `404`
 `{"detail": "profile '<slug>' not found"}`.
@@ -388,6 +423,28 @@ Server-side, `sources/papers/` members are **stripped on ingest** unless the
 server runs with `RESEARCHER_PROFILES_ACCEPT_FULLTEXT=true` (default false).
 The registry refuses to store copyrighted paper text merely because a client
 sent it.
+
+**Query parameter `mode`** (tarball only): what the server does with a live
+file the archive does not carry. Any other value is a `400`.
+
+| `mode` | A file the archive omits |
+|---|---|
+| `replace` (default) | Deleted, unless it belongs to a withheld class (`sources/papers/` fulltext, `.cache/embeddings.sqlite`) the archive carried no member of; those are kept. |
+| `merge` | Kept, always. This is what `rp push --only` and `--merge` send. |
+| `prune` | Deleted, always. |
+
+A file the archive does carry is always written, in every mode.
+
+**Keeping a file means keeping its manifest entry.** The manifest inside
+`profile.jsonld` is the index every reader works from, and the SQL backend
+writes artifact rows *by that manifest*, not by what is in staging. So a kept
+file the incoming manifest does not list is a file nobody can fetch and the SQL
+store never even persists: keeping the bytes alone is a silent delete. Under
+`merge` and `replace` the committed manifest is therefore **the incoming
+manifest plus an entry for every kept file**, taken from the live profile. The
+`spliced` field counts how many entries were added back; a nonzero value means
+the pushed `profile.jsonld` was not the whole index. Under `prune` nothing is
+kept, so nothing is spliced.
 
 `GET /api/v1/profiles/{slug}/archive` uses a different builder,
 `build_viewer_archive`, which projects the profile through the caller's privacy
@@ -419,6 +476,10 @@ without a restart.
 | `name` | string | From the pushed `profile.jsonld`. |
 | `level` | string | Profile depth tier (`lite`, `full`, ...). |
 | `indexed` | boolean | True when the push carried `.cache/embeddings.sqlite`, i.e. the profile is immediately matchable. Always `false` for a JSON body. |
+| `kept` | object | Count of live files the archive omitted but the server kept, keyed by class (`fulltext`, `index`, or `other` under `merge`). Empty for a JSON body. |
+| `spliced` | integer | Manifest entries the server added back for kept files the incoming manifest did not list. Nonzero means the pushed document's manifest was incomplete. |
+| `manifest_counts` | object | `{role: count}` over the manifest the server holds *after* the commit: what a reader can now fetch. |
+| `mode` | string | The push mode that was applied: `replace`, `merge`, or `prune`. |
 
 ```bash
 tar -C /path/to/profiles/jane-doe -czf - . | curl -X PUT \
@@ -435,8 +496,8 @@ which build the tarball for you (excluding dotfiles like `.archive/`).
 
 - `200` on success.
 - `400` `{"detail": "<reason>"}`: bad slug, empty body, unreadable archive,
-  unsafe member, missing `profile.jsonld`, or a staged profile that fails to
-  load.
+  unsafe member, missing `profile.jsonld`, unknown `?mode=`, or a staged
+  profile that fails to load.
 - `401` as elsewhere.
 - `413` `{"detail": "archive exceeds size cap"}`.
 
@@ -483,8 +544,9 @@ curl -X PUT -H "Authorization: Bearer $TOKEN" \
 Download a profile as a gzipped tarball, the inverse of `PUT`. Requires the
 `push` scope. The archive is projected through the caller's viewer tier: it
 contains exactly what the JSON read surface would serve that caller. Nothing
-above their tier is included, and the hard floors (copyrighted full text,
-`.cache/`, `.keys/`) never are.
+above their tier is included, and the build-local hard floors (`.cache/`,
+`.keys/`) never are. Paper full text is an ordinary tier-governed artifact: it
+ships to a caller entitled to its effective tier.
 
 The response carries `X-RP-Archive-Digest` (MD5 of the body, so the client
 can verify the transfer before committing it to its cache),
@@ -501,7 +563,7 @@ can verify the transfer before committing it to its cache),
 Resolve a person descriptor (a rid, or a free-text name) to the rid that
 identifies them in this registry. Requires the `resolve` scope: a write
 scope, not `match`, because a true miss mints a stub profile (`level=lite`,
-`visibility=internal`, `provenance=third_party`). Putting this behind the
+`visibility=limited`, `provenance=third_party`). Putting this behind the
 read-tier match scope would let every match-keyed consumer create people.
 Resolution is deterministic and cautious: the same person resolved the same
 way twice converges on the same rid, and undecidable evidence defers rather
@@ -600,6 +662,10 @@ document, exactly as against a static site.
 
 `{artifact}` must be a `contentUrl` present in the manifest (or `profile.jsonld`
 itself); any other path, including a traversal, is `404`.
+
+`profile.jsonld` here is the same response as
+`GET /api/v1/profiles/{slug}/profile.jsonld`: projected by section visibility,
+with registry-issued proofs, a strong `ETag`, and the same cache headers.
 
 **Response 200**: the artifact bytes, with the manifest's `encodingFormat` as
 the content type. `X-RP-Effective-Tier` reports the artifact's effective tier
@@ -901,16 +967,20 @@ neighborhood.
 | `threshold` | float \| null | none | Drop works scoring below it. |
 | `use_openalex` | boolean | `false` | Fetch candidates from OpenAlex instead of `works`. |
 | `works` | list of objects \| null | none | Candidate works, `PaperRecord`-shaped. |
-| `mailto` | string \| null | none | OpenAlex polite-pool contact. |
 | `max_pages` | integer | `5` | OpenAlex pagination cap. |
+
+With `use_openalex`, the server calls OpenAlex with its own API key from the
+`OPENALEX_API_KEY` environment variable, sent as an `Authorization: Bearer`
+header. Without it, OpenAlex allows only about $0.10 of usage a day.
 
 **Response 200:** `{slug, rid, works: [...]}`, each a ranked work with its
 score.
 
 **Status codes:** `200`; `400` an invalid candidate work in `works`, neither
 `works` nor `use_openalex` supplied, or a profile with no subfields, interests,
-or OpenAlex work ids to query with; `502` `{"detail": "OpenAlex fetch failed:
-<message>"}`; `500` `{"detail": "work ranking failed: <message>"}`; `503`
+or OpenAlex work ids to query with; `502` `{"detail": "OpenAlex fetch failed"}`;
+`503` `{"detail": "OpenAlex's daily limit is used up; try again after midnight
+UTC"}`; `500` `{"detail": "work ranking failed: <message>"}`; `503`
 `{"detail": "matching unavailable: ..."}` when the server lacks the
 `vectors`/`st` extras or the profile has no built index.
 
@@ -1033,7 +1103,7 @@ retries once on parse failure.
 
 ## The owner edit surface
 
-Four routes, gated by `require_owner` rather than by the consumer token (see
+Gated by `require_owner` rather than by the consumer token (see
 [Authentication](#authentication)). On bare rp-sdk that falls back to the
 operator bearer token. A host that runs the
 [management tier](../../rp-spec/dynamic-api.md#14-management-api) sets
@@ -1044,25 +1114,69 @@ operator bearer token. A host that runs the
 | `PATCH` | `/api/v1/profiles/{slug}/metadata` | Patch owner-editable metadata. |
 | `PUT` | `/api/v1/profiles/{slug}/soul` | Replace `personality/SOUL.md` whole. |
 | `GET` / `PATCH` | `/api/v1/profiles/{slug}/visibility` | Read / set artifact tiers. |
+| `GET` | `/api/v1/profiles/{slug}/works/{paper_id}` | One work's whole record. |
+| `PATCH` | `/api/v1/profiles/{slug}/works/{paper_id}` | Patch owner-editable fields of one work. |
+| `PUT` | `/api/v1/profiles/{slug}/works/{paper_id}` | Add or replace one whole record. |
+| `DELETE` | `/api/v1/profiles/{slug}/works/{paper_id}` | Remove one work from the corpus. |
 
 ### What an owner may edit
 
-`researcher_profiles.edit.EDITABLE_METADATA_FIELDS`, exactly:
+Every field of the profile document except a short locked list. That includes
+every field the build AI writes (`summary`, `expertise`, `career_stage`,
+`critiques`, `collaborators`, `research_outputs`, and the rest): an owner can
+always correct what a model guessed about them, without a rebuild.
 
-`name`, `affiliation`, `job_title`, `field`, `subfields`, `summary`,
-`expertise` (the label list), `interests`, `not_interests`, `training`,
-`career`, `same_as`.
+The locked fields are `researcher_profiles.profile.edit.LOCKED_METADATA_FIELDS`:
 
-A key outside that set (`rid`, `provenance`, `visibility`, and everything a
-build tool generates) is a hard `400`, never a silent drop. `slug`
-is popped by the route, so renaming is not an edit. `personality/expertise.md`
-is unrouted: it is synthesized from the paper corpus and cites
-paper ids, and it is a different thing from the editable `expertise` labels
-despite the shared name.
+- identity and proof: `rid`, `@id`, `provenance`, `provenanceNote`, `proof`,
+  `verifiedAt`, `identifier`
+- facts code computes from the corpus: `paper_stats`, `anchor`, `level`,
+  `hasCitationGraph`, `hasEmbeddingIndex`, `expertiseCitesPaperIds`
+- the file manifest: `hasPart`, `subjectOf`
+- format markers and bookkeeping: `@context`, `@type`, `conformsTo`, `url`,
+  `dateModified`
+- visibility, which has its own route: `visibility`, `rp:sectionVisibility`
 
-`training` and `career` arrive as lists of objects and are validated against
-`schema.Training` / `schema.CareerEntry`. A malformed entry is a `400` naming
-the index (`career[0] is not a valid CareerEntry: ...`) and nothing is written.
+Everything else is editable, and
+`researcher_profiles.profile.edit.EDITABLE_METADATA_FIELDS` is that set.
+A patch names fields by their Python names (`job_title`, `license_`), not
+their JSON-LD terms.
+
+`interests` and `not_interests` are a view of `research_interests`. Patching
+either list writes declared text-only entries (+0.5 / -0.5, generator `user`)
+in place of the earlier text-only entries for that list, and the list is
+rebuilt from them.
+
+A locked key is a hard `400`, never a silent drop. `slug` is popped by the
+route, so renaming is not an edit. `personality/expertise.md` is unrouted: it
+is an artifact, not a document field, it cites paper ids, and it is a
+different thing from the editable `expertise` labels despite the shared name.
+
+Structured fields arrive as objects and are validated against their schema
+models: `training` (`schema.Training`), `career` (`schema.CareerEntry`),
+`research_interests`, `therapeutic_areas`, `research_outputs`
+(`schema.ResearchOutput`), `site_capabilities`, and `career_stage`
+(`schema.CareerStage`). A malformed entry is a `400` naming the field or index
+(`career[0] is not a valid CareerEntry: ...`) and nothing is written. A patch
+replaces a list field whole. A single-object field (`career_stage`,
+`site_capabilities`) is merged instead: `{"career_stage": {"current_rank":
+"professor"}}` changes that one fact and keeps the rest. A key sent as `null`
+clears that key; the field sent as `null` clears the whole object.
+
+### What an owner may edit on one work
+
+`researcher_profiles.profile.edit.EDITABLE_WORK_FIELDS`, exactly:
+
+`name`, `doi`, `openalex_id`, `datePublished`, `type`, `citation`,
+`full_text_link`, `access`, `summary`, `first_author`, `author_position`,
+`is_corresponding`.
+
+These are the names the record carries on disk, so a caller patches what it
+read out of `sources/papers.jsonld`. Anything outside the set is a `400`
+(`cited_by_count` and the other build-derived counts included); a `paper_id`
+that is not in the corpus is a `404`. The patched record is re-validated
+before anything is written, so a bad value is a `400` and the file is
+untouched. `rp work set <paper_id> key=value ...` is the CLI for this.
 
 ### Optimistic concurrency (`base_hash` -> 409)
 
@@ -1107,8 +1221,9 @@ unchanged.
 | `training` | list[dict] | Authored history; entries match `schema.Training`. |
 | `career` | list[dict] | Authored history; entries match `schema.CareerEntry`. |
 | `expertise` | list[string] | Default `[]`. Distinct from the `expertise` markdown on `ProfileDetail`. |
-| `interests` | list[string] | Default `[]`. |
-| `not_interests` | list[string] | Default `[]`. Authoritative: a consumer must not improvise around them. |
+| `interests` | list[string] | Default `[]`. Rebuilt from `research_interests` (positive weights) when that is set. |
+| `not_interests` | list[string] | Default `[]`. Authoritative: a consumer must not improvise around them. Rebuilt from `research_interests` (negative weights) when that is set. |
+| `research_interests` | list[dict] | Default `[]`. Typed, weighted interests (`ResearchInterest`). |
 | `same_as` | list[string] | Default `[]`. Other URLs for the same person. |
 | `visibility` | string | The document's OWN declared tier. Read-only here. Set it through `PATCH .../visibility`, never a metadata patch. |
 
@@ -1194,10 +1309,11 @@ all calls to one persona before switching where possible.
 
 ## The management tier is not implemented here
 
-`rp login`, `rp whoami`, `rp agent`, and `rp profile` call endpoints under
-`/api/manage/`, specified in
+`rp login` calls the command-line login endpoints (`/api/auth/device` and
+`/api/auth/token`), and `rp whoami`, `rp agent`, and `rp profile` call endpoints
+under `/api/manage/`, all specified in
 [Management API](../../rp-spec/dynamic-api.md#14-management-api). The server in
 this package does not implement them: it has no accounts, no identity provider,
-and no key store, so `POST /api/manage/cli-auth` answers `404` and the client
+and no key store, so `POST /api/auth/device` answers `404` and the client
 reports that the server offers no command-line login. Point those commands at a
 server that implements the management tier.

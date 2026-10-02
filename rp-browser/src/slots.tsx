@@ -36,18 +36,32 @@ export interface HomeAction {
   primary?: boolean;
 }
 
+/** A host's branding for the top of the landing page. */
+export interface HomeHero {
+  /** Drawn large above the headline, in place of the app-name eyebrow. */
+  mark: ReactNode;
+  /** Inline content for the paragraph under the headline; replaces the default. */
+  lede?: ReactNode;
+  /** Shown below the calls to action, inside the hero. */
+  extra?: ReactNode;
+}
+
 /**
  * Chrome a host application can add when it embeds this SPA. Every field is
  * empty by default, which is the standalone static-host app. A host installs
  * its own values with <ShellSlotsProvider> inside mountApp's `wrap`.
  */
 export interface ShellSlots {
+  /** Replaces the built-in logo and app name at the left of the header. */
+  brand: ReactNode;
   /** Extra links appended to the top nav. */
   navExtras: ReactNode;
   /** The right-hand header cluster (identity, sign in, sign out). */
   headerRight: ReactNode;
   /** Replaces the built-in zero-profile screen in Browse and the analysis views. */
   emptyScreen: ReactNode;
+  /** A logo and lede for the landing page's hero. */
+  homeHero: HomeHero | null;
   /** Replaces the landing page's calls to action. */
   homeActions: HomeAction[] | null;
   /** A paragraph on the About page describing how this deployment is served. */
@@ -57,9 +71,11 @@ export interface ShellSlots {
 }
 
 const EMPTY: ShellSlots = {
+  brand: null,
   navExtras: null,
   headerRight: null,
   emptyScreen: null,
+  homeHero: null,
   homeActions: null,
   aboutNote: null,
   profileTabs: [],

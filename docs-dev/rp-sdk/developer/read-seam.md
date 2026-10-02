@@ -16,7 +16,7 @@ viewer tier and projects its own response.
 
 ## The viewer tier
 
-A viewer tier is one of `public` / `internal` / `restricted`, the same three
+A viewer tier is one of `public` / `limited` / `private`, the same three
 values an artifact carries, read in the other direction. On an artifact, a
 higher tier means fewer people may see it; on a viewer, a higher tier means they
 may see more. Anonymous is not a special case: it is the viewer whose tier is
@@ -38,13 +38,13 @@ else. A route that walks many profiles calls the resolver once per profile.
 
 Without one, [`deps.resolve_viewer_tier`](../../../rp-sdk/src/researcher_profiles/api/deps.py)
 applies in order: an `owner_verifier` that does not raise for this slug gives
-`restricted`; a resolved consumer identity gives `restricted` for the operator,
-else that key's minted `tier`; a valid operator bearer token gives `restricted`;
+`private`; a resolved consumer identity gives `private` for the operator,
+else that key's minted `tier`; a valid operator bearer token gives `private`;
 otherwise `public`.
 
 That last rule covers open dev mode. A server with no token
 configured lets every request through the auth gates, and resolving that to
-`restricted` would mean a laptop silently served the tier nothing else does. A
+`private` would mean a laptop silently served the tier nothing else does. A
 missing credential is not a permissive credential.
 
 ### `profile_tier_floor`
@@ -55,7 +55,7 @@ floor may only narrow. It returns a
 the sentence explaining it. `TierFloor()` (an empty tier) is "no opinion".
 
 This is where a host puts a consent rule the document cannot know about. A
-registry pins a profile whose owner has not published it to `internal`:
+registry pins a profile whose owner has not published it to `limited`:
 claiming a profile does not publish it, and a profile the registry built about
 a real person who never signed in has nobody's agreement behind it at all.
 
@@ -77,10 +77,11 @@ Two gates, in this order:
 Failing either is a 404, with a body byte-identical to a genuinely
 nonexistent profile or an artifact that is not in the manifest. Never a 403: a
 403 confirms the thing exists, which is the one fact a held-back profile is
-trying not to disclose. The one exception is the hard floors described in
-["What's always restricted"](../../../docs/rp-spec/privacy.md#whats-always-restricted)
-(`paper_fulltext`, `.cache/`, `.keys/`), which are `403`, because they are
-withheld from everyone and no caller learns anything from being told why.
+trying not to disclose. The one exception is the build-local hard floors
+described in
+["What's private by default"](../../../docs/rp-spec/privacy.md#whats-private-by-default)
+(`.cache/`, `.keys/`), which are `403`, because they are withheld from
+everyone and no caller learns anything from being told why.
 
 Every response carries `X-RP-Viewer-Tier`, so a client (or a test) can assert
 what it was shown *as* without parsing what it was shown.

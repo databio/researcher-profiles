@@ -170,6 +170,7 @@ class TestManifest:
         (p / "sources" / "web").mkdir(parents=True)
         (p / "sources" / "web" / "1-lab.md").write_text("w")
         (p / "sources" / "cv.md").write_text("cv")
+        (p / "sources" / "interview.md").write_text("digest")
         (p / "sources" / "citations.json").write_text("{}")
         (p / "embeddings").mkdir()
         (p / "embeddings" / "index.json").write_text("{}")
@@ -184,11 +185,12 @@ class TestManifest:
             "works",
             "citations",
             "cv",
+            "interview",
             "paper_summary",
             "paper_fulltext",
             "web",
             "embedding_index",  # flat servable embeddings/index.json (public)
-            "embedding_index_sqlite",  # profile-adjacent .cache/embeddings.sqlite (restricted)
+            "embedding_index_sqlite",  # profile-adjacent .cache/embeddings.sqlite (private)
         }
 
     def test_build_state_is_never_in_the_manifest(self, tmp_path):
@@ -246,10 +248,10 @@ class TestManifest:
         drift = manifest_drift(prof.directory, prof.manifest())
         assert drift == {"missing": [], "stale": []}
 
-    def test_flat_embeddings_are_manifested_and_not_publishignored(self, tmp_path):
+    def test_flat_embeddings_are_manifested_and_ship_publicly(self, tmp_path):
         """embeddings/index.json is a public manifest entry; the sibling blob and
-        chunks files ship by default (they are not excluded by .publishignore)."""
-        from researcher_profiles import privacy
+        chunks files ship in a public export by default."""
+        from researcher_profiles.publish import plan_profile_export
 
         p = tmp_path / "researcher"
         write_profile(p, name="Researcher")
@@ -264,15 +266,15 @@ class TestManifest:
         assert embedding_entry.content_url == "embeddings/index.json"
         assert embedding_entry.visibility == "public"
 
-        # Write the manifest back so effective_tiers sees it, then check the
-        # deny-list excludes none of the flat embedding files.
-        prof = ResearcherProfile.from_files(p)
-        prof.build_manifest(write=True)
-        prof = ResearcherProfile.from_files(p)
-        ignore = set(privacy.publishignore_lines(prof.metadata))
-        assert "embeddings/index.json" not in ignore
-        assert "embeddings/st-all-minilm-l6-v2.bin" not in ignore
-        assert "embeddings/st-all-minilm-l6-v2.chunks.json" not in ignore
+        # Write the manifest back so effective_tiers sees it, then check a
+        # public export ships every flat embedding file.
+        ResearcherProfile.from_files(p).build_manifest(write=True)
+        shipped = set(plan_profile_export(p, "public").files)
+        assert {
+            "embeddings/index.json",
+            "embeddings/st-all-minilm-l6-v2.bin",
+            "embeddings/st-all-minilm-l6-v2.chunks.json",
+        } <= shipped
 
 
 # --------------------------------------------------------------------------
@@ -732,6 +734,18 @@ class DictStorage(ArtifactStorage):
 
     # Raw bodies
 
+    def write_artifact(
+        self,
+        content_url,
+        text,
+        *,
+        role,
+        name,
+        encoding_format="text/plain",
+        manifest_slot="hasPart",
+    ):
+        self.store.setdefault("artifacts", {})[content_url] = text
+
     def artifact_text(self, content_url):
         return (self.store.get("artifacts") or {}).get(content_url)
 
@@ -790,12 +804,12 @@ class TestNonFilesystemBackend:
         dict_profile.add_pre_commit_hook(lambda ctx: seen.append(ctx.profile.metadata))
         with dict_profile.write_unit("owner-edit"):
             dict_profile.edit.patch_metadata({"field": "Systems Biology"})
-            dict_profile.edit.set_visibility(profile_visibility="internal")
+            dict_profile.edit.set_visibility(profile_visibility="limited")
 
         assert dict_profile.metadata.field == "Systems Biology"
-        assert dict_profile.metadata.visibility == "internal"
+        assert dict_profile.metadata.visibility == "limited"
         assert seen[0].field == "Systems Biology"
-        assert seen[0].visibility == "internal"
+        assert seen[0].visibility == "limited"
 
     def test_post_commit_hook_sees_the_committed_cache(self, dict_profile):
         seen = []

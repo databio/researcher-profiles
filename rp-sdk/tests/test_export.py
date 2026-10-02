@@ -339,7 +339,7 @@ class TestExportBundle:
             "https://profiles.example.org/profiles/jane-doe/profile.jsonld",
             explore_base="https://explore.example.org",
         ) == (
-            "https://explore.example.org/#/p?u="
+            "https://explore.example.org/p?u="
             "https%3A%2F%2Fprofiles.example.org%2Fprofiles%2Fjane-doe%2F"
         )
         assert explore_url(None) is None
@@ -348,18 +348,18 @@ class TestExportBundle:
     def test_nonpublic_profile_refuses_until_the_caller_opts_in(self, tmp_path):
         prof = _profile(
             tmp_path / "p",
-            visibility="internal",
+            visibility="limited",
             papers=[_paper("p1", "A study", abstract="Internal prose.")],
         )
         with pytest.raises(ExportVisibilityError):
             build_export_bundle(prof)
 
         bundle = build_export_bundle(prof, ExportOptions(allow_nonpublic=True))
-        assert bundle.visibility == "internal"
+        assert bundle.visibility == "limited"
         assert "Internal prose." in bundle.text
 
-    def test_restricted_sources_never_reach_the_text(self, tmp_path):
-        """``cv``/``web``/``grant`` are restricted by role, not by allowlist."""
+    def test_private_sources_never_reach_the_text(self, tmp_path):
+        """``cv``/``web``/``grant`` are private by role, not by allowlist."""
         prof = _profile(
             tmp_path / "p",
             level="deep",
@@ -389,6 +389,6 @@ class TestExportCli:
         assert bundle.text_chars == len(bundle.text)
 
     def test_nonpublic_profile_exits_four(self, tmp_path, capsys):
-        path = build_profile_dir(tmp_path / "p", visibility="internal")
+        path = build_profile_dir(tmp_path / "p", visibility="limited")
         assert main(["export", str(path)]) == 4
         assert "--allow-nonpublic" in capsys.readouterr().err

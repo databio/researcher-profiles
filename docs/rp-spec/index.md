@@ -141,6 +141,7 @@ conformant document once loaded and re-saved.
 | `name` | REQUIRED | Non-empty display name |
 | `rid` | REQUIRED | Canonical ORCID or `local:<slug>-<hex6>` |
 | `provenance` | REQUIRED | `orcid_verified`, `self_published`, `third_party`, `synthetic`, or `historical` |
+| `provenanceNote` | optional | One human sentence saying how the document was produced when `provenance` alone does not say (e.g. "self-reported via a structured interview on 2026-09-12; unverified"). Consumers SHOULD display it next to the summary |
 | `@context` | required on the wire, defaulted on load | `"https://profiles.databio.org/context/v1.jsonld"` (exact string); absent is filled in with this value |
 | `@type` | required on the wire, defaulted on load | `"Person"`; absent is filled in |
 | `conformsTo` | required on the wire, defaulted on load | Equals the `@context` IRI; a present but wrong value fails to load, an absent value is filled in |
@@ -148,9 +149,11 @@ conformant document once loaded and re-saved.
 | `level` | required on the wire, defaulted on load | `lite`, `full`, or `deep` (see below); absent is filled in as `full` |
 | `license` | RECOMMENDED | SPDX IRI or license URL |
 | `dateModified` | RECOMMENDED | ISO 8601 timestamp |
-| `visibility` | optional | `public`, `internal`, or `restricted` (default: `public`) |
+| `visibility` | optional | `public`, `limited`, or `private` (default: `public`) |
 | `expertise` | optional | Array of topic labels |
-| `not_interests` | optional | Authoritative non-interests |
+| `interests` | optional | Interest labels. When `rp:researchInterests` is present, rebuilt from it: the entries with a positive weight (see [Research interests](#research-interests)) |
+| `not_interests` | optional | Authoritative non-interests. When `rp:researchInterests` is present, rebuilt from it: the entries with a negative weight |
+| `rp:researchInterests` | optional | Typed, weighted interests; the canonical form of the two lists above (see [Research interests](#research-interests)) |
 | `career_stage` | optional | Date-anchored eligibility facts (see below) |
 | `collaborators` | optional | Declared connections to other researchers (see below) |
 | `researchOutputs` | optional | Research outputs other than papers: grants, software, datasets, protocols, etc. (see below) |
@@ -363,9 +366,10 @@ by `role` (or `paperId`) and read its `contentUrl`.
 | `paper_summary` | hasPart | `sources/summaries/<paper_id>.summary.md` |
 | `paper_fulltext` | hasPart | `sources/papers/<paper_id>.md` |
 | `cv` | hasPart | `sources/cv.md` |
+| `interview` | hasPart | `sources/interview.md` (tier `private`) |
 | `web` | hasPart | `sources/web/<n>-<host>.md` |
 | `embedding_index` | hasPart | `embeddings/index.json` |
-| `embedding_index_sqlite` | hasPart | `.cache/embeddings.sqlite` (tier `restricted`) |
+| `embedding_index_sqlite` | hasPart | `.cache/embeddings.sqlite` (tier `private`) |
 | `agent_entry_point` | hasPart | `SKILL.md` |
 | `html` | hasPart | `index.html` |
 
@@ -383,15 +387,45 @@ Consumers MUST ignore unknown `role` values.
 | `synthetic` | Not a natural person (AI agent, test fixture) |
 | `historical` | Real person who cannot hold an ORCID |
 
+A profile built from a structured interview with the subject (no or few
+publications) uses `self_published` and carries a `provenanceNote` saying so;
+nothing in such a profile has been checked against publications or records.
+
 The optional `proof` array carries fine-grained verification:
 
 | Proof kind | What it proves |
 |------------|----------------|
-| `orcid_roundtrip` | ORCID record points back |
+| `orcid_roundtrip` | ORCID record points back (the self-hosted option) |
 | `domain_wellknown` | Control of domain via `.well-known` challenge |
 | `key_signature` | Detached JWS over canonicalized document |
+| `orcid_login` (registry-issued) | The registry serving this document saw the profile's owner sign in with ORCID iD `orcid` |
 
 Consumers MUST ignore unknown proof kinds.
+
+##### Registry-issued proofs
+
+A registry that hosts profiles and signs people in with ORCID can vouch for
+that sign-in itself. It does so with an `orcid_login` proof:
+
+| Member | Value |
+|--------|-------|
+| `kind` | `"orcid_login"` |
+| `issuer` | The base URL of the registry serving the document |
+| `orcid` | The bare ORCID iD (`0000-0002-1825-0097`), equal to the ORCID in `rid` |
+| `verifiedAt` | When the registry last confirmed the ORCID sign-in (ISO 8601) |
+
+A registry computes this proof each time it serves the document. It MUST NOT
+store it, and it MUST drop any copy a document author supplies. A document
+carries at most one, and its `orcid` MUST equal the ORCID in `rid`.
+
+A consumer MUST treat an `orcid_login` proof as valid only when it fetched the
+document from the `issuer` origin (or re-fetches it from there to check). A
+copy served by any other host proves nothing: anyone can paste the JSON into
+their own document.
+
+Self-hosted profiles have no registry to vouch for them. They use
+`orcid_roundtrip` instead: the ORCID record's website list points back to the
+profile.
 
 #### Vocabulary
 
@@ -414,7 +448,6 @@ These files hold data that is too large, or the wrong shape, to embed in JSON.
 ```
 <slug>/
   profile.jsonld              # REQUIRED. The record and manifest
-  .publishignore              # derived exclude list (see Privacy)
   index.html                  # landing page (written by `rp render`)
   SKILL.md                    # agent instructions (optional)
   personality/
@@ -426,7 +459,7 @@ These files hold data that is too large, or the wrong shape, to embed in JSON.
     grants.jsonld             # when grant records exist
     citations.json            # citation graph (optional)
     summaries/<paper_id>.summary.md
-    papers/<paper_id>.md      # full text. RESTRICTED, never served
+    papers/<paper_id>.md      # full text. PRIVATE by default
     cv.md                     # deep profiles
     web/<n>-<host>.md         # deep profiles
   embeddings/
@@ -434,8 +467,8 @@ These files hold data that is too large, or the wrong shape, to embed in JSON.
     <backend>.bin
     <backend>.chunks.json
   .cache/
-    embeddings.sqlite         # derived local index. RESTRICTED, never served
-  .keys/                      # signing keys. RESTRICTED, never served
+    embeddings.sqlite         # derived local index. PRIVATE
+  .keys/                      # signing keys. Never served
 ```
 
 Build state lives in `.build/<slug>/`, outside the profile directory.
@@ -525,3 +558,87 @@ reveals whether artifacts exist, but a consumer MUST validate rather than trust.
   (institutional SSO, ORCID, e-mail) is out of scope. The
   [management tier](dynamic-api.md#14-management-api) specifies only what a
   credential looks like once issued.
+
+## Research interests
+
+`rp:researchInterests` is a list of `ResearchInterest` entries. Each one links
+the person to one concept with an optional signed weight. It follows the
+Weighted Interest Ontology pattern (person, `wi:WeightedInterest`, topic, with
+`wi:weight`); `rp:ResearchInterest` is declared a subclass of
+`wi:WeightedInterest`. That ontology is a precedent, not a standard, and it has
+no fixed range or neutral value, so this spec adds both.
+
+| Field | Required | Meaning |
+|---|---|---|
+| `concept` | REQUIRED | The term (below) |
+| `weight` | optional | A number from -1 to 1. +1 is a core interest, 0 is declared neutral, -1 is a hard exclude, and values between -1 and 0 mean rank lower. **A missing weight means unknown, never 0.** |
+| `method` | REQUIRED | `declared` (the person said it), `inferred` (computed from papers or written by a model), or `imported` (copied from another record, e.g. ORCID keywords) |
+| `generator` | REQUIRED | What produced the entry, e.g. `user`, `llm`, `prosopia-wizard`, `openalex-topics@2026-09` |
+| `assertedAt` | REQUIRED | When the entry was made (`prov:generatedAtTime`). The same person may reassess a concept; this says which entry is newer |
+| `evidence` | optional | `{papers: [...], share: 0.45}`. Raw counts and shares live here, never in `weight` |
+
+A concept has one of two forms, never a mix:
+
+- **Coded**: `@id` (the term's own IRI), `system` (the vocabulary URI,
+  `skos:inScheme`), `code` (`skos:notation`), `display` (the label snapshot,
+  `skos:prefLabel`), and an optional `version` (the release of the pinned
+  vocabulary copy). The field names follow FHIR `Coding`.
+- **Text-only**: `label` plus `unmapped: true`, with no `@id`, `system` or
+  `code`. The fallback when no vocabulary term fits.
+
+[Vocabularies](vocabularies.md) says which vocabularies to use and what
+`system` and `version` hold for each.
+
+**Precedence.** Several entries may cover the same concept (same `system` and
+`code`, or the same text-only label ignoring case). Exactly one counts: a
+`declared` entry beats an `inferred` or `imported` one, and among equals the
+newest `assertedAt` wins.
+
+**Projection.** When `rp:researchInterests` is present, `interests` and
+`not_interests` are rebuilt from the entries that count: a positive weight is
+an interest, a negative weight a non-interest, and an entry with no weight or
+weight 0 is in neither list. A free-text list written by a tool or a person
+becomes text-only entries (+0.5 for an interest, -0.5 for a non-interest).
+
+The spec says what a weight means, not how to compute one. An entry inferred
+from paper counts (`evidence.share`) leaves `weight` unset: how often a topic
+appears in someone's papers is not how much they care about it.
+
+An export MAY give a FOAF view with `foaf:topic_interest` for concepts with a
+positive weight only. Interests are never exported as `schema:knowsAbout`,
+which states expertise, not interest.
+
+## Optional wizard and clinical extensions
+
+`rp:sectionVisibility` declares privacy for the finite inline sections summary,
+expertise, focus, methods, SOUL, clinical, site capabilities, regulatory
+experience, contact, and background. A section is never less restrictive than
+the whole profile. Optional clinical profiles may add `rp:therapeuticAreas`,
+`rp:siteCapabilities`, `rp:regulatoryExperience`, a `trials` collection at
+`sources/trials.jsonld`, and `clinical_expertise` Markdown. Trial entries use a
+validated NCT identifier and describe only confirmed researcher relationships;
+an unknown role remains absent.
+
+Both clinical files are ordinary manifest entries and are optional everywhere:
+
+| Path | Slot | `role` | Default tier |
+|---|---|---|---|
+| `sources/trials.jsonld` | `hasPart` | `trials` | `limited` |
+| `personality/clinical_expertise.md` | `subjectOf` | `clinical_expertise` | `public` |
+
+Trials default to `limited` because trial participation is site and
+patient-adjacent operational detail; the narrative describing it is authored
+for publication and stays `public`. Trial statistics are **derived** from the
+records present, never authored: a count that can disagree with the collection
+under it is a count nobody can trust, and an unknown enrollment stays unknown
+rather than becoming zero.
+
+A profile carrying trials and no papers is complete. An empty
+`sources/papers.jsonld`, or none at all, is the normal shape for a clinical or
+non-publishing researcher, and no consumer may treat it as a broken profile.
+
+These extensions add no terms of their own to the `@context`. Every new key is
+a compact IRI under the already-defined `rp` prefix, which JSON-LD expands
+through that prefix rather than through `@vocab`. The one exception is
+`rp:researchInterests`: its SKOS, `wi:` and PROV mappings need a scoped
+context, which the `@context` defines. No existing term changes meaning.

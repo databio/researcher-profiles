@@ -263,6 +263,62 @@ class TestFastEmbedBackend:
         with pytest.raises(ValueError, match="kind:model"):
             get_backend("fastembed")
 
+    def test_batch_size_passes_through_only_when_set(self):
+        from researcher_profiles.embeddings.backends import FastEmbedBackend, get_backend
+
+        class Model:
+            def __init__(self):
+                self.kwargs = []
+
+            def embed(self, texts, **kw):
+                self.kwargs.append(kw)
+                return [[0.0] * 384 for _ in texts]
+
+        unset = get_backend("fastembed:all-MiniLM-L6-v2")
+        assert unset.batch_size is None
+        unset._model = Model()
+        unset.embed(["a"])
+        assert unset._model.kwargs == [{}]
+
+        small = get_backend("fastembed:all-MiniLM-L6-v2", batch_size=16)
+        small._model = Model()
+        small.embed(["a", "b"])
+        assert small._model.kwargs == [{"batch_size": 16}]
+
+        from_dict = get_backend({"backend": "fastembed", "batch_size": 8})
+        assert isinstance(from_dict, FastEmbedBackend) and from_dict.batch_size == 8
+
+    def test_process_wide_batch_size_reaches_backends_built_without_one(self, monkeypatch):
+        from researcher_profiles.embeddings import backends
+
+        class Model:
+            kwargs = None
+
+            def embed(self, texts, **kw):
+                Model.kwargs = kw
+                return [[0.0] * 384 for _ in texts]
+
+        monkeypatch.setattr(backends, "_FASTEMBED_BATCH_SIZE", None)
+        backends.set_fastembed_batch_size(16)
+        b = backends.get_backend("fastembed:all-MiniLM-L6-v2")
+        b._model = Model()
+        b.embed(["a"])
+        assert Model.kwargs == {"batch_size": 16}
+
+        explicit = backends.get_backend("fastembed:all-MiniLM-L6-v2", batch_size=4)
+        explicit._model = Model()
+        explicit.embed(["a"])
+        assert Model.kwargs == {"batch_size": 4}
+
+        with pytest.raises(ValueError, match="positive"):
+            backends.set_fastembed_batch_size(0)
+
+    def test_batch_size_refused_for_other_backends(self):
+        from researcher_profiles.embeddings.backends import get_backend
+
+        with pytest.raises(ValueError, match="only supported by the fastembed"):
+            get_backend("openai:text-embedding-3-small", batch_size=16)
+
     def test_dict_spec_defaults_to_minilm(self):
         from researcher_profiles.embeddings.backends import get_backend
 
@@ -450,13 +506,13 @@ class TestFlatExport:
 
     The load-bearing property: rows drop out of the public export by the GENERAL
     derivation rule (a chunk's tier is its source's tier), not a hand-rolled
-    ``PUBLISHED_SOURCE_TYPES`` allowlist. cv/web/grant chunks are ``restricted``
+    ``PUBLISHED_SOURCE_TYPES`` allowlist. cv/web/grant chunks are ``private``
     and never reach the blob or the chunks file.
     """
 
     @pytest.fixture
     def deep_profile(self, tmp_path: Path) -> Path:
-        """A deep profile whose sqlite mixes public and restricted (cv/web/grant) chunks."""
+        """A deep profile whose sqlite mixes public and private (cv/web/grant) chunks."""
         return build_profile_dir(
             tmp_path / "tester-deep",
             name="Tester Deep",
@@ -531,11 +587,11 @@ class TestFlatExport:
     # Privacy filtering: the derivation rule, not an allowlist
     # ----------------------------------------------------------------------
 
-    def test_restricted_source_chunks_are_dropped(self, deep_profile: Path):
+    def test_private_source_chunks_are_dropped(self, deep_profile: Path):
         idx = SqliteEmbeddingIndex(deep_profile)
         idx.build_index(backend=FakeBackend())
 
-        # The sqlite contains restricted chunk types.
+        # The sqlite contains private chunk types.
         conn = connect_vec(idx.db_path)
         sqlite_types = {r[0] for r in conn.execute("SELECT DISTINCT source_type FROM chunks")}
         conn.close()
@@ -560,7 +616,7 @@ class TestFlatExport:
 
     def test_internal_profile_exports_nothing(self, tmp_path: Path):
         p = build_profile_dir(
-            tmp_path / "tester-internal", name="Tester Internal", visibility="internal"
+            tmp_path / "tester-limited", name="Tester Limited", visibility="limited"
         )
         SqliteEmbeddingIndex(p).build_index(backend=FakeBackend())
 

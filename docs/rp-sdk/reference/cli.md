@@ -18,7 +18,8 @@ rp <subcommand> [options]
 | [`graph`](#graph) | Build or inspect the derived profile graph (coauthor / COI / advising edges) | core |
 | [`db`](#db) | Push, pull and inspect profiles in a SQL profile store | `[sql]` |
 | [`push`](#push) | Upload a built profile directory to a remote API server | `[client]` |
-| [`render`](#render) | Render `index.html` into a profile folder and refresh its manifest and `.publishignore` (in place) | core |
+| [`render`](#render) | Render `index.html` into a profile folder and refresh its manifest (in place) | core |
+| [`publish`](#publish) | Write the static site one audience may see into a folder any sync tool can upload as is | core |
 | [`site`](#site) | Write the collection files (index.json, by-rid.json, SKILL.md, sitemap.xml, ...) for a set of profiles | core |
 | [`install`](#install) | Pull profiles from a registry into the local cache | `[client]` |
 | [`seek`](#seek) | Print the local path of an installed profile | core |
@@ -159,7 +160,7 @@ new that fits this researcher" query. Needs a built embedding index
 rp rank-works <profile> [--root ROOT] [--since YYYY-MM-DD] [--openalex]
                         [--works FILE] [-k N]
                         [--kind {centroid,summary,expertise}] [--threshold X]
-                        [--mailto EMAIL] [--exclude-types T1,T2] [--all-types]
+                        [--exclude-types T1,T2] [--all-types]
                         [--json]
 ```
 
@@ -173,12 +174,14 @@ rp rank-works <profile> [--root ROOT] [--since YYYY-MM-DD] [--openalex]
 | `-k N` | `10` | Number of ranked works to return. |
 | `--kind {centroid,summary,expertise}` | `centroid` | Which profile vector to rank against. |
 | `--threshold X` | none | Drop works scoring below `X`. |
-| `--mailto EMAIL` | none | OpenAlex polite-pool contact. |
 | `--exclude-types T1,T2` | a default deposit-type set | OpenAlex work types to drop from `--openalex` candidates (software, book, etc.). |
 | `--all-types` | off | Keep every work type; disables the deposit-type filter. |
 | `--json` | off | Emit the ranked works as a JSON array. |
 
-Exactly one of `--openalex` or `--works` is required.
+Exactly one of `--openalex` or `--works` is required. `--openalex` reads the
+OpenAlex API key from the `OPENALEX_API_KEY` environment variable (a free key
+from https://openalex.org/settings/api); there is no command-line flag for it,
+so it stays out of shell history.
 
 ```bash
 rp rank-works voss-elena --openalex --since 2026-07-01
@@ -277,6 +280,30 @@ rp schema export-wire rp-ui-lib/schemas/wire.schema.json
 ```
 
 See the [schema reference](schemas.md).
+
+---
+
+## vocab
+
+Rewrite the pinned interest vocabularies that ship in the package
+(`researcher_profiles/vocab/`): the OpenAlex topic list and the MeSH
+descriptors. Every tool resolves interest codes against these copies, so a
+refresh is a deliberate, reviewed change, run every year or two.
+
+```
+rp vocab refresh [--openalex] [--mesh PATH] [--release YYYY-MM] [--out-dir DIR]
+```
+
+| Option | Description |
+|---|---|
+| `--openalex` | Refetch every OpenAlex topic (network). The release is this month unless `--release` is given. |
+| `--mesh PATH` | Parse NLM's descriptor XML (`desc2026.xml`, or the `desc2026.gz` NLM also ships). The release is the year in the file name. |
+| `--out-dir DIR` | Write somewhere other than the package's own `vocab/` directory. |
+
+Prints, per file, how many ids it now holds and how many were added or
+removed. Passing neither `--openalex` nor `--mesh` exits `2`.
+
+See [Vocabularies](../../rp-spec/vocabularies.md).
 
 ---
 
@@ -389,8 +416,25 @@ Upload a built profile directory to a remote API server
 server; the profile is immediately listable, and matchable when it includes a
 built `.cache/embeddings.sqlite`.
 
+Every push first diffs the server's manifest against the manifest this push
+would commit, and refuses to delete anything the server holds unless you pass
+`--force`. That includes a push whose manifest merely *shrinks*: fewer entries
+means fewer artifacts a reader can fetch, even when no single file was named
+for deletion. Files the archive builder leaves out (withheld fulltext, anything
+under the retired `cache/` directory, paths outside the spec) are reported on
+stderr.
+
+A push also refuses outright when the local manifest names files this directory
+does not have. That is the signature of a partial copy of the profile, not of
+drift to be tidied up, and re-indexing the server from an incomplete directory
+is how artifacts get deleted. Use [`rp where`](#where) to see which root is in
+force. Every command that resolves a slug or rid now prints the directory it
+resolved to on stderr, and warns when the same slug also exists under another
+root in the resolution order.
+
 ```
 rp push <profile> [--root DIR] [--url BASE_URL] [--slug SLUG] [--token TOKEN]
+                  [--dry-run] [--force] [--only PATH ...] [--merge | --prune]
                   [--include-fulltext] [--json]
 ```
 
@@ -401,29 +445,92 @@ rp push <profile> [--root DIR] [--url BASE_URL] [--slug SLUG] [--token TOKEN]
 | `--url` | Server base URL, e.g. `http://localhost:8109`. Default: the server you ran [`rp login`](#login) against. |
 | `--slug` | Target slug on the server. Default: the directory name. |
 | `--token` | Bearer token. Default: `RESEARCHER_PROFILES_TOKEN`, else the stored login's key for that server. |
+| `--dry-run` | Print what the push would add, change, remove, and keep, then stop. Uploads nothing. |
+| `--force` | Push even though it removes files the server holds. |
+| `--only PATH ...` | Send only these profile-relative files. `profile.jsonld` travels too, but its manifest is taken from the server, so nothing else changes. Inline sections (name, expertise) still come from the local document; to change one field only, use [`rp work patch`](#work). Implies `--merge`. |
+| `--merge` | Keep every server-side file this push does not carry. |
+| `--prune` | Delete every server-side file this push does not carry, including withheld fulltext and the index. Cannot combine with `--only` or `--merge`. |
 | `--include-fulltext` | Also upload `sources/papers/` extracted fulltext. Off by default. |
-| `--json` | Emit the server's summary as JSON. |
+| `--json` | Emit the server's summary as JSON (with `--dry-run`, the whole plan). |
+
+**Modes.** With no mode flag the push is a `replace`: the server ends up with
+what the archive carries, except that withheld fulltext and the sqlite index
+are kept when the archive carried none of them. `--only` and `--merge` select
+`merge`: everything not sent stays. `--prune` selects `prune`: everything not
+sent goes. See the [API reference](api.md#put-apiv1profilesslug) for the
+server-side rules.
 
 ```console
 $ rp push profiles/jane-doe --url http://localhost:8109
-pushed jane-doe (Jane A. Doe, level=lite, indexed=True)
+pushed jane-doe: +12 ~3 -0 (kept 2) name=Jane A. Doe, level=lite, indexed=True
+
+$ rp push profiles/jane-doe --only sources/papers.jsonld --dry-run
+source: /home/me/researcher-profiles/jane-doe
+target: http://localhost:8109/api/v1/profiles/jane-doe (mode: merge)
+dry run: push jane-doe -> http://localhost:8109 (update, merge)
+manifest: 11 entries on server -> 11 after push (0 removed)
+  added        0
+  changed      1  works 1
+  unchanged    0
+  removed      0
+  kept        10  citations 1, expertise 1, paper_fulltext 2, paper_summary 5, soul 1
+  respliced    0
+changed (1):
+  sources/papers.jsonld
 ```
 
+`respliced` counts entries the server keeps that the **local** manifest no
+longer lists. The server adds them back, so they survive -- but only a server
+advertising the `manifest_splice` feature (see
+[`GET /api/v1/capabilities`](api.md#get-apiv1capabilities)) does that. Against
+one that does not, the same paths are counted as `removed` and the push
+refuses. A push also asks for the server's `push_modes` before it writes, so
+`--merge` or `--prune` against a server that predates `?mode=` is a refusal
+rather than a silent replace.
+
+After a real push, the server's own post-commit count is printed, and a count
+that fell is a warning on stderr:
+
+```console
+$ rp push profiles/jane-doe --only sources/papers.jsonld
+pushed jane-doe: +0 ~1 -0 (kept 10) name=Jane A. Doe, level=lite, indexed=True
+server now holds 11 artifacts: citations 1, expertise 1, paper_fulltext 2, paper_summary 5, soul 1, works 1
+```
+
+**Pushing with an API key.** An `rpa_` key (or app key) without the "Replace
+whole profiles" switch may still push to a profile it may write. The server
+compares the push with the profile it replaces, part by part, and lands it only
+if every part it changes is Write in the key's table. Otherwise it writes
+nothing and `rp push` names what is in the way:
+
+```console
+$ rp push profiles/jane-doe --url http://localhost:8109 --token rpa_...
+push refused: nothing was written.
+  needs Write on: summary
+Send only the files you may write (--only <file>), or ask the account holder to change this key's access on the Privacy page.
+```
+
+A change no part covers (what the public sees, a field such as
+`provenance_note`) is listed on its own line: only a key with "Replace whole
+profiles" may make it. `rp push --only <file>` sends one file and keeps the
+rest, so a key with Write on `paper_summary` can update one summary. See
+[`rp agent whoami`](#agent) for the key's table.
+
 **Exit codes.** `0` ok · `1` the server could not be reached or would not
-answer · `2` no server URL resolved, the directory is unreadable, or the target
-refused the upload. See the [API reference](api.md#put-apiv1profilesslug) for
-validation rules.
+answer, or refused the push part by part (`403 insufficient_access`) · `2` no server URL resolved, the directory is unreadable, the push
+would remove server files (or shrink the manifest) and `--force` was not given,
+the local manifest names files that are not on disk, `--prune` was combined
+with `--only`/`--merge`, the server does not support the requested mode, or the
+target refused the upload. See the
+[API reference](api.md#put-apiv1profilesslug) for validation rules.
 
 ---
 
 ## render
 
-Render a single profile's `index.html` in place, and refresh the two derived
-files that must stay in step with the profile on disk: its manifest
-(`hasPart` / `subjectOf` in `profile.jsonld`) and `.publishignore` (the list of
-`internal`/`restricted` artifacts a dumb sync must not carry). There is no
-transform and no separate output tree: the folder is publishable by
-construction.
+Render a single profile's `index.html` in place (at `public`), and refresh its
+manifest (`hasPart` / `subjectOf` in `profile.jsonld`). A profile folder is not
+itself safe to upload: to deploy, use [`publish`](#publish).
 
 ```
 rp render <profile> [--root DIR] [--base-url URL] [--no-index]
@@ -440,13 +547,53 @@ found.
 
 ---
 
+## publish
+
+Write the static tree one audience may see into an output folder. For each
+profile that audience may see, `profiles/<slug>/` gets a `profile.jsonld` with
+every section above the audience removed, only the files the audience may
+read, and an `index.html` and `embeddings/` built for the audience. The
+collection files (as [`site`](#site) writes them) are built for the same
+audience. Upload is a separate step: the folder needs no filtering.
+
+```
+rp publish <profiles> --out DIR [--who {public,limited,private}] [--root DIR]
+                      [--base-url URL] [--no-index] [--now ISO8601]
+                      [--dry-run] [--json]
+```
+
+| Argument / flag | Default | Description |
+|---|---|---|
+| `profiles` | none | A profiles root, or one profile (a directory, a rid, or a slug). |
+| `-o`, `--out DIR` | none | Output folder. Required. Must be new, empty, or a previous `rp publish` output. |
+| `--who TIER` | `public` | The audience. `limited` and `private` exports also get `noindex` pages and a disallow-all `robots.txt`. `private` prints a warning: it holds what only the owner may see. |
+| `--base-url URL` | none | Base URL for canonical links, `sitemap.xml` and `robots.txt`. |
+| `--no-index` | off | Add `noindex` directives. |
+| `--now ISO8601` | now | Pin timestamps for deterministic output. |
+| `--dry-run` | off | Print, per profile, what ships and what is withheld and why, plus skipped profiles. Writes nothing. |
+| `--json` | off | Print the same as data. |
+
+A re-run into the same folder removes files the previous run wrote and this
+one does not, so a tier tightened since the last export disappears.
+
+```bash
+rp publish ~/researcher-profiles --out ./_site
+aws s3 sync ./_site s3://my-bucket/ --delete
+```
+
+Exit code 1 when a profile's `derivedFrom` chain does not resolve (a
+restriction that cannot be computed is refused, not guessed) or the output
+folder holds files `rp publish` did not write. Exit code 2 when the profiles
+folder cannot be found.
+
+---
+
 ## site
 
 Write the collection files for a *set* of profiles into an output directory:
 `index.json`, `by-rid.json`, `SKILL.md`, `style.css`, `sitemap.xml`, and the
-rest. Deployment is then a dumb sync of the folders. `site` produces the
-collection-level index, not per-profile pages (use [`render`](#render) for
-those).
+rest, at `public`. `site` produces the collection-level index only; to build a
+deployable folder, use [`publish`](#publish), which includes these files.
 
 ```
 rp site <profiles_dir> --out DIR [--base-url URL]
@@ -656,19 +803,24 @@ entries in `profile.jsonld` that enumerate every artifact the directory
 contains.
 
 ```
-rp manifest <profile> [--root DIR] [--write] [--check] [--json]
+rp manifest <profile> [--root DIR] [--write] [--force] [--check] [--json]
 ```
 
 | Flag | Description |
 |---|---|
 | (none) | Print one line per manifest entry (`role` and `contentUrl`). |
-| `--write` | Regenerate the manifest by walking the directory and store it back into `profile.jsonld`. |
+| `--write` | Regenerate the manifest by walking the directory and store it back into `profile.jsonld`. Prints the diff first and refuses to drop entries. |
+| `--force` | With `--write`, write even though the new manifest drops entries. |
 | `--check` | Exit `4` when the recorded manifest disagrees with what is on disk. |
-| `--json` | Emit the manifest entries and any drift as JSON. |
+| `--json` | Emit the manifest entries and any drift as JSON (with `--write`, also `before`, `after`, `added`, `dropped`). |
 
 Drift is reported in both directions: files on disk that the manifest does not
-list, and manifest entries whose file is gone. A manifest that has silently
-drifted is worse than no manifest at all, because a consumer trusts it.
+list (`manifest_unlisted`), and manifest entries whose file is gone
+(`manifest_stale`). They want opposite actions. An unlisted file wants the
+manifest regenerated. A dangling entry may mean this directory is a partial
+copy of the profile, and regenerating there deletes the missing artifacts for
+good -- so `--write` names every entry it would drop and refuses without
+`--force`.
 
 ```console
 $ rp manifest profiles/jane-doe
@@ -676,6 +828,12 @@ soul             personality/SOUL.md
 expertise        personality/expertise.md
 works            sources/papers.jsonld
 paper_summary    sources/summaries/doe2019methods.summary.md
+
+$ rp manifest profiles/jane-doe-partial --write
+manifest: 141 -> 88 entries (+0 -53)
+  would drop: sources/papers/doe2016example.md
+  ...
+refusing to drop 53 entries; re-run with --force if these files are really gone.
 ```
 
 ---
@@ -744,9 +902,10 @@ Requires the `[signing]` extra.
 ## login
 
 Log in to a profile server from the command line and store the key it mints.
-The server runs a device-authorization flow: `rp` asks for a code, prints a
-link and a short user code, and polls until you approve the request in a
-browser. See
+The server runs the OAuth 2.0 device authorization grant
+([RFC 8628](https://www.rfc-editor.org/rfc/rfc8628)): `rp` asks for a code
+(`POST /api/auth/device`), prints a link and a short user code, and polls
+(`POST /api/auth/token`) until you approve the request in a browser. See
 [Command-line login](../../rp-spec/dynamic-api.md#142-command-line-login) for
 the wire protocol.
 
@@ -765,7 +924,7 @@ rp login [server] [--label NAME] [--no-browser] [--json]
 $ rp login https://profiles.example.org
 Open this link in your browser to approve the login:
 
-  https://profiles.example.org/cli-auth?code=WQTX-9F4K
+  https://profiles.example.org/device?user_code=WQTX-9F4K
 
 Code: WQTX-9F4K
 Waiting for approval...
@@ -779,12 +938,14 @@ profiles you own or edit and nothing else. Once it is stored,
 [`push`](#push), `rp install`, `rp listr` and [`whoami`](#whoami) need no
 flags at all.
 
-A server that does not implement the
-[management tier](../../rp-spec/dynamic-api.md#14-management-api) answers `404`
-on the login request, and the command fails with
-`does not offer command-line login`.
+A server that does not offer
+[command-line login](../../rp-spec/dynamic-api.md#142-command-line-login)
+answers `404` on `POST /api/auth/device`, and the command fails at once with
+`does not offer command-line login`. If you decline the request in the
+browser, or it expires before you approve it, the command stops and says so;
+run `rp login` again to start over.
 
-**Exit codes.** `0` ok · `1` the server refused, timed out, or was unreachable
+**Exit codes.** `0` ok · `1` the server refused, you declined, the request expired or timed out, or the server was unreachable
 · `2` no server URL was given and none is stored.
 
 Requires the `[client]` extra.
@@ -841,26 +1002,24 @@ Requires the `[client]` extra.
 
 ## agent
 
-Introspect an **agent** credential: the `rpa_` key an assistant holds to edit
-one profile on one server. Distinct from [`login`](#login), which handles a
-person's own `rpk_` push key.
+Introspect an **agent** credential: the `rpa_` API key an assistant holds to
+act for one person's account on one server. Distinct from [`login`](#login),
+which handles a person's own `rpk_` push key.
 
 ```
 rp agent whoami [--host NAME] [--json]
-rp agent scopes [--host NAME] [--json]
 rp agent config [--host NAME]
 ```
 
 | Subcommand | Calls | Prints |
 |---|---|---|
-| `whoami` | `GET /api/manage/agent/whoami` | The agent's label and handle, its owner, viewer tier, granted and missing scopes, and the profiles it is bound to. |
-| `scopes` | `GET /api/manage/agent/scopes` | The scope catalog, with the dangerous and default-on flags. |
+| `whoami` | `GET /api/manage/agent/whoami` | The key's label and handle, its owner, its parts table (which parts it may read and write), the "Replace whole profiles" switch, every profile the account reaches with the parts the key may write there, and the acts no key may ever do. |
 | `config` | nothing (local) | Which credential resolved, and from where. |
 
 | Option | Description |
 |---|---|
 | `--host NAME` | Which `[hosts.<name>]` block in `credentials.toml` to use. Default: the file's `default =`, or `$RESEARCHER_PROFILES_AUTH_HOST`. |
-| `--json` | (`whoami`, `scopes`) Emit the server's response verbatim. |
+| `--json` | (`whoami`) Emit the server's response verbatim. |
 
 The credential resolves in four steps; the first hit wins
 (`researcher_profiles.agent.resolve_credential`):
@@ -871,17 +1030,29 @@ The credential resolves in four steps; the first hit wins
 3. The nearest `.env` walked up from the working directory, same two names.
 4. `~/.config/researcher-profiles/credentials.toml`, which must be mode `0600`.
 
-The scope vocabulary is normative in
-[Agent scopes](../../rp-spec/authentication.md#agent-scopes).
+A key's authority is one table: a level (`none`, `read`, or `write`) for each
+part of a profile (sections such as `summary` and `background`, files such as
+`paper_summary` and `cv`, and `lenses`), plus the "Replace whole profiles"
+switch. The account holder sets both on the server's Privacy page; nothing
+about them is stored in `credentials.toml`. A part `whoami` does not list is
+`none`.
 
 ```console
 $ rp agent whoami
-Agent:   laptop-assistant (rpa_7f3a91c2b40e)
+Agent:   summary bot (agent_1a2b3c4d5e6f)
 Owner:   Jane Doe (0000-0002-1825-0097)
-Tier:    restricted
-Scopes:  profile:history, profile:metadata, profile:narrative, read
-Missing: profile:identity, profile:visibility
-Profile: jane-doe (editor)
+Write:   paper_summary
+Read:    background, cv, expertise, focus, summary, works
+None:    every other part
+Replace whole profiles: off
+Profiles:
+  jane-doe (owner, published): writes paper_summary
+Never allowed:
+  publish: Publishing is a decision by the person the profile describes.
+  unpublish: Same decision, other direction.
+  change what the public sees: Only the owner decides what the public may read.
+  delete: Only the profile owner may delete a profile.
+  grant: Only the account holder may give access, including making another key.
 ```
 
 **Exit codes.** `0` ok · `1` no credential resolved, or the server refused
@@ -910,7 +1081,7 @@ rp profile visibility get|set [--tier TIER] [--host NAME]
 | `--if-match HASH` (`push`) | Base hash to send instead of the one in the frontmatter. |
 | `--force` (`push`) | Send no `base_hash`, so the write is last-writer-wins. |
 | `--dry-run` (`push`) | Print what would change and send nothing. |
-| `--tier TIER` (`visibility set`) | `public`, `internal`, or `restricted`. Required for `set`. |
+| `--tier TIER` (`visibility set`) | `public`, `limited`, or `private`. Required for `set`. |
 | `--host NAME` | Which `[hosts.<name>]` block to use. |
 
 The pull document is YAML frontmatter followed by the SOUL narrative as the

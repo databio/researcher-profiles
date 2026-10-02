@@ -20,7 +20,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 from researcher_profiles import LLMClient, ResearcherProfile, StaticArtifactStorage
-from researcher_profiles.cli.auth.agent import Credential, InsufficientScopeError, ManagementClient
+from researcher_profiles.cli.auth.agent import (
+    AgentAPIError,
+    Credential,
+    InsufficientAccessError,
+    ManagementClient,
+)
 from researcher_profiles.client import (
     ApiArtifactStorage,
     _split_profile_url,
@@ -128,7 +133,6 @@ class TestManagementClient:
         "resource, method, args, kwargs, http_method, path, body",
         [
             ("identity", "whoami", (), {}, "get", "/api/manage/agent/whoami", None),
-            ("identity", "scopes", (), {}, "get", "/api/manage/agent/scopes", None),
             ("profile", "get", (SLUG,), {}, "get", f"/api/v1/profiles/{SLUG}", None),
             (
                 "profile",
@@ -153,18 +157,54 @@ class TestManagementClient:
                 "patch_visibility",
                 (SLUG,),
                 {
-                    "profile_visibility": "internal",
-                    "artifacts": [{"role": "soul", "visibility": "restricted"}],
+                    "profile_visibility": "limited",
+                    "artifacts": [{"role": "soul", "visibility": "private"}],
                 },
                 "patch",
                 f"/api/v1/profiles/{SLUG}/visibility",
                 {
-                    "profile_visibility": "internal",
-                    "artifacts": [{"role": "soul", "visibility": "restricted"}],
+                    "profile_visibility": "limited",
+                    "artifacts": [{"role": "soul", "visibility": "private"}],
                 },
             ),
+            (
+                "profile",
+                "get_work",
+                (SLUG, "doe2016example"),
+                {},
+                "get",
+                f"/api/v1/profiles/{SLUG}/works/doe2016example",
+                None,
+            ),
+            (
+                "profile",
+                "patch_work",
+                (SLUG, "doe2016example", {"doi": "10.1/x"}),
+                {"base_hash": "before"},
+                "patch",
+                f"/api/v1/profiles/{SLUG}/works/doe2016example",
+                {"doi": "10.1/x", "base_hash": "before"},
+            ),
+            (
+                "profile",
+                "put_work",
+                (SLUG, "doe2026new", {"name": "A new work", "type": "authored"}),
+                {},
+                "put",
+                f"/api/v1/profiles/{SLUG}/works/doe2026new",
+                {"name": "A new work", "type": "authored"},
+            ),
         ],
-        ids=["whoami", "scopes", "get", "patch-metadata", "put-soul", "patch-visibility"],
+        ids=[
+            "whoami",
+            "get",
+            "patch-metadata",
+            "put-soul",
+            "patch-visibility",
+            "get-work",
+            "patch-work",
+            "put-work",
+        ],
     )
     def test_resource_methods_keep_their_request_shape(
         self, resource, method, args, kwargs, http_method, path, body
@@ -188,32 +228,67 @@ class TestManagementClient:
         "resource, method, args, kwargs",
         [
             ("identity", "whoami", (), {}),
-            ("identity", "scopes", (), {}),
             ("profile", "get", (SLUG,), {}),
             ("profile", "patch_metadata", (SLUG, {"name": "Jane"}), {}),
             ("profile", "put_soul", (SLUG, "A narrative."), {}),
             ("profile", "patch_visibility", (SLUG,), {}),
+            ("profile", "get_work", (SLUG, "doe2016example"), {}),
+            ("profile", "patch_work", (SLUG, "doe2016example", {"doi": "10.1/x"}), {}),
+            ("profile", "delete_work", (SLUG, "doe2016example"), {}),
         ],
-        ids=["whoami", "scopes", "get", "patch-metadata", "put-soul", "patch-visibility"],
+        ids=[
+            "whoami",
+            "get",
+            "patch-metadata",
+            "put-soul",
+            "patch-visibility",
+            "get-work",
+            "patch-work",
+            "delete-work",
+        ],
     )
-    def test_resource_methods_preserve_insufficient_scope_error(
-        self, resource, method, args, kwargs
-    ):
+    def test_resource_methods_raise_insufficient_access(self, resource, method, args, kwargs):
         client, session = _management_client()
         response = MagicMock(status_code=403, is_success=False)
+        # The server's shape: FastAPI wraps the structured refusal in ``detail``.
         response.json.return_value = {
-            "error": "insufficient_scope",
-            "hint": "Need profile:metadata.",
-            "missing": ["profile:metadata"],
+            "detail": {
+                "error": "insufficient_access",
+                "required": ["background", "summary"],
+                "missing": ["background"],
+                "needs_replace": [],
+                "hint": "This needs Write on background.",
+            }
         }
         session.get.return_value = response
         session.patch.return_value = response
         session.put.return_value = response
+        session.delete.return_value = response
 
-        with pytest.raises(InsufficientScopeError) as error:
+        with pytest.raises(InsufficientAccessError) as error:
             getattr(getattr(client, resource), method)(*args, **kwargs)
 
-        assert error.value.missing == ["profile:metadata"]
+        assert error.value.missing == ["background"]
+        assert error.value.required == ["background", "summary"]
+        assert error.value.detail == "This needs Write on background."
+
+    def test_a_not_delegable_refusal_carries_its_hint(self):
+        client, session = _management_client()
+        response = MagicMock(status_code=403, is_success=False)
+        response.json.return_value = {
+            "detail": {
+                "error": "not_delegable",
+                "action": "visibility",
+                "hint": "Apps and API keys may not make this change.",
+            }
+        }
+        session.patch.return_value = response
+
+        with pytest.raises(AgentAPIError) as error:
+            client.profile.patch_visibility(SLUG, profile_visibility="limited")
+
+        assert not isinstance(error.value, InsufficientAccessError)
+        assert error.value.detail == "Apps and API keys may not make this change."
 
 
 # ---------------------------------------------------------------------------
@@ -472,7 +547,7 @@ class TestServerCore:
     ):
         # A site-wide "is the surface open" switch would be the wrong axis; the
         # question is "how much of this profile may this caller see". The token
-        # widens the caller's tier to ``restricted``; it does not unlock a door.
+        # widens the caller's tier to ``private``; it does not unlock a door.
         c = make_api_client(fixture_profiles_root(SLUG), token="secret-token")
         anon = c.get("/api/v1/profiles")
         assert anon.status_code == 200
@@ -482,13 +557,13 @@ class TestServerCore:
             headers={"Authorization": "Bearer secret-token"},
         )
         assert operator.status_code == 200
-        assert operator.headers["X-RP-Viewer-Tier"] == "restricted"
+        assert operator.headers["X-RP-Viewer-Tier"] == "private"
 
     def test_a_private_profile_is_withheld_from_anonymous_but_not_the_operator(
         self, make_api_client, fixture_profiles_root, tmp_path
     ):
         # The private-registry posture, expressed per profile: the document
-        # itself declares ``internal``, so an anonymous caller gets the same 404
+        # itself declares ``limited``, so an anonymous caller gets the same 404
         # a nonexistent slug gets, and the operator gets the profile.
         import shutil
 
@@ -499,7 +574,7 @@ class TestServerCore:
         shutil.copytree(fixture_profiles_root(SLUG) / SLUG, root / SLUG)
         prof = ResearcherProfile.from_files(root / SLUG)
         doc = prof.metadata
-        doc.visibility = "internal"
+        doc.visibility = "limited"
         prof.save_profile(doc)
 
         c = make_api_client(root, token="secret-token")
@@ -937,8 +1012,10 @@ class TestPush:
         html_dir.mkdir(parents=True, exist_ok=True)
         (html_dir / "big.html").write_text("<html>" + "x" * 200000 + "</html>")
 
-        summary = push_profile("http://testserver", src, client=api_client)
-        assert summary["slug"] == OTHER
+        result = push_profile("http://testserver", src, client=api_client)
+        assert result.summary["slug"] == OTHER
+        # ...and the preflight said so before the bytes moved.
+        assert result.plan.dropped["not_in_spec"] == ["sources/html/big.html"]
 
         # The pushed-and-swapped profile on the server carries no sources/html/.
         server_profile = api_client.app.state.store.root / OTHER
@@ -1076,19 +1153,28 @@ class TestJsonUpsertAndMint:
 
 
 def _captured_push_bytes(src: Path, **kw) -> bytes:
-    """Run push_profile against a stub client and return the uploaded body."""
+    """Run push_profile against a stub client and return the uploaded body.
+
+    The stub 404s the preflight GET, so the push is a create: nothing on the
+    far side to diff against, and nothing it could remove.
+    """
     from researcher_profiles.client import push_profile
 
     sent: dict[str, bytes] = {}
 
     class _StubResponse:
-        status_code = 200
+        def __init__(self, status_code: int = 200):
+            self.status_code = status_code
+            self.text = ""
 
         @staticmethod
         def json() -> dict:
             return {"slug": SLUG, "name": "Jane Doe", "level": "full", "indexed": False}
 
     class _StubClient:
+        def get(self, url):
+            return _StubResponse(404)
+
         def put(self, url, *, content, headers=None):
             sent["body"] = content
             return _StubResponse()
@@ -1131,13 +1217,15 @@ class TestArchiveAndInstall:
         prof = ResearcherProfile.from_files(installed)
         assert prof.slug == SLUG
 
-    def test_fulltext_never_ships_over_http(self, make_api_client, server_root, cache_root):
-        """Copyrighted fulltext is a legal floor: no operator flag can serve it.
+    def test_fulltext_does_not_ship_to_a_public_caller(
+        self, make_api_client, server_root, cache_root
+    ):
+        """Paper full text defaults to ``private``, so a public install omits it.
 
         The archive is projected through the caller's tier by
-        ``build_viewer_archive``, and ``ALWAYS_RESTRICTED_ROLES`` withholds full
-        text at every tier, so there is no server setting that can turn
-        redistribution on.
+        ``build_viewer_archive``. This install resolves to the ``public`` tier,
+        and ``paper_fulltext`` defaults to ``private``, so it is withheld here
+        (an owner-tier caller who has not re-tiered it would still receive it).
         """
         http = make_api_client(server_root)
         summary = install_profile(SLUG, url="http://testserver", root=cache_root, client=http)
@@ -1275,7 +1363,7 @@ class TestArchiveAndInstall:
         (src / "sources" / "works.json").write_text("[]")  # non-spec file
         (src / "scratch.txt").write_text("not a profile member")
 
-        names = _tar_names(build_profile_archive(src, include_fulltext=True))
+        names = _tar_names(build_profile_archive(src, include_fulltext=True).data)
 
         # No non-spec member survives.
         assert not any(n.startswith("sources/html") for n in names)
@@ -1312,13 +1400,76 @@ class TestArchiveAndInstall:
 
         src = fixture_profile(SLUG)
 
-        names = _tar_names(build_profile_archive(src, **archive_kwargs))
+        names = _tar_names(build_profile_archive(src, **archive_kwargs).data)
 
         assert any(n.startswith("sources/papers/") for n in names) is expect_papers
         # Scoped to sources/papers/ only; summaries + metadata always remain.
         assert "profile.jsonld" in names
         assert "sources/papers.jsonld" in names
         assert any(n.startswith("sources/summaries/") for n in names)
+
+    def test_archive_reports_what_it_dropped(self, fixture_profile) -> None:
+        """Every exclusion is named, by reason. Silent is how a user loses work."""
+        from researcher_profiles.api.upload import build_profile_archive
+
+        src = fixture_profile(SLUG)
+        (src / "sources" / "html").mkdir(parents=True, exist_ok=True)
+        (src / "sources" / "html" / "scrape.html").write_text("<html></html>")
+        (src / "scratch.txt").write_text("not a profile member")
+        (src / "cache").mkdir()  # pre-rename .cache/
+        (src / "cache" / "embeddings.sqlite").write_bytes(b"not really sqlite")
+        (src / ".git").mkdir()
+        (src / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+
+        archive = build_profile_archive(src)
+
+        assert archive.dropped["legacy_cache"] == ["cache/embeddings.sqlite"]
+        assert archive.dropped["fulltext"] == [
+            "sources/papers/doe2016example.md",
+            "sources/papers/doe2019methods.md",
+        ]
+        not_in_spec = archive.dropped["not_in_spec"]
+        assert "sources/html/scrape.html" in not_in_spec
+        assert "scratch.txt" in not_in_spec
+        # A non-member top-level directory is reported as itself, not walked:
+        # a profile that is also a git checkout must not drown the report.
+        assert ".git/" in not_in_spec
+        assert ".git/HEAD" not in not_in_spec
+        # members is what the tarball actually holds, and agrees with it.
+        assert archive.members == _tar_names(archive.data)
+        assert "profile.jsonld" in archive.members
+        assert not (set(archive.members) & set(not_in_spec))
+
+    def test_archive_only_ships_the_named_files(self, fixture_profile) -> None:
+        """``only=`` is the document plus exactly what was asked for."""
+        from researcher_profiles.api.upload import build_profile_archive
+
+        src = fixture_profile(SLUG)
+
+        archive = build_profile_archive(src, only=["sources/papers.jsonld"])
+
+        assert _tar_names(archive.data) == {"profile.jsonld", "sources/papers.jsonld"}
+        assert archive.members == {"profile.jsonld", "sources/papers.jsonld"}
+        assert archive.dropped == {}  # nothing was dropped; the rest was not asked for
+
+    @pytest.mark.parametrize(
+        "only, match",
+        [
+            (["sources/nope.jsonld"], "not a file in the profile"),
+            (["scratch.txt"], "not a profile member"),
+            (["sources/papers/doe2016example.md"], "include_fulltext"),
+        ],
+        ids=["missing", "not-a-member", "withheld-fulltext"],
+    )
+    def test_archive_only_refuses_a_path_it_cannot_ship(self, fixture_profile, only, match) -> None:
+        """Naming a file and watching it vanish is the bug ``only=`` replaces."""
+        from researcher_profiles.api.upload import build_profile_archive
+
+        src = fixture_profile(SLUG)
+        (src / "scratch.txt").write_text("not a profile member")
+
+        with pytest.raises(ValueError, match=match):
+            build_profile_archive(src, only=only)
 
 
 class TestIdentityResolve:
@@ -1498,7 +1649,7 @@ class TestPushCopyrightBoundary:
         """What the server keeps on ingest is the operator's call, not the client's."""
         from researcher_profiles.api.upload import build_profile_archive
 
-        payload = build_profile_archive(push_src, include_fulltext=True)
+        payload = build_profile_archive(push_src, include_fulltext=True).data
         assert "sources/papers/paper-001.pdf" in _tar_names(payload)  # client sent it
 
         http = make_api_client(push_target, **client_kwargs)
@@ -1518,6 +1669,379 @@ class TestPushCopyrightBoundary:
         assert (stored / "profile.jsonld").is_file()
         # Non-fulltext members survive either way.
         assert (stored / "sources" / "papers.jsonld").is_file()
+
+
+# The jane-doe fixture's extracted paper text, profile-relative.
+_JANE_FULLTEXT = ("sources/papers/doe2016example.md", "sources/papers/doe2019methods.md")
+_INDEX = ".cache/embeddings.sqlite"
+
+
+def _put_archive(http, payload: bytes, **params):
+    return http.put(
+        f"/api/v1/profiles/{SLUG}",
+        content=payload,
+        headers={"Content-Type": "application/gzip"},
+        params=params or None,
+    )
+
+
+def _stored_files(server_root: Path) -> set[str]:
+    """Every profile-relative file the server's live directory holds."""
+    live = server_root / SLUG
+    return {p.relative_to(live).as_posix() for p in live.rglob("*") if p.is_file()}
+
+
+class TestPushKeepsWithheld:
+    """A push is a filtered view of the sender's directory, not the whole of it.
+
+    ``build_profile_archive`` withholds fulltext by default, so absence from
+    the tarball must not read as "delete": under the default ``?mode=replace``
+    the server keeps the fulltext and index files it already holds when the
+    archive carries none of that class. ``?mode=merge`` keeps every omitted
+    file; ``?mode=prune`` keeps none.
+    """
+
+    @pytest.fixture
+    def server_root(self, tmp_path: Path) -> Path:
+        # Not ``tmp_path`` itself: ``fixture_profile`` writes the sender's copy
+        # there, and the server's live directory must be a different tree.
+        root = tmp_path / "server"
+        root.mkdir()
+        return root
+
+    @pytest.fixture
+    def src(self, fixture_profile) -> Path:
+        """A local jane-doe carrying fulltext and a (fake) built index."""
+        src = fixture_profile(SLUG, drop_index=True)
+        cache = src / ".cache"
+        cache.mkdir(exist_ok=True)
+        (cache / "embeddings.sqlite").write_bytes(b"not really sqlite")
+        return src
+
+    @pytest.fixture
+    def full_push(self, src: Path) -> bytes:
+        """Push A: everything, fulltext and index included."""
+        from researcher_profiles.api.upload import build_profile_archive
+
+        payload = build_profile_archive(src, include_fulltext=True).data
+        names = _tar_names(payload)
+        assert set(_JANE_FULLTEXT) <= names and _INDEX in names
+        return payload
+
+    @pytest.fixture
+    def only_push(self, src: Path) -> bytes:
+        """Push C: the ``rp push --only sources/papers.jsonld`` view."""
+        from researcher_profiles.api.upload import build_profile_archive
+
+        payload = build_profile_archive(src, only=["sources/papers.jsonld"]).data
+        assert _tar_names(payload) == {"profile.jsonld", "sources/papers.jsonld"}
+        return payload
+
+    @pytest.fixture
+    def bare_push(self, src: Path) -> bytes:
+        """Push B: the default ``rp push`` view, no fulltext and no index."""
+        import shutil
+
+        from researcher_profiles.api.upload import build_profile_archive
+
+        shutil.rmtree(src / ".cache")
+        payload = build_profile_archive(src, include_fulltext=False).data
+        names = _tar_names(payload)
+        assert not any(n.startswith("sources/papers/") for n in names)
+        assert _INDEX not in names
+        return payload
+
+    def test_a_bare_push_keeps_the_live_fulltext_and_index(
+        self, make_api_client, server_root, full_push, bare_push
+    ):
+        http = make_api_client(server_root, accept_fulltext=True)
+        first = _put_archive(http, full_push)
+        assert first.status_code == 200, first.text
+        assert first.json()["kept"] == {}  # a new profile: nothing to keep
+
+        second = _put_archive(http, bare_push)
+        assert second.status_code == 200, second.text
+        body = second.json()
+        assert body["kept"] == {"fulltext": len(_JANE_FULLTEXT), "index": 1}
+        assert body["mode"] == "replace"
+        assert body["indexed"] is True
+
+        stored = server_root / SLUG
+        for rel in _JANE_FULLTEXT:
+            assert (stored / rel).is_file()
+        assert (stored / _INDEX).read_bytes() == b"not really sqlite"
+        # The rest of the profile was replaced as before; no staging litter.
+        assert (stored / "profile.jsonld").is_file()
+        assert [p.name for p in server_root.iterdir() if p.name.startswith(".upload-")] == []
+
+    def test_prune_deletes_what_the_archive_lacks(
+        self, make_api_client, server_root, full_push, bare_push
+    ):
+        http = make_api_client(server_root, accept_fulltext=True)
+        assert _put_archive(http, full_push).status_code == 200
+
+        r = _put_archive(http, bare_push, mode="prune")
+        assert r.status_code == 200, r.text
+        assert r.json()["kept"] == {}
+        assert r.json()["mode"] == "prune"
+        assert r.json()["indexed"] is False
+
+        stored = server_root / SLUG
+        assert not (stored / "sources" / "papers").exists()
+        assert not (stored / _INDEX).exists()
+        assert (stored / "profile.jsonld").is_file()
+
+    def test_a_class_the_archive_carries_is_authoritative(
+        self, make_api_client, server_root, src: Path, full_push
+    ):
+        """Some fulltext in the archive means the archive decides the fulltext."""
+        import shutil
+
+        from researcher_profiles.api.upload import build_profile_archive
+
+        http = make_api_client(server_root, accept_fulltext=True)
+        assert _put_archive(http, full_push).status_code == 200
+
+        # Push B carries one of the two fulltext files, and no index.
+        (src / _JANE_FULLTEXT[1]).unlink()
+        shutil.rmtree(src / ".cache")
+        partial = build_profile_archive(src, include_fulltext=True).data
+        r = _put_archive(http, partial)
+        assert r.status_code == 200, r.text
+        assert r.json()["kept"] == {"index": 1}
+
+        stored = server_root / SLUG
+        assert (stored / _JANE_FULLTEXT[0]).is_file()
+        assert not (stored / _JANE_FULLTEXT[1]).exists()
+        assert (stored / _INDEX).is_file()
+
+    def test_merge_keeps_every_file_the_archive_omits(
+        self, make_api_client, server_root, full_push, only_push
+    ):
+        """``rp push --only``: send two files, leave the rest of the copy alone."""
+        http = make_api_client(server_root, accept_fulltext=True)
+        assert _put_archive(http, full_push).status_code == 200
+        live = _stored_files(server_root)
+
+        r = _put_archive(http, only_push, mode="merge")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["mode"] == "merge"
+        # Everything the two-member archive left out came back: the withheld
+        # classes under their own names, the rest under "other".
+        assert set(body["kept"]) == {"fulltext", "index", "other"}
+        assert body["kept"]["fulltext"] == len(_JANE_FULLTEXT)
+        assert body["kept"]["index"] == 1
+        assert sum(body["kept"].values()) == len(live) - 2  # the two it carried
+        assert _stored_files(server_root) == live
+
+    def test_replace_deletes_an_unclassed_live_file_the_archive_lacks(
+        self, make_api_client, server_root, src: Path
+    ):
+        """The default is a replacement: only a withheld class survives absence."""
+        from researcher_profiles.api.upload import build_profile_archive
+
+        http = make_api_client(server_root, accept_fulltext=True)
+        web = src / "sources" / "web"
+        web.mkdir(parents=True)
+        (web / "x.md").write_text("a scraped page")
+        assert _put_archive(http, build_profile_archive(src).data).status_code == 200
+        assert (server_root / SLUG / "sources" / "web" / "x.md").is_file()
+
+        (web / "x.md").unlink()
+        r = _put_archive(http, build_profile_archive(src).data)
+        assert r.status_code == 200, r.text
+        assert r.json()["mode"] == "replace"
+        assert not (server_root / SLUG / "sources" / "web" / "x.md").exists()
+
+    def test_an_unknown_mode_is_a_400(self, make_api_client, server_root, full_push):
+        http = make_api_client(server_root)
+        r = _put_archive(http, full_push, mode="nonsense")
+        assert r.status_code == 400
+        assert "invalid mode" in r.json()["detail"]
+
+    def test_a_bare_push_keeps_the_live_fulltext_in_a_sql_store(
+        self, make_api_client, full_push, bare_push
+    ):
+        """No directory to walk: the live copies come from a scratch export."""
+        from researcher_profiles.store.sql import SqlProfileStore
+
+        store = SqlProfileStore("sqlite://")
+        store.create_all()
+        http = make_api_client(store, accept_fulltext=True)
+        assert _put_archive(http, full_push).status_code == 200
+        for rel in _JANE_FULLTEXT:
+            assert store.artifact_bytes(SLUG, rel)
+
+        r = _put_archive(http, bare_push)
+        assert r.status_code == 200, r.text
+        # The SQL store holds no ``.cache/embeddings.sqlite`` (vectors are rows),
+        # so only the fulltext class has anything to carry over.
+        assert r.json()["kept"] == {"fulltext": len(_JANE_FULLTEXT)}
+        for rel in _JANE_FULLTEXT:
+            assert store.artifact_bytes(SLUG, rel)
+
+    def test_merge_keeps_the_live_files_in_a_sql_store(self, make_api_client, full_push, only_push):
+        """Same scratch export, but merge has every omitted file to carry."""
+        from researcher_profiles.store.sql import SqlProfileStore
+
+        store = SqlProfileStore("sqlite://")
+        store.create_all()
+        http = make_api_client(store, accept_fulltext=True)
+        assert _put_archive(http, full_push).status_code == 200
+
+        r = _put_archive(http, only_push, mode="merge")
+        assert r.status_code == 200, r.text
+        kept = r.json()["kept"]
+        assert kept["fulltext"] == len(_JANE_FULLTEXT)
+        assert kept["other"] > 0
+        for rel in (*_JANE_FULLTEXT, "personality/SOUL.md"):
+            assert store.artifact_bytes(SLUG, rel)
+
+    def _served_manifest(self, http) -> dict[str, dict]:
+        """``{contentUrl: entry}`` from ``GET /profiles/{slug}``: the committed index."""
+        resp = http.get(f"/api/v1/profiles/{SLUG}")
+        assert resp.status_code == 200, resp.text
+        return {e["contentUrl"]: e for e in resp.json()["manifest"]}
+
+    @staticmethod
+    def _drop_from_manifest(payload: bytes, prefix: str) -> bytes:
+        """Rebuild ``payload`` with every ``prefix`` entry cut from its manifest.
+
+        What a partial local copy sends: the bytes of the named file, and a
+        ``profile.jsonld`` whose index no longer mentions the artifacts the
+        server holds. Nothing else in the archive changes.
+        """
+        import io
+        import json as _json
+        import tarfile
+
+        with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as tf:
+            members = {m.name: tf.extractfile(m).read() for m in tf.getmembers() if m.isfile()}
+        doc = _json.loads(members["profile.jsonld"])
+        for slot in ("hasPart", "subjectOf"):
+            doc[slot] = [e for e in (doc.get(slot) or []) if not e["contentUrl"].startswith(prefix)]
+        members["profile.jsonld"] = _json.dumps(doc).encode("utf-8")
+
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+            for name, data in members.items():
+                info = tarfile.TarInfo(name)
+                info.size = len(data)
+                tf.addfile(info, io.BytesIO(data))
+        return buf.getvalue()
+
+    @pytest.mark.parametrize("backend", ["files", "sql"], ids=["filesystem", "sql"])
+    def test_merge_splices_kept_files_into_the_manifest(
+        self, make_api_client, server_root, full_push, only_push, backend
+    ):
+        """A kept file keeps its manifest entry, or it is not kept at all.
+
+        The regression this closes: ``--only`` shipped a ``profile.jsonld``
+        whose manifest had lost 53 fulltext entries. The bytes were kept, the
+        entries were not, and the SQL store -- which writes rows BY the
+        recorded manifest -- persisted nothing for them.
+        """
+        from researcher_profiles.store.sql import SqlProfileStore
+
+        if backend == "sql":
+            store = SqlProfileStore("sqlite://")
+            store.create_all()
+            target = store
+        else:
+            target = server_root
+        http = make_api_client(target, accept_fulltext=True)
+        assert _put_archive(http, full_push).status_code == 200
+        before = self._served_manifest(http)
+        assert set(_JANE_FULLTEXT) <= set(before)
+
+        partial = self._drop_from_manifest(only_push, "sources/papers/")
+        r = _put_archive(http, partial, mode="merge")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["spliced"] == len(_JANE_FULLTEXT)
+
+        after = self._served_manifest(http)
+        assert set(_JANE_FULLTEXT) <= set(after), "the kept fulltext lost its manifest entries"
+        assert set(after) == set(before)
+        assert body["manifest_counts"]["paper_fulltext"] == len(_JANE_FULLTEXT)
+        assert sum(body["manifest_counts"].values()) == len(after)
+
+        if backend == "sql":
+            for rel in _JANE_FULLTEXT:
+                assert target.artifact_bytes(SLUG, rel)
+        else:
+            for rel in _JANE_FULLTEXT:
+                assert (server_root / SLUG / rel).is_file()
+
+    def test_replace_splices_withheld_classes(
+        self, make_api_client, server_root, full_push, bare_push
+    ):
+        """The default mode keeps the withheld classes, entries included."""
+        http = make_api_client(server_root, accept_fulltext=True)
+        assert _put_archive(http, full_push).status_code == 200
+        before = self._served_manifest(http)
+
+        partial = self._drop_from_manifest(bare_push, "sources/papers/")
+        r = _put_archive(http, partial)
+        assert r.status_code == 200, r.text
+        assert r.json()["mode"] == "replace"
+        assert r.json()["spliced"] == len(_JANE_FULLTEXT)
+        assert set(self._served_manifest(http)) == set(before)
+
+    def test_prune_drops_entries_and_reports_counts(
+        self, make_api_client, server_root, full_push, bare_push
+    ):
+        """Nothing is kept, so nothing is spliced, and the counts say so.
+
+        The archive is the whole profile under ``prune``, manifest included,
+        so the fulltext entries are cut from the document as well as the
+        tarball: a pruning push that left them in the index would leave the
+        server advertising files it had just deleted.
+        """
+        http = make_api_client(server_root, accept_fulltext=True)
+        assert _put_archive(http, full_push).status_code == 200
+        before = self._served_manifest(http)
+
+        pruning = self._drop_from_manifest(bare_push, "sources/papers/")
+        r = _put_archive(http, pruning, mode="prune")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["kept"] == {} and body["spliced"] == 0
+        counts = body["manifest_counts"]
+        assert "paper_fulltext" not in counts
+        assert sum(counts.values()) < len(before)
+        assert sum(counts.values()) == len(self._served_manifest(http))
+
+    def test_a_new_profile_reports_its_manifest_counts(
+        self, make_api_client, server_root, full_push
+    ):
+        """No live copy to keep anything from, but the counts still describe it."""
+        http = make_api_client(server_root, accept_fulltext=True)
+        r = _put_archive(http, full_push)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["kept"] == {} and body["spliced"] == 0
+        assert sum(body["manifest_counts"].values()) == len(self._served_manifest(http))
+
+    def test_capabilities_route_lists_push_modes(self, make_api_client, server_root):
+        """The pre-check a client makes before it trusts ``?mode=``."""
+        from researcher_profiles.api.upload import PUSH_MODES
+
+        http = make_api_client(server_root)
+        r = http.get("/api/v1/capabilities")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert set(body["push_modes"]) == set(PUSH_MODES)
+        assert "manifest_splice" in body["features"]
+
+    def test_index_html_round_trips_through_the_archive(self, fixture_profile):
+        """``index.html`` is a manifest part (role ``html``), so it ships."""
+        from researcher_profiles.api.upload import build_profile_archive
+
+        src = fixture_profile(SLUG)
+        (src / "index.html").write_text("<html>rendered profile page</html>")
+        assert "index.html" in _tar_names(build_profile_archive(src).data)
 
 
 # --------------------------------------------------------------------------
@@ -1624,6 +2148,37 @@ class TestMatchEndpoint:
         assert len(chunks) == 1
         assert chunks[0]["source_id"] == "paper1"
         assert chunks[0]["score"] == pytest.approx(0.9)
+
+    def test_match_forwards_interests_and_reports_matched_topics(self, api_client):
+        match = _fake_match()
+        match.evidence.matched_topics = ["T10222"]
+        vstore = self._use(api_client.app, _FakeVectorStore([match]))
+        interest = {
+            "concept": {
+                "@id": "https://openalex.org/T10222",
+                "system": "https://openalex.org/topics",
+                "code": "T10222",
+                "display": "Genomics and Chromatin Dynamics",
+            },
+            "weight": 1,
+            "method": "declared",
+            "generator": "user",
+            "assertedAt": "2026-09-25T12:00:00Z",
+        }
+        r = api_client.post("/api/v1/match", json={"query": "chromatin", "interests": [interest]})
+        assert r.status_code == 200
+        assert r.json()["matches"][0]["evidence"]["matched_topics"] == ["T10222"]
+        [forwarded] = vstore.calls[0][1]["interests"]
+        assert forwarded.concept.code == "T10222" and forwarded.weight == 1
+        assert vstore.calls[0][1]["topic_alpha"] == pytest.approx(0.2)
+
+    def test_match_refuses_malformed_interests(self, api_client):
+        self._use(api_client.app, _FakeVectorStore([_fake_match()]))
+        r = api_client.post(
+            "/api/v1/match",
+            json={"query": "chromatin", "interests": [{"concept": {"label": "x"}}]},
+        )
+        assert r.status_code == 422
 
     def test_match_503_when_no_profile_is_indexed(self, api_client):
         """Profiles exist and none has vectors: 503, never an empty 200.
@@ -1826,21 +2381,25 @@ class TestRankWorksEndpoint:
 
         fetch_calls = {}
 
-        def fake_fetch(**kwargs):
+        def fake_fetch(client, **kwargs):
+            fetch_calls["client"] = client
             fetch_calls.update(kwargs)
             return [PaperRecord(title="Fetched work", year=2026)]
 
         monkeypatch.setattr(oa, "fetch_new_works", fake_fetch)
+        monkeypatch.setenv("OPENALEX_API_KEY", "test-key-123")
         r = api_client.post(
             f"/api/v1/profiles/{SLUG}/rank-works",
-            json={"use_openalex": True, "since": "2026-07-01", "mailto": "who@example.org"},
+            json={"use_openalex": True, "since": "2026-07-01"},
         )
         assert r.status_code == 200
         assert r.json()["works"][0]["title"] == "Fetched work"
         # Seeds came from the profile document; request params were forwarded.
         assert fetch_calls["since"] == "2026-07-01"
-        assert fetch_calls["mailto"] == "who@example.org"
         assert "synthetic data science" in fetch_calls["topics"]
+        # The server key went into the client, never into the call.
+        assert fetch_calls["client"].has_key
+        assert "test-key-123" not in repr(fetch_calls)
 
     def test_rank_works_400_without_candidates(self, api_client, rank_stub):
         r = api_client.post(f"/api/v1/profiles/{SLUG}/rank-works", json={})

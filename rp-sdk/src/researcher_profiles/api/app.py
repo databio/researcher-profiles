@@ -175,6 +175,10 @@ def create_app(
     # not published it; bare rp-sdk has no such policy, so a profile's own
     # declaration is the whole story. See deps.get_profile_tier_floor.
     app.state.profile_tier_floor = None
+    #: ``Callable[[Request, str], list[Proof]]`` or None. Given the rid of the
+    #: document being served, returns the registry-issued proofs to attach
+    #: (see REGISTRY_ISSUED_PROOF_KINDS). A plain rp-sdk server has none.
+    app.state.registry_proofs = None
     # Health flag: a host that runs a startup query-embedding preflight
     # flips this to False so ``/health`` answers 503 and the
     # container's HEALTHCHECK stops routing traffic to a deployment whose

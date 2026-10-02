@@ -157,16 +157,15 @@ See [Store profiles in a database](how-to/sql-layer.md).
 ## Publish and push
 
 ```bash
-rp render profiles/jane-doe --base-url https://example.org   # index.html, in place
-rp site profiles --out ./site --base-url https://example.org # collection files
-rp push profiles/jane-doe --url http://localhost:8109        # upload to a server
+rp render profiles/jane-doe --base-url https://example.org     # index.html, in place
+rp publish profiles --out ./_site --base-url https://example.org # the folder to upload
+rp push profiles/jane-doe --url http://localhost:8109          # upload to a server
 ```
 
-`render` writes into the profile folder; there is no separate output tree,
-because a profile is publishable as it stands. It also refreshes
-`.publishignore`, the list of non-public artifacts a plain sync must not copy.
-`site` writes the
-collection-level files for a *set* of profiles. Deployment is then an `rsync`.
+`render` refreshes one profile folder in place. A profile folder is not itself
+safe to upload: `publish` writes the folder one audience may see (`--who`,
+default `public`), with every profile trimmed to that audience and the
+collection files beside them. Deployment is then any sync of that folder.
 See [How to host a profile](publishing.md)
 and the [static API](../rp-spec/static-api.md)
 for the normative CORS and content-type requirements.
@@ -184,7 +183,7 @@ profile's visibility is above `public` and `--allow-nonpublic` was not given.
 
 ## Privacy tiers
 
-Every artifact carries a visibility of `public`, `internal`, or `restricted`,
+Every artifact carries a visibility of `public`, `limited`, or `private`,
 and a served response is projected through the caller's tier. Never assume an
 absent field means "no data"; it may mean "not visible to you". The rules are
 normative and short:

@@ -12,11 +12,25 @@ type Emit = (check: CheckResult) => void;
 // Static API checks (given a profile base URL)
 // ---------------------------------------------------------------------------
 
+/**
+ * The profile base (no trailing slash) for a URL the user pasted. Accepts
+ * either the base or the manifest itself: the validator's URL box is shared
+ * between the Profile and Compliance tabs, and the Profile tab accepts a
+ * `.../profile.jsonld` URL, so without this the manifest probe became
+ * `.../profile.jsonld/profile.jsonld` and 404ed.
+ */
+export function profileBaseOf(profileUrl: string): string {
+  return profileUrl
+    .trim()
+    .replace(/\/+$/, "")
+    .replace(/\/profile\.jsonld$/, "");
+}
+
 export async function staticApiChecks(
   profileUrl: string,
   emit: Emit,
 ): Promise<CheckResult[]> {
-  const base = profileUrl.replace(/\/+$/, "");
+  const base = profileBaseOf(profileUrl);
   const checks: CheckResult[] = [];
 
   function add(c: CheckResult) {

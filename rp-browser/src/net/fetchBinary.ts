@@ -52,6 +52,7 @@ export async function fetchBinary(
       value: buf,
       contentType,
       url,
+      finalUrl: res.url || url,
       bytes: buf.byteLength,
     };
   } catch (err) {

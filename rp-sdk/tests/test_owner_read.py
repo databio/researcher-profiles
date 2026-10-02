@@ -3,14 +3,15 @@
 The route lives on ``public_router`` and the gate is the caller's tier, not
 ownership. A hosted registry keeps the whole profile, every tier, in one
 store, so an owner-only door would leave the public tier unreachable. The
-owner still reads their own ``restricted`` CV, because their viewer tier is
-``restricted``; nobody else does.
+owner still reads their own ``private`` CV, because their viewer tier is
+``private``; nobody else does.
 
 What the route must do, and every assertion below says it:
 
-- serve an owner their own ``internal`` and ``restricted`` (non-floor) artifacts;
-- withhold the hard floors of ``spec/privacy-tiers.md`` section 4 even from the
-  owner (``paper_fulltext``, ``.cache/``/``.keys/``): a **403**, since those are
+- serve an owner their own ``limited`` and ``private`` artifacts, paper
+  full text included: ``paper_fulltext`` is an ordinary private-default role;
+- withhold the build-local hard floors of ``spec/privacy-tiers.md`` section 4
+  even from the owner (``.cache/``/``.keys/``): a **403**, since those are
   withheld from everyone and nothing is disclosed by saying so;
 - withhold an artifact above the caller's tier as a **404** indistinguishable
   from an artifact that is not in the manifest at all;
@@ -18,7 +19,7 @@ What the route must do, and every assertion below says it:
 
 The stub ``owner_verifier`` is the ``X-Test-User`` shape shared with
 ``test_edit.py``; ``deps.resolve_viewer_tier`` reads it, so "owner" resolves to
-the ``restricted`` viewer tier and everyone else falls through to ``public``.
+the ``private`` viewer tier and everyone else falls through to ``public``.
 """
 
 import pytest
@@ -35,11 +36,11 @@ SLUG = "test-researcher"
 def _build_owned_profile(root):
     """Materialize a profile exercising every tier the route must distinguish.
 
-    Public: paper summaries, works. Internal: the works list, re-tiered.
-    Restricted (default): ``sources/cv.md``, ``sources/web/*.md``. Hard floors:
-    a planted ``paper_fulltext`` and the ``.cache/embeddings.sqlite`` index.
-    Plus a ``public``-declared artifact ``derivedFrom`` the restricted CV, whose
-    effective tier is restricted: the derivation-rule probe.
+    Public: paper summaries, works. Limited: the works list, re-tiered.
+    Private (default): ``sources/cv.md``, ``sources/web/*.md``, and a planted
+    ``paper_fulltext``. Build-local hard floor: the ``.cache/embeddings.sqlite``
+    index. Plus a ``public``-declared artifact ``derivedFrom`` the private CV, whose
+    effective tier is private: the derivation-rule probe.
     """
     pdir = root / SLUG
     build_profile_dir(
@@ -51,18 +52,18 @@ def _build_owned_profile(root):
         manifest=True,
     )
 
-    # A copyrighted-fulltext artifact (hard floor), added after the composite
-    # build, then re-recorded in the manifest.
+    # A paper-fulltext artifact (private by default, re-tierable), added
+    # after the composite build, then re-recorded in the manifest.
     (pdir / "sources" / "papers").mkdir(parents=True, exist_ok=True)
     (pdir / "sources" / "papers" / "p1.md").write_text("full text\n", encoding="utf-8")
     ResearcherProfile.from_files(pdir).build_manifest(write=True)
 
-    # Re-tier the works list to `internal`, and add a public-declared artifact
-    # derived from the restricted CV (effective tier -> restricted).
+    # Re-tier the works list to `limited`, and add a public-declared artifact
+    # derived from the private CV (effective tier -> private).
     prof = ResearcherProfile.from_files(pdir)
     for p in prof.metadata.has_part:
         if p.content_url == "sources/papers.jsonld":
-            p.visibility = "internal"
+            p.visibility = "limited"
     (pdir / "derived-note.md").write_text("notes drawn from the CV\n", encoding="utf-8")
     prof.metadata.has_part.append(
         ArtifactRef(
@@ -107,31 +108,40 @@ def _get(client, artifact, *, user="owner"):
 
 
 class TestOwnerReadsOwnPrivateArtifacts:
-    """(a) The owner reads their own internal / restricted artifacts."""
+    """(a) The owner reads their own limited / private artifacts."""
 
-    def test_owner_reads_restricted_cv(self, owned_client):
+    def test_owner_reads_private_cv(self, owned_client):
         r = _get(owned_client, "sources/cv.md")
         assert r.status_code == 200, r.text
-        assert r.headers["X-RP-Effective-Tier"] == "restricted"
+        assert r.headers["X-RP-Effective-Tier"] == "private"
         assert "Education" in r.text
 
-    def test_owner_reads_restricted_web_page(self, owned_client):
+    def test_owner_reads_private_web_page(self, owned_client):
         r = _get(owned_client, "sources/web/1-lab.md")
         assert r.status_code == 200, r.text
-        assert r.headers["X-RP-Effective-Tier"] == "restricted"
+        assert r.headers["X-RP-Effective-Tier"] == "private"
 
     def test_owner_reads_internal_works(self, owned_client):
         r = _get(owned_client, "sources/papers.jsonld")
         assert r.status_code == 200, r.text
-        assert r.headers["X-RP-Effective-Tier"] == "internal"
+        assert r.headers["X-RP-Effective-Tier"] == "limited"
+
+    def test_owner_reads_private_fulltext(self, owned_client):
+        # paper_fulltext is an ordinary private-default artifact: the owner
+        # (private tier) reads it, like their CV. No role hard floor.
+        r = _get(owned_client, "sources/papers/p1.md")
+        assert r.status_code == 200, r.text
+        assert r.headers["X-RP-Effective-Tier"] == "private"
 
 
 class TestHardFloorsWithheldFromOwner:
-    """(b) Even the owner cannot read a hard-floor artifact."""
+    """(b) Even the owner cannot read a build-local hard-floor artifact."""
 
-    def test_paper_fulltext_denied(self, owned_client):
-        r = _get(owned_client, "sources/papers/p1.md")
-        assert r.status_code == 403, r.text
+    def test_fulltext_withheld_from_anonymous(self, owned_client):
+        # Private by default, so a public caller does not receive it: a 404,
+        # indistinguishable from an unknown path.
+        r = _get(owned_client, "sources/papers/p1.md", user=None)
+        assert r.status_code == 404, r.text
 
     def test_cache_index_denied(self, owned_client):
         r = _get(owned_client, ".cache/embeddings.sqlite")
@@ -143,7 +153,7 @@ class TestNonOwnerAndAnonymousDenied:
 
     def test_anonymous_denied(self, owned_client):
         # 404, not 401: an anonymous caller is the viewer whose tier is
-        # ``public``, and a restricted artifact is not there for them. That is
+        # ``public``, and a private artifact is not there for them. That is
         # the same answer a path outside the manifest gets (see
         # ``test_a_withheld_artifact_is_indistinguishable_from_an_unknown_one``).
         r = _get(owned_client, "sources/cv.md", user=None)
@@ -201,16 +211,16 @@ class TestManifestBaseUrl:
 
 
 class TestDerivationRuleRespected:
-    """(e) A public-declared derivative of a restricted source reads as restricted."""
+    """(e) A public-declared derivative of a private source reads as private."""
 
-    def test_derived_artifact_effective_tier_is_restricted(self, owned_client):
+    def test_derived_artifact_effective_tier_is_private(self, owned_client):
         r = _get(owned_client, "derived-note.md")
-        # The owner is entitled to restricted, so this is served, but the
-        # header reports the derived (restricted) tier, not the declared public
+        # The owner is entitled to private, so this is served, but the
+        # header reports the derived (private) tier, not the declared public
         # one. The tier gate uses that same derived tier, so a caller at the
         # public tier does not get it despite its ``visibility: public``.
         assert r.status_code == 200, r.text
-        assert r.headers["X-RP-Effective-Tier"] == "restricted"
+        assert r.headers["X-RP-Effective-Tier"] == "private"
         assert _get(owned_client, "derived-note.md", user=None).status_code == 404
 
 

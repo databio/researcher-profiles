@@ -15,7 +15,7 @@ from pydantic import (
     model_validator,
 )
 
-from ._common import FORMAT_HINT
+from ._common import FORMAT_HINT, GYear, IdRef, OrganizationName, PeriodicalName, PersonList
 from ._identity import _slugify, normalize_doi
 from ._parts import ResearchOutput
 from .jsonld import CONTEXT_URL, PROFILE_FORMAT_IRI, JsonLdModel
@@ -54,9 +54,9 @@ class PaperRecord(ResearchOutput):
     # property, because that is what a paper's name is called everywhere else
     # in this package.
     name: str = Field(validation_alias=AliasChoices("name", "title"))
-    year: int | None = Field(default=None, alias="datePublished")
-    journal: str | None = Field(default=None, alias="isPartOf")
-    authors: list[str] | None = Field(default=None, alias="author")
+    year: GYear = Field(default=None, alias="datePublished")
+    journal: PeriodicalName = Field(default=None, alias="isPartOf")
+    authors: PersonList = Field(default=None, alias="author")
 
     # Identity
     paper_id: str | None = None
@@ -74,6 +74,9 @@ class PaperRecord(ResearchOutput):
     cited_by_count: int | None = None
     abstract: str | None = None
     summary: str | None = None
+    #: OpenAlex topic ids (``T…``) the work is tagged with, primary topic
+    #: first, each once. What an inferred interest counts over.
+    topics: list[str] = []
 
     # Authorship (researcher-profiles specific)
     author_position: str | None = None
@@ -187,7 +190,7 @@ class _CollectionDocument(JsonLdModel):
     type_: str | None = Field(default="Collection", alias="@type")
     conforms_to: str = Field(default=PROFILE_FORMAT_IRI, alias="conformsTo")
     #: The person this collection is about (their profile ``@id``).
-    about: str | None = None
+    about: IdRef = None
 
     @model_validator(mode="before")
     @classmethod
@@ -249,7 +252,7 @@ class GrantRecord(JsonLdModel):
 
     id: str
     title: str = Field(alias="name")
-    funder: str | None = None
+    funder: OrganizationName = None
     number: str | None = Field(default=None, alias="identifier")
     #: NIH activity code (e.g. "R01", "K99", "U01"), recoverable without
     #: parsing the free-text ``identifier``. Feeds eligibility evaluation
@@ -297,6 +300,107 @@ class GrantsDocument(_CollectionDocument):
     def grants(self) -> list[GrantRecord]:
         """Alias for :attr:`has_part`: the awards in this collection."""
         return self.has_part
+
+
+class TrialRecord(JsonLdModel):
+    """A confirmed researcher-to-clinical-trial relationship.
+
+    Part of the optional clinical extension (``docs/rp-spec/index.md``). Only
+    confirmed relationships belong here: a trial a discovery pass merely
+    proposed is draft state in the host, not a claimed accomplishment. Hence
+    ``researcher_role`` is optional and stays absent when unknown; inventing a
+    PI role to fill a required field would turn "we do not know" into a claim
+    nobody made.
+
+    ``nct_id`` is validated against the ClinicalTrials.gov form because it is
+    the record's identity: without it there is nothing to check the claim
+    against, and the ``@id`` is derived from it.
+    """
+
+    type_: str | None = Field(default="MedicalTrial", alias="@type")
+    nct_id: str = Field(pattern=r"^NCT\d{8}$")
+    title: str = Field(alias="name")
+    #: ``principal_investigator``, ``co_investigator``, ``sub_investigator``,
+    #: ``site_pi``, or any other label the source uses. Absent = unknown.
+    researcher_role: str | None = Field(default=None, alias="rp:researcherRole")
+    phase: str | None = None
+    status: str | None = None
+    therapeutic_area: str | None = None
+    conditions: list[str] = Field(default=[])
+    sponsor: str | None = None
+    sponsor_type: str | None = None
+    #: Participants enrolled. ``None`` is unknown and must never be read as 0.
+    enrollment: int | None = Field(default=None, ge=0)
+    start_date: str | None = None
+    completion_date: str | None = None
+    sites: int | None = Field(default=None, ge=0)
+
+    def _jsonld_node(self, data: dict[str, Any]) -> dict[str, Any]:
+        data["@id"] = f"https://clinicaltrials.gov/study/{self.nct_id}"
+        return data
+
+
+class TrialStats(BaseModel):
+    """Counts derived from a :class:`TrialsDocument`, never authored.
+
+    Derived rather than stored for the same reason ``paper_stats`` is computed
+    from the corpus: a written-down total is a number that can disagree with
+    the records under it. Every count here is over the confirmed records
+    present in the collection.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    total_trials: int = 0
+    #: Records whose ``researcher_role`` names a principal-investigator role.
+    as_pi: int = 0
+    industry_sponsored: int = 0
+    completed: int = 0
+    #: Total enrollment, or ``None`` when any included record's enrollment is
+    #: unknown. A partial sum reported as a total is a smaller lie than zero
+    #: but a lie all the same.
+    total_enrollment: int | None = None
+
+
+#: ``researcher_role`` values that count as leading a trial. Compared
+#: case-insensitively; anything else (including an absent role) does not count.
+_PI_ROLES: frozenset[str] = frozenset({"principal_investigator", "site_pi"})
+
+
+class TrialsDocument(_CollectionDocument):
+    """Top-level model for ``sources/trials.jsonld`` (a ``Collection``).
+
+    Optional, and absent from almost every profile. It exists so a clinical
+    researcher whose work is trials rather than papers has somewhere to put the
+    record: an empty ``papers.jsonld`` alongside a populated trials collection
+    is a complete profile, not a broken one.
+    """
+
+    _FILE_LABEL: ClassVar[str] = "trials.jsonld"
+    has_part: list[TrialRecord] = Field(default=[], alias="hasPart")
+
+    @property
+    def trials(self) -> list[TrialRecord]:
+        """Alias for :attr:`has_part`: the trials in this collection."""
+        return self.has_part
+
+    @property
+    def stats(self) -> TrialStats:
+        """Counts over the confirmed records in this collection."""
+        enrollments = [t.enrollment for t in self.has_part]
+        return TrialStats(
+            total_trials=len(self.has_part),
+            as_pi=sum(1 for t in self.has_part if (t.researcher_role or "").lower() in _PI_ROLES),
+            industry_sponsored=sum(
+                1 for t in self.has_part if (t.sponsor_type or "").lower() == "industry"
+            ),
+            completed=sum(1 for t in self.has_part if (t.status or "").lower() == "completed"),
+            total_enrollment=(
+                sum(e for e in enrollments if e is not None)
+                if enrollments and all(e is not None for e in enrollments)
+                else None
+            ),
+        )
 
 
 # ---------------------------------------------------------------------------

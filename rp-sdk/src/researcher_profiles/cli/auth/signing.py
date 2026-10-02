@@ -75,9 +75,9 @@ def _jcs_str(value: Any) -> str:
 
     Keys are sorted by Unicode code point, which equals RFC 8785's UTF-16
     code-unit ordering for every Basic-Multilingual-Plane character (the only
-    characters that appear in profile keys). Floats are rejected: our documents
-    carry none, and permitting one would require ES6 number formatting that
-    ``json.dumps`` does not guarantee.
+    characters that appear in profile keys). Floats (interest weights, paper
+    shares) are written the way ES6 ``Number.prototype.toString`` writes them,
+    which is what RFC 8785 requires; NaN and infinities are rejected.
     """
     if value is None or isinstance(value, bool):
         return json.dumps(value)
@@ -86,11 +86,7 @@ def _jcs_str(value: Any) -> str:
     if isinstance(value, int):
         return str(value)
     if isinstance(value, float):
-        raise TypeError(
-            "JCS canonicalization here refuses floats: profile documents carry "
-            "no floating-point numbers, and permitting one would need ES6 "
-            "number formatting this canonicalizer does not implement"
-        )
+        return _es6_number(value)
     if isinstance(value, (list, tuple)):
         return "[" + ",".join(_jcs_str(v) for v in value) + "]"
     if isinstance(value, dict):
@@ -101,6 +97,39 @@ def _jcs_str(value: Any) -> str:
             + "}"
         )
     raise TypeError(f"cannot canonicalize value of type {type(value).__name__}")
+
+
+def _es6_number(x: float) -> str:
+    """``x`` as ES6 ``Number.prototype.toString`` prints it (RFC 8785 3.2.2.3).
+
+    Python's ``repr`` already yields the shortest round-tripping digits, the
+    same digits ES6 chooses; only the layout differs (``1e-07`` vs ``1e-7``,
+    ``1.0`` vs ``1``), so this re-lays those digits out by the ES6 rules.
+    """
+    if x != x or x in (float("inf"), float("-inf")):
+        raise TypeError("JCS cannot canonicalize NaN or an infinity")
+    if x == 0:
+        return "0"
+    sign = "-" if x < 0 else ""
+    mantissa, _, exp = repr(abs(x)).partition("e")
+    whole, _, frac = mantissa.partition(".")
+    digits = whole + frac
+    point = len(whole) + (int(exp) if exp else 0)
+    stripped = digits.lstrip("0")
+    point -= len(digits) - len(stripped)
+    digits = stripped.rstrip("0")
+    k, n = len(digits), point
+    if k <= n <= 21:
+        out = digits + "0" * (n - k)
+    elif 0 < n <= 21:
+        out = digits[:n] + "." + digits[n:]
+    elif -6 < n <= 0:
+        out = "0." + "0" * -n + digits
+    else:
+        e = n - 1
+        head = digits if k == 1 else digits[0] + "." + digits[1:]
+        out = f"{head}e{'+' if e >= 0 else '-'}{abs(e)}"
+    return sign + out
 
 
 def jcs(obj: Any) -> bytes:

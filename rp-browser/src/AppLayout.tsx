@@ -48,8 +48,12 @@ export function AppLayout() {
     <div className="flex flex-col min-h-screen">
       <header className="app-header flex items-center flex-wrap gap-4 px-6 py-3">
         <Link to="/" className="app-brand flex items-center gap-2">
-          <Logo />
-          <span className="app-brand__name">{__RP_APP_NAME__}</span>
+          {slots.brand ?? (
+            <>
+              <Logo />
+              <span className="app-brand__name">{__RP_APP_NAME__}</span>
+            </>
+          )}
         </Link>
         <nav className="app-header__nav flex flex-wrap gap-1">
           <Link to="/" className={navClass(page === "home")}>

@@ -1,4 +1,4 @@
-"""Refresh one profile folder in place: the single-profile publish path."""
+"""Refresh one profile folder in place, and render a profile page for one audience."""
 
 import logging
 import os
@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from ..privacy import render_publishignore
+from ..privacy import ViewerTier, effective_tiers, tier_allows
 from ..profile import ResearcherProfile
 from ..profile.payloads import (
     paper_entries_list,
@@ -29,11 +29,12 @@ def render_profile(
     """Refresh a single profile folder in place.
 
     Rebuilds the manifest into ``profile.jsonld`` (``hasPart`` / ``subjectOf``
-    plus the ``index.html`` and consumer-skill entries and the consumer flags),
-    renders ``index.html``, and writes ``.publishignore`` at the profile root.
+    plus the ``index.html`` entry and the consumer flags) and renders
+    ``index.html`` at ``public``.
 
-    This does not flatten the tree, copy anything to an output directory, or gate
-    on visibility. A profile already is its published form.
+    This writes nothing outside the profile folder and gates on nothing.
+    Deployment is ``rp publish --who <tier>`` (:func:`publish_collection`), then
+    any sync of its output folder.
     """
     prof_dir = Path(profile_dir).expanduser().resolve()
     if not (prof_dir / "profile.jsonld").is_file():
@@ -71,18 +72,11 @@ def render_profile(
     prof.metadata.subject_of = subjects
 
     # ---- consumer flags -----------------------------------------------
-    build_state = prof.build_state
-    filtered_papers = [
-        p
-        for p in prof.papers
-        if (p.title and p.title.strip())
-        and not (p.paper_id and build_state.is_contaminated(p.paper_id))
-    ]
-    published_paper_ids = {p.paper_id for p in filtered_papers if p.paper_id}
+    published_paper_ids = {p.paper_id for p in _published_papers(prof) if p.paper_id}
 
     has_citation_graph = (prof_dir / "sources" / "citations.json").is_file()
     # The flag means "the served flat index exists", not the
-    # restricted, never-deployed sqlite. A public copy advertises embeddings
+    # private, never-deployed sqlite. A public copy advertises embeddings
     # only when it actually ships them.
     has_embedding_index = (prof_dir / "embeddings" / "index.json").is_file()
     expertise_cites: bool | None = None
@@ -103,20 +97,60 @@ def render_profile(
     prof.save_profile(prof.metadata.model_copy(update=update))
 
     # ---- render index.html --------------------------------------------
-    detail = profile_detail_dict(prof)
-    papers_list = paper_entries_list(
-        prof,
-        build_state=build_state,
-        exclude_contaminated=True,
-        exclude_untitled=True,
-    )
+    # ``public``: the in-place page sits beside the private files, and a
+    # profile folder is not an audience-specific export. ``rp publish`` renders
+    # its own page per audience instead of copying this one.
+    html = render_page(prof, "public", base_url=base_url, no_index=no_index)
+    (prof_dir / "index.html").write_text(html, encoding="utf-8")
+
+
+def render_page(
+    prof: ResearcherProfile,
+    viewer: ViewerTier,
+    *,
+    base_url: str | None = None,
+    no_index: bool = False,
+) -> str:
+    """The profile's ``index.html`` as a viewer entitled to ``viewer`` sees it.
+
+    No exclude list can redact a field out of a page that already contains it,
+    so the page is projected at render time: the same projection the HTTP read
+    uses decides the inline sections, and each manifest-backed block (expertise,
+    SOUL, the works and grants lists) appears only when its artifact's
+    effective tier reaches ``viewer``.
+    """
+    detail = profile_detail_dict(prof, viewer)
+    tiers = effective_tiers(prof.metadata)
+
+    def allowed(content_url: str) -> bool:
+        return tier_allows(viewer, tiers.get(content_url, prof.metadata.visibility))
+
+    for key, content_url in (
+        ("expertise", "personality/expertise.md"),
+        ("soul", "personality/SOUL.md"),
+    ):
+        if not allowed(content_url):
+            detail[key] = None
+
+    build_state = prof.build_state
+    papers_list: list[dict[str, Any]] = []
+    filtered_papers = []
+    if allowed("sources/papers.jsonld"):
+        papers_list = paper_entries_list(
+            prof,
+            build_state=build_state,
+            exclude_contaminated=True,
+            exclude_untitled=True,
+        )
+        filtered_papers = _published_papers(prof)
+    grants = prof.grants if allowed("sources/grants.jsonld") else []
     grants_for_html: list[dict[str, Any]] = []
-    for g in prof.grants:
+    for g in grants:
         gd = g.model_dump(mode="json")
         gd.pop("abstract", None)
         grants_for_html.append(gd)
-    jsonld_graph = profile_jsonld_graph(detail, filtered_papers, prof.grants)
-    html = render_profile_page(
+    jsonld_graph = profile_jsonld_graph(detail, filtered_papers, grants)
+    return render_profile_page(
         prof.slug,
         detail,
         papers_list,
@@ -125,10 +159,14 @@ def render_profile(
         base_url=base_url,
         no_index=no_index,
     )
-    (prof_dir / "index.html").write_text(html, encoding="utf-8")
 
-    # ---- .publishignore -----------------------------------------------
-    # ``privacy.render_publishignore`` is the single authority: it derives the
-    # deny-list from the same effective-tier rule everything else uses, so the
-    # declared tiers and the deployed layout cannot drift.
-    (prof_dir / ".publishignore").write_text(render_publishignore(prof.metadata), encoding="utf-8")
+
+def _published_papers(prof: ResearcherProfile) -> list:
+    """Titled papers not flagged as contaminated: the ones a page may list."""
+    build_state = prof.build_state
+    return [
+        p
+        for p in prof.papers
+        if (p.title and p.title.strip())
+        and not (p.paper_id and build_state.is_contaminated(p.paper_id))
+    ]

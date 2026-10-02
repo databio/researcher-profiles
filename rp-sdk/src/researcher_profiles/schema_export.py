@@ -28,6 +28,8 @@ from .models.api import (
     ProfileDetail,
     ProfileMetadataPayload,
     ProfileSummary,
+    SectionTier,
+    SectionTierReport,
     VisibilityPatch,
     VisibilityReport,
 )
@@ -43,6 +45,7 @@ from .schema import (
     PapersDocument,
     ProfileDocument,
     SummaryFile,
+    TrialsDocument,
 )
 
 # Model -> output filename. Almost every entry is an on-disk artifact schema
@@ -61,6 +64,7 @@ _SCHEMA_MODELS = {
     "profile_jsonld": ProfileDocument,  # profile.jsonld
     "papers_jsonld": PapersDocument,  # sources/papers.jsonld
     "grants_jsonld": GrantsDocument,  # sources/grants.jsonld
+    "trials_jsonld": TrialsDocument,  # sources/trials.jsonld (optional, clinical)
     "summary_file": SummaryFile,  # sources/summaries/*.summary.md frontmatter
     # Published-standard schemas (static site artifacts). NOTE: profile.jsonld
     # and papers.jsonld are the same documents authored and published (the
@@ -107,6 +111,8 @@ class _WireBundle(BaseModel):
     artifact_tier: ArtifactTier
     visibility_patch: VisibilityPatch
     artifact_visibility: ArtifactVisibility
+    section_tier: SectionTier
+    section_tier_report: SectionTierReport
 
 
 def build_wire_schema() -> dict:
@@ -115,7 +121,7 @@ def build_wire_schema() -> dict:
     Every wire model appears under ``$defs`` (``ProfileDetail``,
     ``ProfileMetadataPayload``, ``ProfileSummary``, ``PaperEntry``,
     ``PaperSummary``, ``VisibilityReport``, ``ArtifactTier``,
-    ``VisibilityPatch``, ``ArtifactVisibility``), so a single
+    ``VisibilityPatch``, ``ArtifactVisibility``, ``SectionTier``), so a single
     ``json-schema-to-typescript`` pass emits all interfaces.
     """
     schema = _WireBundle.model_json_schema()

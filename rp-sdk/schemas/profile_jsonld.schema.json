@@ -180,8 +180,8 @@
           "default": "public",
           "enum": [
             "public",
-            "internal",
-            "restricted"
+            "limited",
+            "private"
           ],
           "title": "Visibility",
           "type": "string"
@@ -416,6 +416,79 @@
       "title": "CareerStage",
       "type": "object"
     },
+    "ConceptReference": {
+      "additionalProperties": true,
+      "description": "One term in a controlled vocabulary (``rp:concept``).\n\nThe ``system``/``code``/``version`` triple is what makes a concept\ncomparable across profiles; ``label`` is only what a human reads. Used by\n``therapeutic_areas``; research interests use :class:`InterestConcept`.",
+      "properties": {
+        "@context": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "@Context"
+        },
+        "@id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "@Id"
+        },
+        "@type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "@Type"
+        },
+        "code": {
+          "title": "Code",
+          "type": "string"
+        },
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "system": {
+          "title": "System",
+          "type": "string"
+        },
+        "version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Version"
+        }
+      },
+      "required": [
+        "system",
+        "code",
+        "label"
+      ],
+      "title": "ConceptReference",
+      "type": "object"
+    },
     "Identifier": {
       "additionalProperties": true,
       "description": "A ``schema:PropertyValue`` identifier node.\n\nUsed for the identifiers that are not the profile's ``@id``: OpenAlex,\nScopus, and whatever an older ``external_ids`` block carried.",
@@ -472,6 +545,181 @@
       "title": "Identifier",
       "type": "object"
     },
+    "InterestConcept": {
+      "additionalProperties": true,
+      "description": "The concept a :class:`ResearchInterest` points at.\n\nTwo forms, never mixed. A **coded** concept names a term in a controlled\nvocabulary: ``system`` (the vocabulary URI), ``code``, ``display`` (the\nlabel snapshot a human reads), an optional pinned ``version``, and the\nterm's own IRI as ``@id``. A **text-only** concept is a ``label`` with\n``unmapped: true`` and no ``@id``, ``system`` or ``code``: an interest no\nvocabulary covers, kept rather than forced onto a wrong term.\n\nThe field names follow FHIR ``Coding`` (``system``, ``code``,\n``display``, ``version``), so a Coding view is a rename, not a mapping.\nThis is a separate type from :class:`ConceptReference`, which stays the\nshape of ``therapeutic_areas``.",
+      "properties": {
+        "@context": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "@Context"
+        },
+        "@id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "@Id"
+        },
+        "@type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "@Type"
+        },
+        "code": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Code"
+        },
+        "display": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Display"
+        },
+        "label": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Label"
+        },
+        "system": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "System"
+        },
+        "unmapped": {
+          "default": false,
+          "title": "Unmapped",
+          "type": "boolean"
+        },
+        "version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Version"
+        }
+      },
+      "title": "InterestConcept",
+      "type": "object"
+    },
+    "InterestEvidence": {
+      "additionalProperties": true,
+      "description": "Why an inferred interest was proposed: raw counts live here, not in weight.",
+      "properties": {
+        "@context": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "@Context"
+        },
+        "@id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "@Id"
+        },
+        "@type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "@Type"
+        },
+        "papers": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Papers",
+          "type": "array"
+        },
+        "share": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Share"
+        }
+      },
+      "title": "InterestEvidence",
+      "type": "object"
+    },
     "PaperStats": {
       "additionalProperties": true,
       "description": "Author position statistics (``rp:paperStats``).",
@@ -522,6 +770,81 @@
     },
     "Proof": {
       "additionalProperties": true,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "key_signature"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "required": [
+              "verificationMethod",
+              "alg",
+              "signatureValue"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "domain_wellknown"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "required": [
+              "issuer",
+              "challenge"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "orcid_roundtrip"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "required": [
+              "issuer"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "orcid_login"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "required": [
+              "issuer",
+              "orcid",
+              "verifiedAt"
+            ]
+          }
+        }
+      ],
       "description": "One verification proof attached to a profile (``rp:proof``).\n\nThe format standardizes the *envelope*: what is asserted (``kind``), who\nvouches (``issuer``), when it was last confirmed (``verifiedAt``), and,\nfor checkable proofs, how to check it. It stays neutral on the identity\n*source*. A profile may carry zero, one, or many proofs at once; a\nconsumer picks its own trust threshold over the proofs whose ``kind`` it\nunderstands.\n\n``extra=\"allow\"`` (inherited from :class:`JsonLdModel`) matters here:\ndifferent kinds carry different members, and future kinds add members\nthis version does not model. Unknown members are preserved, never\nrejected.",
       "properties": {
         "@context": {
@@ -612,6 +935,18 @@
           "default": null,
           "title": "Matchedurl"
         },
+        "orcid": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Orcid"
+        },
         "signatureValue": {
           "anyOf": [
             {
@@ -665,6 +1000,103 @@
         "kind"
       ],
       "title": "Proof",
+      "type": "object"
+    },
+    "ResearchInterest": {
+      "additionalProperties": true,
+      "description": "One weighted person-to-concept link (``rp:ResearchInterest``).\n\nModeled on the Weighted Interest Ontology pattern (person ->\n``wi:WeightedInterest`` -> topic, with ``wi:weight``). ``weight`` is signed\nin ``[-1, 1]``: +1 a core interest, 0 declared neutral, -1 a hard exclude,\nand values between -1 and 0 mean rank lower. A missing weight means\n*unknown*, never 0, which is why an inferred entry built from paper counts\ncarries its share in ``evidence`` and leaves ``weight`` unset.\n\nSeveral entries may cover one concept; :func:`effective_interests` picks\nthe one that counts.",
+      "properties": {
+        "@context": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "@Context"
+        },
+        "@id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "@Id"
+        },
+        "@type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "ResearchInterest",
+          "title": "@Type"
+        },
+        "assertedAt": {
+          "format": "date-time",
+          "title": "Assertedat",
+          "type": "string"
+        },
+        "concept": {
+          "$ref": "#/$defs/InterestConcept"
+        },
+        "evidence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InterestEvidence"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "generator": {
+          "minLength": 1,
+          "title": "Generator",
+          "type": "string"
+        },
+        "method": {
+          "enum": [
+            "declared",
+            "inferred",
+            "imported"
+          ],
+          "title": "Method",
+          "type": "string"
+        },
+        "weight": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": -1,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Weight"
+        }
+      },
+      "required": [
+        "concept",
+        "method",
+        "generator",
+        "assertedAt"
+      ],
+      "title": "ResearchInterest",
       "type": "object"
     },
     "ResearchOutput": {
@@ -745,6 +1177,172 @@
         "name"
       ],
       "title": "ResearchOutput",
+      "type": "object"
+    },
+    "SectionVisibility": {
+      "additionalProperties": true,
+      "description": "A declared privacy tier for one inline section of the document.\n\nArtifacts carry their own tier on an :class:`ArtifactRef`; the fields\n*inside* ``profile.jsonld`` had nowhere to carry one, so a private summary\nor a private methods list rode out in a public document however carefully\nthe files were excluded. The section names are a closed set on purpose:\n:data:`researcher_profiles.privacy.SECTION_FIELDS` maps each to the exact\nfields it governs, and a section nothing maps to would be a tier that\nsilently protects nothing.",
+      "properties": {
+        "@context": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "@Context"
+        },
+        "@id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "@Id"
+        },
+        "@type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "@Type"
+        },
+        "section": {
+          "enum": [
+            "summary",
+            "expertise",
+            "focus",
+            "methods",
+            "soul",
+            "clinical",
+            "site_capabilities",
+            "regulatory_experience",
+            "contact",
+            "background"
+          ],
+          "title": "Section",
+          "type": "string"
+        },
+        "visibility": {
+          "enum": [
+            "public",
+            "limited",
+            "private"
+          ],
+          "title": "Visibility",
+          "type": "string"
+        }
+      },
+      "required": [
+        "section",
+        "visibility"
+      ],
+      "title": "SectionVisibility",
+      "type": "object"
+    },
+    "SiteCapabilities": {
+      "additionalProperties": true,
+      "description": "A clinical site's capacity to host trials (``rp:siteCapabilities``).\n\nTyped rather than a free dict so the owner editor can round-trip it and\nthe privacy projection can drop it as one section. See the optional\nclinical extension in ``docs/rp-spec/index.md``.",
+      "properties": {
+        "disease_areas": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Disease Areas",
+          "type": "array"
+        },
+        "enrollment_capacity": {
+          "anyOf": [
+            {
+              "enum": [
+                "low",
+                "medium",
+                "high"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Enrollment Capacity"
+        },
+        "infrastructure": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SiteInfrastructure"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "patient_populations": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Patient Populations",
+          "type": "array"
+        }
+      },
+      "title": "SiteCapabilities",
+      "type": "object"
+    },
+    "SiteInfrastructure": {
+      "additionalProperties": true,
+      "description": "What a trial site has to run a study with (``rp:siteCapabilities``).\n\nEvery field is optional and ``None`` means unknown, never zero: a site\nwhose coordinator count nobody recorded must not read as a site with no\ncoordinators.",
+      "properties": {
+        "coordinators": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Coordinators"
+        },
+        "irb_experience": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Irb Experience"
+        },
+        "phase_experience": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Phase Experience",
+          "type": "array"
+        }
+      },
+      "title": "SiteInfrastructure",
       "type": "object"
     },
     "Training": {
@@ -870,6 +1468,22 @@
     },
     "affiliation": {
       "anyOf": [
+        {
+          "additionalProperties": true,
+          "description": "A Organization node.",
+          "properties": {
+            "@id": {
+              "type": "string"
+            },
+            "@type": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
         {
           "type": "string"
         },
@@ -1141,6 +1755,18 @@
       "title": "Provenance",
       "type": "string"
     },
+    "provenanceNote": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Provenancenote"
+    },
     "recurring_positions": {
       "default": [],
       "items": {
@@ -1161,6 +1787,49 @@
       "description": "Researcher id: a canonical ORCID or a local: id",
       "title": "Rid",
       "type": "string"
+    },
+    "rp:regulatoryExperience": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Rp:Regulatoryexperience",
+      "type": "array"
+    },
+    "rp:researchInterests": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ResearchInterest"
+      },
+      "title": "Rp:Researchinterests",
+      "type": "array"
+    },
+    "rp:sectionVisibility": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/SectionVisibility"
+      },
+      "title": "Rp:Sectionvisibility",
+      "type": "array"
+    },
+    "rp:siteCapabilities": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SiteCapabilities"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "rp:therapeuticAreas": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ConceptReference"
+      },
+      "title": "Rp:Therapeuticareas",
+      "type": "array"
     },
     "sameAs": {
       "default": [],
@@ -1234,8 +1903,8 @@
       "default": "public",
       "enum": [
         "public",
-        "internal",
-        "restricted"
+        "limited",
+        "private"
       ],
       "title": "Visibility",
       "type": "string"

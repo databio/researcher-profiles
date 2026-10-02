@@ -40,6 +40,7 @@ from ...models.api import (
 from ...privacy import (
     ViewerTier,
 )
+from ...schema import ResearchInterest
 from ...store import ProfileStore
 from .._projection import (
     _allowed_source_types,
@@ -77,7 +78,7 @@ def search_profile(
     The served index (``.cache/embeddings.sqlite``) holds ``cv``, ``web``, and
     ``grant`` chunks as well as public ones, and this route returns chunk text
     verbatim, so without the projection a ``match``-scoped consumer reads a
-    researcher's CV back a chunk at a time. Restricted source types are
+    researcher's CV back a chunk at a time. Private source types are
     excluded from the query and dropped from the result: the first keeps them
     from crowding out results the caller may actually have, the second is the
     guarantee.
@@ -136,7 +137,14 @@ def match_profiles(
     diversification (``store.match.rank``) and returns each match's
     slug, name, ORCID, score, and evidence. Chunk-level evidence is included
     only when ``include_chunks=True``.
+
+    ``interests`` (the query side's typed research interests) add a topic
+    component: see ``MatchManager.rank``.
     """
+    try:
+        interests = [ResearchInterest.model_validate(i) for i in body.interests]
+    except pydantic.ValidationError as e:
+        raise HTTPException(status_code=422, detail=f"invalid interests: {e}") from e
     try:
         matches = vstore.match.rank(
             body.query,
@@ -147,6 +155,8 @@ def match_profiles(
             lambda_=body.lambda_,
             topk_chunks=body.topk_chunks,
             normalize=body.normalize,
+            interests=interests or None,
+            topic_alpha=body.topic_alpha,
         )
     # Boundary: the whole store-wide match stack.
     except Exception as e:
@@ -168,6 +178,7 @@ def match_profiles(
             centroid_score=ev.centroid_score,
             top_papers=list(ev.top_papers or []),
             overlapping_topics=list(ev.overlapping_topics or []),
+            matched_topics=list(ev.matched_topics or []),
             top_chunks=(
                 [
                     _search_hit_payload(h)
@@ -519,9 +530,11 @@ def rank_works_for_profile(
         except pydantic.ValidationError as e:
             raise HTTPException(status_code=400, detail=f"invalid candidate work: {e}") from e
     elif body.use_openalex:
+        import os
         from datetime import date, timedelta
 
         from ...openalex import fetch_new_works, profile_query_terms
+        from ...openalex_client import OpenAlexBudgetError, OpenAlexClient
 
         since = body.since or (date.today() - timedelta(days=30)).isoformat()
         terms = profile_query_terms(prof)
@@ -531,17 +544,24 @@ def rank_works_for_profile(
                 detail="profile has no subfields/interests or OpenAlex work ids to query with",
             )
         try:
-            works = fetch_new_works(
-                since=since,
-                topics=terms["topics"],
-                seed_work_ids=terms["seed_work_ids"],
-                mailto=body.mailto,
-                max_pages=body.max_pages,
-            )
-        # Boundary: a live third-party HTTP API.
+            with OpenAlexClient(os.environ.get("OPENALEX_API_KEY")) as client:
+                works = fetch_new_works(
+                    client,
+                    since=since,
+                    topics=terms["topics"],
+                    seed_work_ids=terms["seed_work_ids"],
+                    max_pages=body.max_pages,
+                )
+        except OpenAlexBudgetError as e:
+            raise HTTPException(
+                status_code=503,
+                detail="OpenAlex's daily limit is used up; try again after midnight UTC",
+            ) from e
+        # Boundary: a live third-party HTTP API. The detail is a fixed string:
+        # an exception message can carry the request URL.
         except Exception as e:
             logger.exception("OpenAlex fetch failed for %s", slug)
-            raise HTTPException(status_code=502, detail=f"OpenAlex fetch failed: {e}") from e
+            raise HTTPException(status_code=502, detail="OpenAlex fetch failed") from e
     else:
         raise HTTPException(
             status_code=400, detail="supply candidate works or set use_openalex=true"

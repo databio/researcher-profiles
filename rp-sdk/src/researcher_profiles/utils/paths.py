@@ -47,6 +47,7 @@ from typing import Optional
 __all__ = [
     "BUILD_ROOT_DIRNAME",
     "CACHE_DIRNAME",
+    "LEGACY_CACHE_DIRNAME",
     "REBUILT_DERIVED_CACHES",
     "STORE_CACHE_DIRNAME",
     "build_dir_for",
@@ -64,6 +65,11 @@ BUILD_ROOT_DIRNAME = ".build"
 
 #: Profile-adjacent directory for serve-time derived caches.
 CACHE_DIRNAME = ".cache"
+
+#: Retired spelling of :data:`CACHE_DIRNAME`. Nothing reads it, but a profile
+#: built before the rename still has files under it, so both ``rp validate``
+#: and the push archive builder name it rather than dropping it in silence.
+LEGACY_CACHE_DIRNAME = "cache"
 
 #: Store-wide directory (at the profiles root) for cross-profile derived
 #: caches: the ``rid <-> slug`` index, stacked centroids, the co-authorship

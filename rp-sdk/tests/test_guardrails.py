@@ -43,6 +43,7 @@ from researcher_profiles.schema import (
     PaperStats,
     ProfileDocument,
     Proof,
+    ResearchInterest,
     ResearchOutput,
     Training,
 )
@@ -57,7 +58,7 @@ STORAGE_IDS = ["file", "sql", "api", "static"]
 
 PYPROJECT = REPO_ROOT / "pyproject.toml"
 
-#: The frozen JSON-LD @context lives inside the package (it is loaded with
+#: The JSON-LD @context lives inside the package (it is loaded with
 #: importlib.resources, and the wheel ships it via [tool.hatch...wheel].artifacts).
 CONTEXT_DIR = REPO_ROOT / "src" / "researcher_profiles" / "context"
 CONTEXT_FILE = CONTEXT_DIR / "v1.jsonld"
@@ -85,6 +86,7 @@ SCOPED_MODELS = {
     "paper_stats": PaperStats,
     "identifier": Identifier,
     "MonetaryGrant": GrantRecord,
+    "rp:researchInterests": ResearchInterest,
 }
 
 
@@ -101,6 +103,23 @@ def _emitted_keys(model) -> set[str]:
         # serializer and is never an on-disk key of its own.
         if name != "affiliation_id"
     }
+
+
+def _is_defined(key: str, context: dict) -> bool:
+    """Whether ``key`` expands through a real term rather than through ``@vocab``.
+
+    Two ways to be defined. A plain key needs its own term. A compact IRI
+    (``rp:sectionVisibility``) needs only its prefix, because JSON-LD expands
+    ``prefix:suffix`` against the prefix's IRI and never consults ``@vocab``;
+    that is how the optional wizard and clinical extensions add terms without
+    a term definition of their own. The prefix must actually be declared:
+    an undeclared one is a plain key with a colon in it, which is exactly the
+    accident this guardrail exists to catch.
+    """
+    if key in context:
+        return True
+    prefix, sep, suffix = key.partition(":")
+    return bool(sep and suffix) and isinstance(context.get(prefix), str)
 
 
 class TestImportCost:
@@ -538,15 +557,17 @@ class TestContextParity:
     third-party and older documents, not to absorb this repo's own writer
     output, so every key this package emits has to be defined explicitly.
 
-    Also pins the context bytes: ``v1`` is immutable once published, and an
-    accidental edit must be a red test rather than a silent break of every
-    profile already in the wild.
+    Also pins the context bytes against ``v1.lock.json``: an edit must be
+    deliberate (and update the lock), and an accidental one must be a red test
+    rather than a silent change to every profile already in the wild.
     """
 
     def test_every_global_model_key_has_a_context_term(self, context):
         undefined: dict[str, set[str]] = {}
         for model in GLOBAL_MODELS:
-            missing = {k for k in _emitted_keys(model) if k not in KEYWORDS and k not in context}
+            missing = {
+                k for k in _emitted_keys(model) if k not in KEYWORDS and not _is_defined(k, context)
+            }
             if missing:
                 undefined[model.__name__] = missing
         assert not undefined, f"keys with no context term (they would hit @vocab): {undefined}"
@@ -560,7 +581,7 @@ class TestContextParity:
             missing = {
                 k
                 for k in _emitted_keys(model)
-                if k not in KEYWORDS and k not in scoped and k not in context
+                if k not in KEYWORDS and k not in scoped and not _is_defined(k, context)
             }
             if missing:
                 undefined[term] = missing
@@ -587,14 +608,12 @@ class TestContextParity:
         assert context["heldGrant"]["@id"] == "rp:heldGrant"
 
     def test_context_bytes_match_the_lock(self):
-        """v1 is immutable once published. An edit here breaks every published profile."""
+        """An edit to the context must be deliberate: it changes what every profile means."""
         lock = json.loads(LOCK_FILE.read_text(encoding="utf-8"))
         digest = hashlib.sha256(CONTEXT_FILE.read_bytes()).hexdigest()
         assert digest == lock["sha256"], (
-            "context/v1.jsonld changed. v1 is FROZEN: the only permitted edit is "
-            "adding a term whose expanded IRI is byte-identical to what @vocab "
-            'already produced (i.e. "foo": "rp:foo"). Anything else mints v2 at '
-            "a new IRI. If this really was such an addition, update context/v1.lock.json."
+            "context/v1.jsonld changed. If the edit is deliberate, update the sha256 in "
+            "context/v1.lock.json in the same change (see context/README.md, Change policy)."
         )
         assert lock["iri"] == CONTEXT_URL
 
@@ -936,6 +955,8 @@ class TestStoragePurity:
             "save_soul": lambda: prof.save_soul("# s\n"),
             "save_papers": lambda: prof.save_papers([PaperRecord(paper_id="x", title="t")]),
             "save_grants": lambda: prof.save_grants([]),
+            "save_trials": lambda: prof.save_trials([]),
+            "save_clinical_expertise": lambda: prof.save_clinical_expertise("# c\n"),
             "save_citations": lambda: prof.save_citations(None),
             "save_summary": lambda: prof.save_summary("x", "body"),
             "delete_summary": lambda: prof.delete_summary("x"),

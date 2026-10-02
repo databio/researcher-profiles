@@ -41,7 +41,6 @@ rp validate path/to/jane-doe
 | `src/researcher_profiles/` | the SDK source and the `rp` CLI |
 | `schemas/` | JSON Schema files exported from the models, for external tooling |
 | `skills/` | agent instruction files (SKILL.md) that teach an LLM to publish, agent, or talk to a profile; see [`skills/README.md`](skills/README.md) |
-| `scripts/` | docs-generation tooling that rebuilds the Python API reference; see [`scripts/README.md`](scripts/README.md) |
 | `tests/` | the test suite |
 | `AGENTS.md` | conventions for AI agents working in this repo |
 

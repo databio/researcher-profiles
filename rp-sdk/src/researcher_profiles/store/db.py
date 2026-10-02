@@ -18,6 +18,7 @@ The tables:
 - :class:`ChunkVectorRow`    -> ``rp_chunk_vectors``   (one row per chunk vector)
 - :class:`ProfileVectorRow`  -> ``rp_profile_vectors`` (one row per profile vector)
 - :class:`BuildStateRow`     -> ``rp_build_state``     (not published; droppable)
+- :class:`RidAliasRow`       -> ``rp_rid_aliases``     (retired rid -> its successor)
 
 Identity: ``rid``, not ``slug``
 -------------------------------
@@ -82,9 +83,10 @@ scope, so the base install stays free of the SQLModel/SQLAlchemy dependency.
 
 import hashlib
 import json
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Iterator, Optional
 
-from sqlalchemy import LargeBinary, UniqueConstraint
+from sqlalchemy import DateTime, LargeBinary, UniqueConstraint
 from sqlmodel import JSON, Column, Field, SQLModel
 
 from ..schema.jsonld import canonical_dumps
@@ -105,6 +107,7 @@ __all__ = [
     "PaperRow",
     "ProfileRow",
     "ProfileVectorRow",
+    "RidAliasRow",
     "content_hash_for",
     "create_all",
     "get_engine",
@@ -116,6 +119,17 @@ __all__ = [
 #: ``profile.jsonld`` splits its manifest in two: ``subjectOf`` carries the
 #: persona documents (things *about* the person), ``hasPart`` everything else.
 DEFAULT_MANIFEST_SLOT = "hasPart"
+
+
+def _persistable_document(document: dict, slug: str) -> dict:
+    """``document`` fit to store: registry-issued proofs dropped.
+
+    The SQL backend's one strip point; every row write goes through
+    :meth:`ProfileRow.from_document`. A document with none comes back as is.
+    """
+    from ..schema import strip_registry_issued_from_document
+
+    return strip_registry_issued_from_document(document, where=slug)
 
 
 def content_hash_for(document: dict, soul: str) -> str:
@@ -199,6 +213,9 @@ class ProfileRow(SQLModel, table=True):
     subfields: list = Field(default_factory=list, sa_column=Column(JSON))
     interests: list = Field(default_factory=list, sa_column=Column(JSON))
     not_interests: list = Field(default_factory=list, sa_column=Column(JSON))
+    #: The typed ``rp:researchInterests`` entries, as stored (every entry, not
+    #: just the effective ones), so interests are searchable by concept code.
+    research_interests: list = Field(default_factory=list, sa_column=Column(JSON))
     methodological_commitments: list = Field(default_factory=list, sa_column=Column(JSON))
     recurring_positions: list = Field(default_factory=list, sa_column=Column(JSON))
     intellectual_lineage: list = Field(default_factory=list, sa_column=Column(JSON))
@@ -249,11 +266,16 @@ class ProfileRow(SQLModel, table=True):
 
         ``rid`` comes from ``meta.rid``; there is no override parameter,
         because a document without a rid cannot load in the first place.
+
+        Registry-issued proofs (``REGISTRY_ISSUED_PROOF_KINDS``) are dropped
+        here, so no SQL write path can store one; ``content_hash`` covers the
+        stripped payload.
         """
-        payload = (
+        payload = _persistable_document(
             document
             if document is not None
-            else json.loads(canonical_dumps(meta.model_dump(mode="json")))
+            else json.loads(canonical_dumps(meta.model_dump(mode="json"))),
+            slug,
         )
         return cls(
             rid=meta.rid,
@@ -298,6 +320,7 @@ def _json_projection(meta: "ProfileDocument") -> dict:
         subfields=list(meta.subfields),
         interests=list(meta.interests),
         not_interests=list(meta.not_interests),
+        research_interests=[e.model_dump(mode="json") for e in meta.research_interests],
         methodological_commitments=list(meta.methodological_commitments),
         recurring_positions=list(meta.recurring_positions),
         intellectual_lineage=list(meta.intellectual_lineage),
@@ -652,7 +675,7 @@ class ChunkVectorRow(SQLModel, table=True):
 
     Rows are the *public* subset, the same one
     :func:`~researcher_profiles.embeddings.flat.write_flat_export` publishes:
-    embeddings are partially invertible, so a chunk built from a restricted
+    embeddings are partially invertible, so a chunk built from a private
     source never reaches this table any more than it reaches a ``.bin``.
     ``text`` is not stored for the same reason the published form drops it.
 
@@ -746,6 +769,32 @@ class BuildStateRow(SQLModel, table=True):
     #: ``BuildState``'s own private counter. Build-local; never published.
     schema_version: int = 0
     state: dict = Field(default_factory=dict, sa_column=Column(JSON))
+
+
+class RidAliasRow(SQLModel, table=True):
+    """A retired rid (and its old slug) that now resolves to a live successor.
+
+    Written only by :meth:`SqlProfileStore.merge_into`, in the same transaction
+    that deletes the retired profile. ``rid_for``, ``resolve_slug``, ``get`` and
+    ``exists`` fall back to this table when a ref names no live profile, so an
+    old rid or an old slug keeps resolving everywhere. Chains are kept one hop
+    long: a merge re-points every alias whose successor is the profile it
+    retires. ``old_slug`` stays reserved (``alias_slugs``) so a new profile
+    cannot take a handle that still redirects.
+
+    No foreign key onto ``rp_profiles``: the retired rid is gone by design, and
+    the successor is checked at read time.
+    """
+
+    __tablename__ = "rp_rid_aliases"
+
+    old_rid: str = Field(primary_key=True)
+    old_slug: Optional[str] = Field(default=None, unique=True)
+    successor_rid: str = Field(index=True)
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
 
 
 # ---------------------------------------------------------------------------

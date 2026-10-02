@@ -1,6 +1,6 @@
-"""The public form of a profile's embeddings: the private sqlite index projected to portable files, with restricted rows dropped.
+"""The servable form of a profile's embeddings: the private sqlite index projected to portable files for one audience.
 
-``.cache/embeddings.sqlite`` is a build-local index at tier ``restricted``; it
+``.cache/embeddings.sqlite`` is a build-local index at tier ``private``; it
 never leaves the machine. The servable form lives in the profile as public
 artifacts (see ``docs/rp-spec/embeddings.md``)::
 
@@ -10,11 +10,12 @@ artifacts (see ``docs/rp-spec/embeddings.md``)::
       <backend>.chunks.json    # one metadata entry per row, blob order, no text
 
 The exporter reads the sqlite and writes those three files, dropping every row
-whose effective privacy tier exceeds ``public`` through the general derivation
-rule (:func:`researcher_profiles.privacy.chunk_source_tiers` /
-:func:`researcher_profiles.privacy.drop_above_public`). There is no
+whose effective privacy tier exceeds the audience's (``public`` for the copy
+kept in the profile folder) through the general derivation rule
+(:func:`researcher_profiles.privacy.chunk_source_tiers` /
+:func:`researcher_profiles.privacy.tier_allows`). There is no
 ``PUBLISHED_SOURCE_TYPES`` allowlist. Embeddings are partially invertible, so a
-row built from a ``restricted`` source (a grant, a CV, a scraped web page) must
+row built from a ``private`` source (a grant, a CV, a scraped web page) must
 not appear in a public ``.bin`` (spec section 6).
 
 The readers reconstruct a usable index from the flat form: :class:`FlatEmbeddingIndex`
@@ -34,7 +35,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from ..build_state import BuildState
-from ..privacy import chunk_source_tiers, drop_above_public
+from ..privacy import ViewerTier, chunk_source_tiers, tier_allows
 from ..schema import ProfileDocument
 from ..schema.jsonld import canonical_dumps
 from ..utils.clock import now_iso
@@ -68,6 +69,12 @@ class FlatExportResult:
     index_path: Path
     blob_path: Path
     chunks_path: Path
+    #: L2-normalized mean of the rows written, computed as
+    #: :meth:`FlatEmbeddingIndex.centroid` would from these files: the
+    #: profile's vector at this export's tier, never one that saw a dropped row.
+    centroid: np.ndarray
+    #: The ``probe`` written into ``index.json``.
+    probe: dict[str, Any]
 
 
 @dataclass
@@ -162,27 +169,27 @@ def _read_rows(db_path: Path) -> tuple[list[tuple], int, str]:
     return rows, dim, backend_spec
 
 
-def _public_rows(
+def _servable_rows(
     rows: list[tuple],
     profile_document: ProfileDocument | None,
     build_state: BuildState,
+    viewer: ViewerTier = "public",
 ) -> list[tuple]:
-    """Filter sqlite rows to those safe to publish, in blob order.
+    """Filter sqlite rows to those ``viewer`` may receive, in blob order.
 
     Two independent gates:
 
-    1. Tier: drop any row whose effective tier exceeds ``public``, via the
-       general derivation rule (never an allowlist). Restricted rows never reach
-       the blob or the chunks file.
+    1. Tier: drop any row whose effective tier exceeds ``viewer``, via the
+       general derivation rule (never an allowlist). Rows above the audience
+       never reach the blob or the chunks file.
     2. Contamination: drop ``paper_summary`` / ``paper_abstract`` rows for
        contaminated papers. Contamination is build bookkeeping, orthogonal to
        tier, and contaminated papers must never be published.
     """
     tiers = chunk_source_tiers(profile_document, [(r[0], r[1]) for r in rows])
-    public_idx = set(drop_above_public((i, tiers[(r[0], r[1])]) for i, r in enumerate(rows)))
     kept: list[tuple] = []
-    for i, r in enumerate(rows):
-        if i not in public_idx:
+    for r in rows:
+        if not tier_allows(viewer, tiers[(r[0], r[1])]):
             continue
         source_type, source_id = r[0], r[1]
         if source_type in ("paper_summary", "paper_abstract") and build_state.is_contaminated(
@@ -209,7 +216,7 @@ def public_chunk_keys(
     rows, _dim, _backend = _read_rows(db_path)
     if profile_document is None:
         profile_document = _load_profile_document(profile_dir)
-    kept = _public_rows(rows, profile_document, BuildState.load(profile_dir))
+    kept = _servable_rows(rows, profile_document, BuildState.load(profile_dir))
     return [(r[0], r[1], r[2]) for r in kept]
 
 
@@ -219,7 +226,7 @@ def public_chunk_keys(
 
 
 def _remove_flat_files(embeddings_dir: Path) -> None:
-    """Delete any prior flat form so an all-restricted profile stops advertising it."""
+    """Delete any prior flat form so an all-private profile stops advertising it."""
     if not embeddings_dir.is_dir():
         return
     for name in ("index.json",):
@@ -235,17 +242,21 @@ def write_flat_export(
     *,
     profile_document: ProfileDocument | None = None,
     backend: "EmbeddingBackend | None" = None,
+    viewer: ViewerTier = "public",
+    out_dir: str | Path | None = None,
 ) -> FlatExportResult | None:
     """Write the flat servable form from ``.cache/embeddings.sqlite``.
 
-    sqlite in, public flat form out. Returns a :class:`FlatExportResult`, or
-    ``None`` when there is no sqlite index, no backend metadata, or no public
-    row survives filtering (in which case any stale flat form is removed and
+    sqlite in, flat form for ``viewer`` out, into ``out_dir`` (default: the
+    profile's own ``embeddings/``, which is always the ``public`` copy). Returns a
+    :class:`FlatExportResult`, or ``None`` when there is no sqlite index, no
+    backend metadata, or no row ``viewer`` may receive survives filtering (in
+    which case any stale flat form in ``out_dir`` is removed and
     ``hasEmbeddingIndex`` stays false).
     """
     profile_dir = Path(profile_dir)
     db_path = cache_dir(profile_dir) / "embeddings.sqlite"
-    embeddings_dir = profile_dir / "embeddings"
+    embeddings_dir = Path(out_dir) if out_dir is not None else profile_dir / "embeddings"
     if not db_path.is_file():
         return None
 
@@ -286,7 +297,7 @@ def write_flat_export(
     if profile_document is None:
         profile_document = _load_profile_document(profile_dir)
 
-    kept = _public_rows(rows, profile_document, BuildState.load(profile_dir))
+    kept = _servable_rows(rows, profile_document, BuildState.load(profile_dir), viewer)
     dropped = len(rows) - len(kept)
 
     if not kept:
@@ -355,6 +366,8 @@ def write_flat_export(
         index_path=index_path,
         blob_path=blob_path,
         chunks_path=chunks_path,
+        centroid=_unit_mean(mat),
+        probe=index["probe"],
     )
 
 
@@ -567,18 +580,23 @@ class FlatEmbeddingIndex:
         The same quantity ``.cache/embeddings.sqlite`` yields, computed the same
         way (mean of the stored vectors, then normalize) so a centroid read
         through this index is comparable to one read through the sqlite. It is
-        *not* the same number when the sqlite held restricted rows: those are
+        *not* the same number when the sqlite held private rows: those are
         dropped at export by design, so this is the public subset's centroid.
         """
         from ._sqlite import IndexNotBuiltError
 
         if self._vectors.shape[0] == 0:
             raise IndexNotBuiltError("flat index has no vectors")
-        mean = self._vectors.astype(np.float32).mean(axis=0)
-        n = float(np.linalg.norm(mean))
-        if n < 1e-12:
-            return mean.astype(np.float32)
-        return (mean / n).astype(np.float32)
+        return _unit_mean(self._vectors)
+
+
+def _unit_mean(vectors: np.ndarray) -> np.ndarray:
+    """The L2-normalized mean of ``vectors``' rows (the unnormalized mean if ~0)."""
+    mean = vectors.astype(np.float32).mean(axis=0)
+    n = float(np.linalg.norm(mean))
+    if n < 1e-12:
+        return mean.astype(np.float32)
+    return (mean / n).astype(np.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -596,7 +614,7 @@ def rebuild_sqlite_from_flat(profile_dir: str | Path, *, backend=None):
     sqlite needs it to display search hits) and loads the *vectors* from the
     ``.bin`` by matching ``(source_type, source_id, chunk_index)``.
 
-    Rows present in sources but absent from the flat form (restricted chunks the
+    Rows present in sources but absent from the flat form (private chunks the
     public export dropped) are re-embedded when ``backend`` is given, else
     skipped, so a flat-only rebuild yields a public-subset index.
     """

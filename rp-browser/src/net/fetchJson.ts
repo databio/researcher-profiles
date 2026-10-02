@@ -30,7 +30,14 @@ export type FetchOutcome<T> =
       ok: true;
       value: T;
       contentType: string | null;
+      /** The URL that was requested. */
       url: string;
+      /**
+       * The URL that actually served the bytes, after redirects
+       * (`Response.url`, falling back to `url` when the runtime leaves it
+       * empty). Origin-bound trust decisions use this, never `url`.
+       */
+      finalUrl: string;
       bytes: number;
     }
   | {
@@ -110,6 +117,7 @@ export async function fetchJson<T>(url: string): Promise<FetchOutcome<T>> {
       value,
       contentType,
       url,
+      finalUrl: res.url || url,
       bytes: text.length,
     };
   } catch (err) {

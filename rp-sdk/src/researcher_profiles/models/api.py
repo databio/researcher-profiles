@@ -108,9 +108,27 @@ class ProfileMetadataPayload(_APIModel):
     #: untyped extras, so the generated TypeScript saw ``[k: string]: unknown``
     #: and no owner form could round-trip a field it could not read back typed.
     job_title: Optional[str] = None
+    #: Display projections of :attr:`research_interests` when that is set
+    #: (positive weights, negative weights), and free-text lists otherwise.
+    #: Patching either list writes declared text-only entries.
     interests: list[str] = []
     not_interests: list[str] = []
+    #: The canonical form of the two lists above: one ``ResearchInterest``
+    #: per entry (a concept, a signed weight in -1..1 or none for unknown,
+    #: method, generator, assertedAt, evidence).
+    research_interests: list[dict] = []
     same_as: list[str] = []
+    methodological_commitments: list[str] = []
+    #: Optional clinical extension. Declared rather than left to
+    #: ``extra="allow"`` so the generated TypeScript sees real types and an
+    #: owner form can round-trip them; see ``docs/rp-spec/index.md``.
+    therapeutic_areas: list[dict] = []
+    site_capabilities: Optional[dict] = None
+    regulatory_experience: list[str] = []
+    #: Per-section declared tiers. Read-only here for the same reason
+    #: :attr:`visibility` is: they are set through ``PATCH /visibility``, which
+    #: is the one surface that knows about floors and the full-text lock.
+    section_visibility: list[dict] = []
     #: The document's own declared tier. Read-only here: it is set through
     #: ``PATCH /visibility`` (or, on a management host, the publication act), never by a
     #: metadata patch, and it is not what decides who may read this response.
@@ -184,6 +202,40 @@ class PushResponse(_APIModel):
     # True when the pushed profile carries a built embedding index
     # (.cache/embeddings.sqlite), i.e. it is immediately matchable.
     indexed: bool = False
+    # Server-side files carried over rather than deleted, by class name
+    # ({"fulltext": 53, "index": 1}). Empty for a new profile, for a pruning
+    # push, or when the archive carried every class.
+    kept: dict[str, int] = {}
+    # Manifest entries the server added back because the incoming manifest
+    # dropped a file the server kept. A nonzero count means the pushed
+    # profile.jsonld was not the whole index.
+    spliced: int = 0
+    # {role: count} over the manifest the server holds now. The post-commit
+    # truth, so a client can say what the profile actually contains rather
+    # than what the push offered.
+    manifest_counts: dict[str, int] = {}
+    # The ?mode= the push ran under: what happened to the live files the
+    # archive did not carry (replace | merge | prune).
+    mode: str = "replace"
+
+
+class CapabilitiesResponse(_APIModel):
+    """Result of ``GET /api/v1/capabilities``: what this server can be asked for.
+
+    A push client reads this *before* the PUT. Without it, asking an older
+    server for ``?mode=merge`` gets a plain replace and a 200: the push looks
+    like it worked and the profile is smaller. One cheap unauthenticated GET
+    turns that into a refusal.
+    """
+
+    #: API version this server serves.
+    version: str = "v1"
+    #: The ``?mode=`` values ``PUT /profiles/{slug}`` accepts.
+    push_modes: list[str] = []
+    #: Named behaviours a client can require. ``manifest_splice`` means the
+    #: server adds a manifest entry back for every file it keeps, so a partial
+    #: incoming manifest cannot delete artifacts the server holds.
+    features: list[str] = []
 
 
 class ResolveRequest(_APIModel):
@@ -244,8 +296,13 @@ class MetadataPatch(_APIModel):
     subfields: Optional[list[str]] = None
     summary: Optional[str] = None
     expertise: Optional[list[str]] = None
+    #: Either list, when present, replaces the profile's text-only interest
+    #: entries with declared ones (+0.5 / -0.5, ``generator: user``).
     interests: Optional[list[str]] = None
     not_interests: Optional[list[str]] = None
+    #: Typed entries (``ResearchInterest``), validated server-side like
+    #: ``training``. Replaces the whole list.
+    research_interests: Optional[list[dict]] = None
     #: Authored history. Kept as ``list[dict]`` on the wire: the
     #: entries are validated against ``schema.Training`` / ``schema.CareerEntry``
     #: inside ``profile.edit.patch_metadata``, so a malformed entry is a 400
@@ -258,6 +315,42 @@ class MetadataPatch(_APIModel):
     #: against. Omitted, the patch is last-writer-wins (which is what a
     #: single-owner CLI wants); supplied and stale, the patch is a 409 carrying
     #: the current hash.
+    base_hash: Optional[str] = None
+
+
+class WorkPatch(_APIModel):
+    """Owner-editable fields of one work in ``sources/papers.jsonld``.
+
+    The same shape as :class:`MetadataPatch`, one level down: every field is
+    optional, only the ones present are applied, unknown keys are allowed on
+    the wire (``extra="allow"``) and rejected server-side against the editable
+    whitelist in :mod:`researcher_profiles.profile.edit`.
+
+    Field names are the ones that appear on disk, ``datePublished`` included,
+    so a caller patches what it read out of ``papers.jsonld`` rather than
+    translating into a second vocabulary.
+    """
+
+    name: Optional[str] = None
+    doi: Optional[str] = None
+    openalex_id: Optional[str] = None
+    #: The publication year, spelled as the JSON-LD term rather than declared
+    #: ``year`` with an alias: FastAPI rebuilds a body model's fields for its
+    #: schema pass and pydantic then warns, once per aliased field, that the
+    #: alias has no effect there. The name a caller types is the same either
+    #: way, so the plain field is the one that does not print a warning.
+    datePublished: Optional[int] = None
+    type: Optional[str] = None
+    citation: Optional[str] = None
+    full_text_link: Optional[str] = None
+    access: Optional[str] = None
+    summary: Optional[str] = None
+    first_author: Optional[str] = None
+    author_position: Optional[str] = None
+    is_corresponding: Optional[bool] = None
+    #: See :attr:`MetadataPatch.base_hash`. The digest spans the profile
+    #: document and the SOUL, so it detects a concurrent *profile* edit; a work
+    #: patch sends it for the same reason a metadata patch does.
     base_hash: Optional[str] = None
 
 
@@ -282,11 +375,25 @@ class ArtifactVisibility(_APIModel):
     visibility: str
 
 
+class SectionTier(_APIModel):
+    """One inline section's declared tier.
+
+    Sections travel on the visibility patch rather than the metadata patch
+    because a tier is a privacy decision, not a display field: the one surface
+    that knows about host floors and the full-text lock has to be the one that
+    sets them.
+    """
+
+    section: str
+    visibility: str
+
+
 class VisibilityPatch(_APIModel):
-    """Set the profile-level default tier and/or per-artifact tiers."""
+    """Set the profile-level default tier, per-artifact tiers, section tiers."""
 
     profile_visibility: Optional[str] = None
     artifacts: list[ArtifactVisibility] = []
+    sections: list[SectionTier] = []
     #: See :attr:`MetadataPatch.base_hash`. Tiers live in the document, so a
     #: visibility write shares the one clock with metadata and soul writes.
     base_hash: Optional[str] = None
@@ -322,17 +429,35 @@ class ArtifactTier(_APIModel):
     paper_id: Optional[str] = None
     #: What is written on the manifest entry.
     declared: str
-    #: What actually governs, after the legal floor, the profile default, and
-    #: the derivation rule.
+    #: What actually governs, after the profile default and the derivation rule.
     effective: str
-    #: A legal floor: no one, owner included, may raise this.
-    locked: bool = False
-    #: The full sentence to show a human when ``locked``.
-    lock_reason: Optional[str] = None
     #: Concrete causes holding it above ``declared`` ("derived from
-    #: sources/cv.md (restricted)"), for display on this row.
+    #: sources/cv.md (private)"), for display on this row.
     raised_by: list[str] = []
     #: Subset of ``["anonymous", "lab", "you"]``.
+    visible_to: list[str] = []
+
+
+class SectionTierReport(_APIModel):
+    """One inline section's tiers, and who they let in: the read side of the
+    section mechanism.
+
+    A section has both a tier the owner *declared* and a tier that actually
+    *governs* after the profile default folds in, and an editor has to show
+    both: the control sits on ``declared``, the "resolves to" badge on
+    ``effective``. The old report collapsed the two into one ``{section: tier}``
+    map, so an owner could not tell what they set from what it became.
+    """
+
+    section: str
+    #: What ``doc.section_visibility`` says for this section (``"public"`` when
+    #: undeclared). For ``soul`` this is the most restrictive of the declared
+    #: section tier and the declared tier of the ``soul`` manifest artifact, so
+    #: the read-back matches what actually gates ``personality/SOUL.md``.
+    declared: str
+    #: After folding in the profile default (``privacy.section_tiers``).
+    effective: str
+    #: Subset of ``["anonymous", "lab", "you"]`` who may read this section.
     visible_to: list[str] = []
 
 
@@ -348,6 +473,11 @@ class VisibilityReport(_APIModel):
     profile_floor: Optional[str] = None
     profile_floor_reason: Optional[str] = None
     artifacts: list[ArtifactTier] = []
+    #: One row per inline section, in ``SECTION_FIELDS`` order, each carrying
+    #: its declared tier, its effective tier, and who it lets in. An editor
+    #: shows a section's real tier beside the one the owner typed, rather than
+    #: the single collapsed value the old ``{section: tier}`` map gave.
+    sections: list[SectionTierReport] = []
     #: ``{"anonymous": 0, "lab": 12, "you": 63}``: items each viewer can see.
     counts: dict[str, int] = {}
 
@@ -387,7 +517,16 @@ class MatchRequest(_APIModel):
     query: str
     k: int = 5
     prefilter: int = 10
+    #: Topic labels, or OpenAlex topic ids (``T10222``) matched against each
+    #: profile's typed research interests.
     require_topics: Optional[list[str]] = None
+    #: The query side's typed interests (``ResearchInterest`` entries, e.g. a
+    #: query profile's ``research_interests``). Each candidate's OpenAlex topics
+    #: are scored against them: declared weights boost or push down, a declared
+    #: -1 drops the candidate, and an unweighted topic counts through its share.
+    interests: list[dict] = []
+    #: How much that topic score adds to a candidate's score.
+    topic_alpha: float = 0.2
     diversify: bool = True
     lambda_: float = 0.5
     topk_chunks: int = 5
@@ -399,6 +538,8 @@ class MatchEvidencePayload(_APIModel):
     centroid_score: float
     top_papers: list[str] = []
     overlapping_topics: list[str] = []
+    #: OpenAlex topic ids shared with the request's ``interests``.
+    matched_topics: list[str] = []
     # Populated only when the request sets include_chunks=True.
     top_chunks: list["SearchHitPayload"] = []
 
@@ -564,7 +705,6 @@ class RankWorksRequest(_APIModel):
     threshold: Optional[float] = None
     use_openalex: bool = False
     works: Optional[list[dict]] = None
-    mailto: Optional[str] = None
     max_pages: int = 5
 
 
@@ -681,6 +821,7 @@ class HealthResponse(_APIModel):
 
 __all__ = [
     "ArtifactVisibility",
+    "CapabilitiesResponse",
     "AskRequest",
     "AuthorDescriptor",
     "CoiBlock",
@@ -724,4 +865,5 @@ __all__ = [
     "SearchResponse",
     "SoulUpdate",
     "VisibilityPatch",
+    "WorkPatch",
 ]

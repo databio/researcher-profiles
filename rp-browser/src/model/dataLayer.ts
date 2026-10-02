@@ -100,7 +100,14 @@ export async function getProfilePapers(
     );
   }
 
-  return worksGraphToPapers(outcome.value);
+  // The works graph does not say which papers have a summary; the manifest
+  // does (one `paper_summary` entry per paper). Fill the flag from it so the
+  // list only offers a summary that exists.
+  return worksGraphToPapers(outcome.value).map((p) =>
+    p.summary_available === undefined && p.paper_id
+      ? { ...p, summary_available: summaryUrl(resolved.manifest, p.paper_id) !== null }
+      : p,
+  );
 }
 
 /**

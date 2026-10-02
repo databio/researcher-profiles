@@ -11,9 +11,28 @@ from pydantic import Field, field_validator, model_validator
 from scholarcore import CareerEntry, Training
 from scholarcore.identity import is_local, orcid_of
 
-from ._common import FORMAT_HINT, KNOWN_PROVENANCE, ProfileLevel, Provenance, Visibility
+from ._common import (
+    FORMAT_HINT,
+    KNOWN_PROVENANCE,
+    OrganizationName,
+    ProfileLevel,
+    Provenance,
+    Visibility,
+)
 from ._identity import validate_rid
-from ._parts import Anchor, ArtifactRef, CareerStage, Identifier, PaperStats, ResearchOutput
+from ._parts import (
+    Anchor,
+    ArtifactRef,
+    CareerStage,
+    ConceptReference,
+    Identifier,
+    PaperStats,
+    ResearchInterest,
+    ResearchOutput,
+    SectionVisibility,
+    SiteCapabilities,
+    project_interests,
+)
 from ._proof import Proof
 from .jsonld import CONTEXT_URL, PROFILE_FORMAT_IRI, JsonLdModel
 
@@ -34,6 +53,11 @@ class ProfileDocument(JsonLdModel):
     rid: str = Field(..., description="Researcher id: a canonical ORCID or a local: id")
     #: Who asserted this and on what basis. No default; see :data:`Provenance`.
     provenance: Provenance
+    #: A human sentence saying how this document was produced when the answer is
+    #: not obvious from ``provenance`` alone. Set by interview-based builds
+    #: ("self-reported via a structured interview on 2026-09-12; unverified").
+    #: Consumers SHOULD display it next to the summary.
+    provenance_note: str | None = Field(default=None, alias="provenanceNote")
     #: ISO-8601 timestamp of the ORCID round-trip check. Required by, and only
     #: meaningful for, ``provenance == "orcid_verified"``. Retained as the
     #: ``orcid_roundtrip`` proof's timestamp under the multi-proof model.
@@ -48,7 +72,7 @@ class ProfileDocument(JsonLdModel):
     date_modified: str | None = Field(default=None, alias="dateModified")
 
     #: Profile-level default privacy tier. Artifacts inherit it when they do not
-    #: declare their own ``visibility``. Set to ``internal``/``restricted`` to
+    #: declare their own ``visibility``. Set to ``limited``/``private`` to
     #: hold a whole profile back. This replaces the ``.visibility.json`` sidecar.
     visibility: Visibility = "public"
 
@@ -61,7 +85,7 @@ class ProfileDocument(JsonLdModel):
     expertise_cites_paper_ids: bool | None = Field(default=None, alias="expertiseCitesPaperIds")
 
     level: ProfileLevel = "full"
-    affiliation: str | None = None
+    affiliation: OrganizationName = None
     #: A ROR IRI for :attr:`affiliation`. Not an on-disk key of its own: when
     #: set, ``affiliation`` serializes as an ``Organization`` node carrying it.
     affiliation_id: str | None = None
@@ -83,6 +107,14 @@ class ProfileDocument(JsonLdModel):
     expertise: list[str] = []
     interests: list[str] = []
     not_interests: list[str] = []
+    #: The canonical interest record. When non-empty, ``interests`` and
+    #: ``not_interests`` are rebuilt from it on every load (see
+    #: :func:`~.project_interests`).
+    research_interests: list[ResearchInterest] = Field(default=[], alias="rp:researchInterests")
+    section_visibility: list[SectionVisibility] = Field(default=[], alias="rp:sectionVisibility")
+    therapeutic_areas: list[ConceptReference] = Field(default=[], alias="rp:therapeuticAreas")
+    site_capabilities: SiteCapabilities | None = Field(default=None, alias="rp:siteCapabilities")
+    regulatory_experience: list[str] = Field(default=[], alias="rp:regulatoryExperience")
     methodological_commitments: list[str] = []
     recurring_positions: list[str] = []
     intellectual_lineage: list[str] = []
@@ -198,6 +230,24 @@ class ProfileDocument(JsonLdModel):
             # the document is served, so an unpublished profile still has a
             # well-formed subject IRI.
             self.id_ = self.url or "#me"
+        if self.research_interests:
+            self.interests, self.not_interests = project_interests(self.research_interests)
+        return self
+
+    @model_validator(mode="after")
+    def _check_orcid_login_proof(self) -> "ProfileDocument":
+        """An ``orcid_login`` proof is unique and names this profile's ORCID."""
+        logins = [p for p in self.proof if p.kind == "orcid_login"]
+        if len(logins) > 1:
+            raise ValueError(
+                "a document carries at most one orcid_login proof: it is served by one registry"
+            )
+        for p in logins:
+            if p.orcid != self.orcid:
+                raise ValueError(
+                    f"orcid_login proof names ORCID iD {p.orcid} but this "
+                    f"profile's rid is {self.rid}"
+                )
         return self
 
     # --- derived ------------------------------------------------------
@@ -276,13 +326,17 @@ DERIVED_FIELDS: frozenset[str] = frozenset(
 
 #: JSON-LD infrastructure, document metadata, manifest, external identifiers,
 #: and fields assembled from ORCID by the build tool (not LLM-written).
+#: ``research_interests`` is here too: the build writes it in Python (topic
+#: counts, and the LLM's free-text lists converted to typed entries).
 DOCUMENT_FIELDS: frozenset[str] = frozenset(
     {
+        "research_interests",
         "context",
         "id_",
         "type_",
         "conforms_to",
         "provenance",
+        "provenance_note",
         "verified_at",
         "proof",
         "license_",

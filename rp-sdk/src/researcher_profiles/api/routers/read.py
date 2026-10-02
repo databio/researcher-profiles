@@ -22,7 +22,7 @@ from ...models.api import (
 )
 from ...models.published import ProfileCard, ProfileCollection
 from ...privacy import (
-    ALWAYS_RESTRICTED_PREFIXES,
+    ALWAYS_PRIVATE_PREFIXES,
     ViewerTier,
     effective_tiers,
     explain_tiers,
@@ -30,7 +30,6 @@ from ...privacy import (
     tier_allows,
 )
 from ...schema import (
-    ALWAYS_RESTRICTED_ROLES,
     validate_ref,
 )
 from ...schema.jsonld import CONTEXT_URL
@@ -46,6 +45,8 @@ from .._projection import (
     _profile_summary,
     artifact_visible,
     metadata_payload,
+    registry_proofs,
+    served_document_bytes,
     withheld,
 )
 from ..deps import (
@@ -117,7 +118,7 @@ def _visible_summaries(request: Request, store: ProfileStore) -> list[ProfileSum
             floor = get_profile_tier_floor(request, prof, slug)
             if not profile_visible(prof.metadata, per_profile, floor=floor.tier):
                 continue
-            out.append(_profile_summary(prof))
+            out.append(_profile_summary(prof, per_profile))
         # Boundary: one profile's summary projection; the listing still answers.
         except Exception:
             failed += 1
@@ -302,7 +303,7 @@ def get_profile_detail(
     return ProfileDetail(
         slug=prof.slug,
         rid=getattr(prof, "rid", None),
-        metadata=metadata_payload(prof),
+        metadata=metadata_payload(prof, viewer, proofs=registry_proofs(request, prof.metadata.rid)),
         expertise=(
             prof.expertise
             if artifact_visible(explain, md, "personality/expertise.md", "expertise", viewer)
@@ -328,30 +329,43 @@ def get_profile_jsonld(
     store: ProfileStore = Depends(get_store),
     viewer: ViewerTier = Depends(get_viewer_tier),
 ) -> Response:
-    """Serve the stored ``profile.jsonld`` **verbatim**.
+    """Serve the profile's ``profile.jsonld``: the stored record plus registry proofs.
 
-    These are the bytes the store persisted, not a re-serialization from the
-    loaded model: what a crawler or an agent fetches here has to be the
-    published document, byte for byte, or the ``conformsTo`` claim is about a
-    file nobody can retrieve. ``store.document_bytes`` is that guarantee on
-    every backend.
+    The served document is the stored record plus any registry-issued proofs
+    (``orcid_login``), which the registry computes on every request from its
+    own live state and never stores (``app.state.registry_proofs``). A profile
+    with no section projection and no registry proof is served as the exact
+    bytes the store persisted (``store.document_bytes``), so the
+    ``conformsTo`` claim is about a file anyone can retrieve byte for byte.
+    ``/profiles/{slug}/content/profile.jsonld`` returns the same bytes.
     """
     try:
         validate_ref(slug)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
-    # The profile-level tier gates the document; what is inside it is served
-    # verbatim (spec section 6/7). The bytes are the published record or the
-    # ``conformsTo`` claim is about a file nobody can retrieve.
     prof = get_profile(slug, store)
     _gate_profile(request, prof, viewer, slug)
+    return _document_response(request, store, prof, viewer, slug)
+
+
+def _document_response(
+    request: Request, store: ProfileStore, prof, viewer: ViewerTier, slug: str
+) -> Response:
+    """The one ``profile.jsonld`` response, shared by both document URLs.
+
+    Gated by the profile tier only (the caller has already run the gate);
+    inline sections are projected when the profile declares section
+    visibility, and registry-issued proofs are attached (see
+    :func:`served_document_bytes`).
+    """
     try:
-        data = store.document_bytes(slug)
+        data = served_document_bytes(request, store, prof, viewer, store.resolve_slug(slug))
     except (ProfileNotFoundError, KeyError) as e:
         raise _profile_missing(slug) from e
     # A strong etag over the served bytes, so the short revalidation above is a
     # 304 rather than a re-send. It is the document itself, not a timestamp: two
-    # replicas serving the same profile agree on it.
+    # replicas serving the same profile agree on it, and a change in a
+    # registry proof changes it.
     etag = '"' + hashlib.sha256(data).hexdigest()[:32] + '"'
     headers = _cache_headers(viewer, etag=etag, last_modified_iso=prof.metadata.date_modified)
     if request.headers.get("if-none-match") == etag:
@@ -383,8 +397,8 @@ def get_profile_artifact(
     whole profile, every tier, in one store, so an owner-or-nothing route
     would be the wrong shape: it would lock a signed-in owner out of the public
     view and give nobody a way to read the public tier without a credential.
-    An owner reads their own ``restricted`` CV because a management host's
-    resolver gives them the ``restricted`` viewer tier, not because this path
+    An owner reads their own ``private`` CV because a management host's
+    resolver gives them the ``private`` viewer tier, not because this path
     is reserved for them.
 
     Three refusals, in order:
@@ -395,15 +409,16 @@ def get_profile_artifact(
       included, so there is no viewer for whom their existence is a secret and
       nothing is disclosed by saying why.
 
-      - ``paper_fulltext`` (``sources/papers/``): extracted full text of
-        copyrighted papers. A legal floor, not a preference; serving it is the
-        redistribution the whole tier exists to prevent.
       - ``.cache/`` and ``.keys/``: build-local derived state (the sqlite
         embedding index) and key material, not servable profile artifacts.
 
     * the artifact gate: 404, byte-identical to an artifact that is not in the
       manifest at all. "Not for you" and "not there" must not be tellable apart,
       or the error message enumerates the private half of the profile.
+
+    Past all three, a manifest entry whose body the store does not hold (a
+    push withheld it) is a 404 that says so. Only a caller the tier gate
+    admitted can reach it, so it discloses nothing they may not see.
 
     Only paths the manifest declares are servable; an unknown or traversing path
     is a 404. ``X-RP-Effective-Tier`` reports the tier the derivation rule
@@ -418,22 +433,10 @@ def get_profile_artifact(
     # here rather than through the manifest lookup below. This is what makes
     # ``/content/`` a usable base URL: a client points at one directory and
     # follows relative contentUrls out of the document it finds there, exactly
-    # as it does against a static site. Gated by the profile tier only: the
-    # bytes are served verbatim (spec section 6/7).
+    # as it does against a static site. The same response as
+    # ``/profiles/{slug}/profile.jsonld``: same bytes, same ETag.
     if artifact == "profile.jsonld":
-        try:
-            data = store.document_bytes(resolved)
-        except (ProfileNotFoundError, KeyError) as e:
-            raise _profile_missing(slug) from e
-        headers = {"Cache-Control": "private, no-store", "Vary": VARY_ON_CREDENTIALS}
-        lm = _http_date(prof.metadata.date_modified)
-        if lm is not None:
-            headers["Last-Modified"] = lm
-        return Response(
-            content=data,
-            media_type="application/ld+json",
-            headers=headers,
-        )
+        return _document_response(request, store, prof, viewer, resolved)
 
     # Only manifest artifacts are servable. Keying off effective_tiers (rather
     # than the raw path) both bounds the surface to declared artifacts and gives
@@ -450,12 +453,7 @@ def get_profile_artifact(
         raise unknown
 
     # Hard floors: never served, to anybody, at any tier.
-    if part.role in ALWAYS_RESTRICTED_ROLES:
-        raise HTTPException(
-            status_code=403,
-            detail="paper full text is a restricted hard floor and is never served",
-        )
-    if any(artifact.startswith(prefix) for prefix in ALWAYS_RESTRICTED_PREFIXES):
+    if any(artifact.startswith(prefix) for prefix in ALWAYS_PRIVATE_PREFIXES):
         raise HTTPException(
             status_code=403,
             detail="build-local derived state is not a servable artifact",
@@ -466,10 +464,23 @@ def get_profile_artifact(
 
     # The store owns retrieval, including the traversal refusal a directory
     # backend needs and a relational one structurally cannot need.
+    #
+    # A manifest row can outlive its body: a push that withholds a class of
+    # files (``sources/papers/`` fulltext is withheld by default) still commits
+    # a manifest listing them. The caller has already passed the tier gate
+    # here, so they may know the artifact exists; telling them it is "not a
+    # manifest artifact" would be false and sends them hunting for a
+    # permission problem. Say what is actually wrong instead.
     try:
         data = store.artifact_bytes(resolved, artifact)
     except (ProfileNotFoundError, KeyError) as e:
-        raise unknown from e
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"artifact {artifact!r} is listed in the manifest of {resolved!r} "
+                "but its content was not uploaded to this registry"
+            ),
+        ) from e
 
     return Response(
         content=data,

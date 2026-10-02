@@ -84,7 +84,7 @@ The same list is in the `researcher_profiles.api` package docstring.
   `create_app` sets it, and a host that mounts the routers or re-declares the
   handlers on its own app sets it itself (`api/deps.py::get_store`).
 - `app.state.owner_verifier`: decides whether the caller may edit a profile's
-  canonical documents, and whether they may read its restricted artifacts.
+  canonical documents, and whether they may read its private artifacts.
 - `app.state.consumer_verifier`: checks a per-application scoped key.
 - `app.state.write_scope_verifier`: decides whether a credential may make one
   specific write (`action`, `detail`); `api/deps.py::check_write_scope` calls it

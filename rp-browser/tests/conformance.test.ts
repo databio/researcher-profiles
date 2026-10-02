@@ -25,6 +25,8 @@ const CORPUS = join(HERE, "..", "..", "spec", "conformance");
 interface CaseExpectation {
   valid: boolean;
   expect_fail?: string[];
+  /** Explorer only: check ids that must be present and passing. */
+  expect_pass?: string[];
 }
 interface Case {
   dir: string;
@@ -70,9 +72,16 @@ function fixtureFetch(url: string): Response {
 
 const realFetch = globalThis.fetch;
 
+/** The stub response, with `url` set as a real fetch sets it (no redirects here). */
+function servedFrom(url: string): Response {
+  const res = fixtureFetch(url);
+  Object.defineProperty(res, "url", { value: url });
+  return res;
+}
+
 beforeEach(() => {
   globalThis.fetch = ((input: RequestInfo | URL) =>
-    Promise.resolve(fixtureFetch(String(input)))) as typeof fetch;
+    Promise.resolve(servedFrom(String(input)))) as typeof fetch;
 });
 
 afterEach(() => {
@@ -88,7 +97,8 @@ describe("conformance corpus (explorer validator)", () => {
   for (const c of cases) {
     it(`${c.dir} -> explorer ${c.explorer.valid ? "valid" : "invalid"}`, async () => {
       const target = `${BASE}${c.dir}/`;
-      const checks: Array<{ id: string; passed: boolean; severity: string }> = [];
+      const checks: Array<{ id: string; passed: boolean | "indeterminate"; severity: string }> =
+        [];
       const run = await runValidation(target, (check) =>
         checks.push({ id: check.id, passed: check.passed, severity: check.severity }),
       );
@@ -104,6 +114,11 @@ describe("conformance corpus (explorer validator)", () => {
       for (const id of c.explorer.expect_fail ?? []) {
         const failed = checks.find((x) => x.id === id && !x.passed);
         expect(failed, `${c.dir}: expected check "${id}" to fail`).toBeTruthy();
+      }
+
+      for (const id of c.explorer.expect_pass ?? []) {
+        const passed = checks.find((x) => x.id === id && x.passed === true);
+        expect(passed, `${c.dir}: expected check "${id}" to pass`).toBeTruthy();
       }
     });
   }

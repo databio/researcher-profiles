@@ -4,17 +4,18 @@
 implements: enumerate profiles, resolve a reference, create/delete one, hand
 out its bytes. :class:`VectorStore` is the optional *capability* protocol on
 top of it: a backend that can also serve a profile's vectors.
-:class:`IngestResult`, :class:`ProfileNotFoundError`, :class:`UploadError` and
+:class:`IngestResult`, :class:`ProfileNotFoundError`, :class:`RetiredRidError`,
+:class:`UploadError` and
 :class:`DuplicateIdentityError` are the value and error types that cross that
 boundary. See the package docstring for why these are protocols and not base
 classes.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Protocol, runtime_checkable
 
-from ..errors import ProfileError
+from ..errors import ProfileError, ProfileWriteError
 from ..profile import ResearcherProfile
 from ..profile.write_unit import WriteHook
 
@@ -43,6 +44,32 @@ class ProfileNotFoundError(ProfileError, KeyError):
         # ``KeyError.__str__`` reprs its argument, so a message would arrive
         # wrapped in quotes. These carry a sentence, not a key.
         return str(self.args[0]) if self.args else ""
+
+
+class RetiredRidError(ProfileWriteError):
+    """A write targets a rid or slug that a merge retired.
+
+    A retired rid or slug keeps resolving to its successor through an alias,
+    so reusing it would silently hijack (or resurrect) that identity. A store
+    that keeps aliases refuses such a write with this error. It is a
+    :class:`~researcher_profiles.errors.ProfileWriteError` on purpose: every
+    route that already maps a write error to 409 then does the right thing.
+    """
+
+    def __init__(
+        self, ref: str, successor_rid: str, *, rid: Optional[str] = None, slug: Optional[str] = None
+    ):
+        self.rid = rid
+        self.slug = slug
+        self.successor_rid = successor_rid
+        self.message = (
+            f"{ref!r} was retired by a merge into {successor_rid!r}; "
+            "a retired rid or slug cannot be reused"
+        )
+        super().__init__(ref, self.message)
+
+    def __str__(self) -> str:
+        return self.message
 
 
 class UploadError(ValueError):
@@ -78,6 +105,20 @@ class IngestResult:
     #: on a store with no filesystem: the index is a ``.cache/embeddings.sqlite``
     #: handle, which ``ArtifactStorage`` does not cover (see the module docstring).
     indexed: bool
+    #: Live files carried over rather than deleted, by class
+    #: (``{"fulltext": 53, "index": 1}``); see ``upload.WITHHELD_CLASSES``.
+    #: Filled in by ``ingest_archive``, not by ``commit_directory``.
+    kept: dict[str, int] = field(default_factory=dict)
+    #: Manifest entries the server added back for kept files the incoming
+    #: manifest did not list. Filled in by ``ingest_archive``; see
+    #: ``upload._splice_kept_into_manifest``.
+    spliced: int = 0
+    #: ``{role: count}`` over the manifest the store holds after the commit:
+    #: what a reader can now fetch. Filled in by ``ingest_archive``.
+    manifest_counts: dict[str, int] = field(default_factory=dict)
+    #: Which ``upload.PushMode`` the ingest ran under, and so what happened to
+    #: the live files the archive did not carry.
+    mode: str = "replace"
 
 
 @runtime_checkable
@@ -177,7 +218,52 @@ class ProfileStore(Protocol):
         """
         ...
 
+    def rids_with_email(self, email: str) -> list[str]:
+        """rids of every profile whose top-level document ``email`` equals ``email``.
+
+        Ignoring case and outer whitespace, sorted. Reads stored documents only:
+        never a host's overlay or lens of someone else's profile. A backend that
+        cannot enumerate documents (HTTP) raises ``NotImplementedError``.
+        """
+        ...
+
+    def successor_of(self, ref: str) -> Optional[str]:
+        """The live rid a retired rid or slug resolves to, or ``None``.
+
+        ``None`` for a live profile, for an unknown ref, and on every backend
+        that cannot merge. ``get``, ``rid_for``, ``resolve_slug`` and ``exists``
+        already follow the alias; this says whether they had to.
+        """
+        ...
+
+    def alias_slugs(self) -> set[str]:
+        """Slugs of retired profiles. They stay reserved: allocate around them."""
+        ...
+
     # mutation
+
+    def merge_into(
+        self,
+        retired_ref: str,
+        staging: Path,
+        *,
+        survivor_rid: str,
+        survivor_slug: str,
+        build_missing_index: bool = True,
+    ) -> IngestResult:
+        """Retire one profile into another in ONE write unit.
+
+        Commits the staged survivor directory at ``survivor_rid`` (create or
+        replace), deletes the retired profile, and records an alias so the
+        retired rid and slug keep resolving to the survivor. Chains are kept
+        one hop. Pre-commit hooks see ``ctx.kind == "merge"``,
+        ``ctx.rid == survivor_rid`` and ``ctx.retired_rid`` /
+        ``ctx.retired_slug``. Only a transactional (SQL) store implements it;
+        the others raise ``NotImplementedError``. Raises :class:`RetiredRidError`
+        when ``survivor_rid`` is itself a retired rid: a merge never makes a
+        retired rid live again.
+        """
+        ...
 
     def create(self, document: "ProfileDocument", *, slug: str) -> ResearcherProfile:
         """Create a new profile from a validated document. Returns it.
@@ -188,7 +274,40 @@ class ProfileStore(Protocol):
         exists" and "somebody owns it".
 
         Raises :class:`~researcher_profiles.profile.ProfileWriteError` if
-        ``slug`` or the document's rid is already taken.
+        ``slug`` or the document's rid is already taken. A store that keeps aliases raises :class:`RetiredRidError` for a retired rid or slug.
+        """
+        ...
+
+    def create_bundle(
+        self,
+        document: "ProfileDocument",
+        *,
+        slug: str,
+        expertise: Optional[str] = None,
+        soul: Optional[str] = None,
+        artifacts: Optional[dict[str, str]] = None,
+    ) -> ResearcherProfile:
+        """Create a profile and all of its authored artifacts in one write unit.
+
+        The seam a management host publishes an approved candidate through.
+        :meth:`create` installs a document and nothing else, so a host
+        assembling a complete profile had to follow it with separate artifact
+        writes; between them a half-built profile is live and readable, and a
+        crash leaves one behind with no way to tell it from a finished one.
+        This installs the whole bundle instead, so the document, the persona
+        documents, every artifact in ``artifacts``, the ownership row a
+        pre-commit hook writes, and the derived digest all land together.
+
+        ``artifacts`` maps a manifest ``contentUrl`` to its text body; each key
+        must appear in the document's ``hasPart`` or ``subjectOf``, because an
+        artifact nothing declares is an artifact no consumer can find.
+
+        Whether the unit is genuinely atomic is the backend's to say
+        (``WriteContext.atomic``): SQL commits or rolls back, the filesystem
+        cleans up after itself instead.
+
+        Raises :class:`~researcher_profiles.profile.ProfileWriteError` if
+        ``slug`` or the document's rid is already taken. A store that keeps aliases raises :class:`RetiredRidError` for a retired rid or slug.
         """
         ...
 
@@ -206,7 +325,7 @@ class ProfileStore(Protocol):
         (papers, embeddings) is added later by a push or a build.
 
         Returns the profile, so the caller can read ``rid`` / ``name`` /
-        ``level`` for the response.
+        ``level`` for the response. A store that keeps aliases raises :class:`RetiredRidError` for a retired rid or slug.
         """
         ...
 
@@ -230,6 +349,7 @@ class ProfileStore(Protocol):
         rankable. A backend with no filesystem accepts it and ignores it.
 
         Raises :class:`UploadError` if the staged directory does not load.
+        A store that keeps aliases raises :class:`RetiredRidError` for a retired rid or slug.
         """
         ...
 

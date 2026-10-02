@@ -190,8 +190,64 @@ class TestSchemaExport:
         from researcher_profiles.validate import schema_fingerprint
 
         assert schema_fingerprint() == (
-            "9c4f79c3848fb83c7d1bbee413fde015c4b12908561c454aa6494081769f0b48"
+            "581b6683e038f2de8a1529552095d3d01f56a898b0acb2cdf6127242718bc80d"
         )
+
+    def test_exported_schema_accepts_what_the_model_writes(self):
+        """A document this package serializes must pass its own JSON Schema.
+
+        ``datePublished``, ``isPartOf``, ``author``, ``about``, ``funder`` and
+        ``affiliation`` hold a flat Python value but are written as a typed
+        literal or JSON-LD node. When the schema described the Python type,
+        the browser validator flagged every published works file (``"2024"``
+        is not an integer, ``{"@id": ...}`` is not a string).
+        """
+        import jsonschema
+
+        from researcher_profiles.schema import GrantsDocument
+
+        schemas = build_schemas()
+        papers = PapersDocument.model_validate(
+            {
+                "about": {"@id": "https://orcid.org/0000-0002-1825-0097"},
+                "hasPart": [
+                    {
+                        "name": "A paper",
+                        "doi": "10.1/x",
+                        "datePublished": "2024",
+                        "isPartOf": {"@type": "Periodical", "name": "J"},
+                        "author": [{"@type": "Person", "name": "A. Author"}],
+                    }
+                ],
+            }
+        )
+        grants = GrantsDocument.model_validate(
+            {
+                "about": {"@id": "https://orcid.org/0000-0002-1825-0097"},
+                "hasPart": [
+                    {
+                        "id": "g1",
+                        "name": "A grant",
+                        "funder": {"@type": "Organization", "name": "NIH"},
+                    }
+                ],
+            }
+        )
+        profile = _canonical_doc(
+            affiliation="University of Somewhere",
+            affiliation_id="https://ror.org/000000000",
+        )
+        for name, doc in (
+            ("papers_jsonld", papers),
+            ("grants_jsonld", grants),
+            ("profile_jsonld", profile),
+        ):
+            wire = json.loads(canonical_dumps(doc.model_dump(mode="json", by_alias=True)))
+            errors = [
+                f"{'/'.join(map(str, e.path))}: {e.message}"
+                for e in jsonschema.Draft202012Validator(schemas[name]).iter_errors(wire)
+            ]
+            assert not errors, f"{name}: {errors}"
 
     # ---- Fixture parity: Pydantic + JSON Schema agree on fixtures ----
 
@@ -256,6 +312,16 @@ class TestProvenance:
             "domain_verified"
         )
         assert _provenance_doc(provenance="key_signed", url=URL).provenance == "key_signed"
+
+    def test_provenance_note_round_trips(self):
+        """An interview-built profile says how it was produced, in one sentence."""
+        note = "self-reported via a structured interview on 2026-09-10; unverified"
+        doc = _provenance_doc(provenance="self_published", provenanceNote=note)
+        assert doc.provenance_note == note
+        data = doc.model_dump(by_alias=True)
+        assert data["provenanceNote"] == note
+        assert ProfileDocument.model_validate(data).provenance_note == note
+        assert list(data).index("provenanceNote") == list(data).index("provenance") + 1
 
     def test_unknown_provenance_is_tolerated_not_rejected(self):
         """profile-document.md §4: consumers must ignore unknown enum values.

@@ -42,10 +42,11 @@ from .schema import (
     PapersDocument,
     ProfileDocument,
     SummaryFile,
+    TrialsDocument,
 )
 from .schema.jsonld import CONTEXT_URL, read_jsonld
 from .schema_export import build_schemas
-from .utils.paths import CACHE_DIRNAME
+from .utils.paths import CACHE_DIRNAME, LEGACY_CACHE_DIRNAME
 
 if TYPE_CHECKING:
     from .schema import ArtifactRef
@@ -62,6 +63,7 @@ _SCHEMA_MODELS: dict[str, type] = {
     "profile_jsonld": ProfileDocument,
     "papers_jsonld": PapersDocument,
     "grants_jsonld": GrantsDocument,
+    "trials_jsonld": TrialsDocument,
     "summary_file": SummaryFile,
 }
 
@@ -280,7 +282,7 @@ def validate_artifact(
 
     # Undeclared terms and retired-key detection (only for JSON-LD artifacts,
     # not summary)
-    if schema_name in ("profile_jsonld", "papers_jsonld", "grants_jsonld"):
+    if schema_name in ("profile_jsonld", "papers_jsonld", "grants_jsonld", "trials_jsonld"):
         result.undeclared = undeclared_terms(doc, schema_name)
         result.violations = [_retired_term_violation(t) for t in retired_terms(doc)]
 
@@ -460,10 +462,11 @@ def validate_profile_dir(profile_dir: str | Path) -> ProfileValidationReport:
         (root / "profile.jsonld", "profile_jsonld"),
         (root / "sources" / "papers.jsonld", "papers_jsonld"),
         (root / "sources" / "grants.jsonld", "grants_jsonld"),
+        (root / "sources" / "trials.jsonld", "trials_jsonld"),
     ]
     for path, schema_name in artifact_map:
-        # grants.jsonld is presence-conditional
-        if schema_name == "grants_jsonld" and not path.is_file():
+        # grants.jsonld and trials.jsonld are presence-conditional
+        if schema_name in ("grants_jsonld", "trials_jsonld") and not path.is_file():
             continue
         art_result = validate_artifact(path, schema_name)
         report.artifacts.append(art_result)
@@ -473,16 +476,76 @@ def validate_profile_dir(profile_dir: str | Path) -> ProfileValidationReport:
     if summaries_dir.is_dir():
         for f in sorted(summaries_dir.iterdir()):
             if f.is_file() and f.name.endswith(".summary.md"):
-                text = f.read_text(encoding="utf-8")
+                text = f.read_bytes().decode("utf-8", errors="replace")
                 fm = _extract_frontmatter(text)
                 if fm is not None:
                     art_result = _validate_data(fm, "summary_file", str(f))
                     report.artifacts.append(art_result)
 
+    # Character rule for paper text (full text and summaries)
+    for art_result in _check_text_artifacts(root):
+        report.artifacts.append(art_result)
+
     # Cross-artifact invariants
     _check_cross_artifact(root, report)
 
     return report
+
+
+#: The text artifacts the character rule covers: (directory, filename suffix,
+#: manifest role). Mirrors the ``sources/summaries`` and ``sources/papers``
+#: rows of the manifest table in ``schema.manifest``.
+_TEXT_ARTIFACT_DIRS: tuple[tuple[str, str, str], ...] = (
+    ("sources/papers", ".md", "paper_fulltext"),
+    ("sources/summaries", ".summary.md", "paper_summary"),
+)
+
+
+def _check_text_artifacts(root: Path) -> list[ArtifactResult]:
+    """Fail every paper full text or summary that is not clean text.
+
+    Only failing files get a result, so a clean profile's report is unchanged.
+    The rule itself lives in :mod:`researcher_profiles.text_artifact`, which the
+    builder also runs before it writes a file.
+    """
+    from .text_artifact import text_artifact_problems
+
+    results: list[ArtifactResult] = []
+    for rel_dir, suffix, role in _TEXT_ARTIFACT_DIRS:
+        directory = root / rel_dir
+        if not directory.is_dir():
+            continue
+        for f in sorted(directory.iterdir()):
+            if not (f.is_file() and f.name.endswith(suffix)):
+                continue
+            problems = text_artifact_problems(f.read_bytes())
+            if not problems:
+                continue
+            results.append(
+                ArtifactResult(
+                    path=str(f),
+                    schema_name=role,
+                    exists=True,
+                    parsed=True,
+                    ok=False,
+                    violations=[
+                        Violation(
+                            json_pointer="/",
+                            keyword="text_content",
+                            message=_cap(problem, 300),
+                            found=f"{rel_dir}/{f.name}",
+                            expected="clean UTF-8 text",
+                            fix=(
+                                "delete the file and re-download the paper"
+                                if role == "paper_fulltext"
+                                else "delete the summary and regenerate it"
+                            ),
+                        )
+                        for problem in problems
+                    ],
+                )
+            )
+    return results
 
 
 def _extract_frontmatter(text: str) -> dict | None:
@@ -587,13 +650,6 @@ def _manifest_refs(profile_doc: dict, report: ProfileValidationReport) -> "list[
     return refs
 
 
-#: Directory name used for the profile-adjacent derived cache before its
-#: rename to :data:`~researcher_profiles.utils.paths.CACHE_DIRNAME`
-#: (``.cache/``). A manifest entry still pointing under this name is not
-#: really dangling: the file is on disk, just under the old directory.
-_LEGACY_CACHE_DIRNAME = "cache"
-
-
 def _split_legacy_cache_stale(
     root: Path, stale: list[str], report: ProfileValidationReport
 ) -> list[str]:
@@ -608,7 +664,7 @@ def _split_legacy_cache_stale(
     Returns the remaining ``stale`` entries, for the caller to report as
     ordinary drift.
     """
-    legacy_prefix = f"{_LEGACY_CACHE_DIRNAME}/"
+    legacy_prefix = f"{LEGACY_CACHE_DIRNAME}/"
     legacy = [
         entry for entry in stale if entry.startswith(legacy_prefix) and (root / entry).is_file()
     ]
@@ -619,13 +675,14 @@ def _split_legacy_cache_stale(
                 keyword="legacy_cache_dirname",
                 message=(
                     f"{len(legacy)} manifest entry(ies) under the retired cache "
-                    f"directory name {_LEGACY_CACHE_DIRNAME!r}: {legacy[:5]}"
+                    f"directory name {LEGACY_CACHE_DIRNAME!r}: {legacy[:5]}"
                 ),
-                found=f"{_LEGACY_CACHE_DIRNAME}/",
+                found=f"{LEGACY_CACHE_DIRNAME}/",
                 expected=f"{CACHE_DIRNAME}/",
                 fix=(
-                    f"move the file(s) from {_LEGACY_CACHE_DIRNAME}/ to {CACHE_DIRNAME}/ "
-                    "and run `rp manifest --write` to regenerate"
+                    f"move the file(s) from {LEGACY_CACHE_DIRNAME}/ to {CACHE_DIRNAME}/ "
+                    "and run `rp manifest --write` (it will show what changes and "
+                    "refuse to drop entries)"
                 ),
             )
         )
@@ -641,7 +698,7 @@ def _check_manifest_drift(root: Path, profile_doc: dict, report: ProfileValidati
         report.cross_artifact.append(
             Violation(
                 json_pointer="/hasPart",
-                keyword="manifest_drift",
+                keyword="manifest_unlisted",
                 message=(
                     f"{len(drift['missing'])} file(s) on disk not in manifest: "
                     f"{drift['missing'][:5]}"
@@ -653,14 +710,22 @@ def _check_manifest_drift(root: Path, profile_doc: dict, report: ProfileValidati
         )
     stale = _split_legacy_cache_stale(root, drift["stale"], report)
     if stale:
+        # Distinct keyword from ``manifest_unlisted``, because the two want
+        # opposite actions. An unlisted file wants the manifest regenerated;
+        # a dangling entry may mean this directory is a partial copy, and
+        # regenerating there is what deletes the missing artifacts for good.
         report.cross_artifact.append(
             Violation(
                 json_pointer="/hasPart",
-                keyword="manifest_drift",
+                keyword="manifest_stale",
                 message=f"{len(stale)} manifest entry(ies) with no file: {stale[:5]}",
                 found=f"{len(stale)} dangling entries",
                 expected="every manifest entry has a file on disk",
-                fix="run `rp manifest --write` to regenerate",
+                fix=(
+                    "either restore the files, or if this copy is intentionally "
+                    "partial, do not run `rp manifest --write` here: it would drop "
+                    "these entries"
+                ),
             )
         )
 
@@ -727,6 +792,37 @@ def _check_content_urls(root: Path, profile_doc: dict, report: ProfileValidation
                 )
 
 
+def _check_derivation(profile_doc: dict, report: ProfileValidationReport) -> None:
+    """Every ``derivedFrom`` reference resolves, and the graph has no cycle.
+
+    The derivation rule makes an artifact at least as private as everything
+    it came from, so a reference that resolves to nothing is not a harmless
+    dangling link: it is a restriction the projection silently failed to
+    apply. :func:`~researcher_profiles.privacy.derivation_errors` is the one
+    implementation; this only turns its sentences into findings.
+    """
+    from .privacy import derivation_errors
+    from .schema import ProfileDocument
+
+    try:
+        document = ProfileDocument.model_validate(profile_doc)
+    except PydanticValidationError:
+        # The document's own schema violations are already reported; a
+        # derivation walk over a document that will not parse says nothing new.
+        return
+    for message in derivation_errors(document):
+        report.cross_artifact.append(
+            Violation(
+                json_pointer="/hasPart/derivedFrom",
+                keyword="derivation",
+                message=message,
+                found="an unresolvable derivedFrom graph",
+                expected="every derivedFrom names a manifest paperId or role, acyclically",
+                fix="point derivedFrom at an artifact in this manifest, or remove it",
+            )
+        )
+
+
 def _check_cross_artifact(root: Path, report: ProfileValidationReport) -> None:
     """Check cross-artifact invariants and append violations to the report.
 
@@ -740,6 +836,7 @@ def _check_cross_artifact(root: Path, report: ProfileValidationReport) -> None:
     if profile_doc is not None:
         _check_manifest_drift(root, profile_doc, report)
         _check_content_urls(root, profile_doc, report)
+        _check_derivation(profile_doc, report)
     if papers_doc is not None:
         _check_orphan_summaries(root, _paper_ids(papers_doc), report)
 

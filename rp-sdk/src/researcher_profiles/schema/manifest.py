@@ -33,7 +33,7 @@ JSON = "application/json"
 SQLITE = "application/vnd.sqlite3"
 
 #: Files under ``.cache/`` listed in the manifest. ``embeddings.sqlite`` is a
-#: derived index served at tier ``restricted``; the public servable embeddings
+#: derived index served at tier ``private``; the public servable embeddings
 #: are the flat blob/index/chunks under ``embeddings/``.
 PUBLISHED_CACHE = ("embeddings.sqlite",)
 
@@ -79,7 +79,7 @@ def _part(
     paper_id: str | None = None,
 ) -> ArtifactRef:
     # The ArtifactRef model applies the role's default tier (cv/web/full-text ->
-    # restricted) when `visibility` is not passed, so it is omitted here.
+    # private) when `visibility` is not passed, so it is omitted here.
     return ArtifactRef(
         type_=type_,
         name=name,
@@ -126,8 +126,22 @@ class _DirSpec:
 _SUBJECT_SPECS: tuple[_FileSpec, ...] = (
     _FileSpec("personality/SOUL.md", "SOUL", "soul", MARKDOWN),
     _FileSpec("personality/expertise.md", "Expertise", "expertise", MARKDOWN),
+    # Optional clinical extension: trial operations and site capability prose,
+    # the clinical counterpart of expertise.md.
+    _FileSpec(
+        "personality/clinical_expertise.md",
+        "Clinical expertise",
+        "clinical_expertise",
+        MARKDOWN,
+    ),
     _FileSpec("personality/topics.json", "Research topics", "topics", JSON),
 )
+
+#: The roles that live in ``subjectOf`` rather than ``hasPart``. Derived from
+#: the specs above so the two cannot drift: anything that has to place a
+#: manifest entry in a slot (an ``--only`` push projecting the server's
+#: manifest, an ingest splicing a kept entry back) asks here.
+SUBJECT_ROLES: frozenset[str] = frozenset(spec.role for spec in _SUBJECT_SPECS)
 
 #: The record and its sources, carried in ``hasPart``.
 _PART_SPECS: tuple[_FileSpec, ...] = (
@@ -135,8 +149,11 @@ _PART_SPECS: tuple[_FileSpec, ...] = (
     _FileSpec("SKILL.md", "Agent entry point", "agent_entry_point", MARKDOWN),
     _FileSpec("sources/papers.jsonld", "Works", "works", JSONLD, type_="Collection"),
     _FileSpec("sources/grants.jsonld", "Grants", "grants", JSONLD, type_="Collection"),
+    # Optional clinical extension; ``limited`` by role default.
+    _FileSpec("sources/trials.jsonld", "Clinical trials", "trials", JSONLD, type_="Collection"),
     _FileSpec("sources/citations.json", "Citations", "citations", JSON),
     _FileSpec("sources/cv.md", "CV", "cv", MARKDOWN),
+    _FileSpec("sources/interview.md", "Interview digest", "interview", MARKDOWN),
 )
 
 _DIR_SPECS: tuple[_DirSpec, ...] = (
@@ -197,7 +214,7 @@ def _dir_parts(root: Path, spec: _DirSpec) -> list[ArtifactRef]:
 
 
 def _cache_parts(root: Path) -> list[ArtifactRef]:
-    """The derived sqlite index (tier restricted): reachable by an authorized
+    """The derived sqlite index (tier private): reachable by an authorized
     consumer, excluded from a public sync. Profile-adjacent under ``.cache/``.
     """
     return [
@@ -250,6 +267,7 @@ def manifest_drift(profile_dir: str | Path, recorded: list[ArtifactRef]) -> dict
 
 __all__ = [
     "PUBLISHED_CACHE",
+    "SUBJECT_ROLES",
     "TEXT_FORMATS",
     "build_manifest",
     "is_text_artifact",

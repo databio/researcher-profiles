@@ -10,17 +10,26 @@ whatever a profile looks like over HTTP, it looks the same in the published
 site.
 """
 
+from collections.abc import Sequence
 from typing import Any
 
 import pydantic
 
 from ..build_state import BuildState
+from ..privacy import ViewerTier, project_document
+from ..schema import strip_registry_issued_proofs
 from . import ResearcherProfile
 
 
-def profile_summary_dict(prof: ResearcherProfile) -> dict[str, Any]:
-    """Produce the dict matching ``ProfileSummary`` (GET /api/v1/profiles)."""
-    md = prof.metadata
+def profile_summary_dict(prof: ResearcherProfile, viewer: ViewerTier) -> dict[str, Any]:
+    """Produce the dict matching ``ProfileSummary`` (GET /api/v1/profiles).
+
+    ``viewer`` has no default. A summary carries inline document fields
+    (``affiliation`` sits in the ``background`` section), so a caller that
+    forgot the tier would publish them at every tier, and the collection index
+    the static publisher writes is the most public surface there is.
+    """
+    md = project_document(prof.metadata, viewer)
     # Corpus stats. Each is computed lazily off the loaded profile.
     # ``prof.papers`` and ``prof.summaries`` are already memoized on the
     # profile object, so repeated calls are cheap. A load failure propagates:
@@ -68,15 +77,29 @@ def profile_summary_dict(prof: ResearcherProfile) -> dict[str, Any]:
     }
 
 
-def metadata_payload_dict(prof: ResearcherProfile) -> dict[str, Any]:
+def metadata_payload_dict(
+    prof: ResearcherProfile, viewer: ViewerTier, *, proofs: Sequence[Any] = ()
+) -> dict[str, Any]:
     """Project the on-disk JSON-LD document onto the (non-JSON-LD) wire shape.
 
     The wire contract speaks Python-ish field names, so this dumps by name
     rather than by alias; a client that wants the published JSON-LD bytes
     fetches ``/profiles/{slug}/profile.jsonld`` instead.
+
+    ``viewer`` is required and positional on purpose. This dumps the whole
+    document, inline sections included, so a default would mean a caller that
+    forgot the tier got everything: the failure would be silent, total, and
+    indistinguishable from correct output.
+
+    ``proofs`` are the registry-issued proofs (``Proof`` models) the serving
+    registry attaches to this read. Any registry-issued proof already in the
+    stored document is dropped first: only the registry computes those.
     """
-    md = prof.metadata
+    md = project_document(prof.metadata, viewer)
     data = md.model_dump(mode="json", by_alias=False)
+    data["proof"] = strip_registry_issued_proofs(data.get("proof") or []) + [
+        p.model_dump(mode="json", by_alias=False) for p in proofs
+    ]
     data.pop("affiliation_id", None)
     data["license"] = data.pop("license_", None)
     data["expertise"] = list(md.expertise)
@@ -85,12 +108,12 @@ def metadata_payload_dict(prof: ResearcherProfile) -> dict[str, Any]:
     return data
 
 
-def profile_detail_dict(prof: ResearcherProfile) -> dict[str, Any]:
+def profile_detail_dict(prof: ResearcherProfile, viewer: ViewerTier) -> dict[str, Any]:
     """Produce the dict matching ``ProfileDetail`` (GET /api/v1/profiles/{slug})."""
     return {
         "slug": prof.slug,
         "rid": getattr(prof, "rid", None),
-        "metadata": metadata_payload_dict(prof),
+        "metadata": metadata_payload_dict(prof, viewer),
         "expertise": prof.expertise,
         "soul": prof.soul,
         "manifest": [m.model_dump(mode="json") for m in prof.manifest()],

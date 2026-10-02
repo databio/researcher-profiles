@@ -184,6 +184,22 @@ class SentenceTransformerBackend:
         return [list(map(float, v)) for v in arr]
 
 
+#: The batch size every fastembed backend uses when it was given none. ``None``
+#: (the default) keeps fastembed's own, 256, which on abstract-length texts
+#: peaks near 4.7 GB. A host on a small machine sets it once at startup with
+#: :func:`set_fastembed_batch_size`, which reaches every backend the SDK builds
+#: internally (index builds, vector refreshes, centroids), not only its own.
+_FASTEMBED_BATCH_SIZE: int | None = None
+
+
+def set_fastembed_batch_size(batch_size: int | None) -> None:
+    """Set the process-wide fastembed batch size; ``None`` restores fastembed's."""
+    global _FASTEMBED_BATCH_SIZE
+    if batch_size is not None and batch_size < 1:
+        raise ValueError(f"batch_size must be a positive integer, got {batch_size!r}")
+    _FASTEMBED_BATCH_SIZE = batch_size
+
+
 class FastEmbedBackend:
     """Local ONNX backend via fastembed. Same weights as ``st:``, no torch.
 
@@ -232,10 +248,13 @@ class FastEmbedBackend:
     _MODEL_CACHE: dict[str, object] = {}
     _MODEL_LOCK = threading.Lock()
 
-    def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
+    def __init__(self, model_name: str = "all-MiniLM-L6-v2", batch_size: int | None = None):
         self.model_name = model_name
         self.name = f"fastembed:{model_name}"
         self.dim = self._DEFAULT_DIMS.get(model_name, 384)
+        #: Texts per ONNX batch. ``None`` falls back to the process-wide
+        #: :func:`set_fastembed_batch_size`, then to fastembed's own (256).
+        self.batch_size = batch_size
         self._model = None
 
     def _load(self):
@@ -268,7 +287,9 @@ class FastEmbedBackend:
             return []
         model = self._load()
         # fastembed's embed() returns a generator of numpy arrays.
-        vectors = [list(map(float, v)) for v in model.embed(texts)]
+        size = self.batch_size or _FASTEMBED_BATCH_SIZE
+        kw = {"batch_size": size} if size else {}
+        vectors = [list(map(float, v)) for v in model.embed(texts, **kw)]
         if vectors:
             self.dim = len(vectors[0])
         return vectors
@@ -363,7 +384,7 @@ class VoyageBackend:
         return out
 
 
-def get_backend(spec: str | dict | None) -> EmbeddingBackend:
+def get_backend(spec: str | dict | None, *, batch_size: int | None = None) -> EmbeddingBackend:
     """Instantiate a backend from a spec.
 
     Accepted forms:
@@ -374,11 +395,20 @@ def get_backend(spec: str | dict | None) -> EmbeddingBackend:
     - ``"voyage:voyage-3-lite"`` -> VoyageBackend
     - ``{"backend": "st", "model": "...", "dim": 384}`` -> full override
     - ``None`` -> package default (``st:all-MiniLM-L6-v2``)
+
+    ``batch_size`` (or a dict spec's ``"batch_size"``) is passed through to
+    the fastembed backend, the only one that takes it; ``None`` keeps the
+    library's own default. Setting it for any other backend is an error.
     """
     from ..utils.const import DEFAULT_BACKEND_SPEC
 
     if spec is None:
         spec = DEFAULT_BACKEND_SPEC
+    if isinstance(spec, dict) and batch_size is None:
+        batch_size = spec.get("batch_size")
+    kind = spec.get("backend") if isinstance(spec, dict) else str(spec).partition(":")[0]
+    if batch_size is not None and kind != "fastembed":
+        raise ValueError(f"batch_size is only supported by the fastembed backend, not {kind!r}")
 
     if isinstance(spec, dict):
         kind = spec.get("backend")
@@ -387,7 +417,7 @@ def get_backend(spec: str | dict | None) -> EmbeddingBackend:
         if kind == "st":
             backend = SentenceTransformerBackend(model or "all-MiniLM-L6-v2")
         elif kind == "fastembed":
-            backend = FastEmbedBackend(model or "all-MiniLM-L6-v2")
+            backend = FastEmbedBackend(model or "all-MiniLM-L6-v2", batch_size=batch_size)
         elif kind == "openai":
             backend = OpenAIBackend(model or "text-embedding-3-small")
         elif kind == "voyage":
@@ -404,7 +434,7 @@ def get_backend(spec: str | dict | None) -> EmbeddingBackend:
     if kind == "st":
         return SentenceTransformerBackend(model)
     if kind == "fastembed":
-        return FastEmbedBackend(model)
+        return FastEmbedBackend(model, batch_size=batch_size)
     if kind == "openai":
         return OpenAIBackend(model)
     if kind == "voyage":

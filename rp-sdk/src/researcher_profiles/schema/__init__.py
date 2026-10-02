@@ -39,9 +39,10 @@ from scholarcore.identity import LOCAL_RID_RE, is_local, is_rid, orcid_of
 
 from ._common import _VISIBILITY_ORDER as _VISIBILITY_ORDER
 from ._common import (
-    ALWAYS_RESTRICTED_ROLES,
+    ALWAYS_PRIVATE_ROLES,
     FORMAT_HINT,
     KNOWN_PROVENANCE,
+    RENAMED_TIERS,
     ROLE_DEFAULT_VISIBILITY,
     ProfileLevel,
     Provenance,
@@ -58,18 +59,46 @@ from ._identity import (
     validate_rid,
 )
 from ._identity import _slugify as _slugify
-from ._parts import Anchor, ArtifactRef, CareerStage, Identifier, PaperStats, ResearchOutput
-from ._proof import KNOWN_PROOF_KINDS, Proof
+from ._parts import (
+    Anchor,
+    ArtifactRef,
+    CareerStage,
+    ConceptReference,
+    Identifier,
+    InterestConcept,
+    InterestEvidence,
+    InterestMethod,
+    PaperStats,
+    ResearchInterest,
+    ResearchOutput,
+    SectionVisibility,
+    SiteCapabilities,
+    SiteInfrastructure,
+    effective_interests,
+    interests_from_text,
+    merge_generated_interests,
+    project_interests,
+)
+from ._proof import (
+    KNOWN_PROOF_KINDS,
+    REGISTRY_ISSUED_PROOF_KINDS,
+    Proof,
+    strip_registry_issued_from_document,
+    strip_registry_issued_proofs,
+)
 from ._sources import (
     GrantRecord,
     GrantsDocument,
     PaperRecord,
     PapersDocument,
     SummaryFile,
+    TrialRecord,
+    TrialsDocument,
+    TrialStats,
 )
 
 __all__ = [
-    "ALWAYS_RESTRICTED_ROLES",
+    "ALWAYS_PRIVATE_ROLES",
     "LOCAL_RID_RE",
     "SLUG_RE",
     "ANCHOR_FIELDS",
@@ -77,6 +106,7 @@ __all__ = [
     "ArtifactRef",
     "CareerEntry",
     "CareerStage",
+    "ConceptReference",
     "DERIVED_FIELDS",
     "DOCUMENT_FIELDS",
     "GrantRecord",
@@ -91,13 +121,29 @@ __all__ = [
     "ProfileDocument",
     "ProfileLevel",
     "Proof",
+    "REGISTRY_ISSUED_PROOF_KINDS",
     "Provenance",
+    "RENAMED_TIERS",
     "ROLE_DEFAULT_VISIBILITY",
     "ResearchOutput",
+    "SectionVisibility",
+    "SiteCapabilities",
+    "SiteInfrastructure",
     "Visibility",
     "most_restrictive",
     "SummaryFile",
+    "TrialRecord",
+    "TrialsDocument",
+    "TrialStats",
     "Training",
+    "InterestConcept",
+    "InterestEvidence",
+    "InterestMethod",
+    "ResearchInterest",
+    "effective_interests",
+    "interests_from_text",
+    "merge_generated_interests",
+    "project_interests",
     "is_local",
     "is_rid",
     "mint_local_rid",
@@ -106,4 +152,6 @@ __all__ = [
     "role_default_visibility",
     "validate_ref",
     "validate_rid",
+    "strip_registry_issued_from_document",
+    "strip_registry_issued_proofs",
 ]

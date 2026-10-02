@@ -230,6 +230,17 @@ class TestWheelIsSdkOnly:
             )
             assert zf.getinfo(member).file_size > 0, f"{member} is empty in the wheel"
 
+    def test_wheel_contains_the_pinned_vocabularies(self, built_wheel):
+        """Interest concepts resolve against these files; an install without them cannot."""
+        from researcher_profiles.vocab import MESH_FILE, OPENALEX_FILE
+
+        with zipfile.ZipFile(built_wheel) as zf:
+            names = set(zf.namelist())
+            for name in (OPENALEX_FILE, MESH_FILE):
+                member = f"researcher_profiles/vocab/{name}"
+                assert member in names, f"{member} is missing from the wheel"
+                assert zf.getinfo(member).file_size > 0, f"{member} is empty in the wheel"
+
 
 class TestDistributionsAreSdkOnly:
     """Neither built artifact may carry anything but the SDK's own files.

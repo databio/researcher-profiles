@@ -13,7 +13,7 @@ export { MetadataPanel } from "./MetadataPanel";
 export { MarkdownSection } from "./MarkdownSection";
 export { PapersList } from "./PapersList";
 export { PaperRow } from "./PaperRow";
-export type { LoadSummary } from "./PaperRow";
+export type { FullTextHref, LoadSummary } from "./PaperRow";
 export { Markdown } from "./Markdown";
 export { worksGraphToPapers } from "./works";
 export type {

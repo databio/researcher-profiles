@@ -81,6 +81,27 @@ def swap_profile_dir(root: Path, slug: str, staging_dir: Path) -> Path:
     return target
 
 
+def _strip_staged_document(staging: Path) -> None:
+    """Drop registry-issued proofs from a staged ``profile.jsonld`` before it goes live.
+
+    A pushed or ingested directory is swapped in whole, so its document never
+    passes :meth:`DirectoryArtifactStorage.save_document`; this is the same
+    strip, applied to the staged file. Untouched when there is nothing to
+    drop, so the pushed bytes stay verbatim.
+    """
+    from ..profile.storage import persistable_document
+    from ..schema.jsonld import canonical_dumps
+
+    path = staging / "profile.jsonld"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return  # the load below reports an unreadable document
+    stripped = persistable_document(data, where=str(path))
+    if stripped is not data:
+        path.write_text(canonical_dumps(stripped), encoding="utf-8")
+
+
 class FilesystemProfileStore(_HookedStore, _AnalyticsAccessors):
     """Profiles as directories under one root, with a small LRU over the
     loaded :class:`~researcher_profiles.profile.ResearcherProfile` objects.
@@ -203,6 +224,32 @@ class FilesystemProfileStore(_HookedStore, _AnalyticsAccessors):
         except ProfileNotFoundError:
             return False
         return True
+
+    def rids_with_email(self, email: str) -> list[str]:
+        """rids whose document ``email`` equals ``email`` (case and outer space ignored).
+
+        Loads every profile, which is fine for a directory corpus.
+        """
+        needle = (email or "").strip().lower()
+        if not needle:
+            return []
+        out = []
+        for slug in self.list_slugs():
+            meta = self.get(slug).metadata
+            if (meta.email or "").strip().lower() == needle:
+                out.append(meta.rid)
+        return sorted(out)
+
+    def successor_of(self, ref: str) -> Optional[str]:  # noqa: ARG002
+        """Always ``None``: a directory store keeps no aliases (it cannot merge)."""
+        return None
+
+    def alias_slugs(self) -> set[str]:
+        """Always empty: a directory store keeps no aliases."""
+        return set()
+
+    def merge_into(self, retired_ref: str, staging: Path, **kwargs) -> IngestResult:  # noqa: ARG002
+        raise NotImplementedError("merge needs the SQL store")
 
     def write_lookup_index(self) -> Optional[Path]:
         """Persist ``rid <-> slug`` into ``<root>/.cache/index.json``.
@@ -353,6 +400,66 @@ class FilesystemProfileStore(_HookedStore, _AnalyticsAccessors):
         self._bump_generation()
         return self._admit(slug, prof)
 
+    def create_bundle(
+        self,
+        document: ProfileDocument,
+        *,
+        slug: str,
+        expertise: str | None = None,
+        soul: str | None = None,
+        artifacts: dict[str, str] | None = None,
+    ) -> ResearcherProfile:
+        """Create ``<root>/<slug>/`` with its document and every artifact.
+
+        One nested write unit of kind ``"create"``, exactly as :meth:`create`.
+        On this backend that unit is not atomic (``ctx.atomic`` is ``False``),
+        so a failure part-way is undone the only way a directory can be: the
+        whole directory comes back out, which is also what :meth:`create`
+        already does.
+        """
+        target = self._root / slug
+        if target.exists() or self.exists(document.rid):
+            raise ProfileWriteError(
+                str(target),
+                f"cannot create {slug!r}: a profile with that slug or with rid "
+                f"{document.rid!r} already exists in {self._root}",
+            )
+        declared = {p.content_url: p for p in (*document.has_part, *document.subject_of)}
+        for content_url in artifacts or {}:
+            if content_url not in declared:
+                raise ProfileWriteError(
+                    str(target), f"artifact {content_url!r} is not in the document manifest"
+                )
+        target.mkdir(parents=True)
+        try:
+            prof = ResearcherProfile.from_files(target)
+            # See ``create``: seed the in-memory document so a create hook
+            # keyed on the rid is not handed an empty one.
+            prof._metadata = document
+            self._thread_hooks(prof)
+            with prof.write_unit("create"):
+                prof.save_profile(document)
+                if expertise is not None:
+                    prof.save_expertise(expertise)
+                if soul is not None:
+                    prof.save_soul(soul)
+                for content_url, text in (artifacts or {}).items():
+                    part = declared[content_url]
+                    prof.storage.write_artifact(
+                        content_url,
+                        text,
+                        role=part.role or "artifact",
+                        name=part.name or content_url,
+                        encoding_format=part.encoding_format or "text/plain",
+                        manifest_slot=("subjectOf" if part in document.subject_of else "hasPart"),
+                    )
+        except BaseException:
+            shutil.rmtree(target, ignore_errors=True)
+            raise
+        self._rid_map_stamp = None
+        self._bump_generation()
+        return self._admit(slug, prof)
+
     def put_document(self, slug: str, document: ProfileDocument) -> ResearcherProfile:
         """Create-or-replace a profile's canonical document only.
 
@@ -422,6 +529,7 @@ class FilesystemProfileStore(_HookedStore, _AnalyticsAccessors):
         committed but unindexed rather than raising. The profile is hosted,
         but not yet in ``/match``.
         """
+        _strip_staged_document(Path(staging))
         try:
             staged = ResearcherProfile.from_files(staging)
             name = staged.metadata.name
@@ -563,7 +671,7 @@ class FilesystemProfileStore(_HookedStore, _AnalyticsAccessors):
         """The profile's vectors: the build-local sqlite, else the served flat form.
 
         sqlite first because it is the richer index: it carries every chunk,
-        including the restricted ones the public export drops, and its hits
+        including the private ones the public export drops, and its hits
         carry text. A directory that only holds a published profile (no
         ``.cache/``) still ranks, at the public subset, through the flat form.
 

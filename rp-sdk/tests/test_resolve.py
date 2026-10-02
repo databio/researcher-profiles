@@ -62,7 +62,7 @@ class TestRidFirst:
         doc = empty_store.get(ORCID_B).metadata
         assert doc.provenance == "third_party"
         assert doc.level == "lite"
-        assert doc.visibility == "internal"
+        assert doc.visibility == "limited"
 
     def test_orcid_miss_without_a_name_is_an_error_not_a_mint(self, empty_store):
         with pytest.raises(ResolveError, match="name"):
@@ -401,23 +401,23 @@ class TestIdempotency:
         r = resolve_person(empty_store, rid=ORCID_A, name="Unknown")
         assert r == ResolveResult(rid=ORCID_A, created=False, confidence="exact")
 
-    def test_restricted_profiles_never_appear_in_candidates(self, empty_store):
-        """The restricted tier never leaves the machine, not even as a
+    def test_private_profiles_never_appear_in_candidates(self, empty_store):
+        """The private tier is served to nobody but the owner, not even as a
         candidate name, and not via the mint path either: round 5 showed a
-        restricted profile AT the deterministic rid being handed back by
+        private profile AT the deterministic rid being handed back by
         the collision absorb. A separate stub is minted instead."""
-        restricted_rid = _deterministic_local_rid("Jenna Doe")
+        private_rid = _deterministic_local_rid("Jenna Doe")
         doc = ProfileDocument(
             name="Jenna Doe",
-            rid=restricted_rid,
+            rid=private_rid,
             provenance="synthetic",
-            visibility="restricted",
+            visibility="private",
         )
         empty_store.create(doc, slug="doe-jenna")
         r = resolve_person(empty_store, name="Jenna Doe")
         assert r.created is True
-        assert r.rid != restricted_rid
-        assert all(c.rid != restricted_rid for c in r.candidates)
+        assert r.rid != private_rid
+        assert all(c.rid != private_rid for c in r.candidates)
 
     def test_a_wedged_directory_does_not_make_a_person_unmintable(self, tmp_path):
         """A create that died between mkdir and writing profile.jsonld
