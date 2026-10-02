@@ -12,7 +12,7 @@ from typing import Any, Literal
 
 from pydantic import Field, model_validator
 
-from ._common import Visibility, _Base, role_default_visibility
+from ._common import ACCESS_RIGHTS_KEY, Visibility, _Base, role_default_visibility
 from .jsonld import JsonLdModel
 
 
@@ -492,6 +492,16 @@ class ArtifactRef(JsonLdModel):
     #: Roles or paper_ids this artifact was derived from. Its effective tier is
     #: the most restrictive of its own and its sources'.
     derived_from: list[str] = Field(default=[], alias="derivedFrom")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_access_rights(cls, data: Any) -> Any:
+        # ``accessRights`` is derived at serve time from the effective tier
+        # (:func:`researcher_profiles.privacy.project_document`). A copy read
+        # back in is stale by construction, so it is never kept or stored.
+        if isinstance(data, dict) and ACCESS_RIGHTS_KEY in data:
+            data = {k: v for k, v in data.items() if k != ACCESS_RIGHTS_KEY}
+        return data
 
     @model_validator(mode="after")
     def _apply_role_tier(self) -> "ArtifactRef":

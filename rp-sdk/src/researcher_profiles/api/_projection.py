@@ -13,6 +13,7 @@ re-exported without an underscore from ``researcher_profiles.api``:
 internal to the route modules.
 """
 
+import json
 import logging
 from collections.abc import Sequence
 from datetime import datetime, timezone
@@ -30,6 +31,7 @@ from ..privacy import (
     TierExplanation,
     ViewerTier,
     chunk_source_tiers,
+    label_access_rights,
     profile_visible,
     project_document,
     tier_allows,
@@ -169,14 +171,14 @@ def registry_proofs(request: Request, rid: str) -> list[Proof]:
 
 def _served(prof, viewer: ViewerTier, proofs: Sequence[Proof]) -> ProfileDocument:
     md = prof.metadata
-    doc = project_document(md, viewer) if md.section_visibility else md
+    doc = project_document(md, viewer)
     return doc.model_copy(update={"proof": strip_registry_issued_proofs(doc.proof) + list(proofs)})
 
 
 def served_document(request: Request, prof, viewer: ViewerTier) -> ProfileDocument:
     """The document a registry serves: the stored record plus its registry proofs.
 
-    Projected by section visibility when the profile declares any. The stored
+    Projected for ``viewer`` (sections and ``accessRights``). The stored
     document's own registry-issued proofs (none should exist) are dropped and
     the hook's are appended. Never mutates ``prof.metadata``: the store caches
     that object.
@@ -190,8 +192,9 @@ def served_document_bytes(
     """The ``profile.jsonld`` bytes to serve for ``prof`` to ``viewer``.
 
     With no section projection, no registry proof to attach, and no stored
-    copy of a registry-issued proof, the stored bytes (``store.document_bytes``)
-    come back verbatim. Otherwise the served document is re-serialized
+    copy of a registry-issued proof, the stored JSON (``store.document_bytes``)
+    comes back as written, each manifest entry labeled with its derived
+    ``accessRights``. Otherwise the served document is re-serialized
     canonically, which drops any stored registry-issued proof (a bare server
     with no hook must not serve one either). Raises what ``document_bytes``
     raises when the store has lost the profile.
@@ -199,7 +202,11 @@ def served_document_bytes(
     proofs = registry_proofs(request, prof.metadata.rid)
     stored_registry_proof = any(p.kind in REGISTRY_ISSUED_PROOF_KINDS for p in prof.metadata.proof)
     if not prof.metadata.section_visibility and not proofs and not stored_registry_proof:
-        return store.document_bytes(slug)
+        # The stored JSON as written, plus the derived ``accessRights`` labels.
+        # Re-dumping the model instead would also reshape untouched fields.
+        stored = json.loads(store.document_bytes(slug))
+        label_access_rights(stored, prof.metadata)
+        return canonical_dumps(stored).encode()
     doc = _served(prof, viewer, proofs)
     return canonical_dumps(doc.model_dump(mode="json")).encode()
 

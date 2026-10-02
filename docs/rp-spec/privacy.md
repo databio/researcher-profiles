@@ -200,3 +200,17 @@ Note that the EU and COAR "restricted" is rp's *middle* tier (`limited`), not
 its owner-only tier. In the JSON-LD context, a `visibility` value expands to
 `rp:Public`, `rp:Limited`, or `rp:Private`, and the context document defines
 those three concepts with the `skos:closeMatch` links above.
+
+A host labels every manifest entry it serves with `accessRights`
+(`dcterms:accessRights`): the EU IRI for that entry's **effective** tier, so
+DCAT tools read the tier without the rp vocabulary. The label is derived when
+the profile is served and is never stored; a stored copy is ignored on load.
+
+```json
+{
+  "role": "cv",
+  "contentUrl": "sources/cv.md",
+  "visibility": "private",
+  "accessRights": "http://publications.europa.eu/resource/authority/access-right/NON_PUBLIC"
+}
+```

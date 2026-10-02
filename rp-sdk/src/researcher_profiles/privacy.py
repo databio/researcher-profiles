@@ -17,6 +17,8 @@ from typing import Iterable
 
 from .schema import (
     _VISIBILITY_ORDER,
+    ACCESS_RIGHTS_IRI,
+    ACCESS_RIGHTS_KEY,
     ProfileDocument,
     Visibility,
     most_restrictive,
@@ -121,7 +123,47 @@ def project_document(profile: ProfileDocument, viewer: ViewerTier) -> ProfileDoc
             for name in fields:
                 value = getattr(profile, name, None)
                 setattr(projected, name, [] if isinstance(value, list) else None)
+    _stamp_access_rights(projected)
     return projected
+
+
+def access_rights(profile: ProfileDocument) -> dict[str, str]:
+    """``contentUrl`` -> the EU access-right IRI of that entry's effective tier.
+
+    What a served manifest entry's ``accessRights`` (``dcterms:accessRights``)
+    says, so DCAT tools read the tier without rp's own vocabulary. Derived at
+    egress and dropped on load (:class:`~researcher_profiles.schema.ArtifactRef`),
+    so it is never stored and cannot go stale. A ``derivedFrom`` cycle has no
+    effective tier: the answer is then empty, entries carry no label rather than
+    a wrong one, and ``rp validate`` reports the cycle.
+    """
+    try:
+        effective = effective_tiers(profile)
+    except DerivationCycleError:
+        return {}
+    return {url: ACCESS_RIGHTS_IRI[tier] for url, tier in effective.items()}
+
+
+def label_access_rights(document: dict, profile: ProfileDocument) -> None:
+    """Add ``accessRights`` to every manifest entry of a serialized ``document``.
+
+    For egress that serves the stored JSON rather than a re-dumped model.
+    """
+    rights = access_rights(profile)
+    for slot in ("hasPart", "subjectOf"):
+        for entry in document.get(slot) or []:
+            iri = rights.get(entry.get("contentUrl"))
+            if iri is not None:
+                entry[ACCESS_RIGHTS_KEY] = iri
+
+
+def _stamp_access_rights(profile: ProfileDocument) -> None:
+    """:func:`label_access_rights` for a model: set on each entry's extras."""
+    rights = access_rights(profile)
+    for ref in [*profile.has_part, *profile.subject_of]:
+        iri = rights.get(ref.content_url)
+        if iri is not None and ref.__pydantic_extra__ is not None:
+            ref.__pydantic_extra__[ACCESS_RIGHTS_KEY] = iri
 
 
 @dataclass(frozen=True)
@@ -345,12 +387,14 @@ __all__ = [
     "TierExplanation",
     "ViewerTier",
     "derivation_errors",
+    "access_rights",
     "explain_tiers",
     "narrow_viewer",
     "profile_visible",
     "tier_allows",
     "chunk_source_tiers",
     "effective_tiers",
+    "label_access_rights",
     "SECTION_FIELDS",
     "project_document",
     "section_tiers",

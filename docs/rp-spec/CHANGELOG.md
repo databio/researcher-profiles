@@ -37,4 +37,6 @@ The old names are rejected, with no aliases: validation names the
 replacement. [Privacy](privacy.md#mapping-to-other-vocabularies) gains a
 mapping to the EU access-right, COAR and ORCID vocabularies, and the context
 expands `visibility` values to `rp:Public`, `rp:Limited`, and `rp:Private`,
-each a `skos:closeMatch` to those terms.
+each a `skos:closeMatch` to those terms. Served manifest entries carry
+`accessRights` (`dcterms:accessRights`), the EU IRI of the entry's effective
+tier; it is derived at serve time and never stored.

@@ -39,6 +39,8 @@ from scholarcore.identity import LOCAL_RID_RE, is_local, is_rid, orcid_of
 
 from ._common import _VISIBILITY_ORDER as _VISIBILITY_ORDER
 from ._common import (
+    ACCESS_RIGHTS_IRI,
+    ACCESS_RIGHTS_KEY,
     ALWAYS_PRIVATE_ROLES,
     FORMAT_HINT,
     KNOWN_PROVENANCE,
@@ -98,6 +100,8 @@ from ._sources import (
 )
 
 __all__ = [
+    "ACCESS_RIGHTS_IRI",
+    "ACCESS_RIGHTS_KEY",
     "ALWAYS_PRIVATE_ROLES",
     "LOCAL_RID_RE",
     "SLUG_RE",

@@ -624,9 +624,15 @@ class TestCreateAppOverAStore:
     def test_the_document_route_serves_the_published_bytes(
         self, both_stores, make_api_client, jane_doe_dir
     ):
+        """The published JSON as written, each manifest entry labeled with its
+        derived ``accessRights`` and nothing else changed."""
         c = make_api_client(both_stores)
-        r = c.get("/api/v1/profiles/jane-doe/profile.jsonld")
-        assert r.content == (jane_doe_dir / "profile.jsonld").read_bytes()
+        served = c.get("/api/v1/profiles/jane-doe/profile.jsonld").json()
+        parts = served["hasPart"] + served.get("subjectOf", [])
+        assert parts and all("accessRights" in p for p in parts)
+        for p in parts:
+            del p["accessRights"]
+        assert served == json.loads((jane_doe_dir / "profile.jsonld").read_text(encoding="utf-8"))
 
     def test_a_write_through_a_route_fires_the_apps_hooks(self, both_stores, make_api_client):
         seen = []

@@ -739,3 +739,37 @@ def test_research_interest_keeps_neutral_and_unknown_out_of_both_lists():
     )
     assert doc.interests == ["Example"]
     assert doc.not_interests == ["Excluded"]
+
+
+def test_served_manifest_entries_carry_effective_access_rights():
+    """Each entry gets the EU access-right IRI of its EFFECTIVE tier: a
+    public-declared digest of a private CV is labeled non-public."""
+    from researcher_profiles.privacy import project_document
+    from researcher_profiles.schema import ACCESS_RIGHTS_IRI
+
+    prof = _profile(
+        hasPart=[
+            {"contentUrl": "sources/cv.md", "role": "cv"},
+            {
+                "contentUrl": "digest.md",
+                "role": "web",
+                "visibility": "public",
+                "derivedFrom": ["cv"],
+            },
+            {"contentUrl": "sources/trials.jsonld", "role": "trials"},
+        ],
+        subjectOf=[{"contentUrl": "personality/expertise.md", "role": "expertise"}],
+    )
+    served = project_document(prof, "public").model_dump(mode="json", by_alias=True)
+    rights = {p["contentUrl"]: p["accessRights"] for p in served["hasPart"] + served["subjectOf"]}
+    assert rights == {
+        "sources/cv.md": ACCESS_RIGHTS_IRI["private"],
+        "digest.md": ACCESS_RIGHTS_IRI["private"],
+        "sources/trials.jsonld": ACCESS_RIGHTS_IRI["limited"],
+        "personality/expertise.md": ACCESS_RIGHTS_IRI["public"],
+    }
+    # Derived, never stored: the source document is untouched, and a served
+    # copy read back in drops the label.
+    assert "accessRights" not in prof.model_dump(mode="json", by_alias=True)["hasPart"][0]
+    reloaded = ProfileDocument.model_validate(served)
+    assert "accessRights" not in reloaded.model_dump(mode="json", by_alias=True)["hasPart"][0]

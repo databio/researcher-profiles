@@ -59,6 +59,20 @@ def reject_renamed_tier(value: Any) -> Any:
 
 Visibility = Annotated[VisibilityTier, BeforeValidator(reject_renamed_tier)]
 
+#: The JSON key that carries an artifact's ``dcterms:accessRights`` when it is
+#: served. Derived, never stored; see :data:`ACCESS_RIGHTS_IRI`.
+ACCESS_RIGHTS_KEY = "accessRights"
+
+#: Each tier's term in the EU Publications Office access-right table, the
+#: vocabulary DCAT-AP uses for ``dcterms:accessRights``. A close match, not an
+#: exact one; docs/rp-spec/privacy.md has the full mapping.
+_EU_ACCESS_RIGHT = "http://publications.europa.eu/resource/authority/access-right/"
+ACCESS_RIGHTS_IRI: dict[VisibilityTier, str] = {
+    "public": _EU_ACCESS_RIGHT + "PUBLIC",
+    "limited": _EU_ACCESS_RIGHT + "RESTRICTED",
+    "private": _EU_ACCESS_RIGHT + "NON_PUBLIC",
+}
+
 #: Ordered most-permissive -> least-permissive. Index = restrictiveness rank.
 _VISIBILITY_ORDER: tuple[VisibilityTier, ...] = ("public", "limited", "private")
 

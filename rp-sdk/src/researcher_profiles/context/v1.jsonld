@@ -57,6 +57,7 @@
       }
     },
     "derivedFrom": "rp:derivedFrom",
+    "accessRights": { "@id": "dcterms:accessRights", "@type": "@id" },
     "bytes": "rp:bytes",
     "sha256": "rp:sha256",
     "hasCitationGraph": "rp:hasCitationGraph",
