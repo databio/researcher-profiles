@@ -87,6 +87,9 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
             "  aws s3 sync ./_site s3://my-bucket/ --delete "
             "--endpoint-url https://<account>.r2.cloudflarestorage.com\n"
             "  rclone sync ./_site remote:my-bucket\n"
+            "The folder also holds .rp-publish.json, which records the audience "
+            "and the file list\nand is uploaded with the rest; it holds nothing "
+            "beyond paths already in the tree.\n"
         ),
     )
     p_publish.add_argument(
@@ -246,6 +249,8 @@ def _resolve_publish_source(ref: str, root: str | None):
 
 def _cmd_publish(args: argparse.Namespace) -> int:
     """Write the static tree one audience may see."""
+    from pydantic import ValidationError
+
     from ..publish import PublishError, publish_collection
 
     source = _resolve_publish_source(args.profiles, args.root)
@@ -267,7 +272,7 @@ def _cmd_publish(args: argparse.Namespace) -> int:
             now=args.now,
             dry_run=args.dry_run,
         )
-    except PublishError as e:
+    except (PublishError, ValidationError) as e:
         print(f"publish refused: {e}", file=sys.stderr)
         return EXIT_ERROR
     except FileNotFoundError as e:
@@ -290,6 +295,8 @@ def _cmd_publish(args: argparse.Namespace) -> int:
         print(f"{slug}: skipped ({why})")
     for rel in result.removed:
         print(f"removed {rel}")
+    for rel in result.would_remove:
+        print(f"would remove {rel}")
     print(f"{verb} {len(result.profiles)} profile(s) for --who {result.viewer} to {result.out_dir}")
     return EXIT_OK
 

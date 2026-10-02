@@ -19,11 +19,12 @@ when the export is written, so the output folder needs no filtering.
 """
 
 from ._export import ExportPlan, plan_profile_export
-from ._publish import ProfileExport, PublishError, PublishResult, publish_collection
+from ._publish import MARKER, ProfileExport, PublishError, PublishResult, publish_collection
 from ._render import render_page, render_profile
 from ._site import SiteResult, build_site
 
 __all__ = [
+    "MARKER",
     "ExportPlan",
     "ProfileExport",
     "PublishError",

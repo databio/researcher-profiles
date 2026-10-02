@@ -27,7 +27,8 @@ PROFILE_DOCUMENT = "profile.jsonld"
 #: Directories whose files are parts of one manifest artifact rather than
 #: entries of their own. The flat embedding blob and chunk metadata are named
 #: by ``embeddings/index.json`` (its ``file`` field), so they travel at its tier.
-_COMPANION_DIRS: dict[str, str] = {"embeddings/": "embeddings/index.json"}
+_EMBEDDING_INDEX = "embeddings/index.json"
+_COMPANION_DIRS: dict[str, str] = {"embeddings/": _EMBEDDING_INDEX}
 
 
 @dataclass(frozen=True)
@@ -42,6 +43,10 @@ class ExportPlan:
     files: list[str]
     #: Profile-relative paths on disk that do not ship, each with the reason.
     withheld: dict[str, str] = field(default_factory=dict)
+    #: Whether the ``embeddings/index.json`` artifact reaches this viewer. When
+    #: it does not, nothing under ``embeddings/`` ships, whatever its source,
+    #: and the projected document says ``hasEmbeddingIndex: false``.
+    embeddings: bool = False
 
 
 def _walk(profile_dir: Path) -> Iterator[str]:
@@ -75,7 +80,9 @@ def plan_profile_export(profile_dir: str | os.PathLike, viewer: ViewerTier) -> E
       published record. The one exception is a file under ``embeddings/``,
       which is part of the ``embeddings/index.json`` artifact and takes its
       tier;
-    * a manifest artifact ships when ``tier_allows(viewer, effective_tier)``.
+    * a manifest artifact ships when ``tier_allows(viewer, effective_tier)``;
+    * ``hasEmbeddingIndex`` in the projected document is true only when
+      ``embeddings/index.json`` ships.
 
     The whole-profile gate (``privacy.profile_visible``) is the caller's job: it
     decides whether this profile reaches the viewer at all.
@@ -105,10 +112,13 @@ def plan_profile_export(profile_dir: str | os.PathLike, viewer: ViewerTier) -> E
         else:
             withheld[rel] = _withheld_reason(entry)
 
-    document = canonical_dumps(project_document(profile, viewer).model_dump(mode="json")).encode(
-        "utf-8"
-    )
-    return ExportPlan(document=document, files=files, withheld=withheld)
+    emb = explain.get(_EMBEDDING_INDEX)
+    embeddings = emb is not None and tier_allows(viewer, emb.effective)
+    projected = project_document(profile, viewer)
+    if not embeddings and projected.has_embedding_index:
+        projected.has_embedding_index = False
+    document = canonical_dumps(projected.model_dump(mode="json")).encode("utf-8")
+    return ExportPlan(document=document, files=files, withheld=withheld, embeddings=embeddings)
 
 
 __all__ = ["ExportPlan", "plan_profile_export"]

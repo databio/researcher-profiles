@@ -26,7 +26,12 @@ that audience, only the files that audience may read, and its page and
 embeddings rebuilt for that audience. The collection files (`index.json`,
 `by-rid.json`, `SKILL.md`, ...) sit at the top. Run it again into the same
 folder to refresh it; files that are no longer allowed are removed. Add
-`--dry-run` to see what ships and what is held back, and why.
+`--dry-run` to see what ships, what is held back and why, and what a real run
+would remove.
+
+The folder also holds `.rp-publish.json`, which records the audience and the
+file list and is uploaded with the rest; it holds nothing beyond paths already
+in the tree.
 
 **2. Upload the folder as is.** Nothing in it needs filtering, so any sync
 tool works:

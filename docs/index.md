@@ -1,8 +1,8 @@
 # Researcher Profiles
 
 A portable format specification and SDK for researcher profiles: static,
-self-contained bundles of files describing one researcher, served from any
-HTTP host. The project has five parts.
+self-contained bundles of files describing one researcher that can be served
+from any HTTP host. The project has five parts.
 
 - The [Specification](rp-spec/) is the published profile standard. It covers
   the format, conformance levels, and privacy tiers.

@@ -219,6 +219,44 @@ def _audience_profile(root: Path, slug: str = "ada", **doc_fields) -> Path:
     return pdir
 
 
+def _set_part_tier(pdir: Path, content_url: str, tier: str) -> Path:
+    """Declare one manifest artifact of the profile at ``pdir`` at ``tier``."""
+    from researcher_profiles.profile import ResearcherProfile
+
+    prof = ResearcherProfile.from_files(pdir)
+    doc = prof.metadata
+    (part,) = [p for p in [*doc.has_part, *doc.subject_of] if p.content_url == content_url]
+    part.visibility = tier
+    prof.save_profile(doc)
+    return pdir
+
+
+def _add_private_chunk(pdir: Path) -> None:
+    """Put one ``cv`` chunk (private by role default) into the local index.
+
+    The indexer does not chunk a CV, so the row goes in by hand. Its vector
+    points far from the rest, so a centroid that includes it is visibly off.
+    """
+    import numpy as np
+
+    from researcher_profiles.embeddings._sqlite import connect_vec
+
+    conn = connect_vec(cache_dir(pdir) / "embeddings.sqlite")
+    dim = len(conn.execute("SELECT embedding FROM chunk_vec LIMIT 1").fetchone()[0]) // 4
+    cur = conn.execute(
+        "INSERT INTO chunks (source_type, source_id, chunk_index, text, text_hash, "
+        "section, char_count, indexed_at) VALUES ('cv', 'cv', 0, 'x', 'x', NULL, 1, '')"
+    )
+    vec = -np.ones(dim, dtype="<f4") * 50
+    conn.execute(
+        "INSERT INTO chunk_vec (id, embedding) VALUES (?, ?)", (cur.lastrowid, vec.tobytes())
+    )
+    conn.commit()
+    conn.close()
+    for cached in cache_dir(pdir).rglob("*.npz"):
+        cached.unlink()
+
+
 def _tree_text(root: Path) -> str:
     return "\n".join(
         f.read_text(encoding="utf-8", errors="ignore") for f in root.rglob("*") if f.is_file()
@@ -384,6 +422,158 @@ class TestPublishCollection:
         assert "profile.jsonld" in ada["files"]
         assert ada["withheld"]["sources/papers/p1.md"].startswith("private")
         assert not out.exists()
+
+    # ---- embeddings follow their own artifact's tier ------------------------
+
+    @pytest.mark.parametrize("who, ships", [("public", False), ("private", True)])
+    def test_withheld_embeddings_do_not_ship(self, tmp_path, who, ships):
+        from researcher_profiles.publish import publish_collection
+
+        root = tmp_path / "profiles"
+        _set_part_tier(_audience_profile(root), "embeddings/index.json", "private")
+        out = tmp_path / "out"
+        result = publish_collection(root, out, viewer=who)
+
+        prof_out = out / "profiles" / "ada"
+        assert (prof_out / "embeddings").exists() is ships
+        doc = json.loads((prof_out / "profile.jsonld").read_text())
+        assert doc.get("hasEmbeddingIndex", False) is ships
+        (export,) = result.profiles
+        assert any(f.startswith("embeddings/") for f in export.files) is ships
+        # The collection does not advertise a profile whose vectors it withheld.
+        bundle = json.loads((out / "collection.jsonld").read_text())
+        assert bool(bundle["artifacts"]) is ships
+        if not ships:
+            assert not (out / "collection" / "embeddings").exists()
+
+    def test_viewer_archive_drops_the_embedding_flag_with_the_embeddings(self, tmp_path):
+        from researcher_profiles.publish import plan_profile_export
+
+        pdir = _set_part_tier(
+            _audience_profile(tmp_path / "profiles"), "embeddings/index.json", "private"
+        )
+        public = json.loads(plan_profile_export(pdir, "public").document)
+        private = json.loads(plan_profile_export(pdir, "private").document)
+        assert public.get("hasEmbeddingIndex", False) is False
+        assert private["hasEmbeddingIndex"] is True
+
+    def test_collection_centroid_is_the_mean_of_what_ships(self, tmp_path):
+        import numpy as np
+
+        from researcher_profiles.embeddings.flat import FlatEmbeddingIndex
+        from researcher_profiles.profile import ResearcherProfile
+        from researcher_profiles.publish import publish_collection
+
+        root = tmp_path / "profiles"
+        pdir = _audience_profile(root)
+        _add_private_chunk(pdir)
+        out = tmp_path / "out"
+        publish_collection(root, out)
+
+        shipped = FlatEmbeddingIndex.load(out / "profiles" / "ada" / "embeddings").centroid()
+        index = json.loads((out / "collection" / "embeddings" / "index.json").read_text())
+        assert index["rows"] == ["ada"]
+        blob = (out / "collection" / "embeddings" / index["file"]).read_bytes()
+        row = np.frombuffer(blob, dtype="<f4")
+        np.testing.assert_allclose(row, shipped, atol=1e-6)
+        # The private chunk moves the all-chunk centroid, so equality above is
+        # not an accident of every chunk being public.
+        everything = ResearcherProfile.from_files(pdir).index.embedding("centroid")
+        assert not np.allclose(everything, shipped, atol=1e-4)
+
+    # ---- a profile that will not load stops the publish ----------------------
+
+    def test_a_profile_that_will_not_load_fails_the_publish(self, tmp_path, capsys):
+        from researcher_profiles.cli import main
+        from researcher_profiles.publish import PublishError, publish_collection
+
+        root = tmp_path / "profiles"
+        _audience_profile(root, "ada")
+        bad = _audience_profile(root, "bob", rid="0000-0002-1825-0097")
+        out = tmp_path / "out"
+        publish_collection(root, out)
+        assert (out / "profiles" / "bob" / "index.html").is_file()
+        before = _tree_snapshot(out)
+
+        doc = json.loads((bad / "profile.jsonld").read_text())
+        doc["visibility"] = "restricted"
+        (bad / "profile.jsonld").write_text(json.dumps(doc), encoding="utf-8")
+
+        with pytest.raises(PublishError, match="bob"):
+            publish_collection(root, out)
+        assert _tree_snapshot(out) == before
+        assert main(["publish", str(root), "--out", str(out)]) != 0
+        assert "bob" in capsys.readouterr().err
+        assert _tree_snapshot(out) == before
+
+    # ---- the marker ------------------------------------------------------------
+
+    @pytest.mark.parametrize("marker", ["[]", '{"files": "x"}', '"x"', "{}"])
+    def test_refuses_a_marker_of_the_wrong_shape(self, tmp_path, marker):
+        from researcher_profiles.publish import MARKER, PublishError, publish_collection
+
+        root = tmp_path / "profiles"
+        _audience_profile(root)
+        out = tmp_path / "out"
+        out.mkdir()
+        (out / MARKER).write_text(marker, encoding="utf-8")
+        with pytest.raises(PublishError, match="unreadable"):
+            publish_collection(root, out)
+
+    def test_a_crash_before_pruning_is_cleaned_up_next_run(self, tmp_path, monkeypatch):
+        from researcher_profiles.publish import _publish, publish_collection
+
+        root = tmp_path / "profiles"
+        pdir = _audience_profile(root)
+        out = tmp_path / "out"
+        publish_collection(root, out)
+        summary = next((out / "profiles" / "ada" / "sources" / "summaries").iterdir())
+        _set_part_tier(pdir, summary.relative_to(out / "profiles" / "ada").as_posix(), "limited")
+
+        real = _publish._remove_stale
+        monkeypatch.setattr(_publish, "_remove_stale", _boom)
+        with pytest.raises(RuntimeError):
+            publish_collection(root, out)
+        assert summary.exists()
+        monkeypatch.setattr(_publish, "_remove_stale", real)
+
+        publish_collection(root, out)
+        assert not summary.exists()
+
+    def test_dry_run_reports_what_it_would_remove(self, tmp_path, capsys):
+        from researcher_profiles.cli import main
+        from researcher_profiles.publish import publish_collection
+
+        root = tmp_path / "profiles"
+        pdir = _audience_profile(root)
+        out = tmp_path / "out"
+        publish_collection(root, out)
+        summary = next((out / "profiles" / "ada" / "sources" / "summaries").iterdir())
+        rel = summary.relative_to(out / "profiles" / "ada").as_posix()
+        _set_part_tier(pdir, rel, "limited")
+
+        result = publish_collection(root, out, dry_run=True)
+        assert result.would_remove == [f"profiles/ada/{rel}"]
+        assert result.removed == []
+        assert summary.exists()
+
+        assert main(["publish", str(root), "-o", str(out), "--dry-run", "--json"]) == 0
+        assert json.loads(capsys.readouterr().out)["would_remove"] == [f"profiles/ada/{rel}"]
+        assert main(["publish", str(root), "-o", str(out), "--dry-run"]) == 0
+        assert f"would remove profiles/ada/{rel}" in capsys.readouterr().out
+        assert summary.exists()
+
+    @pytest.mark.parametrize("who, sitemap", [("public", True), ("limited", False)])
+    def test_sitemap_only_for_a_public_export(self, tmp_path, who, sitemap):
+        from researcher_profiles.publish import publish_collection
+
+        root = tmp_path / "profiles"
+        _audience_profile(root)
+        out = tmp_path / "out"
+        publish_collection(root, out, viewer=who, base_url="https://example.org")
+        assert (out / "sitemap.xml").exists() is sitemap
+        robots = (out / "robots.txt").read_text()
+        assert ("Disallow: /\n" in robots) is not sitemap
 
 
 # ---------------------------------------------------------------------------
