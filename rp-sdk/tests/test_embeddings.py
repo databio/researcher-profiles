@@ -263,6 +263,37 @@ class TestFastEmbedBackend:
         with pytest.raises(ValueError, match="kind:model"):
             get_backend("fastembed")
 
+    def test_batch_size_passes_through_only_when_set(self):
+        from researcher_profiles.embeddings.backends import FastEmbedBackend, get_backend
+
+        class Model:
+            def __init__(self):
+                self.kwargs = []
+
+            def embed(self, texts, **kw):
+                self.kwargs.append(kw)
+                return [[0.0] * 384 for _ in texts]
+
+        unset = get_backend("fastembed:all-MiniLM-L6-v2")
+        assert unset.batch_size is None
+        unset._model = Model()
+        unset.embed(["a"])
+        assert unset._model.kwargs == [{}]
+
+        small = get_backend("fastembed:all-MiniLM-L6-v2", batch_size=16)
+        small._model = Model()
+        small.embed(["a", "b"])
+        assert small._model.kwargs == [{"batch_size": 16}]
+
+        from_dict = get_backend({"backend": "fastembed", "batch_size": 8})
+        assert isinstance(from_dict, FastEmbedBackend) and from_dict.batch_size == 8
+
+    def test_batch_size_refused_for_other_backends(self):
+        from researcher_profiles.embeddings.backends import get_backend
+
+        with pytest.raises(ValueError, match="only supported by the fastembed"):
+            get_backend("openai:text-embedding-3-small", batch_size=16)
+
     def test_dict_spec_defaults_to_minilm(self):
         from researcher_profiles.embeddings.backends import get_backend
 
