@@ -152,7 +152,7 @@ def _build_full_profile(root, *, visibility: str = "public", overrides: dict | N
 def matrix_client(make_api_client, tmp_path):
     """Factory: ``matrix_client(visibility=..., overrides=...)`` -> TestClient.
 
-    Installs the ``X-Test-User`` owner-verifier stub from ``test_owner_read.py``
+    Installs the ``X-Test-User`` owner-verifier stub (the same shape ``test_edit.py`` uses)
     and a consumer verifier that mints a tier per key, so all six viewer kinds
     are reachable from one app.
     """
@@ -585,6 +585,25 @@ class TestVisibilityWritesAreHonest:
         assert r.status_code == 400
 
 
+def _add_derived_note(client, tmp_path) -> None:
+    """Declare a public ``derived-note.md`` drawn from the CV, so it is raised to private."""
+    pdir = tmp_path / "profiles-public-0" / SLUG
+    prof = ResearcherProfile.from_files(pdir)
+    (pdir / "derived-note.md").write_text("drawn from the CV\n", encoding="utf-8")
+    prof.metadata.has_part.append(
+        ArtifactRef(
+            name="Derived note",
+            encodingFormat="text/markdown",
+            contentUrl="derived-note.md",
+            role="custom",
+            derivedFrom=["cv"],
+            visibility="public",
+        )
+    )
+    prof.save_profile()
+    client.app.state.store.evict(SLUG)
+
+
 class TestVisibilityReport:
     def test_counts_are_the_consequence_a_person_reads(self, matrix_client):
         c = matrix_client()
@@ -605,21 +624,7 @@ class TestVisibilityReport:
 
     def test_a_derived_artifact_names_its_source(self, matrix_client, tmp_path):
         c = matrix_client()
-        pdir = tmp_path / "profiles-public-0" / SLUG
-        prof = ResearcherProfile.from_files(pdir)
-        (pdir / "derived-note.md").write_text("drawn from the CV\n", encoding="utf-8")
-        prof.metadata.has_part.append(
-            ArtifactRef(
-                name="Derived note",
-                encodingFormat="text/markdown",
-                contentUrl="derived-note.md",
-                role="custom",
-                derivedFrom=["cv"],
-                visibility="public",
-            )
-        )
-        prof.save_profile()
-        c.app.state.store.evict(SLUG)
+        _add_derived_note(c, tmp_path)
 
         report = _get(c, f"/api/v1/profiles/{SLUG}/visibility", "owner").json()
         note = next(a for a in report["artifacts"] if a["content_url"] == "derived-note.md")
@@ -690,6 +695,32 @@ class TestContentRouteMatrix:
         direct = _get(c, f"/api/v1/profiles/{SLUG}/profile.jsonld", viewer)
         assert via_content.status_code == direct.status_code == (200 if profile_ok else 404)
         assert via_content.content == direct.content
+        if profile_ok:
+            assert via_content.headers["Cache-Control"] == direct.headers["Cache-Control"]
+            assert via_content.headers["content-type"].startswith("application/ld+json")
+
+
+class TestContentRouteEffectiveTier:
+    """The content route gates on the effective tier, not the role default."""
+
+    def test_a_retiered_artifact_is_served_at_its_declared_tier(self, matrix_client):
+        c = matrix_client(overrides={"works": "limited"})
+        owner = _content(c, "owner", ROLE_ARTIFACTS["works"])
+        assert owner.status_code == 200, owner.text
+        assert owner.headers["X-RP-Effective-Tier"] == "limited"
+        lab = _content(c, "consumer_lab", ROLE_ARTIFACTS["works"])
+        assert lab.status_code == 200, lab.text
+        assert lab.headers["X-RP-Effective-Tier"] == "limited"
+        assert _content(c, "anonymous", ROLE_ARTIFACTS["works"]).status_code == 404
+
+    def test_a_derived_artifact_is_gated_at_its_derived_tier(self, matrix_client, tmp_path):
+        c = matrix_client()
+        _add_derived_note(c, tmp_path)
+        owner = _content(c, "owner", "derived-note.md")
+        assert owner.status_code == 200, owner.text
+        assert owner.headers["X-RP-Effective-Tier"] == "private"
+        assert _content(c, "anonymous", "derived-note.md").status_code == 404
+        assert _content(c, "stranger", "derived-note.md").status_code == 404
 
 
 class TestContentRouteRefusalsAreOpaque:

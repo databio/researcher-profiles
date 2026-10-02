@@ -23,7 +23,7 @@ from researcher_profiles.store.db import RidAliasRow
 from researcher_profiles.store.http import HttpProfileStore
 from researcher_profiles.store.sql import SqlProfileStore
 
-from .factories import build_profile_dir
+from .factories import build_profile_dir, tar_gz_of_dir
 
 ORCID_A = "0000-0002-1825-0097"
 ORCID_B = "0000-0004-4600-113X"
@@ -240,17 +240,6 @@ class TestMergeInto:
         assert store.alias_slugs() == set()
 
 
-def _tar_of_dir(src: Path) -> bytes:
-    import io
-    import tarfile
-
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
-        for child in sorted(src.iterdir()):
-            tf.add(child, arcname=child.name)
-    return buf.getvalue()
-
-
 class TestRetiredRidsStayRetired:
     """After a merge, neither the retired rid nor the retired slug can be reused.
 
@@ -325,7 +314,7 @@ class TestRetiredRidsStayRetired:
         c = make_api_client(merged, token="op")
         auth = {"Authorization": "Bearer op"}
         staged = _stage(tmp_path / "m", LOCAL_L, "Mallory")
-        r = c.put("/api/v1/profiles/mallory", content=_tar_of_dir(staged), headers=auth)
+        r = c.put("/api/v1/profiles/mallory", content=tar_gz_of_dir(staged), headers=auth)
         assert r.status_code == 409, r.text
         assert "retired" in r.json()["detail"]
         body = {"name": "Mallory", "rid": LOCAL_L, "provenance": "synthetic"}

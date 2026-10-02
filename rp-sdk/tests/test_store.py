@@ -37,9 +37,10 @@ from researcher_profiles.store import (
     build_store,
 )
 from researcher_profiles.store.config import DATABASE_URL_ENV_VAR, PROFILES_ROOT_ENV_VAR
+from researcher_profiles.store.db import content_hash_for
 from researcher_profiles.store.sql import SqlArtifactStorage, SqlProfileStore
 
-from .factories import FakeBackend, build_profile_dir
+from .factories import ADA, FakeBackend, build_profile_dir, tar_gz_of_dir
 from .test_profile import DictStorage
 
 
@@ -102,6 +103,15 @@ def _new_document(rid: str, name: str) -> ProfileDocument:
     """
     provenance = "synthetic" if rid.startswith("local:") else "third_party"
     return ProfileDocument(name=name, rid=rid, provenance=provenance)
+
+
+def _assert_proof_stripped(store, slug: str) -> None:
+    stored = json.loads(store.document_bytes(slug))
+    kinds = [p["kind"] for p in stored.get("proof", [])]
+    assert "orcid_login" not in kinds
+    assert "orcid_roundtrip" in kinds
+    soul = store.get(slug).soul or ""
+    assert store.content_hash(slug) == content_hash_for(stored, soul)
 
 
 @pytest.fixture
@@ -488,6 +498,107 @@ class TestPutDocument:
         both_stores.put_document("mm", _new_document("local:mm-aa11bb", "MM"))
         with pytest.raises(ProfileWriteError):
             both_stores.put_document("mm", _new_document("local:mm-cc22dd", "MM"))
+
+
+class TestRegistryProofStrip:
+    """No write path stores a registry-issued proof.
+
+    ``orcid_login`` is computed by the registry each time it serves a document.
+    A copy an author supplies (create, tarball push, JSON push, PATCH, merge) is
+    dropped by the store on write, and ``content_hash`` covers the stripped
+    document. Every other proof kind is kept untouched. The push and PATCH cases
+    enter through HTTP because those routes are how an author's document reaches
+    the store; the contract under test is the store's.
+    """
+
+    FORGED = {
+        "kind": "orcid_login",
+        "issuer": "https://evil.example",
+        "orcid": ADA,
+        "verifiedAt": "2026-09-01T12:00:00+00:00",
+    }
+    ROUNDTRIP = {"kind": "orcid_roundtrip", "issuer": f"https://orcid.org/{ADA}"}
+    LOCAL = "local:lee-local-abc123"
+
+    @pytest.fixture(params=["filesystem", "sql"])
+    def blank_store(self, request, tmp_path):
+        if request.param == "filesystem":
+            return FilesystemProfileStore(tmp_path / "root")
+        s = SqlProfileStore("sqlite://")
+        s.create_all()
+        return s
+
+    def _doc(self, rid: str = ADA) -> ProfileDocument:
+        return ProfileDocument(
+            name="Ada Lovelace",
+            rid=rid,
+            provenance="third_party",
+            proof=[self.FORGED, self.ROUNDTRIP] if rid == ADA else [self.ROUNDTRIP],
+        )
+
+    def _staged(self, tmp_path) -> Path:
+        return build_profile_dir(
+            tmp_path / "stage",
+            name="Ada Lovelace",
+            rid=ADA,
+            level="lite",
+            papers=False,
+            personality=False,
+            summaries=False,
+            proof=[self.FORGED, self.ROUNDTRIP],
+        )
+
+    def test_create_strips_it(self, blank_store):
+        blank_store.create(self._doc(), slug="ada")
+        _assert_proof_stripped(blank_store, "ada")
+        # The in-memory profile matches what was persisted.
+        assert [p.kind for p in blank_store.get("ada").metadata.proof] == ["orcid_roundtrip"]
+
+    def test_a_tarball_push_strips_it(self, blank_store, tmp_path, make_api_client):
+        c = make_api_client(blank_store)
+        r = c.put("/api/v1/profiles/ada", content=tar_gz_of_dir(self._staged(tmp_path)))
+        assert r.status_code == 200, r.text
+        _assert_proof_stripped(blank_store, "ada")
+
+    def test_a_json_push_strips_it(self, blank_store, make_api_client):
+        c = make_api_client(blank_store)
+        body = {
+            "name": "Ada Lovelace",
+            "rid": ADA,
+            "provenance": "third_party",
+            "proof": [self.FORGED, self.ROUNDTRIP],
+        }
+        r = c.put("/api/v1/profiles/ada", json=body)
+        assert r.status_code == 200, r.text
+        _assert_proof_stripped(blank_store, "ada")
+
+    def test_a_metadata_patch_cannot_store_it(self, blank_store, make_api_client):
+        blank_store.create(self._doc(), slug="ada")
+        c = make_api_client(blank_store)
+        r = c.patch("/api/v1/profiles/ada/metadata", json={"proof": [self.FORGED]})
+        # ``proof`` is not an owner-editable field; whatever the answer, nothing is stored.
+        assert r.status_code >= 400
+        r = c.patch("/api/v1/profiles/ada/metadata", json={"summary": "An edit."})
+        assert r.status_code == 200, r.text
+        _assert_proof_stripped(blank_store, "ada")
+
+    def test_merge_into_strips_it(self, tmp_path):
+        store = SqlProfileStore("sqlite://")
+        store.create_all()
+        store.create(self._doc(self.LOCAL), slug="lee")
+        store.merge_into(
+            self.LOCAL,
+            self._staged(tmp_path),
+            survivor_rid=ADA,
+            survivor_slug="lee",
+            build_missing_index=False,
+        )
+        _assert_proof_stripped(store, "lee")
+
+    def test_other_proof_kinds_are_kept_verbatim(self, blank_store):
+        blank_store.create(self._doc(self.LOCAL), slug="lee")
+        stored = json.loads(blank_store.document_bytes("lee"))
+        assert stored["proof"] == [self.ROUNDTRIP]
 
 
 class TestCreateAppOverAStore:

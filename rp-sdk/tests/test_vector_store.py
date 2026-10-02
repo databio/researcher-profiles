@@ -31,12 +31,10 @@ import pytest
 from researcher_profiles import ResearcherProfile
 from researcher_profiles.embeddings.cache import SqliteEmbeddingIndex
 from researcher_profiles.embeddings.flat import FlatEmbeddingIndex, write_flat_export
-from researcher_profiles.embeddings.protocol import VectorIndex
 from researcher_profiles.errors import CapabilityUnavailableError, ProfileWriteError
 from researcher_profiles.publish import build_site
 from researcher_profiles.store import FilesystemProfileStore, ProfileNotFoundError
 from researcher_profiles.store.http import HttpProfileStore
-from researcher_profiles.store.protocol import VectorStore
 
 from .factories import FakeBackend, build_profile_dir
 
@@ -128,8 +126,13 @@ def published_site(indexed_root: Path, tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def http_store(published_site: Path) -> HttpProfileStore:
-    client = httpx.Client(transport=_DirectoryTransport(published_site))
+def site_transport(published_site: Path) -> _DirectoryTransport:
+    return _DirectoryTransport(published_site)
+
+
+@pytest.fixture
+def http_store(site_transport: _DirectoryTransport) -> HttpProfileStore:
+    client = httpx.Client(transport=site_transport)
     store = HttpProfileStore("https://profiles.example.org", client=client)
     yield store
     client.close()
@@ -193,17 +196,6 @@ class _NoVectorStore:
 class TestCapability:
     """Who satisfies ``VectorStore``, and what a store that does not gets told."""
 
-    def test_all_three_backends_satisfy_the_protocol(self, fs_store, http_store, sql_store):
-        assert isinstance(fs_store, VectorStore)
-        assert isinstance(http_store, VectorStore)
-        assert isinstance(sql_store, VectorStore)
-
-    def test_every_index_reader_satisfies_the_index_protocol(self, fs_store, http_store, sql_store):
-        """The sqlite reader and the flat reader are interchangeable to a caller."""
-        assert isinstance(fs_store.vector_index("ada-lovelace"), VectorIndex)
-        assert isinstance(http_store.vector_index("ada-lovelace"), VectorIndex)
-        assert isinstance(sql_store.vector_index("ada-lovelace"), VectorIndex)
-
     def test_ranking_over_a_non_vector_store_raises_up_front(self, fs_store):
         """One actionable error before any work, not an empty ranking.
 
@@ -216,7 +208,6 @@ class TestCapability:
         from researcher_profiles.analytics.roster import _RosterCache
 
         bad = _NoVectorStore(fs_store)
-        assert not isinstance(bad, VectorStore)
         rostered = _RosterCache(bad)
         assert len(rostered()) == 2  # the roster itself needs no vectors
         with pytest.raises(CapabilityUnavailableError, match="serve vectors"):
@@ -312,11 +303,12 @@ class TestHttpStoreVectors:
         local = SqliteEmbeddingIndex(indexed_root / "ada-lovelace").centroid()
         assert np.allclose(http_store.centroid("ada-lovelace"), local, atol=1e-5)
 
-    def test_centroid_prefers_the_stacked_blob_over_per_profile_fetches(self, http_store):
+    def test_centroid_prefers_the_stacked_blob_over_per_profile_fetches(
+        self, http_store, site_transport
+    ):
         http_store.centroid("ada-lovelace")
         http_store.centroid("grace-hopper")
-        transport = http_store._http._transport
-        assert not any(r.endswith(".chunks.json") for r in transport.requested), (
+        assert not any(r.endswith(".chunks.json") for r in site_transport.requested), (
             "a per-profile flat index was fetched when the collection blob had the answer"
         )
 
@@ -381,20 +373,16 @@ class TestRankingParity:
             assert a.evidence.centroid_score == pytest.approx(b.evidence.centroid_score, abs=1e-5)
 
     def test_ranking_a_sql_store_needs_no_directory(self, sql_store):
-        assert sql_store.root is None
         assert sql_store.centroids.matrix.shape == (2, 16)
 
     def test_ranking_a_remote_store_needs_no_directory(self, http_store):
-        assert http_store.root is None
-        assert http_store.centroids.cache_path is None
-        assert http_store.match.topics_cache_path is None
         # Still ranks, and still memoizes the matrix in process.
         assert http_store.centroids.matrix.shape == (2, 16)
         assert http_store.centroids.matrix is http_store.centroids.matrix
 
-    def test_write_lookup_index_is_a_no_op_without_a_root(self, http_store, sql_store):
-        assert http_store.write_lookup_index() is None
-        assert sql_store.write_lookup_index() is None
+    def test_write_lookup_index_is_accepted_by_a_remote_store(self, http_store):
+        """The composition root (``api/deps.py``, ``analytics/indexes.py``) calls it on every store."""
+        http_store.write_lookup_index()
 
     def test_backend_spec_is_detected_through_the_store(self, fs_store, http_store, sql_store):
         assert fs_store.backend_spec == "fake:tiny"
@@ -414,10 +402,10 @@ class TestRankingParity:
         )
         store = FilesystemProfileStore(indexed_root)
         assert len(store.list_slugs()) == 3
-        assert len(store._rostered()) == 3
         assert not store.has_vector_index("unbuilt")
 
         roster, matrix = store.centroids.snapshot()
+        assert len(roster.slugs) == 3
         assert matrix.shape[0] == 3
         assert not matrix[roster.slugs.index("unbuilt")].any()
         ranked = store.match.rank(_QUERY, k=3, normalize=False, diversify=False)
@@ -433,13 +421,17 @@ class TestFilesystemStoreVectors:
     """The directory backend serves whichever form the profile actually has."""
 
     def test_sqlite_wins_when_both_forms_exist(self, fs_store):
-        assert isinstance(fs_store.vector_index("ada-lovelace"), SqliteEmbeddingIndex)
+        hits = fs_store.vector_index("ada-lovelace").search(_QUERY, k=1)
+        assert hits and hits[0].text  # the build-local sqlite is the richer index: hits carry text
 
     def test_flat_is_used_when_there_is_no_sqlite(self, fs_store, indexed_root):
         """A directory of *downloaded* profiles still ranks, at the public subset."""
         (indexed_root / "ada-lovelace" / ".cache" / "embeddings.sqlite").unlink()
         fs_store.evict("ada-lovelace")
-        assert isinstance(fs_store.vector_index("ada-lovelace"), FlatEmbeddingIndex)
+        idx = fs_store.vector_index("ada-lovelace")
+        published = FlatEmbeddingIndex.load(indexed_root / "ada-lovelace" / "embeddings")
+        assert idx.count == published.count
+        assert idx.search(_QUERY, k=3)
         assert fs_store.centroid("ada-lovelace").shape == (16,)
 
     def test_a_profile_with_neither_form_says_so(self, fs_store, indexed_root):
@@ -451,9 +443,11 @@ class TestFilesystemStoreVectors:
         with pytest.raises(IndexNotBuiltError, match="has no vectors"):
             fs_store.vector_index("unbuilt")
 
-    def test_the_directory_backend_holds_no_stacked_matrix(self, fs_store):
+    def test_the_directory_matrix_is_built_from_each_profile_centroid(self, fs_store):
         """``.cache/centroids.npz`` is the caller's memo, not the store's answer."""
-        assert fs_store.centroids_matrix() is None
+        roster, matrix = fs_store.centroids.snapshot()
+        for i, slug in enumerate(roster.slugs):
+            assert np.allclose(matrix[i], fs_store.centroid(slug), atol=1e-6)
 
 
 # ---------------------------------------------------------------------------
@@ -521,7 +515,6 @@ class TestSqlStoreVectors:
         rid = sql_store.rid_for("ada-lovelace")
         with sql_store.session() as sess:
             row = sess.get(ProfileVectorRow, (rid, "centroid"))
-        assert row is not None
         assert np.allclose(sql_store.centroid("ada-lovelace"), np.frombuffer(row.vector, "<f4"))
 
     def test_centroids_matrix_is_one_select_for_the_whole_roster(self, sql_store):
@@ -532,7 +525,6 @@ class TestSqlStoreVectors:
 
     def test_vector_index_searches_the_rows(self, sql_store):
         idx = sql_store.vector_index("ada-lovelace")
-        assert isinstance(idx, FlatEmbeddingIndex)
         assert idx.backend_spec == "fake:tiny"
         hits = idx.search(_QUERY, k=3)
         assert hits

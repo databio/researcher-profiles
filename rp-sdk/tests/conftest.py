@@ -197,3 +197,9 @@ def make_api_client():
 
     yield _make
     stack.close()
+
+
+@pytest.fixture
+def api_client(make_api_client, fixture_profiles_root):
+    """A TestClient over a profiles root holding one copy of ``jane-doe``."""
+    return make_api_client(fixture_profiles_root("jane-doe"))

@@ -29,8 +29,10 @@ deviation visible in the test body.
 """
 
 import hashlib
+import io
 import json
 import shutil
+import tarfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
@@ -420,6 +422,49 @@ def stub_llm(profile, response_text: str | None = None):
     object.__setattr__(profile, "_llm_client", fake)
     profile.index.search = MagicMock(return_value=[])  # type: ignore[method-assign]
     return fake
+
+
+# ---------------------------------------------------------------------------
+# Archives and the HTTP client
+# ---------------------------------------------------------------------------
+
+
+def add_fulltext_pdf(profile_dir: Path) -> Path:
+    """Plant a publisher-copyrighted PDF the archive boundary must withhold."""
+    papers = profile_dir / "sources" / "papers"
+    papers.mkdir(parents=True, exist_ok=True)
+    path = papers / "paper-001.pdf"
+    path.write_bytes(b"%PDF-1.4 fake fulltext")
+    return path
+
+
+def tar_names(data: bytes) -> set[str]:
+    """The member names of a gzipped tarball."""
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tf:
+        return {m.name for m in tf.getmembers()}
+
+
+def tar_gz_of_dir(src: Path) -> bytes:
+    """A gzipped tarball of a directory's contents, ``profile.jsonld`` at the root."""
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+        for child in sorted(src.iterdir()):
+            tf.add(child, arcname=child.name)
+    return buf.getvalue()
+
+
+def remote_from_app(app, slug: str = "jane-doe"):
+    """Build an ``ApiArtifactStorage``-backed profile that talks to the in-process app
+    using a starlette TestClient (which is itself an httpx.Client)."""
+    from fastapi.testclient import TestClient
+
+    from researcher_profiles import ResearcherProfile
+    from researcher_profiles.client import ApiArtifactStorage
+
+    http = TestClient(app)
+    return ResearcherProfile(
+        ApiArtifactStorage(slug=slug, base_url="http://testserver", client=http)
+    )
 
 
 # ---------------------------------------------------------------------------

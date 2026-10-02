@@ -152,8 +152,10 @@ is about them. A helper that can produce them is a helper that can hide them.
 ### Where a test goes
 
 One domain file per source domain, named for the domain. `tests/test_*.py`
-mirrors `src/researcher_profiles/`: `test_api.py` owns the HTTP surface and its
-clients, `test_profile.py` owns a profile directory and its sidecars,
+mirrors `src/researcher_profiles/`: `test_api.py` owns the HTTP app and its
+read/generative/search/identity/edit routes, `test_push.py` owns push and archive
+(`api/routers/push.py`, `api/upload.py`), `test_client.py` owns `client/`,
+`test_profile.py` owns a profile directory and its sidecars,
 `test_llm.py` owns everything that calls a model, and so on. Within a file, each
 area is a class (`TestPush`, `TestManifest`, and so on), which is also what stops
 two same-named tests from silently shadowing each other. A new test goes in the

@@ -4,6 +4,8 @@ The device flow (RFC 8628: ``/api/auth/device`` then ``/api/auth/token``) is
 exercised against a stubbed server (an ``httpx`` mock transport), so this
 covers the CLI's side of the protocol: start, poll through pending /
 slow_down / 429 until approved or refused, store 0600, without a real server.
+The file also pins the agent ``ManagementClient`` wire contract from
+``cli/auth/agent.py``.
 """
 
 import json
@@ -16,8 +18,15 @@ import pytest
 
 from researcher_profiles.cli import main
 from researcher_profiles.cli.auth import credentials as creds
+from researcher_profiles.cli.auth.agent import (
+    AgentAPIError,
+    Credential,
+    InsufficientAccessError,
+    ManagementClient,
+)
 
 SERVER = "https://people.example.org"
+SLUG = "jane-doe"
 _RealClient = httpx.Client
 
 
@@ -393,3 +402,178 @@ class TestLoginFlow:
         assert main(["login", SERVER, "--no-browser"]) == 1
         assert "login failed" in capsys.readouterr().err
         assert creds.load_login() is None
+
+
+def _management_client() -> tuple[ManagementClient, MagicMock]:
+    """A management client with its one session replaced by a request recorder."""
+    client = ManagementClient(
+        Credential(key="rpa_test", url="https://profiles.example.org", source="test")
+    )
+    session = MagicMock()
+    client._session = session
+    return client, session
+
+
+class TestManagementClient:
+    """The management client preserves the profile-service wire contract."""
+
+    @pytest.mark.parametrize(
+        "resource, method, args, kwargs, http_method, path, body",
+        [
+            ("identity", "whoami", (), {}, "get", "/api/manage/agent/whoami", None),
+            ("profile", "get", (SLUG,), {}, "get", f"/api/v1/profiles/{SLUG}", None),
+            (
+                "profile",
+                "patch_metadata",
+                (SLUG, {"name": "Jane Q. Doe"}),
+                {"base_hash": "before"},
+                "patch",
+                f"/api/v1/profiles/{SLUG}/metadata",
+                {"name": "Jane Q. Doe", "base_hash": "before"},
+            ),
+            (
+                "profile",
+                "put_soul",
+                (SLUG, "A narrative."),
+                {},
+                "put",
+                f"/api/v1/profiles/{SLUG}/soul",
+                {"soul": "A narrative."},
+            ),
+            (
+                "profile",
+                "patch_visibility",
+                (SLUG,),
+                {
+                    "profile_visibility": "limited",
+                    "artifacts": [{"role": "soul", "visibility": "private"}],
+                },
+                "patch",
+                f"/api/v1/profiles/{SLUG}/visibility",
+                {
+                    "profile_visibility": "limited",
+                    "artifacts": [{"role": "soul", "visibility": "private"}],
+                },
+            ),
+            (
+                "profile",
+                "get_work",
+                (SLUG, "doe2016example"),
+                {},
+                "get",
+                f"/api/v1/profiles/{SLUG}/works/doe2016example",
+                None,
+            ),
+            (
+                "profile",
+                "patch_work",
+                (SLUG, "doe2016example", {"doi": "10.1/x"}),
+                {"base_hash": "before"},
+                "patch",
+                f"/api/v1/profiles/{SLUG}/works/doe2016example",
+                {"doi": "10.1/x", "base_hash": "before"},
+            ),
+            (
+                "profile",
+                "put_work",
+                (SLUG, "doe2026new", {"name": "A new work", "type": "authored"}),
+                {},
+                "put",
+                f"/api/v1/profiles/{SLUG}/works/doe2026new",
+                {"name": "A new work", "type": "authored"},
+            ),
+        ],
+        ids=[
+            "whoami",
+            "get",
+            "patch-metadata",
+            "put-soul",
+            "patch-visibility",
+            "get-work",
+            "patch-work",
+            "put-work",
+        ],
+    )
+    def test_resource_methods_keep_their_request_shape(
+        self, resource, method, args, kwargs, http_method, path, body
+    ):
+        client, session = _management_client()
+        response = MagicMock(status_code=200, is_success=True)
+        response.json.return_value = {"ok": True}
+        getattr(session, http_method).return_value = response
+
+        result = getattr(getattr(client, resource), method)(*args, **kwargs)
+
+        request = getattr(session, http_method)
+        url = f"https://profiles.example.org{path}"
+        if body is None:
+            request.assert_called_once_with(url)
+        else:
+            request.assert_called_once_with(url, json=body)
+        assert result == {"ok": True}
+
+    @pytest.mark.parametrize(
+        "resource, method, args, kwargs",
+        [
+            ("identity", "whoami", (), {}),
+            ("profile", "get", (SLUG,), {}),
+            ("profile", "patch_metadata", (SLUG, {"name": "Jane"}), {}),
+            ("profile", "put_soul", (SLUG, "A narrative."), {}),
+            ("profile", "patch_visibility", (SLUG,), {}),
+            ("profile", "get_work", (SLUG, "doe2016example"), {}),
+            ("profile", "patch_work", (SLUG, "doe2016example", {"doi": "10.1/x"}), {}),
+            ("profile", "delete_work", (SLUG, "doe2016example"), {}),
+        ],
+        ids=[
+            "whoami",
+            "get",
+            "patch-metadata",
+            "put-soul",
+            "patch-visibility",
+            "get-work",
+            "patch-work",
+            "delete-work",
+        ],
+    )
+    def test_resource_methods_raise_insufficient_access(self, resource, method, args, kwargs):
+        client, session = _management_client()
+        response = MagicMock(status_code=403, is_success=False)
+        # The server's shape: FastAPI wraps the structured refusal in ``detail``.
+        response.json.return_value = {
+            "detail": {
+                "error": "insufficient_access",
+                "required": ["background", "summary"],
+                "missing": ["background"],
+                "needs_replace": [],
+                "hint": "This needs Write on background.",
+            }
+        }
+        session.get.return_value = response
+        session.patch.return_value = response
+        session.put.return_value = response
+        session.delete.return_value = response
+
+        with pytest.raises(InsufficientAccessError) as error:
+            getattr(getattr(client, resource), method)(*args, **kwargs)
+
+        assert error.value.missing == ["background"]
+        assert error.value.required == ["background", "summary"]
+        assert error.value.detail == "This needs Write on background."
+
+    def test_a_not_delegable_refusal_carries_its_hint(self):
+        client, session = _management_client()
+        response = MagicMock(status_code=403, is_success=False)
+        response.json.return_value = {
+            "detail": {
+                "error": "not_delegable",
+                "action": "visibility",
+                "hint": "Apps and API keys may not make this change.",
+            }
+        }
+        session.patch.return_value = response
+
+        with pytest.raises(AgentAPIError) as error:
+            client.profile.patch_visibility(SLUG, profile_visibility="limited")
+
+        assert not isinstance(error.value, InsufficientAccessError)
+        assert error.value.detail == "Apps and API keys may not make this change."

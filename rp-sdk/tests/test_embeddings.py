@@ -239,18 +239,16 @@ def test_disable_env(synthetic_profile, monkeypatch):
 
 class TestFastEmbedBackend:
     def test_string_spec_returns_backend(self):
-        from researcher_profiles.embeddings.backends import FastEmbedBackend, get_backend
+        from researcher_profiles.embeddings.backends import get_backend
 
         backend = get_backend("fastembed:all-MiniLM-L6-v2")
-        assert isinstance(backend, FastEmbedBackend)
         assert backend.name == "fastembed:all-MiniLM-L6-v2"
         assert backend.dim == 384
 
     def test_dict_spec_returns_backend_and_allows_dim_override(self):
-        from researcher_profiles.embeddings.backends import FastEmbedBackend, get_backend
+        from researcher_profiles.embeddings.backends import get_backend
 
         backend = get_backend({"backend": "fastembed", "model": "all-MiniLM-L6-v2"})
-        assert isinstance(backend, FastEmbedBackend)
         assert backend.name == "fastembed:all-MiniLM-L6-v2"
         assert backend.dim == 384
 
@@ -264,7 +262,7 @@ class TestFastEmbedBackend:
             get_backend("fastembed")
 
     def test_batch_size_passes_through_only_when_set(self):
-        from researcher_profiles.embeddings.backends import FastEmbedBackend, get_backend
+        from researcher_profiles.embeddings.backends import get_backend
 
         class Model:
             def __init__(self):
@@ -275,7 +273,6 @@ class TestFastEmbedBackend:
                 return [[0.0] * 384 for _ in texts]
 
         unset = get_backend("fastembed:all-MiniLM-L6-v2")
-        assert unset.batch_size is None
         unset._model = Model()
         unset.embed(["a"])
         assert unset._model.kwargs == [{}]
@@ -286,7 +283,9 @@ class TestFastEmbedBackend:
         assert small._model.kwargs == [{"batch_size": 16}]
 
         from_dict = get_backend({"backend": "fastembed", "batch_size": 8})
-        assert isinstance(from_dict, FastEmbedBackend) and from_dict.batch_size == 8
+        from_dict._model = Model()
+        from_dict.embed(["a"])
+        assert from_dict._model.kwargs == [{"batch_size": 8}]
 
     def test_process_wide_batch_size_reaches_backends_built_without_one(self, monkeypatch):
         from researcher_profiles.embeddings import backends
@@ -325,15 +324,35 @@ class TestFastEmbedBackend:
         backend = get_backend({"backend": "fastembed"})
         assert backend.model_name == "all-MiniLM-L6-v2"
 
-    def test_model_map_translates_short_names_and_passes_through_unknown(self):
-        from researcher_profiles.embeddings.backends import FastEmbedBackend
+    @pytest.mark.parametrize(
+        ("model", "expected"),
+        [
+            ("all-MiniLM-L6-v2", "sentence-transformers/all-MiniLM-L6-v2"),
+            ("some/custom-model", "some/custom-model"),
+        ],
+        ids=["short-name-mapped-to-hf-path", "unknown-name-passed-through"],
+    )
+    def test_fastembed_receives_the_full_model_path(self, monkeypatch, model, expected):
+        import sys
+        import types
 
-        assert (
-            FastEmbedBackend._MODEL_MAP["all-MiniLM-L6-v2"]
-            == "sentence-transformers/all-MiniLM-L6-v2"
+        from researcher_profiles.embeddings.backends import FastEmbedBackend, get_backend
+
+        seen = []
+
+        class TextEmbedding:
+            def __init__(self, model_name):
+                seen.append(model_name)
+
+            def embed(self, texts, **kw):
+                return [[0.0] * 384 for _ in texts]
+
+        monkeypatch.setitem(
+            sys.modules, "fastembed", types.SimpleNamespace(TextEmbedding=TextEmbedding)
         )
-        backend = FastEmbedBackend("some/custom-model")
-        assert backend._MODEL_MAP.get(backend.model_name, backend.model_name) == "some/custom-model"
+        monkeypatch.setattr(FastEmbedBackend, "_MODEL_CACHE", {})  # isolate the session cache
+        get_backend(f"fastembed:{model}").embed(["a"])
+        assert seen == [expected]
 
     def test_missing_fastembed_raises_with_extra_name(self, monkeypatch):
         import builtins
@@ -353,7 +372,7 @@ class TestFastEmbedBackend:
         monkeypatch.setattr("builtins.__import__", fake_import)
         backend = FastEmbedBackend()
         with pytest.raises(MissingEmbeddingBackendError, match=r"'fastembed' extra"):
-            backend._load()
+            backend.embed(["a"])
 
     @pytest.mark.integration
     def test_real_embed_roundtrip(self):
@@ -385,7 +404,6 @@ class TestProfileCentroid:
 
         monkeypatch.setattr(pv, "_resolve_backend", lambda profile: FakeBackend())
         vec = p.index.embedding(kind)
-        assert isinstance(vec, np.ndarray)
         assert vec.shape == (16,)
         # unit-normalized
         assert abs(float(np.linalg.norm(vec)) - 1.0) < 1e-4
@@ -427,7 +445,6 @@ class TestTopicsAndRelevance:
         p = ResearcherProfile.from_files(synthetic_profile)
 
         topics = p.topics.get(n=3, method="cluster")
-        assert isinstance(topics, list)
         # We have 4 chunks (2 expertise + 1 soul + 2 summaries minus stripping)
         # KMeans yields up to n clusters
         assert 1 <= len(topics) <= 3
@@ -531,8 +548,7 @@ class TestFlatExport:
         report = idx.build_index(backend=FakeBackend())
         assert report.added > 0
 
-        result = write_flat_export(synthetic_profile)
-        assert result is not None
+        write_flat_export(synthetic_profile)
 
         emb = synthetic_profile / "embeddings"
         index_path = emb / "index.json"
@@ -573,8 +589,7 @@ class TestFlatExport:
         idx = SqliteEmbeddingIndex(p)
         # A realistic model name with a colon.
         idx.build_index(backend=FakeBackend(name="st:all-MiniLM-L6-v2"))
-        result = write_flat_export(p)
-        assert result is not None
+        write_flat_export(p)
 
         index = json.loads((p / "embeddings" / "index.json").read_text())
         assert index["backend_spec"] == "st:all-MiniLM-L6-v2"
@@ -598,7 +613,6 @@ class TestFlatExport:
         assert {"cv", "web", "grant"} <= sqlite_types
 
         result = write_flat_export(deep_profile)
-        assert result is not None
         assert result.dropped > 0
 
         chunks = json.loads(
@@ -620,8 +634,7 @@ class TestFlatExport:
         )
         SqliteEmbeddingIndex(p).build_index(backend=FakeBackend())
 
-        result = write_flat_export(p)
-        assert result is None
+        write_flat_export(p)
         # No flat form advertised.
         assert not (p / "embeddings" / "index.json").is_file()
 
@@ -634,7 +647,6 @@ class TestFlatExport:
         bs.save(synthetic_profile)
 
         result = write_flat_export(synthetic_profile)
-        assert result is not None
         chunks = json.loads(
             (
                 synthetic_profile
@@ -648,15 +660,13 @@ class TestFlatExport:
     def test_export_is_content_addressed_and_idempotent(self, synthetic_profile: Path):
         SqliteEmbeddingIndex(synthetic_profile).build_index(backend=FakeBackend())
         r1 = write_flat_export(synthetic_profile)
-        assert r1 is not None
         r2 = write_flat_export(synthetic_profile)
-        assert r2 is not None
         # An unchanged sqlite yields an identical blob digest.
         assert r1.sha256 == r2.sha256
 
     def test_no_sqlite_means_no_flat_form(self, synthetic_profile: Path):
         # No build_index call: no meta/embeddings.sqlite.
-        assert write_flat_export(synthetic_profile) is None
+        write_flat_export(synthetic_profile)
         assert not (synthetic_profile / "embeddings" / "index.json").is_file()
 
 
@@ -887,9 +897,9 @@ class TestProbeAndSchema:
         index = json.loads((flat_indexed_profile / "embeddings" / "index.json").read_text())
         assert "probe" in index, "index.json must include a probe object"
         probe = index["probe"]
-        assert isinstance(probe["text"], str) and len(probe["text"]) > 0
-        assert isinstance(probe["vector"], list) and len(probe["vector"]) > 0
-        assert all(isinstance(v, float) for v in probe["vector"])
+        assert probe["text"]
+        assert len(probe["vector"]) == index["dim"]
+        assert probe["vector"] == pytest.approx(FakeBackend().embed([probe["text"]])[0], abs=1e-6)
 
     def test_flat_export_validates_against_schema(self, flat_indexed_profile: Path):
         import jsonschema

@@ -1,318 +1,50 @@
-"""The served profile: the HTTP surface and every client that speaks to it.
+"""The served profile's HTTP app: the read, generative, search, identity and edit routes,
+auth and tier projection, and the registry proofs attached at read time.
 
-One FastAPI app, four ways in: the read/LLM endpoints, push, archive+install,
-and match. Plus the three clients (``from_api``, ``push_profile`` /
-``install_profile``, and the static-host reader) whose contract must match what
-a locally loaded profile gives you.
+Push and archive live in test_push.py; the clients that speak to this app live in
+test_client.py.
 """
 
 import io
 import json
-import re
 import tarfile
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
-from urllib.parse import urlsplit
 
-import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from researcher_profiles import LLMClient, ResearcherProfile, StaticArtifactStorage
-from researcher_profiles.cli.auth.agent import (
-    AgentAPIError,
-    Credential,
-    InsufficientAccessError,
-    ManagementClient,
-)
+from researcher_profiles import LLMClient, ResearcherProfile
 from researcher_profiles.client import (
-    ApiArtifactStorage,
-    _split_profile_url,
-    install_profile,
-    list_installed,
-    list_registry,
-    push_profile,
     resolve_rid,
-    seek_profile,
 )
 from researcher_profiles.embeddings.cache import SearchHit
-from researcher_profiles.errors import (
-    CapabilityUnavailableError,
-    ProfileLoadError,
-    ProfileWriteError,
-)
-from researcher_profiles.models.results import Match, MatchEvidence, PersonaResponse
+from researcher_profiles.models.results import Match, MatchEvidence
 from researcher_profiles.resolve import Candidate
-from researcher_profiles.schema import ProfileDocument
+from researcher_profiles.schema import ProfileDocument, Proof
+from researcher_profiles.store.db import ProfileRow
+from researcher_profiles.store.sql import SqlProfileStore
 
-from .factories import FIXTURE_DIR, fake_llm_response
+from .factories import (
+    build_profile_dir,
+    fake_llm_response,
+    remote_from_app,
+)
 
 # --------------------------------------------------------------------------
-# The server: routes, auth, and the from_api client
+# The server: routes, auth, and tier projection
 # --------------------------------------------------------------------------
 
 
 SLUG = "jane-doe"
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _add_fulltext_pdf(profile_dir: Path) -> Path:
-    """Plant a publisher-copyrighted PDF the archive boundary must withhold."""
-    papers = profile_dir / "sources" / "papers"
-    papers.mkdir(parents=True, exist_ok=True)
-    path = papers / "paper-001.pdf"
-    path.write_bytes(b"%PDF-1.4 fake fulltext")
-    return path
-
-
-def _tar_of_dir(src: Path) -> bytes:
-    """Gzipped tar of a directory's CONTENTS (``profile.jsonld`` at tar root)."""
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
-        for child in sorted(src.iterdir()):
-            tf.add(child, arcname=child.name)
-    return buf.getvalue()
-
-
-def _tar_of_members(members) -> bytes:
-    """Gzipped tar built member-by-member, so a test can plant a hostile name."""
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
-        for name, data in members.items():
-            info = tarfile.TarInfo(name=name)
-            info.size = len(data)
-            tf.addfile(info, io.BytesIO(data))
-    return buf.getvalue()
-
-
-def _tar_names(data: bytes) -> set[str]:
-    """The member names of a gzipped tarball."""
-    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tf:
-        return {m.name for m in tf.getmembers()}
-
-
-def _static_transport(profile_dir: Path, base_url: str):
-    """An ``httpx.MockTransport`` serving ``profile_dir`` file-for-file.
-
-    That is exactly what a published profile is: a static directory behind a
-    URL prefix.
-    """
-    root = urlsplit(base_url).path.rstrip("/")
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        path = request.url.path
-        if not path.startswith(root + "/"):
-            return httpx.Response(404)
-        f = profile_dir / path[len(root) + 1 :]
-        if f.is_file():
-            return httpx.Response(200, text=f.read_text(encoding="utf-8"))
-        return httpx.Response(404)
-
-    return httpx.MockTransport(handler)
-
-
-def _management_client() -> tuple[ManagementClient, MagicMock]:
-    """A management client with its one session replaced by a request recorder."""
-    client = ManagementClient(
-        Credential(key="rpa_test", url="https://profiles.example.org", source="test")
-    )
-    session = MagicMock()
-    client._session = session
-    return client, session
-
-
-class TestManagementClient:
-    """The management client preserves the profile-service wire contract."""
-
-    @pytest.mark.parametrize(
-        "resource, method, args, kwargs, http_method, path, body",
-        [
-            ("identity", "whoami", (), {}, "get", "/api/manage/agent/whoami", None),
-            ("profile", "get", (SLUG,), {}, "get", f"/api/v1/profiles/{SLUG}", None),
-            (
-                "profile",
-                "patch_metadata",
-                (SLUG, {"name": "Jane Q. Doe"}),
-                {"base_hash": "before"},
-                "patch",
-                f"/api/v1/profiles/{SLUG}/metadata",
-                {"name": "Jane Q. Doe", "base_hash": "before"},
-            ),
-            (
-                "profile",
-                "put_soul",
-                (SLUG, "A narrative."),
-                {},
-                "put",
-                f"/api/v1/profiles/{SLUG}/soul",
-                {"soul": "A narrative."},
-            ),
-            (
-                "profile",
-                "patch_visibility",
-                (SLUG,),
-                {
-                    "profile_visibility": "limited",
-                    "artifacts": [{"role": "soul", "visibility": "private"}],
-                },
-                "patch",
-                f"/api/v1/profiles/{SLUG}/visibility",
-                {
-                    "profile_visibility": "limited",
-                    "artifacts": [{"role": "soul", "visibility": "private"}],
-                },
-            ),
-            (
-                "profile",
-                "get_work",
-                (SLUG, "doe2016example"),
-                {},
-                "get",
-                f"/api/v1/profiles/{SLUG}/works/doe2016example",
-                None,
-            ),
-            (
-                "profile",
-                "patch_work",
-                (SLUG, "doe2016example", {"doi": "10.1/x"}),
-                {"base_hash": "before"},
-                "patch",
-                f"/api/v1/profiles/{SLUG}/works/doe2016example",
-                {"doi": "10.1/x", "base_hash": "before"},
-            ),
-            (
-                "profile",
-                "put_work",
-                (SLUG, "doe2026new", {"name": "A new work", "type": "authored"}),
-                {},
-                "put",
-                f"/api/v1/profiles/{SLUG}/works/doe2026new",
-                {"name": "A new work", "type": "authored"},
-            ),
-        ],
-        ids=[
-            "whoami",
-            "get",
-            "patch-metadata",
-            "put-soul",
-            "patch-visibility",
-            "get-work",
-            "patch-work",
-            "put-work",
-        ],
-    )
-    def test_resource_methods_keep_their_request_shape(
-        self, resource, method, args, kwargs, http_method, path, body
-    ):
-        client, session = _management_client()
-        response = MagicMock(status_code=200, is_success=True)
-        response.json.return_value = {"ok": True}
-        getattr(session, http_method).return_value = response
-
-        result = getattr(getattr(client, resource), method)(*args, **kwargs)
-
-        request = getattr(session, http_method)
-        url = f"https://profiles.example.org{path}"
-        if body is None:
-            request.assert_called_once_with(url)
-        else:
-            request.assert_called_once_with(url, json=body)
-        assert result == {"ok": True}
-
-    @pytest.mark.parametrize(
-        "resource, method, args, kwargs",
-        [
-            ("identity", "whoami", (), {}),
-            ("profile", "get", (SLUG,), {}),
-            ("profile", "patch_metadata", (SLUG, {"name": "Jane"}), {}),
-            ("profile", "put_soul", (SLUG, "A narrative."), {}),
-            ("profile", "patch_visibility", (SLUG,), {}),
-            ("profile", "get_work", (SLUG, "doe2016example"), {}),
-            ("profile", "patch_work", (SLUG, "doe2016example", {"doi": "10.1/x"}), {}),
-            ("profile", "delete_work", (SLUG, "doe2016example"), {}),
-        ],
-        ids=[
-            "whoami",
-            "get",
-            "patch-metadata",
-            "put-soul",
-            "patch-visibility",
-            "get-work",
-            "patch-work",
-            "delete-work",
-        ],
-    )
-    def test_resource_methods_raise_insufficient_access(self, resource, method, args, kwargs):
-        client, session = _management_client()
-        response = MagicMock(status_code=403, is_success=False)
-        # The server's shape: FastAPI wraps the structured refusal in ``detail``.
-        response.json.return_value = {
-            "detail": {
-                "error": "insufficient_access",
-                "required": ["background", "summary"],
-                "missing": ["background"],
-                "needs_replace": [],
-                "hint": "This needs Write on background.",
-            }
-        }
-        session.get.return_value = response
-        session.patch.return_value = response
-        session.put.return_value = response
-        session.delete.return_value = response
-
-        with pytest.raises(InsufficientAccessError) as error:
-            getattr(getattr(client, resource), method)(*args, **kwargs)
-
-        assert error.value.missing == ["background"]
-        assert error.value.required == ["background", "summary"]
-        assert error.value.detail == "This needs Write on background."
-
-    def test_a_not_delegable_refusal_carries_its_hint(self):
-        client, session = _management_client()
-        response = MagicMock(status_code=403, is_success=False)
-        response.json.return_value = {
-            "detail": {
-                "error": "not_delegable",
-                "action": "visibility",
-                "hint": "Apps and API keys may not make this change.",
-            }
-        }
-        session.patch.return_value = response
-
-        with pytest.raises(AgentAPIError) as error:
-            client.profile.patch_visibility(SLUG, profile_visibility="limited")
-
-        assert not isinstance(error.value, InsufficientAccessError)
-        assert error.value.detail == "Apps and API keys may not make this change."
+_PROOF_ORCID = "0000-0002-1825-0097"
+_PROOF_LOCAL = "local:lee-local-abc123"
+_PROOF_ISSUER = "https://registry.example"
 
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def api_client(make_api_client, fixture_profiles_root):
-    """A TestClient over a profiles root holding one copy of ``jane-doe``."""
-    return make_api_client(fixture_profiles_root(SLUG))
-
-
-def _remote_from_app(app, slug=SLUG) -> ResearcherProfile:
-    """Build an ``ApiArtifactStorage``-backed profile that talks to the in-process app
-    using a starlette TestClient (which is itself an httpx.Client)."""
-    http = TestClient(app)
-    return ResearcherProfile(
-        ApiArtifactStorage(slug=slug, base_url="http://testserver", client=http)
-    )
-
-
-def _local_profile(root: Path) -> ResearcherProfile:
-    return ResearcherProfile.from_files(root / SLUG)
 
 
 INCOMPLETE_SLUG = "incomplete-profile"
@@ -386,33 +118,7 @@ def _dotted_get(payload, dotted):
 
 
 class TestServerCore:
-    """The HTTP surface itself: URL parsing, routes, auth, and error mapping."""
-
-    # ----------------------------------------------------------------------
-    # URL parsing
-    # ----------------------------------------------------------------------
-
-    @pytest.mark.parametrize(
-        "url, expected_base, expected_slug",
-        [
-            ("http://localhost:8109", "http://localhost:8109", None),
-            (
-                "http://localhost:8109/api/v1/profiles/jane-doe",
-                "http://localhost:8109",
-                "jane-doe",
-            ),
-            (
-                "http://localhost:8109/api/v1/profiles/jane-doe/",
-                "http://localhost:8109",
-                "jane-doe",
-            ),
-        ],
-        ids=["root", "with-slug", "with-slug-trailing-slash"],
-    )
-    def test_split_profile_url(self, url, expected_base, expected_slug):
-        base, slug = _split_profile_url(url)
-        assert base == expected_base
-        assert slug == expected_slug
+    """The HTTP surface itself: routes, auth, and error mapping."""
 
     # ----------------------------------------------------------------------
     # Health + listing
@@ -485,7 +191,7 @@ class TestServerCore:
         # ...and the SDK client rebuilds a PaperRecord that still carries them,
         # so a consumer reading a hosted profile is not worse off than one
         # reading the directory.
-        remote = _remote_from_app(client.app)
+        remote = remote_from_app(client.app)
         try:
             record = next(p for p in remote.papers if p.paper_id == "doe2016example")
             assert record.doi == "10.1234/example.2016"
@@ -566,8 +272,6 @@ class TestServerCore:
         # itself declares ``limited``, so an anonymous caller gets the same 404
         # a nonexistent slug gets, and the operator gets the profile.
         import shutil
-
-        from researcher_profiles import ResearcherProfile
 
         root = tmp_path / "private-profiles"
         root.mkdir()
@@ -652,824 +356,184 @@ class TestServerCore:
         assert "persona" in r.json()["detail"].lower()
 
 
-class TestFromApiClient:
-    """``from_api``: the same assertions must pass over HTTP as over files."""
-
-    def test_remote_404_raises_keyerror(self, api_client):
-        remote = _remote_from_app(api_client.app, slug="does-not-exist")
-        with pytest.raises(KeyError):
-            _ = remote.metadata
-
-    def test_remote_401_raises_permission_error(self, make_api_client, fixture_profiles_root):
-        # A wrong credential on a scoped endpoint is a 401, and the client
-        # maps it to PermissionError. The read surface has no credential gate
-        # to fail (a caller with a bad token is an anonymous caller, projected
-        # to the public tier), so the assertion is made where a credential is
-        # genuinely required.
-        secured = make_api_client(fixture_profiles_root(SLUG), token="real-token").app
-        http = TestClient(secured, headers={"Authorization": "Bearer WRONG"})
-        remote = ResearcherProfile(
-            ApiArtifactStorage(slug=SLUG, base_url="http://testserver", client=http)
-        )
-        with pytest.raises(PermissionError):
-            _ = remote.index.search("anything")
-
-    @pytest.fixture
-    def both_profiles(self, api_client, fixture_profiles_root):
-        local = _local_profile(fixture_profiles_root(SLUG))
-        remote = _remote_from_app(api_client.app)
-        yield local, remote
-        remote.close()
-
-    @pytest.mark.parametrize(
-        "accessor",
-        [
-            lambda p: p.slug,
-            lambda p: p.metadata.name,
-            lambda p: p.metadata.affiliation,
-            lambda p: p.expertise,
-            lambda p: p.soul,
-            # The remote summaries are limited to papers with summary_available
-            # True; local LazySummaries enumerates directly from disk. They should
-            # agree.
-            lambda p: set(p.summaries.keys()),
-        ],
-        ids=[
-            "slug",
-            "metadata.name",
-            "metadata.affiliation",
-            "expertise",
-            "soul",
-            "summaries-keys",
-        ],
-    )
-    def test_contract_parity(self, both_profiles, accessor):
-        """Each simple accessor must read the same over HTTP as over files."""
-        local, remote = both_profiles
-        assert accessor(local) == accessor(remote)
-
-    def test_contract_papers(self, both_profiles):
-        local, remote = both_profiles
-        assert len(local.papers) == len(remote.papers)
-        if local.papers:
-            # Compare a few stable fields on the first paper.
-            lp, rp = local.papers[0], remote.papers[0]
-            assert lp.title == rp.title
-            assert lp.year == rp.year
-
-    def test_contract_search_isinstance_and_attrs(self, api_client, fixture_profiles_root):
-        """Both backends should return objects with the same SearchHit shape."""
-        from researcher_profiles.embeddings.cache import SearchHit
-
-        # Stub local search.
-        local = _local_profile(fixture_profiles_root(SLUG))
-        fake_hits = [
-            SearchHit(
-                text="t",
-                source_type="paper_summary",
-                source_id="abc",
-                chunk_index=0,
-                section=None,
-                cosine=0.0,
-                score=0.5,
-                meta={"year": 2020},
-            )
-        ]
-        local.index.search = MagicMock(return_value=fake_hits)  # type: ignore[assignment]
-
-        # Stub server-side search on cached profile.
-        cache = api_client.app.state.store
-        server_prof = cache.get(SLUG)
-        server_prof.index.search = MagicMock(return_value=fake_hits)  # type: ignore[assignment]
-
-        remote = _remote_from_app(api_client.app)
-        try:
-            for prof in (local, remote):
-                hits = prof.index.search("anything", k=3)
-                assert len(hits) == 1
-                assert isinstance(hits[0], SearchHit)
-                assert hits[0].source_id == "abc"
-                assert hits[0].score == 0.5
-        finally:
-            remote.close()
-
-    def test_contract_ask(self, api_client, fixture_profiles_root):
-        """ask() must return PersonaResponse from both backends."""
-        # Local: stub the LLM client.
-        local = _local_profile(fixture_profiles_root(SLUG))
-        fake_client = MagicMock(spec=LLMClient)
-        fake_client.complete.return_value = fake_llm_response("answer")
-        object.__setattr__(local, "_llm_client", fake_client)
-        local.index.search = MagicMock(return_value=[])  # type: ignore[assignment]
-
-        # Server-side: stub the LLM on the cached profile too.
-        cache = api_client.app.state.store
-        server_prof = cache.get(SLUG)
-        server_fake_client = MagicMock(spec=LLMClient)
-        server_fake_client.complete.return_value = fake_llm_response("answer")
-        object.__setattr__(server_prof, "_llm_client", server_fake_client)
-        server_prof.index.search = MagicMock(return_value=[])  # type: ignore[assignment]
-
-        remote = _remote_from_app(api_client.app)
-        try:
-            local_resp = local.persona.ask("Q")
-            remote_resp = remote.persona.ask("Q")
-            assert isinstance(local_resp, PersonaResponse)
-            assert isinstance(remote_resp, PersonaResponse)
-            assert local_resp.text == remote_resp.text == "answer"
-            assert local_resp.model == remote_resp.model
-        finally:
-            remote.close()
-
-    def test_contract_read_parity(self, both_profiles):
-        """The same profile, read locally and over HTTP, agrees field for field."""
-        local, remote = both_profiles
-        assert remote.metadata.rid == local.metadata.rid
-        assert remote.name == local.name
-        assert remote.soul == local.soul
-        assert remote.expertise == local.expertise
-        assert sorted(remote.summaries) == sorted(local.summaries)
-        # The digest is computed from what the server serves: a
-        # privacy-projected document, not the raw published bytes. So it is
-        # well-formed here rather than equal to the local one. The static
-        # backend, which fetches the file itself, does assert equality.
-        assert remote.content_hash().startswith("sha256:")
-
-    def test_a_remote_profile_writes_nowhere_and_builds_no_index(self, both_profiles):
-        """A published view refuses, rather than writing to a synthetic path."""
-        _local, remote = both_profiles
-        with pytest.raises(ProfileWriteError):
-            remote.save_soul("# not yours\n")
-        with pytest.raises(CapabilityUnavailableError):
-            remote.index.build()
-
-    def test_list_remote(self, api_client):
-        http = TestClient(api_client.app)
-        items = ResearcherProfile.list_remote("http://testserver", client=http)
-        listing = list_registry("http://testserver", client=http)[0]
-        assert SLUG in [i["slug"] for i in items]
-        assert [i["slug"] for i in items] == [p["slug"] for p in listing.profiles]
-
-    def test_list_registry_reports_a_dead_server_as_data_not_an_exception(self):
-        # A real closed port, matching the style of
-        # test_listr_when_every_registry_is_down: a dead registry is one
-        # failed listing among possibly several, never a raised exception.
-        listings = list_registry("http://127.0.0.1:9")
-        assert len(listings) == 1
-        listing = listings[0]
-        assert listing.profiles == ()
-        assert listing.error is not None
+def _proof(when: str = "2026-09-01T12:00:00+00:00") -> Proof:
+    return Proof(kind="orcid_login", issuer=_PROOF_ISSUER, orcid=_PROOF_ORCID, verifiedAt=when)
 
 
-# --------------------------------------------------------------------------
-# PUT /api/v1/profiles/{slug}
-# --------------------------------------------------------------------------
+def _login_proofs(doc: dict, key: str = "proof") -> list[dict]:
+    return [p for p in doc.get(key, []) if p["kind"] == "orcid_login"]
 
 
-OTHER = "john-smith"
+class TestRegistryProofsServed:
+    """Registry-issued proofs are attached when a document is served.
 
-
-def _tar_with_symlink() -> bytes:
-    """A tarball whose second member is a symlink escaping to /etc/passwd."""
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
-        data = b"name: X\n"
-        info = tarfile.TarInfo(name="profile.jsonld")
-        info.size = len(data)
-        tf.addfile(info, io.BytesIO(data))
-        link = tarfile.TarInfo(name="escape")
-        link.type = tarfile.SYMTYPE
-        link.linkname = "/etc/passwd"
-        tf.addfile(link)
-    return buf.getvalue()
-
-
-class TestPush:
-    """Tests for the profile push endpoint (PUT /api/v1/profiles/{slug}).
-
-    Covers: push -> live listing roundtrip, overwrite of an existing profile,
-    traversal/symlink rejection, the size cap, bad-archive handling, and the
-    critical invalidation behavior: a push drops the cached registry snapshot so
-    a subsequent /match rebuilds over the new profile set.
+    ``app.state.registry_proofs`` computes them per read. Both ``profile.jsonld``
+    URLs and the detail payload carry them; the archive does not; a stored copy is
+    never served; without the hook the stored bytes go out verbatim.
     """
 
-    # ----------------------------------------------------------------------
-    # Roundtrip + overwrite
-    # ----------------------------------------------------------------------
-
-    def test_push_new_profile_appears_live(self, api_client):
-        r = api_client.put(f"/api/v1/profiles/{OTHER}", content=_tar_of_dir(FIXTURE_DIR / OTHER))
-        assert r.status_code == 200, r.text
-        body = r.json()
-        assert body["slug"] == OTHER
-        assert body["name"]
-        assert body["indexed"] is False  # fixture has no embeddings.sqlite
-
-        slugs = [x["slug"] for x in api_client.get("/api/v1/profiles").json()["profiles"]]
-        assert OTHER in slugs
-        assert api_client.get(f"/api/v1/profiles/{OTHER}").status_code == 200
-
-    def test_push_overwrites_existing_profile(
-        self, api_client, fixture_profiles_root, fixture_profile
-    ):
-        root = fixture_profiles_root(SLUG)
-        # Warm the cache with the original profile.
-        orig_name = api_client.get(f"/api/v1/profiles/{SLUG}").json()["metadata"]["name"]
-
-        staged = fixture_profile(SLUG)
-        py = (staged / "profile.jsonld").read_text()
-        assert orig_name in py
-        (staged / "profile.jsonld").write_text(py.replace(orig_name, "Renamed Person"))
-
-        r = api_client.put(f"/api/v1/profiles/{SLUG}", content=_tar_of_dir(staged))
-        assert r.status_code == 200, r.text
-        assert r.json()["name"] == "Renamed Person"
-        # The cached profile object was evicted -> reads reflect the new content.
-        d = api_client.get(f"/api/v1/profiles/{SLUG}").json()
-        assert d["metadata"]["name"] == "Renamed Person"
-        # No leftover staging/backup dirs in the profiles root or the listing.
-        leftovers = [p.name for p in root.iterdir() if p.name.startswith((".upload-", ".old-"))]
-        assert leftovers == []
-
-    # ----------------------------------------------------------------------
-    # Rejection paths
-    # ----------------------------------------------------------------------
-
-    @pytest.mark.parametrize(
-        "slug, make_body, detail",
-        [
-            ("Bad_Slug", lambda: _tar_of_dir(FIXTURE_DIR / OTHER), "invalid slug"),
-            (OTHER, lambda: _tar_of_members({"notes.md": b"hello"}), "profile.jsonld"),
-            (
-                OTHER,
-                lambda: _tar_of_members({"profile.jsonld": b"name: X\n", "../evil.txt": b"pwned"}),
-                "traversal",
-            ),
-            (
-                OTHER,
-                lambda: _tar_of_members(
-                    {"profile.jsonld": b"name: X\n", "/tmp/evil.txt": b"pwned"}
-                ),
-                None,
-            ),
-            (OTHER, _tar_with_symlink, "link"),
-            (OTHER, lambda: b"not a tarball", None),
-        ],
-        ids=[
-            "bad-slug",
-            "missing-profile-document",
-            "path-traversal",
-            "absolute-path",
-            "symlink-member",
-            "garbage-body",
-        ],
-    )
-    def test_push_rejects_bad_upload(self, api_client, slug, make_body, detail):
-        """Every malformed or hostile upload is a 400, never a 5xx or a partial write."""
-        r = api_client.put(f"/api/v1/profiles/{slug}", content=make_body())
-        assert r.status_code == 400
-        if detail is not None:
-            assert detail in r.json()["detail"]
-
-    def test_push_size_cap(self, make_api_client, fixture_profiles_root):
-        c = make_api_client(fixture_profiles_root(SLUG), max_upload_bytes=1024)
-        r = c.put(
-            f"/api/v1/profiles/{OTHER}",
-            content=_tar_of_dir(FIXTURE_DIR / OTHER),
+    @pytest.fixture
+    def store(self):
+        s = SqlProfileStore("sqlite://")
+        s.create_all()
+        s.create(
+            ProfileDocument(name="Ada Lovelace", rid=_PROOF_ORCID, provenance="third_party"),
+            slug="ada",
         )
-        assert r.status_code == 413
+        return s
 
-    def test_push_requires_token_when_configured(self, make_api_client, fixture_profiles_root):
-        c = make_api_client(fixture_profiles_root(SLUG), token="sekrit")
-        r = c.put(
-            f"/api/v1/profiles/{OTHER}",
-            content=_tar_of_dir(FIXTURE_DIR / OTHER),
+    @pytest.fixture
+    def calls(self):
+        return []
+
+    @pytest.fixture
+    def client(self, store, make_api_client, calls):
+        c = make_api_client(store)
+        state = {"when": "2026-09-01T12:00:00+00:00"}
+
+        def hook(request, rid):
+            calls.append(rid)
+            return [_proof(state["when"])] if rid == _PROOF_ORCID else []
+
+        c.app.state.registry_proofs = hook
+        c.hook_state = state
+        return c
+
+    def test_all_three_reads_carry_the_proof_once(self, client):
+        for url in (
+            "/api/v1/profiles/ada/profile.jsonld",
+            "/api/v1/profiles/ada/content/profile.jsonld",
+        ):
+            r = client.get(url)
+            assert r.status_code == 200, r.text
+            proofs = _login_proofs(r.json())
+            assert proofs == [
+                {
+                    "kind": "orcid_login",
+                    "issuer": _PROOF_ISSUER,
+                    "orcid": _PROOF_ORCID,
+                    "verifiedAt": "2026-09-01T12:00:00+00:00",
+                }
+            ]
+        detail = client.get("/api/v1/profiles/ada").json()
+        assert [p["kind"] for p in detail["metadata"]["proof"]] == ["orcid_login"]
+
+    def test_both_urls_same_bytes_and_etag_and_304(self, client):
+        a = client.get("/api/v1/profiles/ada/profile.jsonld")
+        b = client.get("/api/v1/profiles/ada/content/profile.jsonld")
+        assert a.content == b.content
+        assert a.headers["etag"] == b.headers["etag"]
+        r = client.get(
+            "/api/v1/profiles/ada/content/profile.jsonld",
+            headers={"If-None-Match": a.headers["etag"]},
         )
-        assert r.status_code == 401
-        r = c.put(
-            f"/api/v1/profiles/{OTHER}",
-            content=_tar_of_dir(FIXTURE_DIR / OTHER),
-            headers={"Authorization": "Bearer sekrit"},
-        )
+        assert r.status_code == 304
+
+    def test_hook_change_changes_etag(self, client):
+        before = client.get("/api/v1/profiles/ada/profile.jsonld").headers["etag"]
+        client.hook_state["when"] = "2026-09-02T12:00:00+00:00"
+        after = client.get("/api/v1/profiles/ada/profile.jsonld").headers["etag"]
+        assert before != after
+
+    def test_stored_copy_is_not_served(self, client, store):
+        forged = {**_proof().model_dump(mode="json"), "issuer": "https://evil.example"}
+        with store.session() as s:
+            row = s.get(ProfileRow, _PROOF_ORCID)
+            row.document = {**row.document, "proof": [forged]}
+            s.add(row)
+            s.commit()
+        store.evict("ada")
+        doc = client.get("/api/v1/profiles/ada/profile.jsonld").json()
+        assert [p["issuer"] for p in _login_proofs(doc)] == [_PROOF_ISSUER]
+
+    def test_no_hook_serves_stored_bytes_verbatim(self, store, make_api_client):
+        c = make_api_client(store)
+        r = c.get("/api/v1/profiles/ada/profile.jsonld")
+        assert r.content == store.document_bytes("ada")
+        assert c.get("/api/v1/profiles/ada/content/profile.jsonld").content == r.content
+
+    def test_no_hook_still_strips_a_stored_copy(self, store, make_api_client):
+        forged = {**_proof().model_dump(mode="json"), "issuer": "https://evil.example"}
+        with store.session() as s:
+            row = s.get(ProfileRow, _PROOF_ORCID)
+            row.document = {**row.document, "proof": [forged]}
+            s.add(row)
+            s.commit()
+        store.evict("ada")
+        c = make_api_client(store)
+        for url in (
+            "/api/v1/profiles/ada/profile.jsonld",
+            "/api/v1/profiles/ada/content/profile.jsonld",
+        ):
+            r = c.get(url)
+            assert r.status_code == 200, r.text
+            assert _login_proofs(r.json()) == []
+
+    def test_raising_hook_is_a_200_without_proof(self, store, make_api_client):
+        c = make_api_client(store)
+
+        def boom(request, rid):
+            raise RuntimeError("nope")
+
+        c.app.state.registry_proofs = boom
+        r = c.get("/api/v1/profiles/ada/profile.jsonld")
         assert r.status_code == 200
+        assert _login_proofs(r.json()) == []
+        assert c.get("/api/v1/profiles/ada").status_code == 200
 
-    def test_failed_push_leaves_existing_profile_intact(self, api_client):
-        orig = api_client.get(f"/api/v1/profiles/{SLUG}").json()
-        r = api_client.put(
-            f"/api/v1/profiles/{SLUG}",
-            content=_tar_of_members({"profile.jsonld": b": not [valid yaml\n"}),
-        )
-        assert r.status_code == 400
-        assert api_client.get(f"/api/v1/profiles/{SLUG}").json() == orig
-
-    # ----------------------------------------------------------------------
-    # Registry invalidation (the critical one)
-    # ----------------------------------------------------------------------
-
-    def test_push_moves_the_write_generation_and_drops_disk_caches(
-        self, api_client, fixture_profiles_root
-    ):
-        """A profile pushed AFTER a /match must appear in subsequent matches.
-
-        There is no snapshot on ``app.state`` to drop any more. The analytics
-        cache on the store, stamped with its write generation, so the push has
-        to move that generation (which is what rebuilds the roster) and take
-        the on-disk ``.cache`` memos with it.
-        """
-        from researcher_profiles.api.deps import get_store
-
-        reg_dir = fixture_profiles_root(SLUG) / ".cache"
-        reg_dir.mkdir()
-        (reg_dir / "centroids.npz").write_bytes(b"stale")
-        (reg_dir / "topics.json").write_text("{}")
-
-        app = api_client.app
-        store = get_store(SimpleNamespace(app=app))
-        before = store.generation
-        roster = store._rostered()
-        assert roster.slugs == [SLUG]
-
-        r = api_client.put(
-            f"/api/v1/profiles/{OTHER}",
-            content=_tar_of_dir(FIXTURE_DIR / OTHER),
-        )
-        assert r.status_code == 200
-        assert store.generation > before
-        # Nobody called invalidate: the stamp moved, so the roster rebuilt.
-        assert store._rostered() is not roster
-        assert store._rostered().slugs == sorted([SLUG, OTHER])
-        assert not (reg_dir / "centroids.npz").exists()
-        assert not (reg_dir / "topics.json").exists()
-
-    # ----------------------------------------------------------------------
-    # Push goes through the spec-whitelist archive builder
-    # ----------------------------------------------------------------------
-
-    def test_push_strips_non_spec_html(self, api_client, fixture_profile):
-        """A sources/html/ scrape on disk never reaches the server via push."""
-        src = fixture_profile(OTHER)
-        html_dir = src / "sources" / "html"
-        html_dir.mkdir(parents=True, exist_ok=True)
-        (html_dir / "big.html").write_text("<html>" + "x" * 200000 + "</html>")
-
-        result = push_profile("http://testserver", src, client=api_client)
-        assert result.summary["slug"] == OTHER
-        # ...and the preflight said so before the bytes moved.
-        assert result.plan.dropped["not_in_spec"] == ["sources/html/big.html"]
-
-        # The pushed-and-swapped profile on the server carries no sources/html/.
-        server_profile = api_client.app.state.store.root / OTHER
-        assert not (server_profile / "sources" / "html").exists()
-        assert (server_profile / "profile.jsonld").is_file()
-
-
-_LOCAL_RID_RE = re.compile(r"^local:[a-z0-9][a-z0-9-]*-[0-9a-f]{6}$")
-
-
-class TestJsonUpsertAndMint:
-    """``PUT /api/v1/profiles/{slug}`` with ``Content-Type: application/json``.
-
-    The tarball push (``TestPush``) shares this URL; a JSON body is dispatched
-    to the document-only upsert instead. Covers create/replace, validation and
-    slug guards, ``If-Match`` optimistic concurrency, and server-side ``local:``
-    rid minting. Backend-agnostic, so served over a fresh filesystem store.
-    """
-
-    def test_json_create_then_replace(self, make_api_client, tmp_path):
-        c = make_api_client(tmp_path)
-        body = {"name": "Ada Lovelace", "rid": "local:ada-a1b2c3", "provenance": "synthetic"}
-        r = c.put("/api/v1/profiles/ada", json=body)
+    def test_archive_carries_no_registry_proof(self, client):
+        r = client.get("/api/v1/profiles/ada/archive")
         assert r.status_code == 200, r.text
-        payload = r.json()
-        # PushResponse shape.
-        assert payload["slug"] == "ada"
-        assert payload["rid"] == "local:ada-a1b2c3"
-        assert payload["name"] == "Ada Lovelace"
-        assert "level" in payload
-        assert payload["indexed"] is False  # JSON upsert never carries an index
-        assert c.get("/api/v1/profiles/ada").json()["metadata"]["name"] == "Ada Lovelace"
+        with tarfile.open(fileobj=io.BytesIO(r.content), mode="r:gz") as tf:
+            doc = json.loads(tf.extractfile("profile.jsonld").read())
+        assert _login_proofs(doc) == []
 
-        # Replace: same slug + rid, new name.
-        body["name"] = "Ada, Countess of Lovelace"
-        r = c.put("/api/v1/profiles/ada", json=body)
-        assert r.status_code == 200, r.text
-        assert c.get("/api/v1/profiles/ada").json()["metadata"]["name"] == (
-            "Ada, Countess of Lovelace"
+    def test_section_projection_keeps_the_proof(self, client, store):
+        from researcher_profiles.schema import SectionVisibility
+
+        prof = store.get("ada")
+        doc = prof.metadata
+        doc.summary = "A private summary."
+        doc.section_visibility = [SectionVisibility(section="summary", visibility="private")]
+        prof.save_profile(doc)
+        store.evict("ada")
+        for url in (
+            "/api/v1/profiles/ada/profile.jsonld",
+            "/api/v1/profiles/ada/content/profile.jsonld",
+        ):
+            served = client.get(url).json()
+            assert "summary" not in served
+            assert len(_login_proofs(served)) == 1
+
+    def test_retired_alias_serves_the_survivor_proof(self, tmp_path, make_api_client, calls):
+        store = SqlProfileStore("sqlite://")
+        store.create_all()
+        store.create(
+            ProfileDocument(name="Lee", rid=_PROOF_LOCAL, provenance="synthetic"), slug="lee"
         )
-
-    def test_json_invalid_document_is_422(self, make_api_client, tmp_path):
-        c = make_api_client(tmp_path)
-        # A rid is present (so the mint 400 does not fire), but it is malformed,
-        # so ProfileDocument validation rejects it.
-        r = c.put(
-            "/api/v1/profiles/ada",
-            json={"name": "Ada", "rid": "not-a-valid-rid", "provenance": "synthetic"},
+        store.create(
+            ProfileDocument(name="Ada", rid=_PROOF_ORCID, provenance="third_party"), slug="ada"
         )
-        assert r.status_code == 422, r.text
-
-    def test_json_bad_slug_is_400(self, make_api_client, tmp_path):
-        c = make_api_client(tmp_path)
-        r = c.put(
-            "/api/v1/profiles/Bad_Slug",
-            json={"name": "Ada", "rid": "local:ada-a1b2c3", "provenance": "synthetic"},
+        staged = build_profile_dir(
+            tmp_path / "stage",
+            name="Ada",
+            rid=_PROOF_ORCID,
+            level="lite",
+            papers=False,
+            personality=False,
+            summaries=False,
         )
-        assert r.status_code == 400, r.text
-
-    def test_if_match_conflict_returns_409_with_current_hash(self, make_api_client, tmp_path):
-        c = make_api_client(tmp_path)
-        body = {"name": "Ada Lovelace", "rid": "local:ada-a1b2c3", "provenance": "synthetic"}
-        assert c.put("/api/v1/profiles/ada", json=body).status_code == 200
-        current = c.get("/api/v1/profiles/ada").json()["content_hash"]
-
-        body["name"] = "Someone Else"
-        r = c.put(
-            "/api/v1/profiles/ada",
-            json=body,
-            headers={"If-Match": "sha256:stale-and-wrong"},
+        store.merge_into(
+            "lee", staged, survivor_rid=_PROOF_ORCID, survivor_slug="ada", build_missing_index=False
         )
-        assert r.status_code == 409, r.text
-        assert r.headers["X-RP-Content-Hash"] == current
-
-        # A matching If-Match is accepted.
-        r = c.put("/api/v1/profiles/ada", json=body, headers={"If-Match": current})
-        assert r.status_code == 200, r.text
-
-    def test_mint_local_rid_json_flag(self, make_api_client, tmp_path):
-        c = make_api_client(tmp_path)
-        r = c.put(
-            "/api/v1/profiles/ada",
-            json={"name": "Ada Lovelace", "mintLocalRid": True, "provenance": "synthetic"},
+        c = make_api_client(store)
+        c.app.state.registry_proofs = lambda request, rid: (
+            calls.append(rid) or ([_proof()] if rid == _PROOF_ORCID else [])
         )
-        assert r.status_code == 200, r.text
-        assert _LOCAL_RID_RE.match(r.json()["rid"])
-
-    def test_mint_local_rid_query_param(self, make_api_client, tmp_path):
-        c = make_api_client(tmp_path)
-        r = c.put(
-            "/api/v1/profiles/grace?mint=local",
-            json={"name": "Grace Hopper", "provenance": "synthetic"},
-        )
-        assert r.status_code == 200, r.text
-        assert _LOCAL_RID_RE.match(r.json()["rid"])
-
-    def test_no_rid_without_opt_in_is_400(self, make_api_client, tmp_path):
-        c = make_api_client(tmp_path)
-        r = c.put("/api/v1/profiles/ada", json={"name": "Ada", "provenance": "synthetic"})
-        assert r.status_code == 400, r.text
-
-    def test_mint_with_empty_name_is_400(self, make_api_client, tmp_path):
-        c = make_api_client(tmp_path)
-        r = c.put(
-            "/api/v1/profiles/ada",
-            json={"name": "", "mintLocalRid": True, "provenance": "synthetic"},
-        )
-        assert r.status_code == 400, r.text
-
-    def test_rid_present_and_mint_flag_is_400(self, make_api_client, tmp_path):
-        c = make_api_client(tmp_path)
-        r = c.put(
-            "/api/v1/profiles/ada",
-            json={
-                "name": "Ada",
-                "rid": "local:ada-a1b2c3",
-                "mintLocalRid": True,
-                "provenance": "synthetic",
-            },
-        )
-        assert r.status_code == 400, r.text
-
-    def test_a_non_json_body_still_takes_the_tarball_path(self, make_api_client, tmp_path):
-        """Content-Type dispatch must not break the tarball push: a gzipped-tar
-        body (no application/json) still ingests as a bundle."""
-        c = make_api_client(tmp_path)
-        r = c.put(f"/api/v1/profiles/{OTHER}", content=_tar_of_dir(FIXTURE_DIR / OTHER))
-        assert r.status_code == 200, r.text
-        assert c.get(f"/api/v1/profiles/{OTHER}").status_code == 200
-
-
-# --------------------------------------------------------------------------
-# The archive endpoint and the local-cache install path
-# --------------------------------------------------------------------------
-
-
-def _captured_push_bytes(src: Path, **kw) -> bytes:
-    """Run push_profile against a stub client and return the uploaded body.
-
-    The stub 404s the preflight GET, so the push is a create: nothing on the
-    far side to diff against, and nothing it could remove.
-    """
-    from researcher_profiles.client import push_profile
-
-    sent: dict[str, bytes] = {}
-
-    class _StubResponse:
-        def __init__(self, status_code: int = 200):
-            self.status_code = status_code
-            self.text = ""
-
-        @staticmethod
-        def json() -> dict:
-            return {"slug": SLUG, "name": "Jane Doe", "level": "full", "indexed": False}
-
-    class _StubClient:
-        def get(self, url):
-            return _StubResponse(404)
-
-        def put(self, url, *, content, headers=None):
-            sent["body"] = content
-            return _StubResponse()
-
-    push_profile("http://testserver", src, client=_StubClient(), **kw)
-    return sent["body"]
-
-
-class TestArchiveAndInstall:
-    """The push -> serve -> install round trip, the cache oracle, and atomicity."""
-
-    @pytest.fixture
-    def server_root(self, fixture_profiles_root) -> Path:
-        """A served profiles root whose one profile carries a copyrighted PDF."""
-        root = fixture_profiles_root(SLUG)
-        _add_fulltext_pdf(root / SLUG)
-        return root
-
-    @pytest.fixture
-    def cache_root(self, tmp_path: Path) -> Path:
-        root = tmp_path / "cache"
-        root.mkdir()
-        return root
-
-    def test_install_round_trip(self, make_api_client, server_root, cache_root):
-        """A served profile installs into the local cache and loads from disk."""
-        http = make_api_client(server_root)
-        summary = install_profile(SLUG, url="http://testserver", root=cache_root, client=http)
-
-        assert summary["status"] == "installed"
-        assert summary["slug"] == SLUG
-        assert summary["level"]
-        installed = Path(summary["path"])
-        assert installed == cache_root / SLUG
-        assert (installed / "profile.jsonld").is_file()
-
-        # It is a real profile, loadable by the normal local path.
-        from researcher_profiles import ResearcherProfile
-
-        prof = ResearcherProfile.from_files(installed)
-        assert prof.slug == SLUG
-
-    def test_fulltext_does_not_ship_to_a_public_caller(
-        self, make_api_client, server_root, cache_root
-    ):
-        """Paper full text defaults to ``private``, so a public install omits it.
-
-        The archive is projected through the caller's tier by
-        ``build_viewer_archive``. This install resolves to the ``public`` tier,
-        and ``paper_fulltext`` defaults to ``private``, so it is withheld here
-        (an owner-tier caller who has not re-tiered it would still receive it).
-        """
-        http = make_api_client(server_root)
-        summary = install_profile(SLUG, url="http://testserver", root=cache_root, client=http)
-
-        assert summary["archive_tier"] == "public"
-        assert not (cache_root / SLUG / "sources" / "papers").exists()
-        # ...but the metadata that lives alongside it still arrives.
-        assert (cache_root / SLUG / "profile.jsonld").is_file()
-
-    def test_cache_hit_skips_download(self, make_api_client, server_root, cache_root):
-        """Filesystem existence is the cache oracle; a second install is a no-op."""
-        http = make_api_client(server_root)
-        first = install_profile(SLUG, url="http://testserver", root=cache_root, client=http)
-        assert first["status"] == "installed"
-
-        marker = cache_root / SLUG / "LOCAL_EDIT"
-        marker.write_text("untouched")
-
-        second = install_profile(SLUG, url="http://testserver", root=cache_root, client=http)
-
-        assert second["status"] == "present"
-        assert marker.read_text() == "untouched"
-
-    def test_force_replaces_cached_profile(self, make_api_client, server_root, cache_root):
-        http = make_api_client(server_root)
-        install_profile(SLUG, url="http://testserver", root=cache_root, client=http)
-        marker = cache_root / SLUG / "LOCAL_EDIT"
-        marker.write_text("clobber me")
-
-        again = install_profile(
-            SLUG, url="http://testserver", root=cache_root, client=http, force=True
-        )
-
-        assert again["status"] == "installed"
-        assert not marker.exists()
-
-    def test_digest_mismatch_aborts_before_commit(
-        self, make_api_client, server_root, cache_root, monkeypatch
-    ):
-        """A corrupted transfer must not land in the cache, and must clean up."""
-        import researcher_profiles.api.routers.push as routes
-
-        real = routes.build_viewer_archive
-
-        def _corrupting(*a, **kw):
-            return real(*a, **kw) + b"trailing-garbage"
-
-        # Digest header is computed from the pre-corruption bytes, so the client
-        # sees a mismatch.
-        monkeypatch.setattr(routes, "build_viewer_archive", lambda *a, **kw: real(*a, **kw))
-
-        http = make_api_client(server_root)
-        orig_stream = http.stream
-
-        class _BadStream:
-            def __init__(self, cm):
-                self._cm = cm
-
-            def __enter__(self):
-                resp = self._cm.__enter__()
-                resp.read()
-                object.__setattr__(resp, "_content", resp.content + b"garbage")
-                return resp
-
-            def __exit__(self, *exc):
-                return self._cm.__exit__(*exc)
-
-        def _patched_stream(method, url, **kw):
-            return _BadStream(orig_stream(method, url, **kw))
-
-        monkeypatch.setattr(http, "stream", _patched_stream)
-
-        with pytest.raises(RuntimeError, match="digest mismatch"):
-            install_profile(SLUG, url="http://testserver", root=cache_root, client=http)
-
-        assert not (cache_root / SLUG).exists()
-        assert list(cache_root.glob(".download-*")) == []
-        assert list(cache_root.glob(".install-*")) == []
-
-    def test_missing_profile_reports_cleanly(self, make_api_client, server_root, cache_root):
-        http = make_api_client(server_root)
-        with pytest.raises(RuntimeError, match="not found"):
-            install_profile(
-                "no-such-person",
-                url="http://testserver",
-                root=cache_root,
-                client=http,
-            )
-        assert not (cache_root / "no-such-person").exists()
-
-    def test_invalid_slug_rejected(self, cache_root):
-        with pytest.raises(ValueError, match="invalid slug"):
-            install_profile("../escape", url="http://testserver", root=cache_root)
-
-    def test_no_registry_configured(self, cache_root, monkeypatch):
-        monkeypatch.delenv("RESEARCHER_PROFILES_REGISTRY_URL", raising=False)
-        with pytest.raises(ValueError, match="no registry URL"):
-            install_profile(SLUG, root=cache_root)
-
-    def test_seek_and_list(self, make_api_client, server_root, cache_root):
-        assert list_installed(cache_root) == []
-        with pytest.raises(FileNotFoundError, match="not installed"):
-            seek_profile(SLUG, root=cache_root)
-
-        http = make_api_client(server_root)
-        install_profile(SLUG, url="http://testserver", root=cache_root, client=http)
-
-        assert list_installed(cache_root) == [SLUG]
-        assert seek_profile(SLUG, root=cache_root) == cache_root / SLUG
-
-    def test_archive_endpoint_headers(self, make_api_client, server_root):
-        http = make_api_client(server_root)
-        resp = http.get(f"/api/v1/profiles/{SLUG}/archive")
-        assert resp.status_code == 200
-        assert resp.headers["X-RP-Archive-Digest"]
-        assert resp.headers["X-RP-Archive-Tier"] == "public"
-        assert "attachment" in resp.headers["content-disposition"]
-
-    def test_archive_404_for_unknown_slug(self, make_api_client, server_root):
-        http = make_api_client(server_root)
-        assert http.get("/api/v1/profiles/nobody/archive").status_code == 404
-
-    # ----------------------------------------------------------------------
-    # Spec-whitelist archive builder (build_profile_archive)
-    # ----------------------------------------------------------------------
-
-    def test_archive_drops_non_spec_members(self, fixture_profile) -> None:
-        """A stale sources/html/ (and other cruft) never reaches the tarball."""
-        from researcher_profiles.api.upload import build_profile_archive
-
-        src = fixture_profile(SLUG)
-        # Scrape residue + assorted non-spec cruft on disk.
-        (src / "sources" / "html").mkdir(parents=True, exist_ok=True)
-        (src / "sources" / "html" / "big.html").write_text("<html>" + "x" * 100000 + "</html>")
-        (src / "sources" / "works.json").write_text("[]")  # non-spec file
-        (src / "scratch.txt").write_text("not a profile member")
-
-        names = _tar_names(build_profile_archive(src, include_fulltext=True).data)
-
-        # No non-spec member survives.
-        assert not any(n.startswith("sources/html") for n in names)
-        assert "sources/works.json" not in names
-        assert "scratch.txt" not in names
-        # Documented members are kept.
-        assert "profile.jsonld" in names
-        # Pushing a profile publishes the RECORD, not the build: the sidecar with
-        # download attempts, rejection reasons, and verification bookkeeping never
-        # leaves this machine.
-        assert "meta/build_state.json" not in names
-        assert not any(
-            n.startswith("meta/") and n != "meta" for n in names if n != "meta/embeddings.sqlite"
-        )
-        assert any(n.startswith("sources/papers/") for n in names)
-        assert "sources/papers.jsonld" in names
-        assert any(n.startswith("sources/summaries/") for n in names)
-
-    @pytest.mark.parametrize(
-        "archive_kwargs, expect_papers",
-        [
-            ({"include_fulltext": True}, True),
-            ({"include_fulltext": False}, False),
-            # The shared builder's *default* is the safe one, not the permissive
-            # one. Every archive that leaves this machine is built here; a caller
-            # who says nothing about fulltext must not end up redistributing it.
-            ({}, False),
-        ],
-        ids=["include-fulltext", "exclude-fulltext", "default-no-kwarg"],
-    )
-    def test_archive_fulltext_gate(self, fixture_profile, archive_kwargs, expect_papers) -> None:
-        """The gate is copyright-scoped: it drops sources/papers/ and nothing else."""
-        from researcher_profiles.api.upload import build_profile_archive
-
-        src = fixture_profile(SLUG)
-
-        names = _tar_names(build_profile_archive(src, **archive_kwargs).data)
-
-        assert any(n.startswith("sources/papers/") for n in names) is expect_papers
-        # Scoped to sources/papers/ only; summaries + metadata always remain.
-        assert "profile.jsonld" in names
-        assert "sources/papers.jsonld" in names
-        assert any(n.startswith("sources/summaries/") for n in names)
-
-    def test_archive_reports_what_it_dropped(self, fixture_profile) -> None:
-        """Every exclusion is named, by reason. Silent is how a user loses work."""
-        from researcher_profiles.api.upload import build_profile_archive
-
-        src = fixture_profile(SLUG)
-        (src / "sources" / "html").mkdir(parents=True, exist_ok=True)
-        (src / "sources" / "html" / "scrape.html").write_text("<html></html>")
-        (src / "scratch.txt").write_text("not a profile member")
-        (src / "cache").mkdir()  # pre-rename .cache/
-        (src / "cache" / "embeddings.sqlite").write_bytes(b"not really sqlite")
-        (src / ".git").mkdir()
-        (src / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
-
-        archive = build_profile_archive(src)
-
-        assert archive.dropped["legacy_cache"] == ["cache/embeddings.sqlite"]
-        assert archive.dropped["fulltext"] == [
-            "sources/papers/doe2016example.md",
-            "sources/papers/doe2019methods.md",
-        ]
-        not_in_spec = archive.dropped["not_in_spec"]
-        assert "sources/html/scrape.html" in not_in_spec
-        assert "scratch.txt" in not_in_spec
-        # A non-member top-level directory is reported as itself, not walked:
-        # a profile that is also a git checkout must not drown the report.
-        assert ".git/" in not_in_spec
-        assert ".git/HEAD" not in not_in_spec
-        # members is what the tarball actually holds, and agrees with it.
-        assert archive.members == _tar_names(archive.data)
-        assert "profile.jsonld" in archive.members
-        assert not (set(archive.members) & set(not_in_spec))
-
-    def test_archive_only_ships_the_named_files(self, fixture_profile) -> None:
-        """``only=`` is the document plus exactly what was asked for."""
-        from researcher_profiles.api.upload import build_profile_archive
-
-        src = fixture_profile(SLUG)
-
-        archive = build_profile_archive(src, only=["sources/papers.jsonld"])
-
-        assert _tar_names(archive.data) == {"profile.jsonld", "sources/papers.jsonld"}
-        assert archive.members == {"profile.jsonld", "sources/papers.jsonld"}
-        assert archive.dropped == {}  # nothing was dropped; the rest was not asked for
-
-    @pytest.mark.parametrize(
-        "only, match",
-        [
-            (["sources/nope.jsonld"], "not a file in the profile"),
-            (["scratch.txt"], "not a profile member"),
-            (["sources/papers/doe2016example.md"], "include_fulltext"),
-        ],
-        ids=["missing", "not-a-member", "withheld-fulltext"],
-    )
-    def test_archive_only_refuses_a_path_it_cannot_ship(self, fixture_profile, only, match) -> None:
-        """Naming a file and watching it vanish is the bug ``only=`` replaces."""
-        from researcher_profiles.api.upload import build_profile_archive
-
-        src = fixture_profile(SLUG)
-        (src / "scratch.txt").write_text("not a profile member")
-
-        with pytest.raises(ValueError, match=match):
-            build_profile_archive(src, only=only)
+        doc = c.get("/api/v1/profiles/lee/profile.jsonld").json()
+        assert doc["rid"] == _PROOF_ORCID
+        assert len(_login_proofs(doc)) == 1
+        assert calls and set(calls) == {_PROOF_ORCID}
 
 
 class TestIdentityResolve:
@@ -1582,466 +646,6 @@ class TestIdentityResolve:
         assert deferred.confidence == "low"
         assert all(isinstance(cand, Candidate) for cand in deferred.candidates)
         assert {cand.rid for cand in deferred.candidates} == {self.JANE_ORCID}
-
-
-class TestPushCopyrightBoundary:
-    """A publisher PDF must not travel, and the server must not rely on the client."""
-
-    # ----------------------------------------------------------------------
-    # Push-side copyright boundary
-    # ----------------------------------------------------------------------
-
-    @pytest.fixture
-    def push_src(self, fixture_profile) -> Path:
-        """A local profile directory carrying a copyrighted fulltext PDF."""
-        src = fixture_profile(SLUG)
-        _add_fulltext_pdf(src)
-        return src
-
-    @pytest.fixture
-    def push_target(self, tmp_path: Path) -> Path:
-        root = tmp_path / "push-target"
-        root.mkdir()
-        return root
-
-    @pytest.mark.parametrize(
-        "push_kwargs, expect_fulltext",
-        [
-            # A plain push must not ship publisher-copyrighted PDFs.
-            ({}, False),
-            # The legitimate case (own backup / entitled registry) still works.
-            ({"include_fulltext": True}, True),
-        ],
-        ids=["excludes-by-default", "can-opt-in"],
-    )
-    def test_push_fulltext_gate(self, push_src: Path, push_kwargs, expect_fulltext) -> None:
-        """Push ships the PDF only when the pushing client explicitly opts in."""
-        names = _tar_names(_captured_push_bytes(push_src, **push_kwargs))
-
-        if expect_fulltext:
-            assert "sources/papers/paper-001.pdf" in names
-        else:
-            assert not any(n.startswith("sources/papers/") for n in names)
-            assert "sources/papers/paper-001.pdf" not in names
-        # The rest of the profile still goes, either way.
-        assert "profile.jsonld" in names
-        assert "sources/papers.jsonld" in names
-
-    @pytest.mark.parametrize(
-        "client_kwargs, expect_stored_fulltext",
-        [
-            # Server-side enforcement: a client that sends fulltext anyway is
-            # trimmed. The boundary must not depend on the client behaving.
-            ({}, False),
-            # accept_fulltext=True is the operator's call: what the registry STORES.
-            ({"accept_fulltext": True}, True),
-        ],
-        ids=["strips-on-ingest", "accepts-when-operator-opts-in"],
-    )
-    def test_server_ingest_fulltext_gate(
-        self,
-        make_api_client,
-        push_src: Path,
-        push_target: Path,
-        client_kwargs,
-        expect_stored_fulltext,
-    ) -> None:
-        """What the server keeps on ingest is the operator's call, not the client's."""
-        from researcher_profiles.api.upload import build_profile_archive
-
-        payload = build_profile_archive(push_src, include_fulltext=True).data
-        assert "sources/papers/paper-001.pdf" in _tar_names(payload)  # client sent it
-
-        http = make_api_client(push_target, **client_kwargs)
-        resp = http.put(
-            f"/api/v1/profiles/{SLUG}",
-            content=payload,
-            headers={"Content-Type": "application/gzip"},
-        )
-
-        assert resp.status_code == 200
-        stored = push_target / SLUG
-        pdf = stored / "sources" / "papers" / "paper-001.pdf"
-        if expect_stored_fulltext:
-            assert pdf.is_file()
-        else:
-            assert not pdf.exists()
-        assert (stored / "profile.jsonld").is_file()
-        # Non-fulltext members survive either way.
-        assert (stored / "sources" / "papers.jsonld").is_file()
-
-
-# The jane-doe fixture's extracted paper text, profile-relative.
-_JANE_FULLTEXT = ("sources/papers/doe2016example.md", "sources/papers/doe2019methods.md")
-_INDEX = ".cache/embeddings.sqlite"
-
-
-def _put_archive(http, payload: bytes, **params):
-    return http.put(
-        f"/api/v1/profiles/{SLUG}",
-        content=payload,
-        headers={"Content-Type": "application/gzip"},
-        params=params or None,
-    )
-
-
-def _stored_files(server_root: Path) -> set[str]:
-    """Every profile-relative file the server's live directory holds."""
-    live = server_root / SLUG
-    return {p.relative_to(live).as_posix() for p in live.rglob("*") if p.is_file()}
-
-
-class TestPushKeepsWithheld:
-    """A push is a filtered view of the sender's directory, not the whole of it.
-
-    ``build_profile_archive`` withholds fulltext by default, so absence from
-    the tarball must not read as "delete": under the default ``?mode=replace``
-    the server keeps the fulltext and index files it already holds when the
-    archive carries none of that class. ``?mode=merge`` keeps every omitted
-    file; ``?mode=prune`` keeps none.
-    """
-
-    @pytest.fixture
-    def server_root(self, tmp_path: Path) -> Path:
-        # Not ``tmp_path`` itself: ``fixture_profile`` writes the sender's copy
-        # there, and the server's live directory must be a different tree.
-        root = tmp_path / "server"
-        root.mkdir()
-        return root
-
-    @pytest.fixture
-    def src(self, fixture_profile) -> Path:
-        """A local jane-doe carrying fulltext and a (fake) built index."""
-        src = fixture_profile(SLUG, drop_index=True)
-        cache = src / ".cache"
-        cache.mkdir(exist_ok=True)
-        (cache / "embeddings.sqlite").write_bytes(b"not really sqlite")
-        return src
-
-    @pytest.fixture
-    def full_push(self, src: Path) -> bytes:
-        """Push A: everything, fulltext and index included."""
-        from researcher_profiles.api.upload import build_profile_archive
-
-        payload = build_profile_archive(src, include_fulltext=True).data
-        names = _tar_names(payload)
-        assert set(_JANE_FULLTEXT) <= names and _INDEX in names
-        return payload
-
-    @pytest.fixture
-    def only_push(self, src: Path) -> bytes:
-        """Push C: the ``rp push --only sources/papers.jsonld`` view."""
-        from researcher_profiles.api.upload import build_profile_archive
-
-        payload = build_profile_archive(src, only=["sources/papers.jsonld"]).data
-        assert _tar_names(payload) == {"profile.jsonld", "sources/papers.jsonld"}
-        return payload
-
-    @pytest.fixture
-    def bare_push(self, src: Path) -> bytes:
-        """Push B: the default ``rp push`` view, no fulltext and no index."""
-        import shutil
-
-        from researcher_profiles.api.upload import build_profile_archive
-
-        shutil.rmtree(src / ".cache")
-        payload = build_profile_archive(src, include_fulltext=False).data
-        names = _tar_names(payload)
-        assert not any(n.startswith("sources/papers/") for n in names)
-        assert _INDEX not in names
-        return payload
-
-    def test_a_bare_push_keeps_the_live_fulltext_and_index(
-        self, make_api_client, server_root, full_push, bare_push
-    ):
-        http = make_api_client(server_root, accept_fulltext=True)
-        first = _put_archive(http, full_push)
-        assert first.status_code == 200, first.text
-        assert first.json()["kept"] == {}  # a new profile: nothing to keep
-
-        second = _put_archive(http, bare_push)
-        assert second.status_code == 200, second.text
-        body = second.json()
-        assert body["kept"] == {"fulltext": len(_JANE_FULLTEXT), "index": 1}
-        assert body["mode"] == "replace"
-        assert body["indexed"] is True
-
-        stored = server_root / SLUG
-        for rel in _JANE_FULLTEXT:
-            assert (stored / rel).is_file()
-        assert (stored / _INDEX).read_bytes() == b"not really sqlite"
-        # The rest of the profile was replaced as before; no staging litter.
-        assert (stored / "profile.jsonld").is_file()
-        assert [p.name for p in server_root.iterdir() if p.name.startswith(".upload-")] == []
-
-    def test_prune_deletes_what_the_archive_lacks(
-        self, make_api_client, server_root, full_push, bare_push
-    ):
-        http = make_api_client(server_root, accept_fulltext=True)
-        assert _put_archive(http, full_push).status_code == 200
-
-        r = _put_archive(http, bare_push, mode="prune")
-        assert r.status_code == 200, r.text
-        assert r.json()["kept"] == {}
-        assert r.json()["mode"] == "prune"
-        assert r.json()["indexed"] is False
-
-        stored = server_root / SLUG
-        assert not (stored / "sources" / "papers").exists()
-        assert not (stored / _INDEX).exists()
-        assert (stored / "profile.jsonld").is_file()
-
-    def test_a_class_the_archive_carries_is_authoritative(
-        self, make_api_client, server_root, src: Path, full_push
-    ):
-        """Some fulltext in the archive means the archive decides the fulltext."""
-        import shutil
-
-        from researcher_profiles.api.upload import build_profile_archive
-
-        http = make_api_client(server_root, accept_fulltext=True)
-        assert _put_archive(http, full_push).status_code == 200
-
-        # Push B carries one of the two fulltext files, and no index.
-        (src / _JANE_FULLTEXT[1]).unlink()
-        shutil.rmtree(src / ".cache")
-        partial = build_profile_archive(src, include_fulltext=True).data
-        r = _put_archive(http, partial)
-        assert r.status_code == 200, r.text
-        assert r.json()["kept"] == {"index": 1}
-
-        stored = server_root / SLUG
-        assert (stored / _JANE_FULLTEXT[0]).is_file()
-        assert not (stored / _JANE_FULLTEXT[1]).exists()
-        assert (stored / _INDEX).is_file()
-
-    def test_merge_keeps_every_file_the_archive_omits(
-        self, make_api_client, server_root, full_push, only_push
-    ):
-        """``rp push --only``: send two files, leave the rest of the copy alone."""
-        http = make_api_client(server_root, accept_fulltext=True)
-        assert _put_archive(http, full_push).status_code == 200
-        live = _stored_files(server_root)
-
-        r = _put_archive(http, only_push, mode="merge")
-        assert r.status_code == 200, r.text
-        body = r.json()
-        assert body["mode"] == "merge"
-        # Everything the two-member archive left out came back: the withheld
-        # classes under their own names, the rest under "other".
-        assert set(body["kept"]) == {"fulltext", "index", "other"}
-        assert body["kept"]["fulltext"] == len(_JANE_FULLTEXT)
-        assert body["kept"]["index"] == 1
-        assert sum(body["kept"].values()) == len(live) - 2  # the two it carried
-        assert _stored_files(server_root) == live
-
-    def test_replace_deletes_an_unclassed_live_file_the_archive_lacks(
-        self, make_api_client, server_root, src: Path
-    ):
-        """The default is a replacement: only a withheld class survives absence."""
-        from researcher_profiles.api.upload import build_profile_archive
-
-        http = make_api_client(server_root, accept_fulltext=True)
-        web = src / "sources" / "web"
-        web.mkdir(parents=True)
-        (web / "x.md").write_text("a scraped page")
-        assert _put_archive(http, build_profile_archive(src).data).status_code == 200
-        assert (server_root / SLUG / "sources" / "web" / "x.md").is_file()
-
-        (web / "x.md").unlink()
-        r = _put_archive(http, build_profile_archive(src).data)
-        assert r.status_code == 200, r.text
-        assert r.json()["mode"] == "replace"
-        assert not (server_root / SLUG / "sources" / "web" / "x.md").exists()
-
-    def test_an_unknown_mode_is_a_400(self, make_api_client, server_root, full_push):
-        http = make_api_client(server_root)
-        r = _put_archive(http, full_push, mode="nonsense")
-        assert r.status_code == 400
-        assert "invalid mode" in r.json()["detail"]
-
-    def test_a_bare_push_keeps_the_live_fulltext_in_a_sql_store(
-        self, make_api_client, full_push, bare_push
-    ):
-        """No directory to walk: the live copies come from a scratch export."""
-        from researcher_profiles.store.sql import SqlProfileStore
-
-        store = SqlProfileStore("sqlite://")
-        store.create_all()
-        http = make_api_client(store, accept_fulltext=True)
-        assert _put_archive(http, full_push).status_code == 200
-        for rel in _JANE_FULLTEXT:
-            assert store.artifact_bytes(SLUG, rel)
-
-        r = _put_archive(http, bare_push)
-        assert r.status_code == 200, r.text
-        # The SQL store holds no ``.cache/embeddings.sqlite`` (vectors are rows),
-        # so only the fulltext class has anything to carry over.
-        assert r.json()["kept"] == {"fulltext": len(_JANE_FULLTEXT)}
-        for rel in _JANE_FULLTEXT:
-            assert store.artifact_bytes(SLUG, rel)
-
-    def test_merge_keeps_the_live_files_in_a_sql_store(self, make_api_client, full_push, only_push):
-        """Same scratch export, but merge has every omitted file to carry."""
-        from researcher_profiles.store.sql import SqlProfileStore
-
-        store = SqlProfileStore("sqlite://")
-        store.create_all()
-        http = make_api_client(store, accept_fulltext=True)
-        assert _put_archive(http, full_push).status_code == 200
-
-        r = _put_archive(http, only_push, mode="merge")
-        assert r.status_code == 200, r.text
-        kept = r.json()["kept"]
-        assert kept["fulltext"] == len(_JANE_FULLTEXT)
-        assert kept["other"] > 0
-        for rel in (*_JANE_FULLTEXT, "personality/SOUL.md"):
-            assert store.artifact_bytes(SLUG, rel)
-
-    def _served_manifest(self, http) -> dict[str, dict]:
-        """``{contentUrl: entry}`` from ``GET /profiles/{slug}``: the committed index."""
-        resp = http.get(f"/api/v1/profiles/{SLUG}")
-        assert resp.status_code == 200, resp.text
-        return {e["contentUrl"]: e for e in resp.json()["manifest"]}
-
-    @staticmethod
-    def _drop_from_manifest(payload: bytes, prefix: str) -> bytes:
-        """Rebuild ``payload`` with every ``prefix`` entry cut from its manifest.
-
-        What a partial local copy sends: the bytes of the named file, and a
-        ``profile.jsonld`` whose index no longer mentions the artifacts the
-        server holds. Nothing else in the archive changes.
-        """
-        import io
-        import json as _json
-        import tarfile
-
-        with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as tf:
-            members = {m.name: tf.extractfile(m).read() for m in tf.getmembers() if m.isfile()}
-        doc = _json.loads(members["profile.jsonld"])
-        for slot in ("hasPart", "subjectOf"):
-            doc[slot] = [e for e in (doc.get(slot) or []) if not e["contentUrl"].startswith(prefix)]
-        members["profile.jsonld"] = _json.dumps(doc).encode("utf-8")
-
-        buf = io.BytesIO()
-        with tarfile.open(fileobj=buf, mode="w:gz") as tf:
-            for name, data in members.items():
-                info = tarfile.TarInfo(name)
-                info.size = len(data)
-                tf.addfile(info, io.BytesIO(data))
-        return buf.getvalue()
-
-    @pytest.mark.parametrize("backend", ["files", "sql"], ids=["filesystem", "sql"])
-    def test_merge_splices_kept_files_into_the_manifest(
-        self, make_api_client, server_root, full_push, only_push, backend
-    ):
-        """A kept file keeps its manifest entry, or it is not kept at all.
-
-        The regression this closes: ``--only`` shipped a ``profile.jsonld``
-        whose manifest had lost 53 fulltext entries. The bytes were kept, the
-        entries were not, and the SQL store -- which writes rows BY the
-        recorded manifest -- persisted nothing for them.
-        """
-        from researcher_profiles.store.sql import SqlProfileStore
-
-        if backend == "sql":
-            store = SqlProfileStore("sqlite://")
-            store.create_all()
-            target = store
-        else:
-            target = server_root
-        http = make_api_client(target, accept_fulltext=True)
-        assert _put_archive(http, full_push).status_code == 200
-        before = self._served_manifest(http)
-        assert set(_JANE_FULLTEXT) <= set(before)
-
-        partial = self._drop_from_manifest(only_push, "sources/papers/")
-        r = _put_archive(http, partial, mode="merge")
-        assert r.status_code == 200, r.text
-        body = r.json()
-        assert body["spliced"] == len(_JANE_FULLTEXT)
-
-        after = self._served_manifest(http)
-        assert set(_JANE_FULLTEXT) <= set(after), "the kept fulltext lost its manifest entries"
-        assert set(after) == set(before)
-        assert body["manifest_counts"]["paper_fulltext"] == len(_JANE_FULLTEXT)
-        assert sum(body["manifest_counts"].values()) == len(after)
-
-        if backend == "sql":
-            for rel in _JANE_FULLTEXT:
-                assert target.artifact_bytes(SLUG, rel)
-        else:
-            for rel in _JANE_FULLTEXT:
-                assert (server_root / SLUG / rel).is_file()
-
-    def test_replace_splices_withheld_classes(
-        self, make_api_client, server_root, full_push, bare_push
-    ):
-        """The default mode keeps the withheld classes, entries included."""
-        http = make_api_client(server_root, accept_fulltext=True)
-        assert _put_archive(http, full_push).status_code == 200
-        before = self._served_manifest(http)
-
-        partial = self._drop_from_manifest(bare_push, "sources/papers/")
-        r = _put_archive(http, partial)
-        assert r.status_code == 200, r.text
-        assert r.json()["mode"] == "replace"
-        assert r.json()["spliced"] == len(_JANE_FULLTEXT)
-        assert set(self._served_manifest(http)) == set(before)
-
-    def test_prune_drops_entries_and_reports_counts(
-        self, make_api_client, server_root, full_push, bare_push
-    ):
-        """Nothing is kept, so nothing is spliced, and the counts say so.
-
-        The archive is the whole profile under ``prune``, manifest included,
-        so the fulltext entries are cut from the document as well as the
-        tarball: a pruning push that left them in the index would leave the
-        server advertising files it had just deleted.
-        """
-        http = make_api_client(server_root, accept_fulltext=True)
-        assert _put_archive(http, full_push).status_code == 200
-        before = self._served_manifest(http)
-
-        pruning = self._drop_from_manifest(bare_push, "sources/papers/")
-        r = _put_archive(http, pruning, mode="prune")
-        assert r.status_code == 200, r.text
-        body = r.json()
-        assert body["kept"] == {} and body["spliced"] == 0
-        counts = body["manifest_counts"]
-        assert "paper_fulltext" not in counts
-        assert sum(counts.values()) < len(before)
-        assert sum(counts.values()) == len(self._served_manifest(http))
-
-    def test_a_new_profile_reports_its_manifest_counts(
-        self, make_api_client, server_root, full_push
-    ):
-        """No live copy to keep anything from, but the counts still describe it."""
-        http = make_api_client(server_root, accept_fulltext=True)
-        r = _put_archive(http, full_push)
-        assert r.status_code == 200, r.text
-        body = r.json()
-        assert body["kept"] == {} and body["spliced"] == 0
-        assert sum(body["manifest_counts"].values()) == len(self._served_manifest(http))
-
-    def test_capabilities_route_lists_push_modes(self, make_api_client, server_root):
-        """The pre-check a client makes before it trusts ``?mode=``."""
-        from researcher_profiles.api.upload import PUSH_MODES
-
-        http = make_api_client(server_root)
-        r = http.get("/api/v1/capabilities")
-        assert r.status_code == 200, r.text
-        body = r.json()
-        assert set(body["push_modes"]) == set(PUSH_MODES)
-        assert "manifest_splice" in body["features"]
-
-    def test_index_html_round_trips_through_the_archive(self, fixture_profile):
-        """``index.html`` is a manifest part (role ``html``), so it ships."""
-        from researcher_profiles.api.upload import build_profile_archive
-
-        src = fixture_profile(SLUG)
-        (src / "index.html").write_text("<html>rendered profile page</html>")
-        assert "index.html" in _tar_names(build_profile_archive(src).data)
 
 
 # --------------------------------------------------------------------------
@@ -2209,116 +813,6 @@ class TestMatchEndpoint:
         detail = r.json()["detail"]
         assert "matching unavailable" in detail
         assert "serve vectors" in detail
-
-
-# --------------------------------------------------------------------------
-# StaticArtifactStorage: a published directory over HTTP
-# --------------------------------------------------------------------------
-
-
-BASE = "https://example.org/profiles/jane-doe"
-
-
-class TestStaticClient:
-    """Tests for ``StaticArtifactStorage``: ``from_url`` and URL-dispatching
-    ``from_files`` against a statically hosted profile directory.
-
-    The "static host" is an httpx.MockTransport serving the jane-doe fixture
-    directory file-for-file, which is exactly what a published profile is.
-    """
-
-    @pytest.fixture
-    def local(self, jane_doe_readonly_dir):
-        """The directory the mock host serves: a published profile is a directory."""
-        return jane_doe_readonly_dir
-
-    @pytest.fixture
-    def http(self, local) -> httpx.Client:
-        return httpx.Client(transport=_static_transport(local, BASE))
-
-    def test_from_url_factory(self, http):
-        prof = ResearcherProfile.from_url(BASE, client=http)
-        assert isinstance(prof.storage, StaticArtifactStorage)
-        assert prof.slug == "jane-doe"
-        assert "Doe" in prof.name
-        assert len(prof.papers) > 0
-        assert prof.expertise.strip()
-        assert prof.soul.strip()
-
-    def test_parity_with_from_files(self, http, local):
-        local = ResearcherProfile.from_files(local)
-        remote = ResearcherProfile.from_url(BASE, client=http)
-        assert remote.name == local.name
-        assert remote.rid == local.rid
-        assert remote.level == local.level
-        assert len(remote.papers) == len(local.papers)
-        assert remote.papers[0].paper_id == local.papers[0].paper_id
-        assert remote.expertise == local.expertise
-        assert remote.soul == local.soul
-        assert remote.citations == local.citations
-        assert sorted(remote.summaries) == sorted(local.summaries)
-
-    def test_summaries_enumerated_from_manifest_and_lazy(self, http, local):
-        prof = ResearcherProfile.from_url(BASE, client=http)
-        keys = list(prof.summaries)
-        assert keys
-        sample = keys[0]
-        body = prof.summaries[sample]
-        assert body == (local / "sources" / "summaries" / f"{sample}.summary.md").read_text(
-            encoding="utf-8"
-        )
-        with pytest.raises(KeyError):
-            prof.summaries["no-such-paper"]
-
-    def test_missing_optional_files_default(self, http):
-        prof = ResearcherProfile.from_url(BASE, client=http)
-        # fixture has no grants.jsonld
-        assert prof.grants == []
-        # build state is local-only: always empty on a static profile
-        assert not prof.build_state.papers
-
-    def test_from_files_dispatches_urls(self):
-        prof = ResearcherProfile.from_files(BASE)
-        assert isinstance(prof.storage, StaticArtifactStorage)
-        assert prof.storage.base_url == BASE
-        prof.close()
-
-    def test_from_files_url_validate_raises(self):
-        with pytest.raises(ValueError):
-            ResearcherProfile.from_files(BASE, validate=True)
-
-    def test_s3_url_translated(self, http):
-        prof = ResearcherProfile.from_url("s3://my-bucket/profiles/jane-doe", client=http)
-        assert prof.storage.base_url.startswith("https://my-bucket.s3.amazonaws.com")
-        assert prof.slug == "jane-doe"
-        assert "Doe" in prof.name
-
-    def test_local_only_methods_raise(self, http):
-        prof = ResearcherProfile.from_url(BASE, client=http)
-        with pytest.raises(NotImplementedError):
-            prof.index.search("anything")
-        with pytest.raises(NotImplementedError):
-            prof.index.build()
-        with pytest.raises(NotImplementedError):
-            prof.validate()
-
-    def test_read_parity_and_refusals(self, http, local):
-        """The static half of the same contract: reads agree, writes refuse."""
-        disk = ResearcherProfile.from_files(local)
-        published = ResearcherProfile.from_url(BASE, client=http)
-        assert published.content_hash() == disk.content_hash()
-        assert published.metadata.rid == disk.metadata.rid
-        with pytest.raises(ProfileWriteError):
-            published.save_soul("# not yours\n")
-        with pytest.raises(CapabilityUnavailableError):
-            published.index.build()
-
-    def test_missing_profile_jsonld_raises(self, http):
-        prof = ResearcherProfile.from_url(
-            "https://example.org/profiles/jane-doe/nonexistent", client=http
-        )
-        with pytest.raises(ProfileLoadError):
-            _ = prof.metadata
 
 
 # --------------------------------------------------------------------------
