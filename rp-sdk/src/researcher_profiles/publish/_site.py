@@ -244,8 +244,15 @@ def _build_into(
     base_url: str | None,
     no_index: bool,
     viewer: ViewerTier = "public",
+    centroids: dict[str, tuple[str, Any, dict | None]] | None = None,
 ) -> None:
-    """Stage every collection file. Raising here leaves ``out`` untouched."""
+    """Stage every collection file. Raising here leaves ``out`` untouched.
+
+    ``centroids`` is ``{slug: (backend_spec, centroid, probe)}`` for each
+    profile whose embeddings ship to ``viewer``, computed from the rows that
+    actually ship (:func:`publish_collection` passes it). Without it, each
+    profile's centroid is read from its own flat files (:func:`_collect_centroid`).
+    """
     no_index = no_index or viewer != "public"
     profile_summaries: list[dict[str, Any]] = []
     by_rid: dict[str, str] = {}
@@ -273,7 +280,10 @@ def _build_into(
         profile_summaries.append(profile_summary_dict(prof, viewer))
         if prof.rid:
             by_rid[prof.rid] = f"profiles/{prof.slug}/profile.jsonld"
-        _collect_centroid(entry, prof, centroid_entries, result)
+        if centroids is None:
+            _collect_centroid(entry, prof, centroid_entries, result, viewer)
+        elif prof.slug in centroids:
+            centroid_entries.append((prof.slug, *centroids[prof.slug]))
 
     result.slugs = slugs
 
@@ -301,14 +311,16 @@ def _build_into(
     # ---- hosting configs ----------------------------------------------
     _write("_headers", cloudflare_headers())
 
-    if base_url:
+    # A non-public export gets no sitemap: it would list every slug, including
+    # the ones only that audience may see, and point crawlers at them.
+    if viewer != "public":
+        _write("robots.txt", robots_txt(no_index=True))
+    elif base_url:
         _write(
             "sitemap.xml",
             sitemap_xml(slugs, base_url=base_url, timestamp=timestamp),
         )
         _write("robots.txt", robots_txt(base_url=base_url, no_index=no_index))
-    elif viewer != "public":
-        _write("robots.txt", robots_txt(no_index=True))
     else:
         result.warnings.append("No base_url given; skipping sitemap.xml and robots.txt")
 
@@ -335,7 +347,7 @@ def _build_into(
         )
 
     # ---- collection centroids (site-level embeddings) -----------------
-    # One L2-normalized centroid per public profile, for ranking profiles
+    # One L2-normalized centroid per searchable profile, for ranking profiles
     # against a query without fetching every profile's chunk set (spec §7).
     centroid_meta = _write_collection_centroids(centroid_entries, _write, result)
 
