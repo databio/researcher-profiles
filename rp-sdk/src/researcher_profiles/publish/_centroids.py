@@ -1,5 +1,6 @@
 """The collection-wide embedding files: every profile's centroid stacked into one blob, the collection bundle, and the topics index."""
 
+import json
 import logging
 from collections.abc import Callable
 from pathlib import Path
@@ -8,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import ValidationError
 
 from ..errors import ProfileError
+from ..privacy import ViewerTier, effective_tiers, tier_allows
 from ..profile import ResearcherProfile
 from ..schema.jsonld import canonical_dumps
 
@@ -24,37 +26,37 @@ def _collect_centroid(
     prof: ResearcherProfile,
     entries: list[tuple[str, str, Any, dict | None]],
     result: "SiteResult",
+    viewer: ViewerTier = "public",
 ) -> None:
     """Append ``(slug, backend_spec, centroid, probe)`` when the profile is Searchable.
 
-    A profile is Searchable when it ships ``embeddings/index.json``. The
-    centroid is computed from the local sqlite (all chunks, including private
-    sources, since a single averaged vector is not invertible, spec §6), so this is
-    a no-op wrapped in a guard when the sqlite is absent or unreadable.
+    A profile is Searchable at ``viewer`` when it ships ``embeddings/index.json``
+    and that artifact's effective tier reaches ``viewer``. The centroid is the
+    mean of the rows in the flat files on disk, which are the profile's
+    ``public`` export, so a chunk the audience may not read never moves it. A
+    profile whose flat files are missing or unreadable is skipped with a
+    warning.
     """
     index_json = prof_dir / "embeddings" / "index.json"
     if not index_json.is_file():
         return
+    tier = effective_tiers(prof.metadata).get("embeddings/index.json")
+    if tier is None or not tier_allows(viewer, tier):
+        return
     # Imported here, not at module scope: ``..embeddings`` pulls numpy, and
     # publishing a site of non-searchable profiles must not need the vectors
     # extra. Past this point the profile is searchable, so it does.
-    from ..embeddings import IndexNotBuiltError, MissingEmbeddingBackendError
+    from ..embeddings import IndexNotBuiltError
+    from ..embeddings.flat import FlatEmbeddingIndex
 
     try:
-        import json as _json
-
-        idx_data = _json.loads(index_json.read_text(encoding="utf-8"))
-        backend_spec = idx_data["backend_spec"]
-    except (OSError, ValueError, KeyError) as e:
+        flat = FlatEmbeddingIndex.load(prof_dir / "embeddings")
+        vec = flat.centroid()
+    except (OSError, ValueError, KeyError, IndexNotBuiltError) as e:
         result.warnings.append(f"collection centroid skipped for {prof.slug}: {e}")
         return
-    probe = idx_data.get("probe")
-    try:
-        vec = prof.index.embedding("centroid")
-    except (IndexNotBuiltError, MissingEmbeddingBackendError, OSError) as e:
-        result.warnings.append(f"collection centroid skipped for {prof.slug}: {e}")
-        return
-    entries.append((prof.slug, str(backend_spec), vec, probe))
+    probe = json.loads(index_json.read_text(encoding="utf-8")).get("probe")
+    entries.append((prof.slug, flat.backend_spec, vec, probe))
 
 
 def _write_collection_centroids(

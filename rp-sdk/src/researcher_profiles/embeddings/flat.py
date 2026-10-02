@@ -69,6 +69,12 @@ class FlatExportResult:
     index_path: Path
     blob_path: Path
     chunks_path: Path
+    #: L2-normalized mean of the rows written, computed as
+    #: :meth:`FlatEmbeddingIndex.centroid` would from these files: the
+    #: profile's vector at this export's tier, never one that saw a dropped row.
+    centroid: np.ndarray
+    #: The ``probe`` written into ``index.json``.
+    probe: dict[str, Any]
 
 
 @dataclass
@@ -360,6 +366,8 @@ def write_flat_export(
         index_path=index_path,
         blob_path=blob_path,
         chunks_path=chunks_path,
+        centroid=_unit_mean(mat),
+        probe=index["probe"],
     )
 
 
@@ -579,11 +587,16 @@ class FlatEmbeddingIndex:
 
         if self._vectors.shape[0] == 0:
             raise IndexNotBuiltError("flat index has no vectors")
-        mean = self._vectors.astype(np.float32).mean(axis=0)
-        n = float(np.linalg.norm(mean))
-        if n < 1e-12:
-            return mean.astype(np.float32)
-        return (mean / n).astype(np.float32)
+        return _unit_mean(self._vectors)
+
+
+def _unit_mean(vectors: np.ndarray) -> np.ndarray:
+    """The L2-normalized mean of ``vectors``' rows (the unnormalized mean if ~0)."""
+    mean = vectors.astype(np.float32).mean(axis=0)
+    n = float(np.linalg.norm(mean))
+    if n < 1e-12:
+        return mean.astype(np.float32)
+    return (mean / n).astype(np.float32)
 
 
 # ---------------------------------------------------------------------------

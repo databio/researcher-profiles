@@ -33,7 +33,7 @@ from researcher_profiles.embeddings.cache import SqliteEmbeddingIndex
 from researcher_profiles.embeddings.flat import FlatEmbeddingIndex, write_flat_export
 from researcher_profiles.embeddings.protocol import VectorIndex
 from researcher_profiles.errors import CapabilityUnavailableError, ProfileWriteError
-from researcher_profiles.publish import build_site
+from researcher_profiles.publish import build_site, render_profile
 from researcher_profiles.store import FilesystemProfileStore, ProfileNotFoundError
 from researcher_profiles.store.http import HttpProfileStore
 from researcher_profiles.store.protocol import VectorStore
@@ -101,13 +101,18 @@ def fake_backend_everywhere(monkeypatch) -> FakeBackend:
 
 @pytest.fixture
 def indexed_root(tmp_path: Path, fake_backend_everywhere: FakeBackend) -> Path:
-    """A two-profile root, each with a real sqlite index and its flat export."""
+    """A two-profile root, each with a real sqlite index and its flat export.
+
+    Rendered, so the manifest lists ``embeddings/index.json``: an artifact the
+    manifest does not list has no tier, and nothing publishes it.
+    """
     root = tmp_path / "profiles"
     root.mkdir()
     for slug, rid in _RIDS.items():
         prof_dir = build_profile_dir(root / slug, name=slug.replace("-", " ").title(), rid=rid)
         SqliteEmbeddingIndex(prof_dir).build_index(backend=fake_backend_everywhere)
         assert write_flat_export(prof_dir, backend=fake_backend_everywhere) is not None
+        render_profile(prof_dir)
     return root
 
 
