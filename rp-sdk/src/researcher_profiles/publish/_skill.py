@@ -113,13 +113,16 @@ profiles/<slug>/
 {embeddings_section}{collection_section}
 ## Wire format
 
-The JSON files match the HTTP API wire shapes exactly:
+`index.json` matches `GET /api/v1/profiles` exactly. The per-profile files
+are the whole-profile static views; a hosted API serves the same data sized
+per caller:
 
-| File | Equivalent API endpoint |
+| File | Closest API endpoint |
 |------|------------------------|
-| `index.json` | `GET /api/v1/profiles` |
-| `profiles/<slug>/profile.json` | `GET /api/v1/profiles/<slug>` |
-| `profiles/<slug>/papers.json` | `GET /api/v1/profiles/<slug>/papers` |
+| `index.json` | `GET /api/v1/profiles` (same shape) |
+| `profiles/<slug>/profile.json` | `GET /api/v1/profiles/<slug>?view=full` (`fields` holds the metadata; the manifest is `GET .../files`) |
+| `profiles/<slug>/papers.json` | `GET /api/v1/profiles/<slug>/papers` (paged rows: `{{items, total, next_cursor}}`) |
+| `profiles/<slug>/summaries/*.json` | `GET /api/v1/profiles/<slug>/summaries?ids=...` |
 
 ## JSON-LD
 

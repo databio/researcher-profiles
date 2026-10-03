@@ -52,6 +52,7 @@ methods catch :class:`~researcher_profiles.errors.ProfileWriteError` only, and
 never bare ``Exception``.
 """
 
+import hashlib
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
@@ -75,6 +76,7 @@ from ..schema import (
     interests_from_text,
 )
 from ..schema._common import RENAMED_TIERS
+from ..schema.jsonld import canonical_dumps
 
 if TYPE_CHECKING:  # pragma: no cover
     from . import ResearcherProfile
@@ -307,6 +309,19 @@ def _declare_text_interests(doc: ProfileDocument, patch: dict[str, Any]) -> dict
             if (e.weight or 0) * sign > 0 and k not in mentioned:
                 declare(e.concept, None)
     return {**patch, "research_interests": kept + added}
+
+
+def paper_version(record: PaperRecord) -> str:
+    """First 16 hex of sha256 over the canonical JSON of one work (64 bits).
+
+    The concurrency token for one work. A work edit does not move the
+    profile's ``content_hash`` (that digest spans the document and the SOUL),
+    so without this two editors fixing the same paper overwrite each other
+    silently. Computed from the record as served, so any change to the record
+    changes it.
+    """
+    data = record.model_dump(mode="json", by_alias=True, exclude_none=True)
+    return hashlib.sha256(canonical_dumps(data).encode("utf-8")).hexdigest()[:16]
 
 
 def _find_work(papers: list[PaperRecord], paper_id: str) -> int:
@@ -563,6 +578,7 @@ __all__ = [
     "LOCKED_METADATA_FIELDS",
     "STRUCTURED_METADATA_FIELDS",
     "WorkNotFoundError",
+    "paper_version",
     "select_parts",
     "EditManager",
 ]

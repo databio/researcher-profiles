@@ -240,3 +240,140 @@ def chunk_web(text: str, page_id: str) -> list[Chunk]:
     text; split on H2/H3 boundaries like other markdown docs, keyed per page.
     """
     return _chunk_markdown_doc(text, "web", page_id)
+
+
+# ---------------------------------------------------------------------------
+# Enumeration through ArtifactStorage
+# ---------------------------------------------------------------------------
+
+#: Every chunk ``source_type`` the enumerator can produce.
+ALL_SOURCE_TYPES = frozenset(
+    {"expertise", "soul", "paper_summary", "paper_abstract", "grant", "cv", "web"}
+)
+
+_SUMMARY_SUFFIX = ".summary.md"
+
+
+def strip_frontmatter(text: str) -> str:
+    """Drop a leading ``---`` YAML frontmatter block, if present."""
+    if not text.startswith("---"):
+        return text
+    end = text.find("\n---", 3)
+    if end == -1:
+        return text
+    return text[end + len("\n---") :].lstrip("\n")
+
+
+def _collection_entries(storage, content_url: str) -> list:
+    """The raw ``hasPart`` entries of a collection artifact, ``[]`` when absent."""
+    import json
+
+    raw = storage.artifact_text(content_url)
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return []
+    if not isinstance(data, dict):
+        return []
+    return data.get("hasPart", []) or []
+
+
+def _web_page_ids(storage) -> list[str]:
+    """Stems of ``sources/web/*.md`` the storage holds, sorted."""
+    try:
+        parts, subjects = storage.build_manifest()
+    # Boundary: a backend that cannot enumerate simply has no web pages here.
+    except Exception:
+        return []
+    ids = set()
+    for ref in [*parts, *subjects]:
+        url = getattr(ref, "content_url", "") or ""
+        if url.startswith("sources/web/") and url.endswith(".md") and url.count("/") == 2:
+            ids.add(url[len("sources/web/") : -len(".md")])
+    return sorted(ids)
+
+
+def enumerate_source_chunks(
+    source,
+    *,
+    source_types=None,
+    level: str | None = None,
+    build_state=None,
+) -> list[Chunk]:
+    """Every chunk a profile's index is built over, read through ``ArtifactStorage``.
+
+    The one enumeration both the indexer (``SqliteEmbeddingIndex``) and the
+    serve-time text recovery (``api._semantic.chunk_texts``) use, so a stored
+    vector row's ``(source_type, source_id, chunk_index)`` always names the
+    same piece of text on both sides.
+
+    ``source`` is a :class:`~researcher_profiles.profile.ResearcherProfile`
+    (its storage, level and build state are used) or an ``ArtifactStorage``
+    (pass ``level`` and ``build_state``). ``source_types`` limits the work to
+    those types; ``None`` means all of them.
+
+    A ``lite`` profile is indexed over paper abstracts only (contaminated
+    papers skipped); ``full`` and ``deep`` over expertise, SOUL and summaries,
+    and ``deep`` adds grants, the CV and web pages.
+    """
+    storage = getattr(source, "storage", source)
+    if level is None:
+        try:
+            level = str(getattr(source.metadata, "level", None) or "full")
+        except Exception:  # noqa: BLE001 - an unreadable document indexes as full
+            level = "full"
+    if build_state is None:
+        try:
+            build_state = source.build_state
+        except Exception:  # noqa: BLE001
+            build_state = None
+    want = ALL_SOURCE_TYPES if source_types is None else frozenset(source_types)
+
+    out: list[Chunk] = []
+    if level == "lite":
+        if "paper_abstract" not in want:
+            return out
+        for i, entry in enumerate(_collection_entries(storage, "sources/papers.jsonld")):
+            if not isinstance(entry, dict):
+                continue
+            paper_id = entry.get("paper_id") or entry.get("openalex_id") or f"paper-{i}"
+            if build_state is not None and build_state.is_contaminated(entry.get("paper_id")):
+                continue
+            abstract = (entry.get("abstract") or "").strip()
+            if abstract:
+                out.extend(chunk_abstract(abstract, str(paper_id)))
+        return out
+
+    if "expertise" in want:
+        text = storage.load_expertise()
+        if text:
+            out.extend(chunk_expertise(text))
+    if "soul" in want:
+        text = storage.load_soul()
+        if text:
+            out.extend(chunk_soul(text))
+    if "paper_summary" in want:
+        summaries = storage.load_summaries()
+        for paper_id in sorted(summaries):
+            out.extend(chunk_summary(summaries[paper_id], paper_id))
+    if level == "deep":
+        if "grant" in want:
+            for i, entry in enumerate(_collection_entries(storage, "sources/grants.jsonld")):
+                if not isinstance(entry, dict):
+                    continue
+                grant_id = str(entry.get("id") or f"grant-{i}")
+                out.extend(
+                    chunk_grant(str(entry.get("name") or ""), entry.get("abstract"), grant_id)
+                )
+        if "cv" in want:
+            cv = storage.artifact_text("sources/cv.md")
+            if cv:
+                out.extend(chunk_cv(strip_frontmatter(cv)))
+        if "web" in want:
+            for page_id in _web_page_ids(storage):
+                body = storage.artifact_text(f"sources/web/{page_id}.md")
+                if body:
+                    out.extend(chunk_web(strip_frontmatter(body), page_id))
+    return out

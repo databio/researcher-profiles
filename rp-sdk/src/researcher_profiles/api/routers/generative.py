@@ -26,6 +26,7 @@ from ...privacy import (
     ViewerTier,
 )
 from ...store import ProfileStore
+from .._limits import PERSONA_K_CAP, clamp
 from .._projection import (
     _allowed_source_types,
     _gate_profile,
@@ -41,7 +42,7 @@ from ._routers import router
 logger = logging.getLogger(__name__)
 
 
-def _llm_response(text_obj: Any) -> LLMTextResponse:
+def _llm_response(text_obj: Any, k_applied: int) -> LLMTextResponse:
     from ...models.api import CitationRefPayload
 
     cits = []
@@ -67,6 +68,7 @@ def _llm_response(text_obj: Any) -> LLMTextResponse:
         refused=bool(getattr(text_obj, "refused", False)),
         refusal_reason=getattr(text_obj, "refusal_reason", None),
         grounded=bool(getattr(text_obj, "grounded", True)),
+        k_applied=k_applied,
     )
 
 
@@ -84,10 +86,11 @@ def ask_profile(
 ) -> LLMTextResponse:
     prof = get_profile(slug, store)
     _gate_profile(request, prof, viewer, slug)
+    k = clamp(body.k, 5, PERSONA_K_CAP)
     try:
         resp = prof.persona.ask(
             body.question,
-            k=body.k,
+            k=k,
             source_types=_allowed_source_types(prof.metadata, viewer),
             model=body.model,
             strict_corpus=body.strict_corpus,
@@ -100,7 +103,7 @@ def ask_profile(
     except Exception as e:
         logger.exception("ask failed for %s", slug)
         raise HTTPException(status_code=500, detail=f"ask failed: {e}") from e
-    return _llm_response(resp)
+    return _llm_response(resp, k)
 
 
 @router.post(
@@ -117,12 +120,13 @@ def review_profile(
 ) -> LLMTextResponse:
     prof = get_profile(slug, store)
     _gate_profile(request, prof, viewer, slug)
+    k = clamp(body.k, 5, PERSONA_K_CAP)
     try:
         resp = prof.persona.review(
             body.material,
             source_types=_allowed_source_types(prof.metadata, viewer),
             focus=body.focus,
-            k=body.k,
+            k=k,
             model=body.model,
             strict_corpus=body.strict_corpus,
             refusal_threshold=body.refusal_threshold,
@@ -133,7 +137,7 @@ def review_profile(
     except Exception as e:
         logger.exception("review failed for %s", slug)
         raise HTTPException(status_code=500, detail=f"review failed: {e}") from e
-    return _llm_response(resp)
+    return _llm_response(resp, k)
 
 
 @router.post(
@@ -150,12 +154,13 @@ def innovate_profile(
 ) -> IdeaList:
     prof = get_profile(slug, store)
     _gate_profile(request, prof, viewer, slug)
+    k = clamp(body.k, 12, PERSONA_K_CAP)
     try:
         ideas = prof.persona.innovate(
             body.topic,
             n=body.n,
             source_types=_allowed_source_types(prof.metadata, viewer),
-            k=body.k,
+            k=k,
             model=body.model,
             temperature=body.temperature,
         )
@@ -176,7 +181,8 @@ def innovate_profile(
                 related_works=list(i.related_works or []),
             )
             for i in ideas
-        ]
+        ],
+        k_applied=k,
     )
 
 
@@ -194,12 +200,13 @@ def riff_profile(
 ) -> RiffList:
     prof = get_profile(slug, store)
     _gate_profile(request, prof, viewer, slug)
+    k = clamp(body.k, 4, PERSONA_K_CAP)
     try:
         riffs = prof.persona.riff(
             body.seed,
             n=body.n,
             source_types=_allowed_source_types(prof.metadata, viewer),
-            k=body.k,
+            k=k,
             model=body.model,
             temperature=body.temperature,
         )
@@ -212,7 +219,8 @@ def riff_profile(
         logger.exception("riff failed for %s", slug)
         raise HTTPException(status_code=500, detail=f"riff failed: {e}") from e
     return RiffList(
-        items=[RiffPayload(angle=r.angle, text=r.text, related_work=r.related_work) for r in riffs]
+        items=[RiffPayload(angle=r.angle, text=r.text, related_work=r.related_work) for r in riffs],
+        k_applied=k,
     )
 
 

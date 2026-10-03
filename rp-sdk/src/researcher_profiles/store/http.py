@@ -289,6 +289,14 @@ class HttpProfileStore(_HookedStore, _AnalyticsAccessors):
             )
         return raw
 
+    def held_artifacts(self, ref: str) -> dict[str, int | None]:
+        """Every manifest entry: a static host publishes what its manifest lists.
+
+        Checking each body would cost one request per file; a static site that
+        lists a file and then 404s on it is a broken site, not a withheld body.
+        """
+        return {part.content_url: part.bytes for part in self.get(ref).manifest()}
+
     def artifact_bytes(self, ref: str, content_url: str) -> bytes:
         """One artifact's bytes, addressed by its ``contentUrl``.
 

@@ -109,7 +109,7 @@ def metadata_payload_dict(
 
 
 def profile_detail_dict(prof: ResearcherProfile, viewer: ViewerTier) -> dict[str, Any]:
-    """Produce the dict matching ``ProfileDetail`` (GET /api/v1/profiles/{slug})."""
+    """Produce the dict matching ``ProfileDetail``: the static ``profile.json`` view."""
     return {
         "slug": prof.slug,
         "rid": getattr(prof, "rid", None),
@@ -127,7 +127,7 @@ def paper_entries_list(
     exclude_contaminated: bool = False,
     exclude_untitled: bool = False,
 ) -> list[dict[str, Any]]:
-    """Produce the list matching ``PaperEntry[]`` (GET /profiles/{slug}/papers).
+    """Produce the list matching ``PaperEntry[]``: the static ``papers.json`` view.
 
     When ``exclude_contaminated`` is True, papers flagged in the build state
     are silently dropped (the publisher's egress policy). The build state is

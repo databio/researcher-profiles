@@ -33,6 +33,7 @@ from .routers import (  # noqa: F401
     edit,
     generative,
     identity,
+    passages,
     push,
     read,
     search,

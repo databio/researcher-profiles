@@ -6,7 +6,7 @@ on-disk pydantic models in ``schema/`` so the two layers
 can evolve independently, but the field names line up where reasonable.
 """
 
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -137,6 +137,15 @@ class ProfileMetadataPayload(_APIModel):
 
 
 class ProfileDetail(_APIModel):
+    """The whole-profile display shape: metadata, both narratives, the manifest.
+
+    Not an HTTP response model any more: ``GET /profiles/{slug}`` answers with
+    :class:`ProfileRecord`. This is the shape the static publisher writes
+    (``payloads.profile_detail_dict``), the shape ``rp-ui-lib`` renders (its
+    ``types.ts`` is generated from it), and the in-memory shape a host's
+    overlay and lens compositing work on.
+    """
+
     slug: str
     #: See :attr:`ProfileSummary.rid`.
     rid: Optional[str] = None
@@ -148,22 +157,23 @@ class ProfileDetail(_APIModel):
     expertise: Optional[str] = None
     #: Markdown body of ``personality/SOUL.md``. See :attr:`expertise`.
     soul: Optional[str] = None
-    #: The profile manifest (``hasPart`` + ``subjectOf`` entries), so a client
-    #: knows what the profile contains without walking the directory. Served
-    #: whole at every tier (spec section 6), with each entry carrying an
-    #: ``effective_visibility`` key so no client recomputes the derivation rule.
+    #: The profile manifest (``hasPart`` + ``subjectOf`` entries), each with an
+    #: ``effective_visibility`` key.
     manifest: list[dict] = []
-    #: The ``contentUrl``s this viewer did not receive. What makes a preview
-    #: legible rather than merely correct: an owner previewing as a stranger can
-    #: see the shape of what the stranger is missing.
+    #: The ``contentUrl``s this viewer did not receive.
     withheld: list[str] = []
-    #: ``"sha256:<hex>"`` over the document + SOUL. An editor reads it here and
-    #: sends it back on the next patch; if it no longer matches, the patch is a
-    #: 409 instead of a silent overwrite of somebody else's edit.
+    #: ``"sha256:<hex>"`` over the document + SOUL: the edit version token.
     content_hash: Optional[str] = None
 
 
 class PaperEntry(_APIModel):
+    """One paper as the static publisher and ``rp-ui-lib`` list it.
+
+    Not an HTTP response model any more: ``GET /profiles/{slug}/papers``
+    answers with :class:`PaperPage`. Kept because the static ``papers`` view
+    and the generated ``rp-ui-lib`` types are built from it.
+    """
+
     paper_id: Optional[str] = None
     title: str
     year: Optional[int] = None
@@ -171,25 +181,235 @@ class PaperEntry(_APIModel):
     first_author: Optional[str] = None
     full_text_link: Optional[str] = None
     summary_available: bool = False
-    #: Bibliographic identifiers, carried from the on-disk
-    #: :class:`~researcher_profiles.schema.PaperRecord`. Without them a remote
-    #: consumer holds a title and has to guess which work it names. A
-    #: title search is a different paper away from wrong. They come off the
-    #: same ``sources/papers.jsonld`` artifact as ``title``/``year``, so they
-    #: are gated by exactly the tier that already gates this route and widen
-    #: nothing: an identifier is a pointer at the open bibliographic record,
-    #: never at content.
     doi: Optional[str] = None
     pmid: Optional[str] = None
     openalex_id: Optional[str] = None
-    #: Full author list where the record carries one (``first_author`` alone
-    #: cannot answer a co-authorship question).
     authors: Optional[list[str]] = None
 
 
 class PaperSummary(_APIModel):
+    """One summary, as the static publisher and ``rp-ui-lib`` carry it."""
+
     paper_id: str
     summary: str
+
+
+# ---------------------------------------------------------------------------
+# Sized, per-caller reads (records, paper pages, text, passages)
+# ---------------------------------------------------------------------------
+
+#: Why a part is not available to this caller.
+#:
+#: - ``not_permitted``: it exists and this caller's tier does not reach it;
+#: - ``none``: there is no such artifact;
+#: - ``not_uploaded``: it is listed and visible, but its body was never pushed.
+SizeReason = Literal["not_permitted", "none", "not_uploaded"]
+
+
+class Size(_APIModel):
+    """What this caller may fetch of one deeper part, and how big it is.
+
+    ``available`` means *this* caller can fetch it through a route that exists,
+    not that the store holds it. ``bytes`` is the UTF-8 size of the stored
+    body; ``approx_tokens`` is ``bytes // 4``.
+    """
+
+    available: bool
+    bytes: Optional[int] = None
+    approx_tokens: Optional[int] = None
+    #: Set only when ``available`` is false.
+    reason: Optional[SizeReason] = None
+
+
+class Trimmed(_APIModel):
+    """The first entries of a long list, and how many there are in all."""
+
+    top: list = []
+    total: int = 0
+
+
+class ProfileParts(_APIModel):
+    """Sizes of a profile's deeper parts, for this caller."""
+
+    soul: Size
+    expertise: Size
+    #: The works artifact (``sources/papers.jsonld``); the count is in
+    #: ``fields.paper_count``.
+    papers: Size
+    #: Files this caller may not read, counted by role, e.g.
+    #: ``{"paper_fulltext": 53}``.
+    files_withheld: dict[str, int] = {}
+
+
+class ProfileRecord(_APIModel):
+    """``GET /profiles/{slug}``: one profile, sized for the caller.
+
+    ``view="record"`` (the default) is the trimmed record: the fields an agent
+    or a list view commonly needs, long lists cut to their top entries with a
+    total, no JSON-LD plumbing, no file manifest, no narrative bodies. It stays
+    under 8 KB. ``view="full"`` carries every metadata field untrimmed, plus
+    the ``soul`` and ``expertise`` bodies, for an edit form.
+    """
+
+    slug: str
+    rid: Optional[str] = None
+    #: The edit version token (``"sha256:<hex>"`` over document + SOUL).
+    content_hash: Optional[str] = None
+    view: Literal["record", "full"]
+    fields: dict
+    parts: ProfileParts
+    #: Field names this caller may not see; each is ``null`` in ``fields``.
+    withheld: list[str] = []
+    #: ``view="full"`` only: the narrative bodies (``None`` when withheld).
+    soul: Optional[str] = None
+    expertise: Optional[str] = None
+
+
+class PaperRow(_APIModel):
+    """One row of ``GET /profiles/{slug}/papers``: enough to choose the next read."""
+
+    paper_id: str
+    title: str
+    year: Optional[int] = None
+    journal: Optional[str] = None
+    first_author: Optional[str] = None
+    doi: Optional[str] = None
+    openalex_id: Optional[str] = None
+    #: The first ~160 chars of the summary this caller may read, else of the
+    #: abstract.
+    summary_short: Optional[str] = None
+    summary: Size
+    text: Size
+    #: The paper's 16-hex version token, for ``PATCH``/``DELETE /works``.
+    version: str
+    #: Only when the request had ``q``: the fused (RRF) score.
+    score: Optional[float] = None
+    #: Only when the request had ``q``: which rankings kept this paper.
+    matched_by: Optional[list[Literal["keyword", "semantic"]]] = None
+
+
+class PaperPage(_APIModel):
+    """``GET /profiles/{slug}/papers``: one page of paper rows."""
+
+    items: list[PaperRow]
+    #: Matching rows, before paging.
+    total: int
+    limit_applied: int
+    next_cursor: Optional[str] = None
+    has_more: bool = False
+    filters_applied: dict = {}
+    #: Only when the request had ``q``.
+    search_mode_used: Optional[Literal["hybrid", "keyword"]] = None
+    #: Set whenever the server fell back or left something out.
+    note: Optional[str] = None
+
+
+class PaperRecordView(_APIModel):
+    """``GET /profiles/{slug}/papers/{paper_id}``: one paper, sized for the caller."""
+
+    paper_id: str
+    title: str
+    version: str
+    view: Literal["record", "full"]
+    #: ``PaperRecord`` fields by name. The record view trims ``authors`` (first
+    #: 10) and ``topics`` (5) and cuts ``abstract`` at 1,500 chars, setting
+    #: ``abstract_truncated``.
+    fields: dict
+    #: The summary text inline: the summary artifact when this caller may read
+    #: it, else the record's own ``summary`` field.
+    summary: Optional[str] = None
+    summary_source: Optional[Literal["generated", "record"]] = None
+    #: ``{"summary": Size, "text": Size}``.
+    parts: dict[str, Size]
+    #: Full-text section names, when this caller may read the text.
+    sections: Optional[list[str]] = None
+    withheld: list[str] = []
+
+
+class SummaryBatch(_APIModel):
+    """``GET /profiles/{slug}/summaries?ids=``: several summaries in one read."""
+
+    summaries: dict[str, str] = {}
+    unavailable: dict[str, SizeReason] = {}
+    limit_applied: int
+    #: Ids past the cap, not looked at.
+    not_processed: list[str] = []
+
+
+class FileList(_APIModel):
+    """``GET /profiles/{slug}/files``: the manifest, labeled for this caller."""
+
+    #: Manifest entries, each with ``effective_visibility`` and ``slot``
+    #: (``hasPart`` or ``subjectOf``).
+    files: list[dict] = []
+    #: The ``contentUrl``s this caller may not read.
+    withheld: list[str] = []
+
+
+class TextSection(_APIModel):
+    """One heading's span in a text: what ``section=`` accepts."""
+
+    name: str
+    offset: int
+    chars: int
+
+
+class TextPage(_APIModel):
+    """One bounded page of a long text (``.../text``)."""
+
+    section: Optional[str] = None
+    offset: int
+    returned_chars: int
+    #: Of the section, or of the whole text when no section was named.
+    total_chars: int
+    has_more: bool
+    #: Pass as ``offset`` (with the same ``section``) to read on.
+    next_offset: Optional[int] = None
+    sections: list[TextSection] = []
+    text: str
+    #: Narrative reads only: the profile's edit version token.
+    content_hash: Optional[str] = None
+
+
+class PassageRequest(_APIModel):
+    """Body of ``POST .../passages``."""
+
+    query: str
+    k: Optional[int] = None
+
+
+PassageSource = Literal[
+    "full_text", "summary", "abstract", "soul", "expertise", "cv", "web", "grant"
+]
+
+
+class Passage(_APIModel):
+    """One passage that answers a query, from a source this caller may read."""
+
+    source: PassageSource
+    #: Web page id or grant id; a paper's id is implied by the route.
+    source_id: Optional[str] = None
+    section: Optional[str] = None
+    #: Char offset into that source; the text routes accept it for
+    #: ``full_text``, ``soul`` and ``expertise``.
+    offset: Optional[int] = None
+    #: At most ``SNIPPET_CHARS`` characters.
+    text: str
+    #: The fused (RRF) score.
+    score: float
+    matched_by: list[Literal["keyword", "semantic"]]
+
+
+class PassageList(_APIModel):
+    """``POST .../passages``: the best passages, and what was searched."""
+
+    passages: list[Passage]
+    k_applied: int
+    search_mode_used: Literal["hybrid", "keyword", "hybrid+keyword_fulltext"]
+    #: Sources actually searched, e.g. ``["full_text", "summary", "abstract"]``.
+    searched: list[str] = []
+    #: Every fallback or omission, in fixed server text.
+    note: Optional[str] = None
 
 
 class PushResponse(_APIModel):
@@ -311,6 +531,10 @@ class MetadataPatch(_APIModel):
     training: Optional[list[dict]] = None
     career: Optional[list[dict]] = None
     same_as: Optional[list[str]] = None
+    #: The "how I think" narrative (``personality/SOUL.md``), markdown. Replaces
+    #: the whole narrative, in the same write as the other fields, so the
+    #: profile's ``content_hash`` moves once.
+    soul: Optional[str] = None
     #: Optimistic concurrency: the ``content_hash`` this edit was composed
     #: against. Omitted, the patch is last-writer-wins (which is what a
     #: single-owner CLI wants); supplied and stale, the patch is a 409 carrying
@@ -348,20 +572,12 @@ class WorkPatch(_APIModel):
     first_author: Optional[str] = None
     author_position: Optional[str] = None
     is_corresponding: Optional[bool] = None
-    #: See :attr:`MetadataPatch.base_hash`. The digest spans the profile
-    #: document and the SOUL, so it detects a concurrent *profile* edit; a work
-    #: patch sends it for the same reason a metadata patch does.
-    base_hash: Optional[str] = None
-
-
-class SoulUpdate(_APIModel):
-    """Replacement body for ``personality/SOUL.md``."""
-
-    soul: str
-    #: See :attr:`MetadataPatch.base_hash`. The digest spans the document and
-    #: the SOUL, so a soul write and a metadata write conflict with each other,
-    #: which is exactly right: they are two halves of one profile.
-    base_hash: Optional[str] = None
+    #: Optimistic concurrency for this one work: the paper ``version`` (from
+    #: ``GET /papers`` or ``GET /papers/{paper_id}``) this edit was composed
+    #: against. Supplied and stale, the patch is a 409 carrying the current
+    #: version in ``X-RP-Paper-Version``. A work edit does not move the
+    #: profile's ``content_hash``, so that token cannot guard it.
+    base_version: Optional[str] = None
 
 
 class ArtifactVisibility(_APIModel):
@@ -412,6 +628,9 @@ class EditResult(_APIModel):
     #: The ``content_hash`` after this write. An editor holding a form open
     #: sends it as the next ``base_hash`` without re-reading the profile.
     content_hash: Optional[str] = None
+    #: Work edits only: the paper's version after this write (``None`` after a
+    #: delete).
+    version: Optional[str] = None
 
 
 class ArtifactTier(_APIModel):
@@ -502,10 +721,14 @@ class SearchHitPayload(_APIModel):
     cosine: float
     score: float
     meta: dict = {}
+    #: True when ``text`` was cut to ``SNIPPET_CHARS`` at a word boundary.
+    truncated: bool = False
 
 
 class SearchResponse(_APIModel):
     hits: list[SearchHitPayload]
+    #: The ``k`` that ran, after clamping.
+    k_applied: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -571,6 +794,9 @@ class MatchResponse(_APIModel):
     ranked_profiles: int
     #: The size of the indexed corpus this query was ranked against.
     total_profiles: int
+    #: ``k`` and ``prefilter`` as they ran, after clamping.
+    k_applied: int = 0
+    prefilter_applied: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -647,6 +873,9 @@ class ReviewerMatchResult(MatchResult):
 
 class ReviewerMatchResponse(_APIModel):
     matches: list[ReviewerMatchResult]
+    #: ``k`` and ``prefilter`` as they ran, after clamping.
+    k_applied: int = 0
+    prefilter_applied: int = 0
 
 
 class GraphNodePayload(_APIModel):
@@ -724,6 +953,9 @@ class RankWorksResponse(_APIModel):
     slug: str
     rid: Optional[str] = None
     works: list[RankedWorkPayload]
+    #: ``k`` and ``max_pages`` as they ran, after clamping.
+    k_applied: int = 0
+    max_pages_applied: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -780,6 +1012,8 @@ class LLMTextResponse(_APIModel):
     refused: bool = False
     refusal_reason: Optional[str] = None
     grounded: bool = True
+    #: The retrieval ``k`` that ran, after clamping.
+    k_applied: int = 0
 
 
 class IdeaPayload(_APIModel):
@@ -791,6 +1025,8 @@ class IdeaPayload(_APIModel):
 
 class IdeaList(_APIModel):
     items: list[IdeaPayload]
+    #: The retrieval ``k`` that ran, after clamping.
+    k_applied: int = 0
 
 
 class RiffPayload(_APIModel):
@@ -801,6 +1037,8 @@ class RiffPayload(_APIModel):
 
 class RiffList(_APIModel):
     items: list[RiffPayload]
+    #: The retrieval ``k`` that ran, after clamping.
+    k_applied: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -849,8 +1087,23 @@ __all__ = [
     "MetadataPatch",
     "PaperEntry",
     "PaperSummary",
+    "FileList",
+    "Passage",
+    "PassageList",
+    "PassageRequest",
+    "PaperPage",
+    "PaperRecordView",
+    "PaperRow",
     "ProfileDetail",
     "ProfileMetadataPayload",
+    "ProfileParts",
+    "ProfileRecord",
+    "Size",
+    "SizeReason",
+    "SummaryBatch",
+    "TextPage",
+    "TextSection",
+    "Trimmed",
     "ProfileSummary",
     "PushResponse",
     "RankWorksRequest",
@@ -863,7 +1116,6 @@ __all__ = [
     "SearchHitPayload",
     "SearchRequest",
     "SearchResponse",
-    "SoulUpdate",
     "VisibilityPatch",
     "WorkPatch",
 ]

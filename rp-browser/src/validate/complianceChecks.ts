@@ -352,27 +352,35 @@ export async function dynamicApiChecks(
       passed:
         detailOutcome.ok &&
         "slug" in detailOutcome.value &&
-        "metadata" in detailOutcome.value,
+        "fields" in detailOutcome.value,
       message: detailOutcome.ok
-        ? "slug" in detailOutcome.value && "metadata" in detailOutcome.value
-          ? `GET /profiles/${slug} returns slug and metadata.`
+        ? "slug" in detailOutcome.value && "fields" in detailOutcome.value
+          ? `GET /profiles/${slug} returns slug and fields.`
           : `GET /profiles/${slug} missing required fields.`
         : `GET /profiles/${slug} failed: ${detailOutcome.ok ? "" : detailOutcome.detail}`,
     });
 
     // Papers endpoint
+    // A page of rows: {items: [...], total, limit_applied, next_cursor}.
     const papersOutcome = await fetchJson<unknown>(
       `${base}/profiles/${slug}/papers`,
     );
+    const papersPage =
+      papersOutcome.ok &&
+      typeof papersOutcome.value === "object" &&
+      papersOutcome.value !== null &&
+      Array.isArray((papersOutcome.value as Record<string, unknown>).items)
+        ? (papersOutcome.value as { items: unknown[]; total?: number })
+        : null;
     add({
       id: "dynamic-papers",
       title: "Papers Endpoint",
       severity: "error",
-      passed: papersOutcome.ok && Array.isArray(papersOutcome.value),
+      passed: papersPage !== null,
       message: papersOutcome.ok
-        ? Array.isArray(papersOutcome.value)
-          ? `GET /profiles/${slug}/papers returns array with ${(papersOutcome.value as unknown[]).length} entries.`
-          : "Papers endpoint did not return an array."
+        ? papersPage !== null
+          ? `GET /profiles/${slug}/papers returns a page of ${papersPage.items.length} rows (total ${String(papersPage.total ?? "?")}).`
+          : "Papers endpoint did not return a page ({items: [...]})."
         : `GET /profiles/${slug}/papers failed: ${papersOutcome.ok ? "" : papersOutcome.detail}`,
     });
 

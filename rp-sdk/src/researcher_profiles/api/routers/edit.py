@@ -1,4 +1,4 @@
-"""The owner-scoped interactive edit surface: metadata, soul, works, visibility.
+"""The owner-scoped interactive edit surface: metadata (narrative included), works, visibility.
 
 Every route here hangs on ``edit_router``, which carries a router-level
 ``Depends(require_owner)``. ``deps.require_owner`` takes ``slug`` as a required
@@ -7,6 +7,8 @@ or FastAPI would surface ``slug`` as a required query parameter instead.
 """
 
 import logging
+from contextlib import nullcontext
+from typing import Optional
 
 from fastapi import Depends, HTTPException, Request
 
@@ -15,7 +17,6 @@ from ...models.api import (
     EditResult,
     MetadataPatch,
     SectionTierReport,
-    SoulUpdate,
     VisibilityPatch,
     VisibilityReport,
     WorkPatch,
@@ -27,7 +28,7 @@ from ...privacy import (
     section_tiers,
     tier_allows,
 )
-from ...profile.edit import EditError, WorkNotFoundError
+from ...profile.edit import EditError, WorkNotFoundError, paper_version
 from ...schema import PaperRecord, most_restrictive
 from ...store import ProfileStore
 from .._projection import (
@@ -67,11 +68,46 @@ def _check_base_hash(store: ProfileStore, ref: str, base_hash: str | None) -> No
         return
     raise HTTPException(
         status_code=409,
-        detail=(
-            "this profile changed since you loaded it "
-            f"(current content_hash {current}); reload it and re-apply your edit"
-        ),
+        detail={
+            "error": "conflict",
+            "current": current,
+            "message": (
+                "this profile changed since you loaded it; reload it and re-apply your edit"
+            ),
+        },
         headers={"X-RP-Content-Hash": current},
+    )
+
+
+def _check_base_version(record: PaperRecord, base_version: Optional[str]) -> None:
+    """Refuse a work edit composed against another version of that work.
+
+    The work-level twin of :func:`_check_base_hash`: the profile's
+    ``content_hash`` does not move when a work changes, so it cannot guard a
+    work. Opt-in the same way: no ``base_version``, last writer wins.
+    """
+    if base_version is None:
+        return
+    current = paper_version(record)
+    if current == base_version:
+        return
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "error": "conflict",
+            "current": current,
+            "message": "this paper changed since you loaded it; reload it and re-apply your edit",
+        },
+        headers={"X-RP-Paper-Version": current},
+    )
+
+
+def _work(prof, paper_id: str) -> PaperRecord:
+    for record in prof.papers:
+        if record.paper_id == paper_id:
+            return record
+    raise HTTPException(
+        status_code=404, detail=f"no work with paper_id {paper_id!r} in this profile"
     )
 
 
@@ -82,9 +118,12 @@ def patch_profile_metadata(
     request: Request,
     store: ProfileStore = Depends(get_store),
 ) -> EditResult:
-    """Patch owner-editable metadata: every content field, AI-written ones included.
+    """Patch owner-editable metadata, the narrative included: every content field.
 
-    Only the fields present in the body are applied. Every profile field is
+    Only the fields present in the body are applied. ``soul`` replaces the
+    "how I think" narrative (``personality/SOUL.md``); it is applied in the
+    same write unit as the other fields, so the edit is atomic and the
+    profile's ``content_hash`` moves once. Every profile field is
     editable except the locked ones
     (:data:`researcher_profiles.profile.edit.LOCKED_METADATA_FIELDS`: identity,
     code-computed facts, the manifest, bookkeeping, and visibility); the
@@ -105,10 +144,23 @@ def patch_profile_metadata(
     # caller's own bookkeeping.
     patch.pop("slug", None)
     base_hash = patch.pop("base_hash", None)
+    has_soul = "soul" in patch
+    soul = patch.pop("soul", None)
     _check_base_hash(store, store.resolve_slug(slug), base_hash)
-    check_write_scope(request, "metadata", {"fields": sorted(patch)})
+    if patch or not has_soul:
+        check_write_scope(request, "metadata", {"fields": sorted(patch)})
+    if has_soul:
+        check_write_scope(request, "soul", {})
     try:
-        prof.edit.patch_metadata(patch)
+        # One write unit when both halves change, so the edit is atomic and the
+        # hooks run once; a single half is its own unit already. The unit is
+        # named for the narrative, the half a hook that cares about embedded
+        # or overridable text (a vector refresh, an overlay) must not miss.
+        with prof.write_unit("soul") if (patch and has_soul) else nullcontext():
+            if patch:
+                prof.edit.patch_metadata(patch)
+            if has_soul:
+                prof.edit.set_soul(soul if soul is not None else "")
     except EditError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     resolved = store.resolve_slug(slug)
@@ -116,32 +168,7 @@ def patch_profile_metadata(
     return EditResult(
         slug=resolved,
         rid=getattr(prof, "rid", None),
-        updated=sorted(patch.keys()),
-        content_hash=_content_hash(store, resolved),
-    )
-
-
-@edit_router.put("/profiles/{slug}/soul", response_model=EditResult)
-def put_profile_soul(
-    slug: str,
-    body: SoulUpdate,
-    request: Request,
-    store: ProfileStore = Depends(get_store),
-) -> EditResult:
-    """Replace the SOUL/persona narrative (``personality/SOUL.md``)."""
-    prof = get_profile(slug, store)
-    _check_base_hash(store, store.resolve_slug(slug), body.base_hash)
-    check_write_scope(request, "soul", {})
-    try:
-        prof.edit.set_soul(body.soul)
-    except EditError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-    resolved = store.resolve_slug(slug)
-    invalidate_after_write(request, store, resolved)
-    return EditResult(
-        slug=resolved,
-        rid=getattr(prof, "rid", None),
-        updated=["soul"],
+        updated=sorted([*patch.keys(), *(["soul"] if has_soul else [])]),
         content_hash=_content_hash(store, resolved),
     )
 
@@ -155,29 +182,6 @@ def _work_edit_error(e: EditError) -> HTTPException:
     """
     status = 404 if isinstance(e, WorkNotFoundError) else 400
     return HTTPException(status_code=status, detail=str(e))
-
-
-@edit_router.get("/profiles/{slug}/works/{paper_id}", response_model=PaperRecord)
-def get_profile_work(
-    slug: str,
-    paper_id: str,
-    store: ProfileStore = Depends(get_store),
-) -> PaperRecord:
-    """One work's whole record, as an editor needs to see it before patching.
-
-    ``GET /profiles/{slug}/papers`` serves a reading list and drops the fields
-    this surface edits (``citation``, ``access``, ``summary``, ...), so an
-    owner had no way to read back what they were about to change. Owner-scoped
-    like the rest of this router, and the full record is exactly what that
-    scope already grants.
-    """
-    prof = get_profile(slug, store)
-    for record in prof.papers:
-        if record.paper_id == paper_id:
-            return record
-    raise HTTPException(
-        status_code=404, detail=f"no work with paper_id {paper_id!r} in this profile"
-    )
 
 
 @edit_router.patch("/profiles/{slug}/works/{paper_id}", response_model=EditResult)
@@ -198,22 +202,22 @@ def patch_profile_work(
     record is re-validated before it is written; a patch that would produce an
     invalid record is a 400 and leaves the corpus untouched.
 
-    ``base_hash`` works as on the metadata patch. Note what it covers: the
-    digest spans the profile document and the SOUL (see
-    :func:`_check_base_hash`), so it catches a concurrent *profile* edit, not a
-    concurrent edit to a different work.
+    Send ``base_version`` (the paper's ``version`` from ``GET /papers`` or
+    ``GET /papers/{paper_id}``) to get a **409** carrying the current version
+    in ``X-RP-Paper-Version`` instead of overwriting somebody else's edit to
+    this paper. The reply's ``version`` is the paper's new version.
     """
     prof = get_profile(slug, store)
     patch = body.model_dump(exclude_unset=True, by_alias=False)
-    # ``base_hash`` is the concurrency token, not a field of the work. Popped
-    # before the whitelist check, or the whitelist would reject the caller's own
-    # bookkeeping; ``paper_id`` never appears here because it is the route
-    # parameter and re-keying a record is not a patch.
-    base_hash = patch.pop("base_hash", None)
-    _check_base_hash(store, store.resolve_slug(slug), base_hash)
+    # ``base_version`` is the concurrency token, not a field of the work.
+    # Popped before the whitelist check, or the whitelist would reject the
+    # caller's own bookkeeping; ``paper_id`` never appears here because it is
+    # the route parameter and re-keying a record is not a patch.
+    base_version = patch.pop("base_version", None)
+    _check_base_version(_work(prof, paper_id), base_version)
     check_write_scope(request, "works", {"paper_id": paper_id, "fields": sorted(patch)})
     try:
-        prof.edit.patch_work(paper_id, patch)
+        updated = prof.edit.patch_work(paper_id, patch)
     except EditError as e:
         raise _work_edit_error(e) from e
     resolved = store.resolve_slug(slug)
@@ -223,32 +227,41 @@ def patch_profile_work(
         rid=getattr(prof, "rid", None),
         updated=sorted(patch.keys()),
         content_hash=_content_hash(store, resolved),
+        version=paper_version(updated),
     )
 
 
-@edit_router.put("/profiles/{slug}/works/{paper_id}", response_model=EditResult)
-def put_profile_work(
+@edit_router.post("/profiles/{slug}/works", response_model=EditResult, status_code=201)
+def add_profile_work(
     slug: str,
-    paper_id: str,
     body: dict,
     request: Request,
     store: ProfileStore = Depends(get_store),
 ) -> EditResult:
-    """Add one work, or replace the record already under this ``paper_id``.
+    """Add one new work. Never overwrites: an existing ``paper_id`` is a 409.
 
-    The body is a whole :class:`~researcher_profiles.schema.PaperRecord`, but
-    it is annotated as a dict and parsed by ``add_work``: taking the on-disk
-    model as the declared body would make a malformed record a 422 about the
-    request shape instead of the 400 naming the offending field that every
-    other edit route answers with.
-
-    The path's ``paper_id`` wins over whatever the body carries, so a record
-    can never be filed under a name other than the one it was addressed by.
+    The body is a whole :class:`~researcher_profiles.schema.PaperRecord`
+    carrying its ``paper_id``, annotated as a dict and parsed by ``add_work``:
+    taking the on-disk model as the declared body would make a malformed
+    record a 422 about the request shape instead of the 400 naming the
+    offending field that every other edit route answers with. To change a work
+    already there, ``PATCH /works/{paper_id}``.
     """
     prof = get_profile(slug, store)
+    paper_id = str(body.get("paper_id") or "").strip() if isinstance(body, dict) else ""
+    if not paper_id:
+        raise HTTPException(status_code=400, detail="a work record needs a paper_id")
+    if any(record.paper_id == paper_id for record in prof.papers):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "conflict",
+                "message": "paper_id already exists; use PATCH",
+            },
+        )
     check_write_scope(request, "works", {"paper_id": paper_id, "fields": ["*"]})
     try:
-        prof.edit.add_work({**body, "paper_id": paper_id})
+        added = prof.edit.add_work({**body, "paper_id": paper_id})
     except EditError as e:
         raise _work_edit_error(e) from e
     resolved = store.resolve_slug(slug)
@@ -258,6 +271,7 @@ def put_profile_work(
         rid=getattr(prof, "rid", None),
         updated=[paper_id],
         content_hash=_content_hash(store, resolved),
+        version=paper_version(added),
     )
 
 
@@ -267,9 +281,15 @@ def delete_profile_work(
     paper_id: str,
     request: Request,
     store: ProfileStore = Depends(get_store),
+    base_version: Optional[str] = None,
 ) -> EditResult:
-    """Remove one work from ``sources/papers.jsonld``."""
+    """Remove one work from ``sources/papers.jsonld``.
+
+    ``base_version`` (a query parameter) works as on the work patch: stale,
+    the delete is a 409 and the work stays.
+    """
     prof = get_profile(slug, store)
+    _check_base_version(_work(prof, paper_id), base_version)
     check_write_scope(request, "works", {"paper_id": paper_id, "fields": []})
     try:
         prof.edit.remove_work(paper_id)

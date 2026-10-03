@@ -421,7 +421,7 @@ class TestManagementClient:
         "resource, method, args, kwargs, http_method, path, body",
         [
             ("identity", "whoami", (), {}, "get", "/api/manage/agent/whoami", None),
-            ("profile", "get", (SLUG,), {}, "get", f"/api/v1/profiles/{SLUG}", None),
+            ("profile", "get", (SLUG,), {}, "get", f"/api/v1/profiles/{SLUG}?view=full", None),
             (
                 "profile",
                 "patch_metadata",
@@ -430,15 +430,6 @@ class TestManagementClient:
                 "patch",
                 f"/api/v1/profiles/{SLUG}/metadata",
                 {"name": "Jane Q. Doe", "base_hash": "before"},
-            ),
-            (
-                "profile",
-                "put_soul",
-                (SLUG, "A narrative."),
-                {},
-                "put",
-                f"/api/v1/profiles/{SLUG}/soul",
-                {"soul": "A narrative."},
             ),
             (
                 "profile",
@@ -461,37 +452,36 @@ class TestManagementClient:
                 (SLUG, "doe2016example"),
                 {},
                 "get",
-                f"/api/v1/profiles/{SLUG}/works/doe2016example",
+                f"/api/v1/profiles/{SLUG}/papers/doe2016example?view=full",
                 None,
             ),
             (
                 "profile",
                 "patch_work",
                 (SLUG, "doe2016example", {"doi": "10.1/x"}),
-                {"base_hash": "before"},
+                {"base_version": "before"},
                 "patch",
                 f"/api/v1/profiles/{SLUG}/works/doe2016example",
-                {"doi": "10.1/x", "base_hash": "before"},
+                {"doi": "10.1/x", "base_version": "before"},
             ),
             (
                 "profile",
-                "put_work",
-                (SLUG, "doe2026new", {"name": "A new work", "type": "authored"}),
+                "add_work",
+                (SLUG, {"paper_id": "doe2026new", "name": "A new work", "type": "authored"}),
                 {},
-                "put",
-                f"/api/v1/profiles/{SLUG}/works/doe2026new",
-                {"name": "A new work", "type": "authored"},
+                "post",
+                f"/api/v1/profiles/{SLUG}/works",
+                {"paper_id": "doe2026new", "name": "A new work", "type": "authored"},
             ),
         ],
         ids=[
             "whoami",
             "get",
             "patch-metadata",
-            "put-soul",
             "patch-visibility",
             "get-work",
             "patch-work",
-            "put-work",
+            "add-work",
         ],
     )
     def test_resource_methods_keep_their_request_shape(
@@ -518,7 +508,7 @@ class TestManagementClient:
             ("identity", "whoami", (), {}),
             ("profile", "get", (SLUG,), {}),
             ("profile", "patch_metadata", (SLUG, {"name": "Jane"}), {}),
-            ("profile", "put_soul", (SLUG, "A narrative."), {}),
+            ("profile", "add_work", (SLUG, {"paper_id": "doe2026new", "name": "New"}), {}),
             ("profile", "patch_visibility", (SLUG,), {}),
             ("profile", "get_work", (SLUG, "doe2016example"), {}),
             ("profile", "patch_work", (SLUG, "doe2016example", {"doi": "10.1/x"}), {}),
@@ -528,7 +518,7 @@ class TestManagementClient:
             "whoami",
             "get",
             "patch-metadata",
-            "put-soul",
+            "add-work",
             "patch-visibility",
             "get-work",
             "patch-work",
@@ -551,6 +541,7 @@ class TestManagementClient:
         session.get.return_value = response
         session.patch.return_value = response
         session.put.return_value = response
+        session.post.return_value = response
         session.delete.return_value = response
 
         with pytest.raises(InsufficientAccessError) as error:

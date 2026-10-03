@@ -1101,8 +1101,8 @@ $ rp profile push profile.md
 `push` sends the frontmatter's `base_hash` by default, so an owner edit that
 landed since the pull returns `409` rather than silently overwriting it.
 Re-pull and re-apply, or pass `--force` to overwrite anyway. Changed
-metadata goes to `PATCH /api/v1/profiles/{slug}/metadata` and a changed body to
-`PUT /api/v1/profiles/{slug}/soul`; visibility is never part of a push, only of
+metadata and the body go together, in one `PATCH /api/v1/profiles/{slug}/metadata`
+(the body as its `soul` field); visibility is never part of a push, only of
 `rp profile visibility set`, and an agent key may narrow a tier but never widen
 one.
 

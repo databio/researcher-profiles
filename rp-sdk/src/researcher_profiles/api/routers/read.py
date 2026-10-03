@@ -8,17 +8,22 @@ different code path; it is the viewer whose tier is ``public``.
 import hashlib
 import logging
 from datetime import datetime, timezone
+from typing import Literal, Optional
 
-from fastapi import Depends, HTTPException, Request, Response
+from fastapi import Depends, HTTPException, Query, Request, Response
 
 from ... import __version__
 from ...models.api import (
-    PaperEntry,
-    PaperSummary,
-    ProfileDetail,
+    FileList,
+    PaperPage,
+    PaperRecordView,
     ProfileListEntry,
     ProfileListResponse,
+    ProfileRecord,
     ProfileSummary,
+    SummaryBatch,
+    TextPage,
+    TextSection,
 )
 from ...models.published import ProfileCard, ProfileCollection
 from ...privacy import (
@@ -30,11 +35,13 @@ from ...privacy import (
     tier_allows,
 )
 from ...schema import (
+    PaperRecord,
     validate_ref,
 )
 from ...schema.jsonld import CONTEXT_URL
-from ...schema.manifest import _SUMMARY_SUFFIX
 from ...store import ProfileNotFoundError, ProfileStore
+from .._cursor import decode_cursor, encode_cursor
+from .._limits import BATCH_IDS_CAP, PAPERS_LIMIT, clamp
 from .._projection import (
     PUBLIC_DOCUMENT_MAX_AGE,
     VARY_ON_CREDENTIALS,
@@ -44,11 +51,19 @@ from .._projection import (
     _profile_missing,
     _profile_summary,
     artifact_visible,
-    metadata_payload,
-    registry_proofs,
     served_document_bytes,
     withheld,
 )
+from .._records import paper_record_view, paper_row, profile_record, summary_text
+from .._sizes import (
+    EXPERTISE_URL,
+    PAPERS_URL,
+    SOUL_URL,
+    SizeIndex,
+    summary_url,
+    text_url,
+)
+from .._text import page_text, sections_of
 from ..deps import (
     get_profile,
     get_profile_tier_floor,
@@ -264,60 +279,86 @@ def get_collection(
 
 @public_router.get(
     "/profiles/{slug}",
-    response_model=ProfileDetail,
+    response_model=ProfileRecord,
+    response_model_exclude_none=True,
 )
 def get_profile_detail(
+    slug: str,
+    request: Request,
+    store: ProfileStore = Depends(get_store),
+    viewer: ViewerTier = Depends(get_viewer_tier),
+    view: Literal["record", "full"] = "record",
+) -> Response:
+    """One profile, sized for this caller.
+
+    ``view="record"`` (the default) is the trimmed record: the common fields,
+    long lists cut to their top entries with a total, the edit version
+    (``content_hash``) and, under ``parts``, what this caller may fetch of the
+    narrative and the works file and how big each is. It stays under 8 KB.
+    ``view="full"`` carries every metadata field untrimmed plus the ``soul``
+    and ``expertise`` bodies, for an edit form or a client that mirrors the
+    profile. Neither view carries the file manifest: that is
+    ``GET /profiles/{slug}/files``.
+
+    A field this caller may not see is ``null`` and named in ``withheld``,
+    never ``""``: a client has to be able to tell withheld from empty.
+
+    ``ETag`` is weak and derived from ``content_hash`` (plus the viewer tier and
+    the view), so ``If-None-Match`` answers 304 for one stored-column read.
+    """
+    prof = get_profile(slug, store)
+    _gate_profile(request, prof, viewer, slug)
+    resolved = store.resolve_slug(slug)
+    current = _content_hash(store, resolved)
+    headers = {"Cache-Control": "private, no-store", "Vary": VARY_ON_CREDENTIALS}
+    if current:
+        etag = f'W/"{current.split(":", 1)[-1][:32]}-{viewer}-{view}"'
+        headers["ETag"] = etag
+        if request.headers.get("if-none-match") == etag:
+            return Response(status_code=304, headers=headers)
+    record = profile_record(prof, viewer, view=view, request=request, store=store)
+    return Response(
+        content=record.model_dump_json(exclude_none=True),
+        media_type="application/json",
+        headers=headers,
+    )
+
+
+@public_router.get("/profiles/{slug}/files", response_model=FileList)
+def get_profile_files(
     slug: str,
     request: Request,
     response: Response,
     store: ProfileStore = Depends(get_store),
     viewer: ViewerTier = Depends(get_viewer_tier),
-) -> ProfileDetail:
-    """One profile, projected artifact by artifact through the viewer's tier.
+) -> FileList:
+    """The profile's manifest, each entry labeled with its effective tier.
 
-    The profile gate runs first (404 when this viewer may not see it at all),
-    then each body is served only if its backing artifact is visible: ``soul``
-    from ``personality/SOUL.md``, ``expertise`` from
-    ``personality/expertise.md``. A withheld body is ``None``, never ``""``: a
-    client has to be able to tell "withheld" from "empty", and an owner looking
-    at an empty box would reasonably conclude publication had worked.
-
-    The manifest itself stays whole (spec section 6, tier-invariant), with each
-    entry carrying its ``effective_visibility`` so no client ever recomputes the
-    derivation rule, and ``withheld`` naming what this viewer did not get.
+    Served whole at every tier (spec section 6, tier-invariant), with each
+    entry's ``effective_visibility`` so no client recomputes the derivation
+    rule, its ``slot`` (``hasPart`` or ``subjectOf``), and ``withheld`` naming
+    what this viewer may not read. A push client reads this to learn what the
+    server holds.
     """
     prof = get_profile(slug, store)
     _gate_profile(request, prof, viewer, slug)
     response.headers["Cache-Control"] = "private, no-store"
     response.headers["Vary"] = VARY_ON_CREDENTIALS
     explain = explain_tiers(prof.metadata)
-    md = prof.metadata
-
-    manifest = []
-    for part in prof.manifest():
-        entry = part.model_dump(mode="json")
-        detail = explain.get(part.content_url)
-        entry["effective_visibility"] = detail.effective if detail is not None else part.visibility
-        manifest.append(entry)
-
-    return ProfileDetail(
-        slug=prof.slug,
-        rid=getattr(prof, "rid", None),
-        metadata=metadata_payload(prof, viewer, proofs=registry_proofs(request, prof.metadata.rid)),
-        expertise=(
-            prof.expertise
-            if artifact_visible(explain, md, "personality/expertise.md", "expertise", viewer)
-            else None
-        ),
-        soul=(
-            prof.soul
-            if artifact_visible(explain, md, "personality/SOUL.md", "soul", viewer)
-            else None
-        ),
-        manifest=manifest,
-        withheld=withheld(explain, viewer),
-        content_hash=_content_hash(store, prof.slug),
-    )
+    files = []
+    for slot, parts in (
+        ("hasPart", prof.metadata.has_part),
+        ("subjectOf", prof.metadata.subject_of),
+    ):
+        for part in parts:
+            entry = part.model_dump(mode="json")
+            detail = explain.get(part.content_url)
+            entry["effective_visibility"] = (
+                detail.effective if detail is not None else part.visibility
+            )
+            entry["slot"] = slot
+            files.append(entry)
+    return FileList(files=files, withheld=withheld(explain, viewer))
 
 
 @public_router.get(
@@ -493,86 +534,386 @@ def get_profile_artifact(
     )
 
 
-@public_router.get(
-    "/profiles/{slug}/papers",
-    response_model=list[PaperEntry],
-)
-def list_papers(
-    slug: str,
-    request: Request,
-    store: ProfileStore = Depends(get_store),
-    viewer: ViewerTier = Depends(get_viewer_tier),
-) -> list[PaperEntry]:
-    """The works list, gated on the tier of ``sources/papers.jsonld``.
+def _works_visible(prof, viewer: ViewerTier) -> bool:
+    return artifact_visible(
+        explain_tiers(prof.metadata), prof.metadata, PAPERS_URL, "works", viewer
+    )
 
-    ``summary_available`` reports what this viewer may fetch, not what exists on
-    disk. Advertising a summary the caller cannot retrieve would send them
-    straight into a 404 and teach them the profile is broken rather than
-    private.
-    """
-    prof = get_profile(slug, store)
-    _gate_profile(request, prof, viewer, slug)
-    explain = explain_tiers(prof.metadata)
-    md = prof.metadata
-    if not artifact_visible(explain, md, "sources/papers.jsonld", "works", viewer):
-        raise _profile_missing(slug)
-    summaries = prof.summaries
-    out: list[PaperEntry] = []
-    for p in prof.papers:
-        pid = p.paper_id
-        has_summary = bool(pid and pid in summaries) and artifact_visible(
-            explain, md, f"sources/summaries/{pid}{_SUMMARY_SUFFIX}", "paper_summary", viewer
-        )
-        out.append(
-            PaperEntry(
-                paper_id=pid,
-                title=p.title,
-                year=p.year,
-                journal=p.journal,
-                first_author=p.first_author,
-                authors=p.authors,
-                doi=p.doi,
-                pmid=p.pmid,
-                openalex_id=p.openalex_id,
-                full_text_link=p.full_text_link,
-                summary_available=has_summary,
-            )
-        )
+
+def _year_key(record: PaperRecord) -> int:
+    return record.year if isinstance(record.year, int) else -1
+
+
+def _split_ids(ids: str) -> list[str]:
+    out: list[str] = []
+    for raw in ids.split(","):
+        pid = raw.strip()
+        if pid and pid not in out:
+            out.append(pid)
     return out
 
 
 @public_router.get(
-    "/profiles/{slug}/summary/{paper_id}",
-    response_model=PaperSummary,
+    "/profiles/{slug}/papers",
+    response_model=PaperPage,
+    response_model_exclude_none=True,
 )
-def get_paper_summary(
+def list_papers(
     slug: str,
-    paper_id: str,
     request: Request,
+    response: Response,
     store: ProfileStore = Depends(get_store),
     viewer: ViewerTier = Depends(get_viewer_tier),
-) -> PaperSummary:
-    """One paper summary, gated on that summary artifact's effective tier.
+    limit: Optional[int] = None,
+    cursor: Optional[str] = None,
+    q: Optional[str] = None,
+    year_min: Optional[int] = None,
+    missing_ids: bool = False,
+    has_text: Optional[bool] = None,
+    ids: Optional[str] = None,
+) -> PaperPage:
+    """The works list as rich rows, paged, gated on the tier of ``sources/papers.jsonld``.
 
-    A withheld summary 404s with the same body as a summary that was never
-    written: "you may not have this" and "this does not exist" must be
-    indistinguishable, or the error message is an existence oracle.
+    Each row carries what a caller needs to choose its next read: identity,
+    a short summary, the ``summary`` and full-text ``text`` sizes *this caller*
+    may fetch (``{available, bytes, approx_tokens, reason}``), and the paper's
+    ``version`` for an edit. Advertising a part the caller cannot retrieve
+    would send them into a 404 and teach them the profile is broken rather
+    than private.
+
+    Without ``q``, rows are newest first (``year`` desc, then ``paper_id``),
+    paged with a keyset cursor. With ``q``, rows are ranked by hybrid search
+    (meaning, over the stored summary and abstract vectors, plus BM25 keywords
+    over title, summary, abstract and journal, merged by reciprocal rank),
+    paged with an offset cursor; ``search_mode_used`` and ``note`` say what
+    ran. ``year_min``, ``missing_ids`` (no DOI and no OpenAlex id) and
+    ``has_text`` filter before ranking. ``limit`` defaults to 20 and is
+    clamped to 100 (``limit_applied``). A cursor is bound to the filters it was
+    made under; reusing it with others is a 400 ``cursor_mismatch``.
+
+    ``ids`` (a comma list, at most 20) reads those rows only, in that order,
+    with no paging.
     """
     prof = get_profile(slug, store)
     _gate_profile(request, prof, viewer, slug)
-    summaries = prof.summaries
-    missing = HTTPException(
-        status_code=404,
-        detail=f"summary {paper_id!r} not found for profile {slug!r}",
+    if not _works_visible(prof, viewer):
+        raise _profile_missing(slug)
+    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["Vary"] = VARY_ON_CREDENTIALS
+    sizes = SizeIndex(prof, viewer, store, store.resolve_slug(slug))
+    papers = [p for p in prof.papers if p.paper_id]
+
+    if ids is not None:
+        wanted = _split_ids(ids)
+        taken = wanted[:BATCH_IDS_CAP]
+        by_id = {p.paper_id: p for p in papers}
+        rows = [paper_row(prof, sizes, by_id[pid]) for pid in taken if pid in by_id]
+        note = None
+        if len(wanted) > BATCH_IDS_CAP:
+            note = f"Only the first {BATCH_IDS_CAP} ids were read."
+        return PaperPage(
+            items=rows,
+            total=len(rows),
+            limit_applied=len(taken),
+            filters_applied={"ids": taken},
+            note=note,
+        )
+
+    filters = {"q": q, "year_min": year_min, "missing_ids": missing_ids, "has_text": has_text}
+    applied = {k: v for k, v in filters.items() if v not in (None, False, "")}
+    lim = clamp(limit, *PAPERS_LIMIT)
+    if year_min is not None:
+        papers = [p for p in papers if isinstance(p.year, int) and p.year >= year_min]
+    if missing_ids:
+        papers = [p for p in papers if not p.doi and not p.openalex_id]
+    if has_text is not None:
+        papers = [p for p in papers if sizes.text(p.paper_id).available == has_text]
+
+    if not q:
+        papers.sort(key=lambda p: (-_year_key(p), p.paper_id))
+        full_total = len(papers)
+        if cursor:
+            key = decode_cursor(cursor, filters).get("k")
+            if not (isinstance(key, list) and len(key) == 2):
+                decode_cursor("", filters)  # raises the cursor_mismatch 400
+            after = (-int(key[0]), str(key[1]))
+            papers = [p for p in papers if (-_year_key(p), p.paper_id) > after]
+        page = papers[:lim]
+        more = len(papers) > lim
+        next_cursor = (
+            encode_cursor({"k": [_year_key(page[-1]), page[-1].paper_id]}, filters)
+            if more and page
+            else None
+        )
+        return PaperPage(
+            items=[paper_row(prof, sizes, p) for p in page],
+            total=full_total,
+            limit_applied=lim,
+            next_cursor=next_cursor,
+            has_more=more,
+            filters_applied=applied,
+        )
+
+    from .._semantic import hybrid_rank_papers
+
+    candidates = []
+    for p in papers:
+        text, _ = summary_text(prof, sizes, p)
+        candidates.append(
+            {
+                "paper_id": p.paper_id,
+                "title": p.title,
+                "journal": p.journal,
+                "summary": text,
+                "abstract": p.abstract,
+            }
+        )
+    ranked, mode, note = hybrid_rank_papers(request, store, prof, viewer, q, candidates)
+    start = 0
+    if cursor:
+        start = decode_cursor(cursor, filters).get("o")
+        if not isinstance(start, int) or start < 0:
+            decode_cursor("", filters)
+    by_id = {p.paper_id: p for p in papers}
+    window = ranked[start : start + lim]
+    rows = []
+    for pid, score, matched_by in window:
+        row = paper_row(prof, sizes, by_id[pid])
+        row.score = round(score, 6)
+        row.matched_by = list(matched_by)
+        rows.append(row)
+    more = start + lim < len(ranked)
+    return PaperPage(
+        items=rows,
+        total=len(ranked),
+        limit_applied=lim,
+        next_cursor=encode_cursor({"o": start + lim}, filters) if more else None,
+        has_more=more,
+        filters_applied=applied,
+        search_mode_used=mode,
+        note=note,
     )
-    if paper_id not in summaries:
+
+
+def _find_paper(prof, paper_id: str, slug: str) -> PaperRecord:
+    for record in prof.papers:
+        if record.paper_id == paper_id:
+            return record
+    raise HTTPException(status_code=404, detail=f"paper {paper_id!r} not found in profile {slug!r}")
+
+
+def _text_of(store: ProfileStore, slug: str, content_url: str) -> str:
+    """One artifact's stored text; a 404 that says so when its body was never pushed."""
+    try:
+        return store.artifact_bytes(store.resolve_slug(slug), content_url).decode(
+            "utf-8", errors="replace"
+        )
+    except (ProfileNotFoundError, KeyError) as e:
+        raise HTTPException(
+            status_code=404,
+            detail=f"{content_url!r} is listed for {slug!r} but its content was not uploaded",
+        ) from e
+
+
+@public_router.get(
+    "/profiles/{slug}/papers/{paper_id}",
+    response_model=PaperRecordView,
+    response_model_exclude_none=True,
+)
+def get_paper(
+    slug: str,
+    paper_id: str,
+    request: Request,
+    response: Response,
+    store: ProfileStore = Depends(get_store),
+    viewer: ViewerTier = Depends(get_viewer_tier),
+    view: Literal["record", "full"] = "record",
+) -> PaperRecordView:
+    """One paper: its fields, its summary inline, its sizes, and its version.
+
+    Gated like the works list (``sources/papers.jsonld``). ``summary`` is the
+    generated summary when this caller may read it, else the record's own
+    ``summary`` field (``summary_source`` says which). ``sections`` lists the
+    full text's headings when this caller may read the text, so a section read
+    needs no offset arithmetic. ``view="record"`` trims long lists (first 10
+    authors, 5 topics) and cuts the abstract at 1,500 chars; ``view="full"``
+    returns the whole record.
+    """
+    prof = get_profile(slug, store)
+    _gate_profile(request, prof, viewer, slug)
+    if not _works_visible(prof, viewer):
+        raise _profile_missing(slug)
+    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["Vary"] = VARY_ON_CREDENTIALS
+    record = _find_paper(prof, paper_id, slug)
+    sizes = SizeIndex(prof, viewer, store, store.resolve_slug(slug))
+    sections = None
+    if sizes.text(paper_id).available:
+        try:
+            body = _text_of(store, slug, text_url(paper_id))
+        except HTTPException:
+            body = None
+        if body is not None:
+            sections = [s.name for s in sections_of(body)]
+    return paper_record_view(prof, sizes, record, view=view, sections=sections)
+
+
+@public_router.get("/profiles/{slug}/summaries", response_model=SummaryBatch)
+def get_summaries(
+    slug: str,
+    request: Request,
+    response: Response,
+    store: ProfileStore = Depends(get_store),
+    viewer: ViewerTier = Depends(get_viewer_tier),
+    ids: str = Query(..., description="Comma-separated paper ids, at most 20."),
+) -> SummaryBatch:
+    """Several generated paper summaries in one read, each gated on its own tier.
+
+    At most 20 ids (more are listed in ``not_processed``). A summary this
+    caller may not read, or that does not exist, is in ``unavailable`` with its
+    reason (``not_permitted``, ``none``, ``not_uploaded``), the same answer the
+    rows' ``summary`` size gives.
+    """
+    prof = get_profile(slug, store)
+    _gate_profile(request, prof, viewer, slug)
+    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["Vary"] = VARY_ON_CREDENTIALS
+    wanted = _split_ids(ids)
+    taken, rest = wanted[:BATCH_IDS_CAP], wanted[BATCH_IDS_CAP:]
+    sizes = SizeIndex(prof, viewer, store, store.resolve_slug(slug))
+    summaries = prof.summaries
+    out: dict[str, str] = {}
+    unavailable: dict[str, str] = {}
+    for pid in taken:
+        size = sizes.of(summary_url(pid))
+        if size.available and pid in summaries:
+            out[pid] = summaries[pid]
+        else:
+            unavailable[pid] = size.reason or "none"
+    return SummaryBatch(
+        summaries=out, unavailable=unavailable, limit_applied=len(taken), not_processed=rest
+    )
+
+
+def _unknown_section(e: ValueError) -> HTTPException:
+    valid = e.args[1] if len(e.args) > 1 else []
+    return HTTPException(
+        status_code=400,
+        detail={
+            "error": "unknown_section",
+            "message": "that section does not exist in this text",
+            "valid": valid,
+        },
+    )
+
+
+@public_router.get(
+    "/profiles/{slug}/papers/{paper_id}/text",
+    response_model=TextPage,
+    response_model_exclude_none=True,
+)
+def get_paper_text(
+    slug: str,
+    paper_id: str,
+    request: Request,
+    response: Response,
+    store: ProfileStore = Depends(get_store),
+    viewer: ViewerTier = Depends(get_viewer_tier),
+    section: Optional[str] = None,
+    offset: int = 0,
+    max_chars: Optional[int] = None,
+) -> TextPage:
+    """A paper's full text, bounded: whole up to ~80K chars, else paged.
+
+    Gated exactly like ``GET /profiles/{slug}/content/sources/papers/{id}.md``:
+    a full text this caller may not read is the same 404 as one that does not
+    exist. Above 80K chars the page is the first chunk, cut at a paragraph,
+    with ``has_more`` and ``next_offset``. ``section=`` reads one heading's
+    span (names are in ``sections``). Offsets are indices into the whole text.
+    """
+    prof = get_profile(slug, store)
+    _gate_profile(request, prof, viewer, slug)
+    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["Vary"] = VARY_ON_CREDENTIALS
+    url = text_url(paper_id)
+    missing = HTTPException(
+        status_code=404, detail=f"no full text {paper_id!r} for profile {slug!r}"
+    )
+    effective = effective_tiers(prof.metadata)
+    if url not in effective or not tier_allows(viewer, effective[url]):
         raise missing
-    if not artifact_visible(
-        explain_tiers(prof.metadata),
-        prof.metadata,
-        f"sources/summaries/{paper_id}{_SUMMARY_SUFFIX}",
-        "paper_summary",
-        viewer,
-    ):
-        raise missing
-    return PaperSummary(paper_id=paper_id, summary=summaries[paper_id])
+    body = _text_of(store, slug, url)
+    try:
+        return page_text(body, section=section, offset=offset, max_chars=max_chars)
+    except ValueError as e:
+        raise _unknown_section(e) from e
+
+
+#: The narrative's two parts, in reading order: ``(section name, contentUrl, role)``.
+_NARRATIVE = (("soul", SOUL_URL, "soul"), ("expertise", EXPERTISE_URL, "expertise"))
+
+
+@public_router.get(
+    "/profiles/{slug}/text",
+    response_model=TextPage,
+    response_model_exclude_none=True,
+)
+def get_profile_text(
+    slug: str,
+    request: Request,
+    response: Response,
+    store: ProfileStore = Depends(get_store),
+    viewer: ViewerTier = Depends(get_viewer_tier),
+    section: Optional[str] = None,
+    offset: int = 0,
+    max_chars: Optional[int] = None,
+) -> TextPage:
+    """The profile's narrative, bounded: ``soul`` (SOUL.md) and ``expertise``.
+
+    With no section, both parts this caller may read, joined as ``# Soul`` and
+    ``# Expertise`` sections. With ``section=soul`` or ``section=expertise``,
+    that artifact's stored text alone, so an offset from a passage is an index
+    into it. Each part is gated like its content route. The response carries
+    ``content_hash``, so an edit to the narrative needs no second read.
+    """
+    prof = get_profile(slug, store)
+    _gate_profile(request, prof, viewer, slug)
+    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["Vary"] = VARY_ON_CREDENTIALS
+    explain = explain_tiers(prof.metadata)
+    md = prof.metadata
+    bodies = {
+        name: (prof.soul if name == "soul" else prof.expertise)
+        for name, url, role in _NARRATIVE
+        if artifact_visible(explain, md, url, role, viewer)
+    }
+    names = [name for name, _url, _role in _NARRATIVE]
+    if section is not None and section.lower() not in names:
+        raise _unknown_section(ValueError("unknown section", names))
+    if section is not None:
+        section = section.lower()
+        if section not in bodies:
+            raise HTTPException(status_code=404, detail=f"no {section} text for profile {slug!r}")
+        page = page_text(bodies[section] or "", section=None, offset=offset, max_chars=max_chars)
+        page.section = section
+        page.sections = [TextSection(name=section, offset=0, chars=len(bodies[section] or ""))]
+    else:
+        if not bodies:
+            raise HTTPException(status_code=404, detail=f"no narrative for profile {slug!r}")
+        joined, spans = "", []
+        for name in names:
+            if name not in bodies:
+                continue
+            head = f"# {name.capitalize()}\n\n"
+            if joined:
+                joined += "\n\n"
+            spans.append(
+                TextSection(
+                    name=name, offset=len(joined) + len(head), chars=len(bodies[name] or "")
+                )
+            )
+            joined += head + (bodies[name] or "")
+        page = page_text(joined, section=None, offset=offset, max_chars=max_chars)
+        page.sections = spans
+    page.content_hash = _content_hash(store, store.resolve_slug(slug))
+    return page

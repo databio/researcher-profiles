@@ -199,14 +199,14 @@ def _remote_manifest(http: Any, slug: str) -> tuple[bool, dict[str, dict]]:
     blind, having failed to learn what the server holds, is how a push
     silently deletes a profile.
     """
-    resp = http.get(f"/api/v1/profiles/{slug}")
+    resp = http.get(f"/api/v1/profiles/{slug}/files")
     if resp.status_code == 404:
         return False, {}
     if resp.status_code == 401:
         raise PermissionError(resp.text)
     if resp.status_code >= 400:
         raise RuntimeError(f"push preflight failed ({resp.status_code}): {resp.text[:300]}")
-    entries = resp.json().get("manifest") or []
+    entries = resp.json().get("files") or []
     return True, {
         e["contentUrl"]: e for e in entries if isinstance(e, dict) and e.get("contentUrl")
     }

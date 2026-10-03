@@ -809,7 +809,8 @@ class _StubServer:
             return _StubResponse(200, self.capabilities)
         if self.manifest is None:
             return _StubResponse(404)
-        return _StubResponse(200, {"slug": "jane-doe", "manifest": self.manifest})
+        assert url.endswith("/files"), url
+        return _StubResponse(200, {"files": self.manifest, "withheld": []})
 
     def put(self, url, *, content, headers=None):
         self.puts.append((url, content))
@@ -1277,15 +1278,8 @@ class TestManagementClientDispatch:
         assert calls == [("get", "jane-doe")]
         assert "visibility:" in capsys.readouterr().out
 
-    def test_profile_pull_reads_the_flat_manifest_list(self, monkeypatch, tmp_path, capsys):
-        """``manifest`` is a flat ``list[dict]``, not a ``{"entries": [...]}`` envelope.
-
-        That is what ``models.api.ProfileDetail`` serves and what the spec's
-        ``GET /profiles/{slug}`` table declares, so the soul fetch must find
-        its entry by iterating the list directly.
-        """
-        import httpx
-
+    def test_profile_pull_writes_the_full_view(self, monkeypatch, tmp_path, capsys):
+        """The full view carries the SOUL body inline; pull writes it, no second fetch."""
         from researcher_profiles.cli.auth import agent
 
         credential = agent.Credential(
@@ -1294,36 +1288,31 @@ class TestManagementClientDispatch:
         detail = {
             "slug": "jane-doe",
             "rid": "0000-0002-1825-0097",
-            "metadata": {"name": "Jane Doe"},
+            "view": "full",
+            "fields": {"name": "Jane Doe"},
             "content_hash": "sha256:abc",
-            "manifest": [
-                {"content_url": "papers.json", "role": "papers"},
-                {"content_url": "personality/SOUL.md", "role": "soul"},
-            ],
+            "soul": "I study barnacles.\n",
         }
 
         class FakeClient:
             def __init__(self, _credential):
                 self.profile = SimpleNamespace(get=lambda slug: detail)
 
-        asked: list[str] = []
-
-        def fake_get(url, headers=None, **kw):
-            asked.append(url)
-            return SimpleNamespace(raise_for_status=lambda: None, text="I study barnacles.\n")
-
         monkeypatch.setattr(agent, "resolve_credential", lambda **_: credential)
         monkeypatch.setattr(agent, "ManagementClient", FakeClient)
-        monkeypatch.setattr(httpx, "get", fake_get)
 
         out = tmp_path / "profile.md"
         assert main(["profile", "pull", "-o", str(out)]) == 0
-        assert asked == [
-            "https://profiles.example.org/api/v1/profiles/jane-doe/content/personality/SOUL.md"
-        ]
         body = out.read_text()
         assert "I study barnacles." in body
         assert "base_hash: sha256:abc" in body
+        assert "name: Jane Doe" in body
+
+        # A SOUL this key may not read says so instead of writing an empty body
+        # a later push would save over the real one.
+        detail["soul"] = None
+        assert main(["profile", "pull", "-o", str(out)]) == 0
+        assert "may not read the SOUL" in capsys.readouterr().err
 
     def test_profile_write_preserves_agent_error_exit(self, monkeypatch, capsys):
         from researcher_profiles.cli.auth.agent import AgentAPIError
@@ -1344,14 +1333,18 @@ class TestWorkVerb:
             "rpa_test", "https://example.test", "test", profile="jane-doe"
         )
         calls = []
-        remote = record or {"paper_id": "smith2023protein", "doi": None, "datePublished": "2023"}
+        remote = record or {
+            "paper_id": "smith2023protein",
+            "version": "0123456789abcdef",
+            "fields": {"paper_id": "smith2023protein", "doi": None, "datePublished": "2023"},
+        }
 
         class FakeClient:
             def __init__(self, _credential):
                 self.profile = SimpleNamespace(
                     get_work=lambda slug, pid: calls.append(("get", slug, pid)) or remote,
-                    patch_work=lambda slug, pid, patch, base_hash=None: (
-                        calls.append(("patch", slug, pid, patch, base_hash))
+                    patch_work=lambda slug, pid, patch, base_version=None: (
+                        calls.append(("patch", slug, pid, patch, base_version))
                         or {"updated": sorted(patch)}
                     ),
                     delete_work=lambda slug, pid: calls.append(("delete", slug, pid)) or {},
@@ -1398,12 +1391,12 @@ class TestWorkVerb:
         ]
         assert "updated" in capsys.readouterr().out
 
-    def test_if_match_travels_as_the_base_hash(self, monkeypatch):
+    def test_if_match_travels_as_the_base_version(self, monkeypatch):
         calls = self._install(monkeypatch)
         assert (
-            main(["work", "set", "smith2023protein", "doi=10.1/x", "--if-match", "sha256:a"]) == 0
+            main(["work", "set", "smith2023protein", "doi=10.1/x", "--if-match", "0123abcd"]) == 0
         )
-        assert calls[0][-1] == "sha256:a"
+        assert calls[0][-1] == "0123abcd"
         # --force drops it, which is what last-writer-wins means here.
         assert main(["work", "set", "smith2023protein", "doi=10.1/x", "--force"]) == 0
         assert calls[1][-1] is None

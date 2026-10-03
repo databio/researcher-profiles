@@ -378,6 +378,50 @@ class FakeBackend:
         return out
 
 
+#: Word -> concept dimension for :class:`ConceptBackend`. Dimension 7 is a
+#: small constant so no text embeds to the zero vector.
+CONCEPT_WORDS = {
+    0: "chromatin accessibility atac nucleosome nucleosomes open",
+    1: "transcription transcriptional enhancer enhancers regulation regulatory switched genes",
+    2: "methylation epigenetic",
+    3: "metadata standards reproducible",
+    4: "region enrichment sets lola",
+    5: "nuclei intact lysis membrane",
+    6: "protein folding",
+}
+
+
+class ConceptBackend:
+    """A tiny meaning-aware encoder: embeds by counting concept words.
+
+    Two texts that share no word but name the same concept ("how genes get
+    switched on", "transcriptional regulation") point the same way, and a
+    symbol outside the vocabulary (``GATA1``) points nowhere in particular.
+    That is what a paraphrase-versus-keyword search test needs and
+    :class:`FakeBackend`'s hash vectors cannot give.
+    """
+
+    def __init__(self, name: str = "fake:concept"):
+        import re
+
+        self.name = name
+        self.dim = 8
+        self._word = {w: d for d, ws in CONCEPT_WORDS.items() for w in ws.split()}
+        self._tok = re.compile(r"\w+")
+
+    def embed(self, texts):
+        out = []
+        for t in texts:
+            v = [0.0] * 8
+            v[7] = 0.1
+            for w in self._tok.findall(t.lower()):
+                if w in self._word:
+                    v[self._word[w]] += 1.0
+            n = sum(x * x for x in v) ** 0.5
+            out.append([x / n for x in v])
+        return out
+
+
 def fake_llm_response(
     text: str = "reply",
     *,

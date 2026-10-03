@@ -32,13 +32,7 @@ from .backends import EmbeddingBackend, get_backend
 from .chunking import (
     PAPER_CHUNK_TYPES,
     Chunk,
-    chunk_abstract,
-    chunk_cv,
-    chunk_expertise,
-    chunk_grant,
-    chunk_soul,
-    chunk_summary,
-    chunk_web,
+    enumerate_source_chunks,
 )
 
 logger = logging.getLogger(__name__)
@@ -121,16 +115,6 @@ def _cosine_distance(a: Sequence[float], b: Sequence[float]) -> float:
 
 def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
-def _strip_frontmatter(text: str) -> str:
-    """Drop a leading ``---`` YAML frontmatter block, if present."""
-    if not text.startswith("---"):
-        return text
-    end = text.find("\n---", 3)
-    if end == -1:
-        return text
-    return text[end + len("\n---") :].lstrip("\n")
 
 
 # Shared vec0 nearest-neighbour SELECT used by both search paths. Params: (blob, k).
@@ -260,93 +244,22 @@ class SqliteEmbeddingIndex:
     # ------------------------------------------------------------------
 
     def _enumerate_chunks(self) -> list[Chunk]:
-        # A "lite" profile has no personality/ or summaries/ on disk; its index
-        # is built over paper abstracts instead.
-        level = self._level()
-        if level == "lite":
-            return self._enumerate_abstract_chunks()
+        """Every chunk this profile is indexed over.
 
-        out: list[Chunk] = []
-        expertise_path = self.profile_dir / "personality" / "expertise.md"
-        if expertise_path.is_file():
-            out.extend(chunk_expertise(expertise_path.read_text(encoding="utf-8")))
-        soul_path = self.profile_dir / "personality" / "SOUL.md"
-        if soul_path.is_file():
-            out.extend(chunk_soul(soul_path.read_text(encoding="utf-8")))
-        summaries_dir = self.profile_dir / "sources" / "summaries"
-        if summaries_dir.is_dir():
-            for f in sorted(summaries_dir.iterdir()):
-                if not (f.is_file() and f.name.endswith(".summary.md")):
-                    continue
-                paper_id = f.name[: -len(".summary.md")]
-                text = f.read_text(encoding="utf-8")
-                out.extend(chunk_summary(text, paper_id))
-        if level == "deep":
-            out.extend(self._enumerate_deep_source_chunks())
-        return out
-
-    def _enumerate_deep_source_chunks(self) -> list[Chunk]:
-        """Enumerate grant/cv/web chunks for a ``deep`` profile.
-
-        Each source class is optional on disk (presence-conditional): grants
-        from ``sources/grants.jsonld``, the CV from ``sources/cv.md``, web pages
-        from ``sources/web/*.md``. Provenance frontmatter on cv/web files is
-        stripped before chunking.
-        """
-        out: list[Chunk] = []
-        grants_path = self.profile_dir / "sources" / "grants.jsonld"
-        if grants_path.is_file():
-            data = json.loads(grants_path.read_text(encoding="utf-8"))
-            entries = data.get("hasPart", []) or [] if isinstance(data, dict) else []
-            for i, entry in enumerate(entries):
-                if not isinstance(entry, dict):
-                    continue
-                grant_id = str(entry.get("id") or f"grant-{i}")
-                out.extend(
-                    chunk_grant(
-                        str(entry.get("name") or ""),
-                        entry.get("abstract"),
-                        grant_id,
-                    )
-                )
-        cv_path = self.profile_dir / "sources" / "cv.md"
-        if cv_path.is_file():
-            out.extend(chunk_cv(_strip_frontmatter(cv_path.read_text(encoding="utf-8"))))
-        web_dir = self.profile_dir / "sources" / "web"
-        if web_dir.is_dir():
-            for f in sorted(web_dir.iterdir()):
-                if not (f.is_file() and f.suffix == ".md"):
-                    continue
-                out.extend(chunk_web(_strip_frontmatter(f.read_text(encoding="utf-8")), f.stem))
-        return out
-
-    def _enumerate_abstract_chunks(self) -> list[Chunk]:
-        """Enumerate ``paper_abstract`` chunks from ``sources/papers.jsonld``.
-
-        Used for ``lite`` profiles, which never build summaries or personality
-        docs. Skips papers with no abstract and papers the build state flags
-        contaminated (contamination is build bookkeeping, not published record).
+        Delegates to :func:`~.chunking.enumerate_source_chunks`, the one
+        enumeration the serve-time text recovery also uses, so a stored row's
+        ``(source_type, source_id, chunk_index)`` names the same text on both
+        sides. A ``lite`` profile is indexed over paper abstracts instead of
+        personality documents and summaries.
         """
         from ..build_state import BuildState
+        from ..profile.storage import DirectoryArtifactStorage
 
-        papers_path = self.profile_dir / "sources" / "papers.jsonld"
-        if not papers_path.is_file():
-            return []
-        data = json.loads(papers_path.read_text(encoding="utf-8"))
-        entries = data.get("hasPart", []) or [] if isinstance(data, dict) else []
-        state = BuildState.load(self.profile_dir)
-        out: list[Chunk] = []
-        for i, entry in enumerate(entries):
-            if not isinstance(entry, dict):
-                continue
-            paper_id = entry.get("paper_id") or entry.get("openalex_id") or f"paper-{i}"
-            if state.is_contaminated(entry.get("paper_id")):
-                continue
-            abstract = (entry.get("abstract") or "").strip()
-            if not abstract:
-                continue
-            out.extend(chunk_abstract(abstract, str(paper_id)))
-        return out
+        return enumerate_source_chunks(
+            DirectoryArtifactStorage(self.profile_dir),
+            level=self._level(),
+            build_state=BuildState.load(self.profile_dir),
+        )
 
     # ------------------------------------------------------------------
     # Build

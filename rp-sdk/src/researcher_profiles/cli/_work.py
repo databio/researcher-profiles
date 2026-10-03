@@ -49,7 +49,7 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
     )
     p_set.add_argument("paper_id", help="The work's paper_id")
     p_set.add_argument("assignment", nargs="+", metavar="key=value", help="Fields to set")
-    p_set.add_argument("--if-match", help="Base hash for conflict detection")
+    p_set.add_argument("--if-match", help="The paper's version, for conflict detection")
     p_set.add_argument("--force", action="store_true", help="Skip base_hash check")
     p_set.add_argument(
         "--dry-run", action="store_true", help="Show what would change without writing"
@@ -92,10 +92,11 @@ def _work_show(client, slug: str, args: argparse.Namespace) -> int:
     from .auth.agent import AgentAPIError
 
     try:
-        record = client.profile.get_work(slug, args.paper_id)
+        view = client.profile.get_work(slug, args.paper_id)
     except AgentAPIError as e:
         print(f"Error: {e.detail}", file=sys.stderr)
         return EXIT_ERROR
+    record = {**(view.get("fields") or {}), "version": view.get("version")}
     if args.as_json:
         print(json.dumps(record, indent=2))
         return EXIT_OK
@@ -118,7 +119,7 @@ def _work_set(client, slug: str, args: argparse.Namespace) -> int:
         # The current remote values too: "would set doi=X" is only useful next
         # to what doi already is.
         try:
-            record = client.profile.get_work(slug, args.paper_id)
+            record = client.profile.get_work(slug, args.paper_id).get("fields") or {}
         except AgentAPIError as e:
             print(f"Error: {e.detail}", file=sys.stderr)
             return EXIT_ERROR
@@ -128,7 +129,7 @@ def _work_set(client, slug: str, args: argparse.Namespace) -> int:
 
     base_hash = None if args.force else args.if_match
     try:
-        result = client.profile.patch_work(slug, args.paper_id, patch, base_hash=base_hash)
+        result = client.profile.patch_work(slug, args.paper_id, patch, base_version=base_hash)
     except AgentAPIError as e:
         print(f"Error: {e.detail}", file=sys.stderr)
         return EXIT_ERROR

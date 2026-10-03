@@ -29,8 +29,8 @@ Routers
 Route handlers
     The read, search and generative handlers are exported so a host can
     re-declare them on its own ``APIRouter`` with its own dependencies:
-    ``list_profiles``, ``get_profile_detail``, ``list_papers``,
-    ``get_paper_summary``, ``search_profile``, ``ask_profile``,
+    ``list_profiles``, ``get_profile_detail``, ``list_papers``, ``get_paper``,
+    ``get_summaries``, ``search_profile``, ``ask_profile``,
     ``review_profile``, ``innovate_profile``, ``riff_profile``. Each takes the
     store and the viewer tier as arguments, and a host supplies them through
     its own ``Depends``. ``list_profiles`` returns a ``Response`` carrying the
@@ -84,7 +84,13 @@ from ._projection import (
 from .app import create_app
 from .routers._routers import edit_router, public_router, router
 from .routers.generative import ask_profile, innovate_profile, review_profile, riff_profile
-from .routers.read import get_paper_summary, get_profile_detail, list_papers, list_profiles
+from .routers.read import (
+    get_paper,
+    get_profile_detail,
+    get_summaries,
+    list_papers,
+    list_profiles,
+)
 from .routers.search import search_profile
 
 __all__ = [
@@ -92,8 +98,9 @@ __all__ = [
     "ask_profile",
     "create_app",
     "edit_router",
-    "get_paper_summary",
+    "get_paper",
     "get_profile_detail",
+    "get_summaries",
     "innovate_profile",
     "invalidate_after_write",
     "list_papers",

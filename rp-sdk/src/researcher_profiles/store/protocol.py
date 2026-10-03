@@ -373,6 +373,18 @@ class ProfileStore(Protocol):
         """
         ...
 
+    def held_artifacts(self, ref: str) -> dict[str, int | None]:
+        """``{contentUrl: stored size in bytes}`` for every body this store holds.
+
+        A manifest row can outlive its body (a push withholds full text by
+        default), so "listed" is not "fetchable". The read routes ask this once
+        per request to tell a caller ``not_uploaded``, and to size a part whose
+        manifest entry carries no ``bytes``, without reading a single body. A
+        size is ``None`` when the store cannot say cheaply. Raises
+        :class:`ProfileNotFoundError` when the profile is absent.
+        """
+        ...
+
     def artifact_bytes(self, ref: str, content_url: str) -> bytes:
         """One manifest artifact's bytes, addressed by its ``contentUrl``.
 

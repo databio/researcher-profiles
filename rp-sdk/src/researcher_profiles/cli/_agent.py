@@ -220,43 +220,7 @@ def _cmd_agent(args: argparse.Namespace) -> int:
     return handler(ManagementClient(cred), args)
 
 
-def _fetch_soul(cred, slug: str, manifest: list) -> str:
-    """Fetch the profile's SOUL body, or warn and return an empty one.
-
-    The body is written into the round-trip document and a later ``rp profile
-    push`` writes it back, so a fetch that failed must say so: pushing an empty
-    SOUL that was never actually read would erase the real one.
-    """
-    soul_url = ""
-    for entry in manifest or []:
-        if entry.get("role") == "soul" or "SOUL" in entry.get("content_url", ""):
-            soul_url = entry.get("content_url", "")
-            break
-    if not soul_url or soul_url.startswith("http"):
-        return ""
-    try:
-        import httpx
-    except ImportError as e:
-        print(
-            f"warning: cannot fetch SOUL ({e}); the round-trip document's body will be empty",
-            file=sys.stderr,
-        )
-        return ""
-    url = f"{cred.url.rstrip('/')}/api/v1/profiles/{slug}/content/{soul_url}"
-    try:
-        resp = httpx.get(url, headers={"Authorization": f"Bearer {cred.key}"}, timeout=30.0)
-        resp.raise_for_status()
-    except httpx.HTTPError as e:
-        print(
-            f"warning: cannot fetch SOUL from {url}: {e}; "
-            "the round-trip document's body will be empty",
-            file=sys.stderr,
-        )
-        return ""
-    return resp.text
-
-
-def _profile_pull(client, cred, slug: str, args: argparse.Namespace) -> int:
+def _profile_pull(client, slug: str, args: argparse.Namespace) -> int:
     """Write the profile out as a round-trip document (frontmatter plus SOUL)."""
     import yaml
 
@@ -268,13 +232,22 @@ def _profile_pull(client, cred, slug: str, args: argparse.Namespace) -> int:
         print(f"Error: {e.detail}", file=sys.stderr)
         return EXIT_ERROR
     content_hash = data.get("content_hash")
-    soul = _fetch_soul(cred, slug, data.get("manifest") or [])
+    soul = data.get("soul")
+    if soul is None:
+        # Written into the round-trip document, and a later ``rp profile push``
+        # writes it back: a SOUL that was never read must say so, or pushing
+        # the empty body would erase the real one.
+        print(
+            "warning: this key may not read the SOUL; the round-trip document's body is empty",
+            file=sys.stderr,
+        )
+        soul = ""
 
     front = {
         "slug": slug,
         "rid": data.get("rid"),
         "base_hash": content_hash,
-        **_editable_fields(data.get("metadata", {})),
+        **_editable_fields(data.get("fields", {})),
     }
 
     out = Path(args.output)
@@ -304,7 +277,7 @@ def _profile_diff(client, slug: str, args: argparse.Namespace) -> int:
     except AgentAPIError as e:
         print(f"Error: {e.detail}", file=sys.stderr)
         return EXIT_ERROR
-    remote_meta = remote.get("metadata", {})
+    remote_meta = remote.get("fields", {})
     changed = [
         name
         for name, value in _editable_fields(local["frontmatter"]).items()
@@ -340,14 +313,13 @@ def _profile_push(client, slug: str, args: argparse.Namespace) -> int:
             print("Would update soul.")
         return EXIT_OK
 
+    if local.get("body") is not None:
+        # The narrative rides the same patch: one write, one version move.
+        patch["soul"] = local["body"]
     try:
         if patch:
             result = client.profile.patch_metadata(slug, patch, base_hash=base_hash)
-            print(f"Metadata: updated {', '.join(result.get('updated', []))}")
-            base_hash = result.get("content_hash")
-        if local.get("body") is not None:
-            client.profile.put_soul(slug, local["body"], base_hash=base_hash)
-            print("Soul: updated")
+            print(f"Updated: {', '.join(result.get('updated', []))}")
     except InsufficientAccessError as e:
         print(f"Refused: this key needs Write on {', '.join(e.missing)}.", file=sys.stderr)
         print(
@@ -371,7 +343,7 @@ def _profile_visibility(client, slug: str, args: argparse.Namespace) -> int:
         except AgentAPIError as e:
             print(f"Error: {e.detail}", file=sys.stderr)
             return EXIT_ERROR
-        print(f"visibility: {data.get('metadata', {}).get('visibility', '?')}")
+        print(f"visibility: {data.get('fields', {}).get('visibility', '?')}")
         return EXIT_OK
     if not args.tier:
         print("--tier required for set", file=sys.stderr)
@@ -406,7 +378,7 @@ def _cmd_profile(args: argparse.Namespace) -> int:
         return EXIT_ERROR
 
     if args.profile_cmd == "pull":
-        return _profile_pull(client, cred, slug, args)
+        return _profile_pull(client, slug, args)
     if args.profile_cmd == "diff":
         return _profile_diff(client, slug, args)
     if args.profile_cmd == "push":

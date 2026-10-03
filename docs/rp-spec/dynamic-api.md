@@ -29,7 +29,7 @@ The dynamic API categorizes routes by authentication requirement:
 | Route category | Token required |
 |----------------|----------------|
 | Health check | No |
-| Read endpoints (list, detail, papers, summaries, content, registry) | No |
+| Read endpoints (list, record, files, papers, summaries, text, passages, content, collection) | No |
 | Search, match, persona, upload, archive, identity resolution | Yes |
 | Owner edit endpoints | Yes (owner-level) |
 | Command-line login (`/api/auth/*`) | No (see [section 14.2](#142-command-line-login)) |
@@ -127,7 +127,7 @@ Nested lists (`{list: ...}`) are also valid entries, per the
 
 ### GET /profiles/{slug}
 
-Full profile detail.
+One profile, sized for the caller. `view=record` (default) or `view=full`.
 
 **Response 200:**
 
@@ -135,12 +135,18 @@ Full profile detail.
 |-------|------|-------------|
 | `slug` | string | |
 | `rid` | string \| null | The researcher ID this profile describes |
-| `metadata` | object | See [Profile metadata](#profile-metadata) |
-| `expertise` | string \| null | Raw `personality/expertise.md` content. `null` when the viewer's tier does not reach that artifact (its `contentUrl` then appears in `withheld`); `""` when the file is empty |
-| `soul` | string \| null | Raw `personality/SOUL.md` content. `null` when withheld, as for `expertise` |
-| `manifest` | list[object] | The profile manifest entries (`hasPart` plus `subjectOf`) as a flat list, each with an added `effective_visibility` key, so a client knows what the profile contains without walking the directory. Not an envelope: there is no `entries` key. |
-| `withheld` | list[string] | The `contentUrl`s this viewer's tier did not reach |
 | `content_hash` | string \| null | `"sha256:<hex>"` for optimistic concurrency (see [Owner edit endpoints](#11-owner-edit-endpoints)) |
+| `view` | string | `record` or `full` |
+| `fields` | object | The [profile metadata](#profile-metadata). In `record` view, long lists are `{"top": [...], "total": n}` and the response stays under 8 KB. `full` carries every field. Neither carries the manifest. |
+| `parts` | object | For `soul`, `expertise`, `papers`: `{available, bytes, approx_tokens}` or `{available: false, reason}`, where `reason` is `not_permitted`, `none` or `not_uploaded`. `available` describes what this caller may fetch. Also `files_withheld`: `{role: count}`. |
+| `withheld` | list[string] | Field names this viewer's tier does not reach; each is `null` in `fields`, never `""` |
+| `soul`, `expertise` | string \| null | `full` only: raw `personality/SOUL.md` and `personality/expertise.md`. `null` when withheld, `""` when empty |
+
+### GET /profiles/{slug}/files
+
+The profile manifest entries (`hasPart` plus `subjectOf`) as `files`, each
+with an added `effective_visibility` and `slot`, plus `withheld`: the
+`contentUrl`s this viewer's tier does not reach.
 
 ### GET /profiles/{slug}/profile.jsonld
 
@@ -173,36 +179,49 @@ header reports the artifact's effective privacy tier.
 
 ### GET /profiles/{slug}/papers
 
-List all papers attached to a profile.
+One page of the profile's papers. Query: `limit` (default 20, at most 100),
+`cursor`, `q`, `year_min`, `missing_ids`, `has_text`, `ids`. A server MUST
+clamp an oversized `limit` and report `limit_applied`, not refuse it.
 
-**Response 200:** array of paper entries:
+**Response 200:** `{items, total, limit_applied, next_cursor, has_more,
+filters_applied}`, plus `search_mode_used` and `note` when `q` was given. Each
+item:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `paper_id` | string \| null | Citation key |
+| `paper_id` | string | Citation key |
 | `title` | string | |
-| `year` | integer \| null | |
-| `journal` | string \| null | |
-| `first_author` | string \| null | |
-| `authors` | list[string] \| null | Full author list when the record carries one |
-| `doi` | string \| null | |
-| `pmid` | string \| null | |
-| `openalex_id` | string \| null | |
-| `full_text_link` | string \| null | |
-| `summary_available` | boolean | Whether a summary exists for this paper and the caller's tier may fetch it |
+| `year`, `journal`, `first_author`, `doi`, `openalex_id` | | |
+| `summary_short` | string \| null | Start of the summary (or abstract) |
+| `summary`, `text` | object | Sizes for this caller, as in `parts` above |
+| `version` | string | The paper's version token for edits |
 
-### GET /profiles/{slug}/summary/{paper_id}
+A `cursor` is bound to the filters it was made under; reusing it with others
+returns `400`.
 
-Fetch the markdown summary for one paper.
+### GET /profiles/{slug}/papers/{paper_id}
 
-**Response 200:**
+One paper: `fields`, the `summary` inline, `parts` (`summary` and `text`
+sizes), `sections` of the full text, and `version`.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `paper_id` | string | Echoes the request |
-| `summary` | string | Full summary markdown |
+### GET /profiles/{slug}/summaries
 
-Returns `404` if the profile or paper summary does not exist.
+`?ids=` (at most 20): `{summaries: {paper_id: markdown}, unavailable:
+{paper_id: reason}, limit_applied, not_processed}`.
+
+### GET /profiles/{slug}/papers/{paper_id}/text, GET /profiles/{slug}/text
+
+A paper's full text, or the narrative (`section=soul|expertise`), in bounded
+pages: `{text, section, offset, returned_chars, total_chars, has_more,
+next_offset, sections}`. Whole up to 80,000 characters by default. `offset` is
+an index into the whole text.
+
+### POST /profiles/{slug}/papers/{paper_id}/passages, POST /profiles/{slug}/passages
+
+`{query, k}` (k at most 10): the passages that best answer the query, from
+sources this caller may read: `{passages, k_applied, search_mode_used,
+searched, note}`. The server MUST report in `search_mode_used` and `note` when
+it searched by keyword only.
 
 ### GET /collection.json
 
@@ -589,7 +608,8 @@ Patch owner-editable metadata fields.
 
 **Editable fields:** `name`, `affiliation`, `job_title`, `field`, `subfields`,
 `summary`, `expertise` (the label list), `interests`, `not_interests`,
-`research_interests`, `training`, `career`, `same_as`. A patch to `interests`
+`research_interests`, `training`, `career`, `same_as`, and `soul` (replaces
+`personality/SOUL.md` in the same write; part `soul`). A patch to `interests`
 or `not_interests` is recorded as declared `research_interests` entries.
 
 A key outside this set returns `400`. Fields like `rid`, `provenance`,
@@ -597,15 +617,18 @@ A key outside this set returns `400`. Fields like `rid`, `provenance`,
 
 **Optimistic concurrency:** Send `base_hash` (from the `content_hash` returned
 by `GET /profiles/{slug}`) to detect concurrent edits. If the profile changed
-since the hash was read, the server returns `409` with the current hash.
+since the hash was read, the server returns `409` with
+`{"detail": {"error": "conflict", "current": "<hash>", "message": ...}}` and the
+`X-RP-Content-Hash` header.
 Omitting `base_hash` is last-writer-wins. Successful edits return the new
 `content_hash`.
 
-### PUT /profiles/{slug}/soul
+### POST /profiles/{slug}/works, PATCH and DELETE /profiles/{slug}/works/{paper_id}
 
-Replace `personality/SOUL.md` entirely. Supports the same `base_hash`
-optimistic concurrency as metadata edits (the hash spans both the document and
-the SOUL).
+Add one work (`409` when its `paper_id` exists; it never overwrites), patch
+one work's editable fields, or remove one. `PATCH` and `DELETE` take
+`base_version` (the paper's `version`); a stale one is `409` with the current
+version in `X-RP-Paper-Version`.
 
 ### GET /profiles/{slug}/visibility
 

@@ -1043,3 +1043,64 @@ class TestProfileIndexStats:
         assert index_backend_name(prof) == ""
         _write_bare_index(prof, [("soul", "SOUL")], meta={"backend_name": "fake:tiny"})
         assert index_backend_name(prof) == "fake:tiny"
+
+
+class TestChunkEnumeration:
+    """Indexing and serve-time text recovery enumerate chunks with one function.
+
+    The keys below are the ones the directory-walking enumerator produced
+    before it moved behind ``ArtifactStorage``: a stored vector row names its
+    text by them, so they must not move.
+    """
+
+    DEEP_KEYS = [
+        ("cv", "cv", 0),
+        ("cv", "cv", 1),
+        ("expertise", "expertise", 0),
+        ("expertise", "expertise", 1),
+        ("expertise", "expertise", 2),
+        ("grant", "grantX", 0),
+        ("paper_summary", "paperA", 0),
+        ("paper_summary", "paperB", 0),
+        ("soul", "soul", 0),
+        ("soul", "soul", 1),
+        ("web", "1-lab", 0),
+        ("web", "1-lab", 1),
+    ]
+
+    def test_keys_are_stable_and_shared_with_the_sql_store(self, tmp_path):
+        from researcher_profiles.embeddings.cache import SqliteEmbeddingIndex
+        from researcher_profiles.embeddings.chunking import enumerate_source_chunks
+        from researcher_profiles.store.sql import SqlProfileStore
+
+        d = build_profile_dir(tmp_path / "p", level="deep", grants=True, cv=True, web=True)
+        indexed = sorted(
+            (c.source_type, c.source_id, c.chunk_index)
+            for c in SqliteEmbeddingIndex(d)._enumerate_chunks()
+        )
+        assert indexed == self.DEEP_KEYS
+
+        store = SqlProfileStore("sqlite://")
+        store.create_all()
+        store.put(ResearcherProfile.from_files(d))
+        served = enumerate_source_chunks(store.get("p"))
+        assert sorted((c.source_type, c.source_id, c.chunk_index) for c in served) == indexed
+
+    def test_lite_profiles_enumerate_abstracts(self, tmp_path):
+        from researcher_profiles.embeddings.cache import SqliteEmbeddingIndex
+
+        d = build_profile_dir(
+            tmp_path / "p",
+            level="lite",
+            personality=False,
+            summaries=False,
+            papers=[
+                {"paper_id": "a2020x", "title": "T", "abstract": "Para one.\n\nPara two."},
+                {"paper_id": "b2021y", "title": "U"},
+            ],
+        )
+        keys = [
+            (c.source_type, c.source_id, c.chunk_index)
+            for c in SqliteEmbeddingIndex(d)._enumerate_chunks()
+        ]
+        assert keys == [("paper_abstract", "a2020x", 0)]

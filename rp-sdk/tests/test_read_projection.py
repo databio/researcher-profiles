@@ -215,6 +215,22 @@ def _detail(client, viewer, **kwargs):
     return _get(client, f"/api/v1/profiles/{SLUG}", viewer, **kwargs)
 
 
+def _files(client, viewer, **kwargs):
+    return _get(client, f"/api/v1/profiles/{SLUG}/files", viewer, **kwargs)
+
+
+def _summary_served(client, viewer, paper_id="paperA", **kwargs) -> bool:
+    """Whether ``/summaries`` hands this viewer the summary's text."""
+    r = _get(
+        client,
+        f"/api/v1/profiles/{SLUG}/summaries",
+        viewer,
+        params={"ids": paper_id, **(kwargs.get("params") or {})},
+    )
+    assert r.status_code == 200, r.text
+    return paper_id in r.json()["summaries"]
+
+
 def _expected_effective(role: str, profile_tier: str, declared: str | None = None) -> str:
     """The tier the matrix says an artifact resolves to. The rule, restated."""
     tiers = [profile_tier, declared or ROLE_DEFAULT[role]]
@@ -264,16 +280,16 @@ class TestArtifactGate:
 
     def test_manifest_reports_the_effective_tier(self, matrix_client, viewer, profile_tier, role):
         c = matrix_client(visibility=profile_tier)
-        r = _detail(c, viewer)
+        r = _files(c, viewer)
         assert r.status_code == 200, r.text
-        entry = next(m for m in r.json()["manifest"] if m["contentUrl"] == ROLE_ARTIFACTS[role])
+        entry = next(m for m in r.json()["files"] if m["contentUrl"] == ROLE_ARTIFACTS[role])
         assert entry["effective_visibility"] == _expected_effective(role, profile_tier)
 
     def test_withheld_names_exactly_what_was_not_served(
         self, matrix_client, viewer, profile_tier, role
     ):
         c = matrix_client(visibility=profile_tier)
-        r = _detail(c, viewer)
+        r = _files(c, viewer)
         assert r.status_code == 200, r.text
         withheld = set(r.json()["withheld"])
         assert (ROLE_ARTIFACTS[role] in withheld) is not _sees(role, viewer, profile_tier)
@@ -282,20 +298,23 @@ class TestArtifactGate:
 @pytest.mark.parametrize("viewer,profile_tier", VISIBLE_COMBOS)
 @pytest.mark.parametrize("role", ["soul", "expertise"])
 class TestBodiesOnProfileDetail:
-    """The two bodies ``ProfileDetail`` actually carries."""
+    """The two bodies the full view carries, and their sizes in the record."""
 
     def test_body_is_served_only_when_the_tier_allows(
         self, matrix_client, viewer, profile_tier, role
     ):
         c = matrix_client(visibility=profile_tier)
-        r = _detail(c, viewer)
+        r = _detail(c, viewer, params={"view": "full"})
         assert r.status_code == 200, r.text
-        body = r.json()[role]
+        body = r.json().get(role)
+        part = r.json()["parts"][role]
         if _sees(role, viewer, profile_tier):
             assert body
+            assert part["available"] is True and part["bytes"]
         else:
-            # Withheld is None, never "": a client has to tell them apart.
+            # Withheld is absent/None, never "": a client has to tell them apart.
             assert body is None
+            assert part == {"available": False, "reason": "not_permitted"}
 
 
 @pytest.mark.parametrize("declared", ["public", "limited", "private"])
@@ -307,9 +326,9 @@ class TestMostRestrictiveComposition:
         self, matrix_client, declared, profile_tier
     ):
         c = matrix_client(visibility=profile_tier, overrides={"paper_summary": declared})
-        r = _detail(c, "owner")
+        r = _files(c, "owner")
         entry = next(
-            m for m in r.json()["manifest"] if m["contentUrl"] == ROLE_ARTIFACTS["paper_summary"]
+            m for m in r.json()["files"] if m["contentUrl"] == ROLE_ARTIFACTS["paper_summary"]
         )
         assert entry["effective_visibility"] == _expected_effective(
             "paper_summary", profile_tier, declared
@@ -319,9 +338,13 @@ class TestMostRestrictiveComposition:
         self, matrix_client, declared, profile_tier
     ):
         c = matrix_client(visibility=profile_tier, overrides={"paper_summary": declared})
-        r = _get(c, f"/api/v1/profiles/{SLUG}/summary/paperA", "anonymous")
         both_public = declared == "public" and profile_tier == "public"
-        assert (r.status_code == 200) is both_public
+        if profile_tier != "public":
+            # The profile itself is hidden from an anonymous caller.
+            r = _get(c, f"/api/v1/profiles/{SLUG}/summaries", "anonymous", params={"ids": "paperA"})
+            assert r.status_code == 404
+            return
+        assert _summary_served(c, "anonymous") is both_public
 
 
 class TestPapersAndSummaries:
@@ -333,12 +356,12 @@ class TestPapersAndSummaries:
     def test_summary_available_reflects_this_viewer(self, matrix_client):
         """It must not advertise a summary the caller would then 404 on."""
         c = matrix_client(overrides={"paper_summary": "limited"})
-        anon = _get(c, f"/api/v1/profiles/{SLUG}/papers", "anonymous").json()
-        lab = _get(c, f"/api/v1/profiles/{SLUG}/papers", "consumer_lab").json()
-        assert all(p["summary_available"] is False for p in anon)
-        assert any(p["summary_available"] for p in lab)
-        assert _get(c, f"/api/v1/profiles/{SLUG}/summary/paperA", "anonymous").status_code == 404
-        assert _get(c, f"/api/v1/profiles/{SLUG}/summary/paperA", "consumer_lab").status_code == 200
+        anon = _get(c, f"/api/v1/profiles/{SLUG}/papers", "anonymous").json()["items"]
+        lab = _get(c, f"/api/v1/profiles/{SLUG}/papers", "consumer_lab").json()["items"]
+        assert all(p["summary"] == {"available": False, "reason": "not_permitted"} for p in anon)
+        assert any(p["summary"]["available"] for p in lab)
+        assert not _summary_served(c, "anonymous")
+        assert _summary_served(c, "consumer_lab")
 
 
 # ---------------------------------------------------------------------------
@@ -366,7 +389,7 @@ class TestRefusalIsIndistinguishableFromAbsence:
     def test_papers_and_summary_refusals_are_404(self, matrix_client):
         c = matrix_client(visibility="limited")
         assert _get(c, f"/api/v1/profiles/{SLUG}/papers", "anonymous").status_code == 404
-        r = _get(c, f"/api/v1/profiles/{SLUG}/summary/paperA", "anonymous")
+        r = _get(c, f"/api/v1/profiles/{SLUG}/summaries", "anonymous", params={"ids": "paperA"})
         assert r.status_code == 404
 
 
@@ -391,15 +414,7 @@ class TestPreviewCap:
         )
         anon = _get(c, f"/api/v1/profiles/{SLUG}/papers", "anonymous")
         assert owner_preview.json() == anon.json()
-        assert (
-            _get(
-                c,
-                f"/api/v1/profiles/{SLUG}/summary/paperA",
-                "owner",
-                params={"as": "anonymous"},
-            ).status_code
-            == 404
-        )
+        assert not _summary_served(c, "owner", params={"as": "anonymous"})
 
     def test_the_cap_never_widens(self, matrix_client):
         """``?as=owner`` as an anonymous caller is still the anonymous view."""
@@ -411,8 +426,10 @@ class TestPreviewCap:
 
     def test_lab_preview_sits_between(self, matrix_client):
         c = matrix_client(overrides={"paper_summary": "limited"})
-        r = _get(c, f"/api/v1/profiles/{SLUG}/summary/paperA", "owner", params={"as": "lab"})
-        assert r.status_code == 200
+        r = _get(
+            c, f"/api/v1/profiles/{SLUG}/summaries", "owner", params={"ids": "paperA", "as": "lab"}
+        )
+        assert "paperA" in r.json()["summaries"]
         assert r.headers["X-RP-Viewer-Tier"] == "limited"
 
     def test_unknown_viewer_is_a_loud_400(self, matrix_client):
@@ -485,13 +502,14 @@ class TestSearchProjection:
 
         captured: dict = {}
 
-        def _search(self, query, k=5, filter=None):
-            captured["filter"] = filter
-            return [_Hit(t) for t in ("paper_summary", "cv", "web", "grant")]
+        def _search(request, store, prof, viewer, query, *, source_types, k):
+            captured["source_types"] = list(source_types)
+            # Ignores the restriction on purpose: the route's own drop is the guarantee.
+            return [_Hit(t) for t in ("paper_summary", "cv", "web", "grant")], None
 
-        from researcher_profiles.profile.index import IndexManager
+        import researcher_profiles.api._semantic as semantic
 
-        monkeypatch.setattr(IndexManager, "search", _search, raising=False)
+        monkeypatch.setattr(semantic, "search_chunks", _search)
         return c, captured
 
     @pytest.mark.parametrize(
@@ -520,7 +538,7 @@ class TestSearchProjection:
             json={"query": "anything"},
             headers=VIEWER_HEADERS["consumer_public"],
         )
-        assert "cv" not in captured["filter"]["source_type"]
+        assert "cv" not in captured["source_types"]
 
 
 # ---------------------------------------------------------------------------
@@ -632,7 +650,7 @@ class TestVisibilityReport:
         assert note["effective"] == "private"
         assert any("sources/cv.md" in phrase for phrase in note["raised_by"])
         # And an anonymous reader never receives it.
-        assert "derived-note.md" in set(_detail(c, "anonymous").json()["withheld"])
+        assert "derived-note.md" in set(_files(c, "anonymous").json()["withheld"])
 
 
 # ---------------------------------------------------------------------------

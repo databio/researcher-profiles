@@ -246,6 +246,9 @@ class ManagementClient:
     def _put(self, path: str, body: dict[str, Any]) -> Any:
         return self._handle_response(self._session.put(self._url(path), json=body))
 
+    def _post(self, path: str, body: dict[str, Any]) -> Any:
+        return self._handle_response(self._session.post(self._url(path), json=body))
+
     def _delete(self, path: str) -> Any:
         return self._handle_response(self._session.delete(self._url(path)))
 
@@ -268,7 +271,8 @@ class ProfileClient:
         self._client = client
 
     def get(self, slug: str) -> dict:
-        return self._client._get(f"/api/v1/profiles/{slug}")
+        """The full view: every metadata field (``fields``) and the narrative bodies."""
+        return self._client._get(f"/api/v1/profiles/{slug}?view=full")
 
     def patch_metadata(self, slug: str, patch: dict, base_hash: str | None = None) -> dict:
         body = dict(patch)
@@ -276,28 +280,25 @@ class ProfileClient:
             body["base_hash"] = base_hash
         return self._client._patch(f"/api/v1/profiles/{slug}/metadata", body)
 
-    def put_soul(self, slug: str, soul: str, base_hash: str | None = None) -> dict:
-        body: dict[str, Any] = {"soul": soul}
-        if base_hash:
-            body["base_hash"] = base_hash
-        return self._client._put(f"/api/v1/profiles/{slug}/soul", body)
-
     def get_work(self, slug: str, paper_id: str) -> dict:
-        return self._client._get(f"/api/v1/profiles/{slug}/works/{paper_id}")
+        """One work, full view: ``fields`` (on-disk names), ``version``, sizes."""
+        return self._client._get(f"/api/v1/profiles/{slug}/papers/{paper_id}?view=full")
 
     def patch_work(
-        self, slug: str, paper_id: str, patch: dict, base_hash: str | None = None
+        self, slug: str, paper_id: str, patch: dict, base_version: str | None = None
     ) -> dict:
         body = dict(patch)
-        if base_hash:
-            body["base_hash"] = base_hash
+        if base_version:
+            body["base_version"] = base_version
         return self._client._patch(f"/api/v1/profiles/{slug}/works/{paper_id}", body)
 
-    def put_work(self, slug: str, paper_id: str, record: dict) -> dict:
-        return self._client._put(f"/api/v1/profiles/{slug}/works/{paper_id}", record)
+    def add_work(self, slug: str, record: dict) -> dict:
+        """Add one new work; an existing ``paper_id`` is refused (409)."""
+        return self._client._post(f"/api/v1/profiles/{slug}/works", record)
 
-    def delete_work(self, slug: str, paper_id: str) -> dict:
-        return self._client._delete(f"/api/v1/profiles/{slug}/works/{paper_id}")
+    def delete_work(self, slug: str, paper_id: str, base_version: str | None = None) -> dict:
+        query = f"?base_version={base_version}" if base_version else ""
+        return self._client._delete(f"/api/v1/profiles/{slug}/works/{paper_id}{query}")
 
     def patch_visibility(
         self,

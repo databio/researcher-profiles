@@ -12,8 +12,9 @@ directory, each profile is a slug-named subdirectory containing a
 `profile.jsonld`, paper metadata, expertise / SOUL markdown, and optionally a
 `.cache/embeddings.sqlite` vector index. The API surfaces:
 
-- Profile listing and metadata (`/profiles`, `/profiles/{slug}`)
-- Paper inventories and per-paper summaries (`/profiles/{slug}/papers`, `.../summary/{paper_id}`)
+- Profile listing and the sized profile record (`/profiles`, `/profiles/{slug}`, `.../files`)
+- Paged paper rows, one paper, batched summaries (`.../papers`, `.../papers/{paper_id}`, `.../summaries`)
+- Bounded text reads and passages (`.../papers/{paper_id}/text`, `.../text`, `POST .../passages`)
 - Semantic search over a researcher's corpus (`POST .../search`)
 - Cross-profile ranking (`POST /api/v1/match`)
 - Four persona-grounded LLM endpoints: `ask`, `review`, `innovate`, `riff`
@@ -327,52 +328,38 @@ The SDK's `list_remote()` unwraps the envelope and returns the entries.
 
 ### GET /api/v1/profiles/{slug}
 
-Full profile detail: metadata + raw `expertise.md` + raw `SOUL.md`.
+One profile, sized for this caller. Query `view=record` (default) or
+`view=full`.
 
-**Response 200** (`ProfileDetail`):
+**Response 200** (`ProfileRecord`):
 
 | Field | Type | Notes |
 |---|---|---|
 | `slug` | string | |
 | `rid` | string \| null | The profile's identity: an ORCID or a `local:` id. |
-| `metadata` | `ProfileMetadataPayload` | See [Common response shapes](#common-response-shapes). |
-| `expertise` | string \| null | Raw markdown body of `personality/expertise.md`. `null` when this viewer's tier does not reach that artifact (its `contentUrl` then appears in `withheld`). `""` means the file is empty. |
-| `soul` | string \| null | Raw markdown body of `personality/SOUL.md`. `null` when withheld, as for `expertise`. |
-| `manifest` | list[object] | The profile manifest (`hasPart` plus `subjectOf` entries), served whole at every tier. Each entry carries the on-disk fields plus `effective_visibility`, the tier that governs it after the derivation rule. |
-| `withheld` | list[string] | The `contentUrl`s this viewer did not receive. |
 | `content_hash` | string \| null | `"sha256:<hex>"` over the document and the SOUL together. Send it back as `base_hash` on the next edit to get a `409` instead of overwriting somebody else's write. |
+| `view` | `"record"` \| `"full"` | |
+| `fields` | object | The metadata. `record`: the common fields only, long lists as `{"top": [...], "total": n}` (interests: top 8 by weight as `{label, weight}`; career and training: 3 most recent), `career_stage` scalars, `paper_count`, `summary_count`; no JSON-LD plumbing. `full`: every field untrimmed. Never `has_part`/`subject_of` (see `/files`). |
+| `parts` | object | `soul`, `expertise`, `papers`: each `{available, bytes, approx_tokens}` or `{available: false, reason}` with `reason` one of `not_permitted`, `none`, `not_uploaded`. `files_withheld`: `{role: count}` of files this viewer may not read. |
+| `withheld` | list[string] | Field names this viewer may not see (each `null` in `fields`), plus `soul` when the narrative is withheld. |
+| `soul`, `expertise` | string \| null | `view=full` only: the narrative bodies. `null` when withheld, `""` when empty. |
 
-```json
-{
-  "slug": "jane-doe",
-  "rid": "0000-0002-1825-0097",
-  "metadata": {
-    "name": "Jane Doe",
-    "level": "full",
-    "rid": "0000-0002-1825-0097",
-    "affiliation": "Example University",
-    "field": "Computational Biology",
-    "subfields": ["epigenomics", "chromatin"]
-  },
-  "expertise": "## Region set analysis\n\n...",
-  "soul": "## How I think\n\n...",
-  "manifest": [
-    {
-      "@type": "DigitalDocument",
-      "name": "Expertise",
-      "encodingFormat": "text/markdown",
-      "contentUrl": "personality/expertise.md",
-      "role": "expertise",
-      "visibility": "public",
-      "effective_visibility": "public"
-    }
-  ],
-  "withheld": ["sources/papers/doe2016example.md"],
-  "content_hash": "sha256:744853cb..."
-}
-```
+The record view stays under 8 KB for any profile. The response carries a weak
+`ETag` built from `content_hash`, the viewer tier and the view; send it as
+`If-None-Match` to get `304`. `Cache-Control: private, no-store`.
 
-**Status codes:** `200`; `404` `{"detail": "profile '<slug>' not found"}`.
+**Status codes:** `200`, `304`; `404` `{"detail": "profile '<slug>' not found"}`.
+
+---
+
+### GET /api/v1/profiles/{slug}/files
+
+The profile manifest (`hasPart` plus `subjectOf`), served whole at every tier.
+**Response 200** (`FileList`): `files` (each entry carries the on-disk fields
+plus `effective_visibility`, the tier that governs it after the derivation
+rule, and `slot`, `hasPart` or `subjectOf`) and `withheld` (the `contentUrl`s
+this viewer may not read). A push client reads this to learn what the server
+holds.
 
 ---
 
@@ -682,54 +669,107 @@ this caller's viewer tier, all with indistinguishable bodies; `403` for the
 
 ### GET /api/v1/profiles/{slug}/papers
 
-List every paper attached to the profile.
+One page of paper rows, gated on the tier of `sources/papers.jsonld`.
 
-**Response 200** (`list[PaperEntry]`):
+**Query:** `limit` (default 20, clamped to 100), `cursor` (the previous page's
+`next_cursor`), `q` (rank by hybrid search), `year_min`, `missing_ids` (no DOI
+and no OpenAlex id), `has_text`, and `ids` (comma list, at most 20, no paging).
+
+**Response 200** (`PaperPage`): `items` (rows), `total` (matching rows before
+paging), `limit_applied`, `next_cursor` (`null` on the last page), `has_more`,
+`filters_applied`, and with `q`: `search_mode_used` (`hybrid` or `keyword`)
+and `note` (why it fell back, in fixed text).
+
+Each row (`PaperRow`):
 
 | Field | Type | Notes |
 |---|---|---|
-| `paper_id` | string \| null | Citation key (e.g. `doe2016example`). |
-| `title` | string | Required. |
-| `year` | integer \| null | |
-| `journal` | string \| null | |
-| `first_author` | string \| null | |
-| `authors` | list[string] \| null | Full author list when the record carries one. |
-| `doi` | string \| null | |
-| `pmid` | string \| null | |
-| `openalex_id` | string \| null | |
-| `full_text_link` | string \| null | |
-| `summary_available` | boolean | True iff `paper_id` is non-null, a summary file exists, and this viewer's tier may fetch it. |
+| `paper_id` | string | Citation key (e.g. `doe2016example`). |
+| `title` | string | |
+| `year`, `journal`, `first_author`, `doi`, `openalex_id` | | |
+| `summary_short` | string \| null | The first ~160 characters of the summary this viewer may read, else of the abstract. |
+| `summary`, `text` | object | Sizes of the summary and the full text for this viewer: `{available, bytes, approx_tokens}` or `{available: false, reason}`. |
+| `version` | string | 16-hex version of this paper, for `base_version` on an edit. |
+| `score`, `matched_by` | | Only with `q`: the fused score and which ranking kept the row (`keyword`, `semantic`). |
 
-**Status codes:** `200`, `404`.
+Without `q`, rows are newest first (`year` desc, then `paper_id`) and the
+cursor is keyset. With `q`, keyword ranking (BM25 over title, summary, abstract
+and journal) and semantic ranking (cosine over the stored summary and abstract
+vectors, kept at 0.30 or above) are merged by reciprocal rank (k = 60), and the
+cursor is an offset (rows can shift if the profile changes between pages). A
+cursor used with other filters is a `400` with
+`{"detail": {"error": "cursor_mismatch", ...}}`.
+
+**Status codes:** `200`, `400`, `404`.
 
 ---
 
-### GET /api/v1/profiles/{slug}/summary/{paper_id}
+### GET /api/v1/profiles/{slug}/papers/{paper_id}
 
-Fetch the markdown summary for one paper.
+One paper (`PaperRecordView`): `fields` (on-disk names such as `datePublished`
+and `isPartOf`; the record view keeps the first 10 authors and 5 topics and
+cuts the abstract at 1,500 characters with `abstract_truncated`), `summary`
+inline (the generated summary when this viewer may read it, else the record's
+own; `summary_source` says which), `parts` (`summary` and `text` sizes),
+`sections` (full-text headings, when the viewer may read the text), `version`,
+and `withheld`. `?view=full` returns the whole record. Gated like `/papers`.
 
-**Response 200** (`PaperSummary`):
+---
 
-| Field | Type | Notes |
-|---|---|---|
-| `paper_id` | string | Echoes the request. |
-| `summary` | string | Full summary markdown. |
+### GET /api/v1/profiles/{slug}/summaries
 
-**Status codes:** `200`; `404` if the profile is missing or `paper_id` has no
-summary: `{"detail": "summary '<paper_id>' not found for profile '<slug>'"}`.
+`?ids=a,b,c` (at most 20). **Response 200** (`SummaryBatch`): `summaries`
+(`{paper_id: markdown}`), `unavailable` (`{paper_id: reason}`),
+`limit_applied`, `not_processed` (ids past the cap).
+
+---
+
+### GET /api/v1/profiles/{slug}/papers/{paper_id}/text and GET /api/v1/profiles/{slug}/text
+
+Bounded reads of a paper's full text and of the narrative. Each is gated
+exactly like the content route for that file.
+
+**Query:** `section` (a heading name from `sections`; for the narrative,
+`soul` or `expertise`), `offset` (an index into the whole stored text, also
+when `section` is given), `max_chars` (default 80,000, clamped to 200,000).
+
+**Response 200** (`TextPage`): `text`, `section`, `offset`, `returned_chars`,
+`total_chars` (of the section, or of the whole text), `has_more`,
+`next_offset` (pass it as `offset` to continue), `sections`
+(`[{name, offset, chars}]`), and for the narrative `content_hash`. A cut page
+ends at a paragraph break when one is near. An unknown section is a `400`
+`{"detail": {"error": "unknown_section", "valid": [...]}}`.
+
+---
+
+### POST /api/v1/profiles/{slug}/papers/{paper_id}/passages and POST /api/v1/profiles/{slug}/passages
+
+`{"query": str, "k": int}` (k default 3, clamped to 10). The passages in one
+paper (full text, summary, abstract) or one profile (soul, expertise, and the
+cv, web and grant chunks this viewer may read) that best answer the query.
+
+**Response 200** (`PassageList`): `passages` (each `{source, source_id,
+section, offset, text, score, matched_by}`, text at most 1,200 characters;
+`offset` works with the text routes for `full_text`, `soul` and `expertise`),
+`k_applied`, `search_mode_used` (`hybrid`, `keyword`, or
+`hybrid+keyword_fulltext` when full text was searched), `searched`, and `note`.
+Full text and private sources have no stored vectors, so they are searched by
+keyword only, and the note says so. Only sources this viewer may read are
+searched.
 
 ---
 
 ### POST /api/v1/profiles/{slug}/search
 
-Semantic search over the profile's chunk-level sqlite-vec index.
+Semantic search over one profile's stored chunk vectors (the SQL store's
+`rp_chunk_vectors`, or a directory's index), returning each hit's text.
 
 **Request body** (`SearchRequest`):
 
 | Field | Type | Required | Default | Notes |
 |---|---|---|---|---|
 | `query` | string | yes | none | Whitespace-only queries return an empty hit list. |
-| `k` | integer | no | `5` | Number of hits. |
+| `k` | integer | no | `5` | Number of hits; clamped to 20 (`k_applied` says what ran). |
 | `filter` | object \| null | no | `null` | Only `source_type` is recognized (string or list). Candidates are fetched at `k*4` then post-filtered. |
 
 **Known `source_type` values**, which depend on the profile's
@@ -741,7 +781,7 @@ Semantic search over the profile's chunk-level sqlite-vec index.
 
 | Field | Type | Notes |
 |---|---|---|
-| `text` | string | Raw chunk text. |
+| `text` | string | Chunk text, at most 1,200 characters (`truncated: true` when cut). |
 | `source_type` | string | See the known values above. |
 | `source_id` | string | Paper id for summaries and abstracts; grant `id` for grants; page filename stem for web pages; `expertise`, `soul`, or `cv` for those documents. |
 | `chunk_index` | integer | 0-based chunk index within the source. |
@@ -760,15 +800,9 @@ curl -X POST -H "Authorization: Bearer $TOKEN" \
 
 - `200` on success (including empty `hits`).
 - `401`, `404` as elsewhere.
-- `500` `{"detail": "search failed: <message>"}` if `.search` raises. For
-  example, a profile whose `.cache/embeddings.sqlite` has not been built raises
-  `IndexNotBuiltError`, surfaced as `500` `{"detail": "search failed: No index
-  at <path>. Call build_index() first."}`. Treat 5xx as "search not available
-  for this profile" and fall back.
-- `501` when the profile's backend has no local directory at all (a SQL store
-  or a static host), so no index can exist there. The body is the
-  `CapabilityUnavailableError` message:
-  `{"detail": "search needs a local profile directory (<what>); <remedy>"}`.
+- `503` when the profile has no stored vectors or no query encoder is
+  available. Treat it as "search not available for this profile" and fall
+  back.
 
 ---
 
@@ -1111,13 +1145,14 @@ operator bearer token. A host that runs the
 
 | Method | Path | Description |
 |---|---|---|
-| `PATCH` | `/api/v1/profiles/{slug}/metadata` | Patch owner-editable metadata. |
-| `PUT` | `/api/v1/profiles/{slug}/soul` | Replace `personality/SOUL.md` whole. |
+| `PATCH` | `/api/v1/profiles/{slug}/metadata` | Patch owner-editable metadata; the field `soul` replaces `personality/SOUL.md` in the same write. |
 | `GET` / `PATCH` | `/api/v1/profiles/{slug}/visibility` | Read / set artifact tiers. |
-| `GET` | `/api/v1/profiles/{slug}/works/{paper_id}` | One work's whole record. |
+| `POST` | `/api/v1/profiles/{slug}/works` | Add one new work; an existing `paper_id` is a `409`. |
 | `PATCH` | `/api/v1/profiles/{slug}/works/{paper_id}` | Patch owner-editable fields of one work. |
-| `PUT` | `/api/v1/profiles/{slug}/works/{paper_id}` | Add or replace one whole record. |
 | `DELETE` | `/api/v1/profiles/{slug}/works/{paper_id}` | Remove one work from the corpus. |
+
+To read a work before editing it, use the public
+`GET /api/v1/profiles/{slug}/papers/{paper_id}?view=full`.
 
 ### What an owner may edit
 
@@ -1178,21 +1213,25 @@ that is not in the corpus is a `404`. The patched record is re-validated
 before anything is written, so a bad value is a `400` and the file is
 untouched. `rp work set <paper_id> key=value ...` is the CLI for this.
 
-### Optimistic concurrency (`base_hash` -> 409)
+### Optimistic concurrency (`base_hash`, `base_version` -> 409)
 
 `GET /api/v1/profiles/{slug}` returns `content_hash`. Send it back as
-`base_hash` on a metadata patch or a soul write and a concurrent change becomes
-a `409` carrying the current digest in the body and in `X-RP-Content-Hash`:
+`base_hash` on a metadata patch (the narrative included) and a concurrent
+change becomes a `409` carrying the current digest in the body and in
+`X-RP-Content-Hash`:
 
 ```json
-{"detail": "this profile changed since you loaded it (current content_hash sha256:...); reload it and re-apply your edit"}
+{"detail": {"error": "conflict", "current": "sha256:...", "message": "this profile changed since you loaded it; reload it and re-apply your edit"}}
 ```
 
-Omit `base_hash` and the write is last-writer-wins. A
-single-owner CLI does not need a token. Every successful edit returns the new
-`content_hash` on `EditResult`, so a form held open can chain writes without
-re-reading. The digest spans the document and the SOUL together, so the two
-routes share one clock rather than each keeping a private one.
+A work has its own token: each paper row and record carries `version`. Send it
+as `base_version` on `PATCH /works/{paper_id}` (in the body) or `DELETE`
+(a query parameter); a stale one is a `409` with the current version in
+`X-RP-Paper-Version`. The reply's `version` is the new one.
+
+Omit the token and the write is last-writer-wins. A single-owner CLI does not
+need one. Every successful edit returns the new `content_hash` on
+`EditResult`, so a form held open can chain writes without re-reading.
 
 ---
 
@@ -1220,7 +1259,7 @@ unchanged.
 | `job_title` | string \| null | |
 | `training` | list[dict] | Authored history; entries match `schema.Training`. |
 | `career` | list[dict] | Authored history; entries match `schema.CareerEntry`. |
-| `expertise` | list[string] | Default `[]`. Distinct from the `expertise` markdown on `ProfileDetail`. |
+| `expertise` | list[string] | Default `[]`. Distinct from the `expertise` markdown body of the full view. |
 | `interests` | list[string] | Default `[]`. Rebuilt from `research_interests` (positive weights) when that is set. |
 | `not_interests` | list[string] | Default `[]`. Authoritative: a consumer must not improvise around them. Rebuilt from `research_interests` (negative weights) when that is set. |
 | `research_interests` | list[dict] | Default `[]`. Typed, weighted interests (`ResearchInterest`). |

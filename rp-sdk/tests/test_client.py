@@ -163,7 +163,9 @@ class TestFromApiClient:
             assert lp.title == rp.title
             assert lp.year == rp.year
 
-    def test_contract_search_isinstance_and_attrs(self, api_client, fixture_profiles_root):
+    def test_contract_search_isinstance_and_attrs(
+        self, api_client, fixture_profiles_root, monkeypatch
+    ):
         """Both backends should return objects with the same SearchHit shape."""
 
         # Stub local search.
@@ -182,10 +184,10 @@ class TestFromApiClient:
         ]
         local.index.search = MagicMock(return_value=fake_hits)  # type: ignore[assignment]
 
-        # Stub server-side search on cached profile.
-        cache = api_client.app.state.store
-        server_prof = cache.get(SLUG)
-        server_prof.index.search = MagicMock(return_value=fake_hits)  # type: ignore[assignment]
+        # Stub the server's chunk search.
+        import researcher_profiles.api._semantic as semantic
+
+        monkeypatch.setattr(semantic, "search_chunks", lambda *a, **kw: (fake_hits, None))
 
         remote = remote_from_app(api_client.app)
         try:

@@ -198,7 +198,7 @@ def test_static_deploy_and_anonymous_http_publish_the_same_set(tmp_path, make_ap
     on_disk = {url for url in all_artifacts if (pdir / url).is_file()}
 
     client = make_api_client(root)
-    detail = client.get("/api/v1/profiles/drift-check")
+    detail = client.get("/api/v1/profiles/drift-check/files")
     assert detail.status_code == 200
     withheld = set(detail.json()["withheld"])
 
@@ -678,7 +678,7 @@ class TestInlineSectionsCannotEscape:
         # The owner still reads their own sections back: the projection is a
         # cap on the viewer, not a deletion.
         owner = client.get("/api/v1/profiles/leaky", headers={"Authorization": "Bearer op"}).json()
-        assert owner["metadata"]["methodological_commitments"] == [_SECRETS[0]]
+        assert owner["fields"]["methodological_commitments"] == [_SECRETS[0]]
 
     def test_static_publisher_output(self, leak_profile_root):
         from researcher_profiles.publish import publish_collection, render_profile

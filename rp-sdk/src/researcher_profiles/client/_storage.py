@@ -319,6 +319,7 @@ class ApiArtifactStorage(ReadOnlyArtifactStorage):
         # Caches for the combined endpoint.
         self._detail_cache: Optional[dict] = None
         self._paper_index_cache: Optional[list[dict]] = None
+        self._files_cache: Optional[list[dict]] = None
 
     def __repr__(self) -> str:
         return f"ApiArtifactStorage(slug={self._slug!r}, base_url={self.base_url!r})"
@@ -360,6 +361,7 @@ class ApiArtifactStorage(ReadOnlyArtifactStorage):
         """Drop cached immutable resources so the next access refetches."""
         self._detail_cache = None
         self._paper_index_cache = None
+        self._files_cache = None
 
     # HTTP helpers + error mapping
 
@@ -383,20 +385,43 @@ class ApiArtifactStorage(ReadOnlyArtifactStorage):
         return resp.text
 
     def _detail(self) -> dict:
+        """The full view: every metadata field plus the two narrative bodies."""
         if self._detail_cache is None:
-            self._detail_cache = self._request("GET", self._api_path())
+            self._detail_cache = self._request("GET", self._api_path(), params={"view": "full"})
         return self._detail_cache
 
+    def _files(self) -> list[dict]:
+        """The manifest entries the server holds (``GET .../files``)."""
+        if self._files_cache is None:
+            data = self._request("GET", self._api_path("files"))
+            self._files_cache = list(data.get("files") or [])
+        return self._files_cache
+
     def _fetch_summary(self, paper_id: str) -> str:
-        data = self._request("GET", self._api_path("summary", paper_id))
-        return data.get("summary", "")
+        data = self._request("GET", self._api_path("summaries"), params={"ids": paper_id})
+        return (data.get("summaries") or {}).get(paper_id, "")
 
     # Reads
 
     def load_document(self) -> ProfileDocument:
-        d = self._detail()
+        """The served metadata with the manifest put back, as one document.
+
+        The record carries no manifest (it has its own route), and two
+        counts that are not document fields; both are reconciled here so the
+        document validates and ``build_manifest`` has something to answer.
+        """
+        fields = dict(self._detail().get("fields") or {})
+        for key in ("paper_count", "summary_count"):
+            fields.pop(key, None)
+        files = self._files()
+        for slot, key in (("hasPart", "has_part"), ("subjectOf", "subject_of")):
+            fields[key] = [
+                {k: v for k, v in e.items() if k not in ("effective_visibility", "slot")}
+                for e in files
+                if e.get("slot") == slot
+            ]
         # Server emits a tolerant dict; round-trip through ProfileDocument.
-        return ProfileDocument.model_validate(d["metadata"])
+        return ProfileDocument.model_validate(fields)
 
     def content_hash(self) -> str:
         """``"sha256:<hex>"`` over the served document + soul.
@@ -407,24 +432,47 @@ class ApiArtifactStorage(ReadOnlyArtifactStorage):
         """
         d = self._detail()
         h = hashlib.sha256()
-        h.update(
-            canonical_dumps(
-                ProfileDocument.model_validate(d["metadata"]).model_dump(mode="json")
-            ).encode("utf-8")
-        )
+        h.update(canonical_dumps(self.load_document().model_dump(mode="json")).encode("utf-8"))
         h.update(b"\x00")
         h.update((d.get("soul") or "").encode("utf-8"))
         return f"sha256:{h.hexdigest()}"
 
     def load_expertise(self) -> str:
-        return self._detail().get("expertise", "")
+        return self._detail().get("expertise") or ""
 
     def load_soul(self) -> str:
-        return self._detail().get("soul", "")
+        return self._detail().get("soul") or ""
+
+    def _paper_rows(self) -> list[dict]:
+        """Every paper row, following the cursor 100 at a time."""
+        rows: list[dict] = []
+        cursor: Optional[str] = None
+        while True:
+            params: dict[str, Any] = {"limit": 100}
+            if cursor:
+                params["cursor"] = cursor
+            page = self._request("GET", self._api_path("papers"), params=params)
+            rows.extend(page.get("items") or [])
+            cursor = page.get("next_cursor")
+            if not cursor:
+                return rows
 
     def load_papers(self) -> list[PaperRecord]:
-        entries = self._request("GET", self._api_path("papers"))
-        self._paper_index_cache = list(entries)
+        """The whole records off the works file, indexed by the paged rows.
+
+        The rows say which summaries this caller may fetch; the works file
+        (``content/sources/papers.jsonld``, gated by the same tier as the rows)
+        carries every bibliographic field in one read. A server that will not
+        serve the file still answers with records built from the rows.
+        """
+        rows = self._paper_rows()
+        self._paper_index_cache = rows
+        try:
+            raw = self._request("GET", self._api_path("content", PAPERS_URL))
+            data = json.loads(raw) if isinstance(raw, str) else raw
+            return PapersDocument.model_validate(data or {}).has_part
+        except (KeyError, RuntimeError, ValueError, ValidationError):
+            pass
         return [
             PaperRecord.model_validate(
                 {
@@ -433,14 +481,11 @@ class ApiArtifactStorage(ReadOnlyArtifactStorage):
                     "year": e.get("year"),
                     "journal": e.get("journal"),
                     "first_author": e.get("first_author"),
-                    "authors": e.get("authors"),
                     "doi": e.get("doi"),
-                    "pmid": e.get("pmid"),
                     "openalex_id": e.get("openalex_id"),
-                    "full_text_link": e.get("full_text_link"),
                 }
             )
-            for e in entries
+            for e in rows
         ]
 
     def load_grants(self) -> list[GrantRecord]:
@@ -458,7 +503,7 @@ class ApiArtifactStorage(ReadOnlyArtifactStorage):
         ids = [
             e["paper_id"]
             for e in (self._paper_index_cache or [])
-            if e.get("paper_id") and e.get("summary_available")
+            if e.get("paper_id") and (e.get("summary") or {}).get("available")
         ]
         return LazySummaries(ids, self._fetch_summary)
 
@@ -496,7 +541,7 @@ class ApiArtifactStorage(ReadOnlyArtifactStorage):
             return None
 
     def build_manifest(self) -> tuple[list[ArtifactRef], list[ArtifactRef]]:
-        """The manifest the served document records; there is nothing to walk."""
+        """The manifest the server holds (``GET .../files``); there is nothing to walk."""
         try:
             doc = self.load_document()
         except (ProfileError, KeyError, RuntimeError):  # pragma: no cover

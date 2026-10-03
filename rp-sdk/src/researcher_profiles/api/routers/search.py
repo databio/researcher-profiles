@@ -13,7 +13,6 @@ from typing import Any
 import pydantic
 from fastapi import Depends, HTTPException, Request
 
-from ...errors import CapabilityUnavailableError
 from ...models.api import (
     CoiBlock,
     CoiCheckRequest,
@@ -38,10 +37,22 @@ from ...models.api import (
     SearchResponse,
 )
 from ...privacy import (
+    CHUNK_SOURCE_TYPE_ROLE,
     ViewerTier,
 )
 from ...schema import ResearchInterest
 from ...store import ProfileStore
+from .. import _semantic
+from .._limits import (
+    MATCH_K,
+    MATCH_PREFILTER_CAP,
+    RANK_K,
+    RANK_MAX_PAGES_CAP,
+    SEARCH_K,
+    TOPK_CHUNKS_CAP,
+    clamp,
+    truncate_words,
+)
 from .._projection import (
     _allowed_source_types,
     _gate_profile,
@@ -75,48 +86,48 @@ def search_profile(
 ) -> SearchResponse:
     """Semantic search over one profile, projected through the viewer's tier.
 
-    The served index (``.cache/embeddings.sqlite``) holds ``cv``, ``web``, and
-    ``grant`` chunks as well as public ones, and this route returns chunk text
-    verbatim, so without the projection a ``match``-scoped consumer reads a
-    researcher's CV back a chunk at a time. Private source types are
-    excluded from the query and dropped from the result: the first keeps them
-    from crowding out results the caller may actually have, the second is the
-    guarantee.
+    Runs on the store's own vectors (the ``VectorStore`` capability), so it
+    works on every backend, the SQL store included: the query is embedded with
+    the encoder ``/match`` uses, scored against this profile's chunk rows,
+    and each hit's text is recovered from the source it was cut from. Chunks
+    whose source this viewer may not read are excluded from the query and
+    dropped from the result: the first keeps them from crowding out results
+    the caller may actually have, the second is the guarantee. ``k`` defaults
+    to 5 and is clamped to 20 (``k_applied``); hit text is cut to
+    ``SNIPPET_CHARS`` (``truncated``).
     """
     prof = get_profile(slug, store)
     _gate_profile(request, prof, viewer, slug)
+    k = clamp(body.k, *SEARCH_K)
     allowed = _allowed_source_types(prof.metadata, viewer)
-    query_filter = dict(body.filter or {})
-    if allowed is not None:
-        requested = query_filter.get("source_type")
-        if requested is not None:
-            requested = [requested] if isinstance(requested, str) else list(requested)
-            allowed = [st for st in allowed if st in requested]
-        query_filter["source_type"] = allowed
-    try:
-        hits = prof.index.search(body.query, k=body.k, filter=query_filter or None)
-    except CapabilityUnavailableError as e:
-        # This backend has no local index at all (a SQL store, a static host).
-        # 501, not 500: the server is fine, this operation is not offered here.
-        raise HTTPException(status_code=501, detail=str(e)) from e
-    # Boundary: the whole embedding stack behind one profile's index.
-    except Exception as e:
-        logger.exception("search failed for %s", slug)
-        raise HTTPException(status_code=500, detail=f"search failed: {e}") from e
+    types = list(allowed) if allowed is not None else list(CHUNK_SOURCE_TYPE_ROLE)
+    requested = (body.filter or {}).get("source_type")
+    if requested is not None:
+        requested = [requested] if isinstance(requested, str) else list(requested)
+        types = [st for st in types if st in requested]
+    hits, note = _semantic.search_chunks(
+        request, store, prof, viewer, body.query, source_types=types, k=k
+    )
+    if hits is None:
+        # No vectors for this profile, or no usable query encoder: the
+        # operation is not available here, which is not a server fault.
+        raise HTTPException(status_code=503, detail=note or "semantic search unavailable")
     visible = _visible_hits(prof.metadata, viewer, hits)
-    return SearchResponse(hits=[_search_hit_payload(h) for h in visible])
+    return SearchResponse(hits=[_search_hit_payload(h) for h in visible], k_applied=k)
 
 
 def _search_hit_payload(h: Any) -> SearchHitPayload:
+    text, truncated = truncate_words(h.text or "")
     return SearchHitPayload(
-        text=h.text,
+        text=text,
+        truncated=truncated,
         source_type=h.source_type,
         source_id=h.source_id,
         chunk_index=h.chunk_index,
         section=h.section,
         cosine=h.cosine,
         score=h.score,
-        meta=h.meta or {},
+        meta=getattr(h, "meta", None) or {},
     )
 
 
@@ -145,15 +156,16 @@ def match_profiles(
         interests = [ResearchInterest.model_validate(i) for i in body.interests]
     except pydantic.ValidationError as e:
         raise HTTPException(status_code=422, detail=f"invalid interests: {e}") from e
+    k, prefilter, topk_chunks = _match_caps(body)
     try:
         matches = vstore.match.rank(
             body.query,
-            k=body.k,
-            prefilter=body.prefilter,
+            k=k,
+            prefilter=prefilter,
             require_topics=body.require_topics,
             diversify=body.diversify,
             lambda_=body.lambda_,
-            topk_chunks=body.topk_chunks,
+            topk_chunks=topk_chunks,
             normalize=body.normalize,
             interests=interests or None,
             topic_alpha=body.topic_alpha,
@@ -220,7 +232,17 @@ def match_profiles(
         matches=results,
         ranked_profiles=ranked_profiles,
         total_profiles=total_profiles,
+        k_applied=k,
+        prefilter_applied=prefilter,
     )
+
+
+def _match_caps(body) -> tuple[int, int, int]:
+    """``(k, prefilter, topk_chunks)`` clamped to their caps (``_limits``)."""
+    k = clamp(body.k, *MATCH_K)
+    prefilter = clamp(body.prefilter, max(k, 10), MATCH_PREFILTER_CAP)
+    topk_chunks = clamp(body.topk_chunks, 5, TOPK_CHUNKS_CAP)
+    return k, prefilter, topk_chunks
 
 
 def _match_ranked_floor() -> float:
@@ -351,15 +373,16 @@ def match_reviewers(
     """
     if body.mode not in ("drop", "annotate"):
         raise HTTPException(status_code=400, detail="mode must be 'drop' or 'annotate'")
+    k, prefilter, topk_chunks = _match_caps(body)
     try:
         matches = vstore.match.rank(
             body.query,
-            k=body.k,
-            prefilter=body.prefilter,
+            k=k,
+            prefilter=prefilter,
             require_topics=body.require_topics,
             diversify=body.diversify,
             lambda_=body.lambda_,
-            topk_chunks=body.topk_chunks,
+            topk_chunks=topk_chunks,
             normalize=body.normalize,
         )
     # Boundary: the match stack plus the derived graph.
@@ -417,7 +440,7 @@ def match_reviewers(
                 coi=coi_block if body.mode == "annotate" else None,
             )
         )
-    return ReviewerMatchResponse(matches=results)
+    return ReviewerMatchResponse(matches=results, k_applied=k, prefilter_applied=prefilter)
 
 
 @router.get(
@@ -521,6 +544,8 @@ def rank_works_for_profile(
     prof = get_profile(slug, store)
     _gate_profile(request, prof, viewer, slug)
     rank = _rank_works()
+    k = clamp(body.k, *RANK_K)
+    max_pages = clamp(body.max_pages, 5, RANK_MAX_PAGES_CAP)
 
     if body.works:
         from ...schema import PaperRecord
@@ -550,7 +575,7 @@ def rank_works_for_profile(
                     since=since,
                     topics=terms["topics"],
                     seed_work_ids=terms["seed_work_ids"],
-                    max_pages=body.max_pages,
+                    max_pages=max_pages,
                 )
         except OpenAlexBudgetError as e:
             raise HTTPException(
@@ -573,7 +598,7 @@ def rank_works_for_profile(
         ranked = rank(
             prof,
             works,
-            k=body.k,
+            k=k,
             kind=body.kind,
             diversify=body.diversify,
             lambda_=body.lambda_,
@@ -595,4 +620,6 @@ def rank_works_for_profile(
         slug=store.resolve_slug(slug),
         rid=getattr(prof, "rid", None),
         works=[RankedWorkPayload(**r.to_dict()) for r in ranked],
+        k_applied=k,
+        max_pages_applied=max_pages,
     )

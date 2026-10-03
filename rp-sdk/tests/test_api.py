@@ -150,11 +150,31 @@ class TestServerCore:
         assert r.status_code == 200
         d = r.json()
         assert d["slug"] == SLUG
-        assert d["metadata"]["name"]
-        # ProfileDetail.metadata surfaces the depth tier.
-        assert d["metadata"]["level"] == "full"
-        assert isinstance(d["expertise"], str)
-        assert isinstance(d["soul"], str)
+        assert d["view"] == "record"
+        assert d["fields"]["name"]
+        # The record surfaces the depth tier and the edit version...
+        assert d["fields"]["level"] == "full"
+        assert d["content_hash"].startswith("sha256:")
+        # ...and sizes, never bodies or the manifest.
+        assert d["parts"]["soul"]["available"] is True
+        assert "soul" not in d and "manifest" not in d
+        assert "has_part" not in d["fields"]
+        full = api_client.get(f"/api/v1/profiles/{SLUG}", params={"view": "full"}).json()
+        assert isinstance(full["expertise"], str)
+        assert isinstance(full["soul"], str)
+        assert "has_part" not in full["fields"]
+
+    def test_profile_detail_revalidates_on_its_version(self, api_client):
+        """One stored-column read answers "has it changed?" with a 304."""
+        r = api_client.get(f"/api/v1/profiles/{SLUG}")
+        etag = r.headers["ETag"]
+        assert etag.startswith('W/"')
+        again = api_client.get(f"/api/v1/profiles/{SLUG}", headers={"If-None-Match": etag})
+        assert again.status_code == 304
+        full = api_client.get(
+            f"/api/v1/profiles/{SLUG}", params={"view": "full"}, headers={"If-None-Match": etag}
+        )
+        assert full.status_code == 200
 
     def test_profile_detail_404(self, api_client):
         r = api_client.get("/api/v1/profiles/does-not-exist")
@@ -181,12 +201,16 @@ class TestServerCore:
         papers_path.write_text(json.dumps(doc))
 
         client = make_api_client(root)
-        by_id = {p["paper_id"]: p for p in client.get(f"/api/v1/profiles/{SLUG}/papers").json()}
+        page = client.get(f"/api/v1/profiles/{SLUG}/papers").json()
+        by_id = {p["paper_id"]: p for p in page["items"]}
         served = by_id["doe2016example"]
         assert served["doi"] == "10.1234/example.2016"
-        assert served["pmid"] == "27000000"
         assert served["openalex_id"] == "W2000000001"
-        assert served["authors"] == ["Jane A. Doe", "John Roe"]
+        record = client.get(
+            f"/api/v1/profiles/{SLUG}/papers/doe2016example", params={"view": "full"}
+        ).json()
+        assert record["fields"]["pmid"] == "27000000"
+        assert record["fields"]["author"] == ["Jane A. Doe", "John Roe"]
 
         # ...and the SDK client rebuilds a PaperRecord that still carries them,
         # so a consumer reading a hosted profile is not worse off than one
@@ -203,21 +227,25 @@ class TestServerCore:
     def test_list_papers(self, api_client):
         r = api_client.get(f"/api/v1/profiles/{SLUG}/papers")
         assert r.status_code == 200
-        papers = r.json()
+        page = r.json()
+        papers = page["items"]
         # The jane-doe fixture carries 8 papers, 5 of which have a summary file
         # in sources/summaries/. Asserting the join unconditionally is the point:
         # `if papers:` let this pass on an empty response.
         by_id = {p["paper_id"]: p for p in papers}
         assert len(by_id) == 8
+        assert (page["total"], page["limit_applied"], page["has_more"]) == (8, 20, False)
         assert by_id["doe2016example"]["title"] == (
             "ExampleOverlap: enrichment analysis of example region sets"
         )
         assert by_id["doe2016example"]["year"] == 2016
-        # summary_available is a real join against sources/summaries/, not a
+        # The summary size is a real join against sources/summaries/, not a
         # constant: 5 of the 8 papers have one.
-        assert by_id["doe2016example"]["summary_available"] is True
-        assert by_id["roe2018toolkit"]["summary_available"] is False
-        assert sum(p["summary_available"] for p in papers) == 5
+        assert by_id["doe2016example"]["summary"]["available"] is True
+        assert by_id["doe2016example"]["summary"]["bytes"] > 0
+        assert by_id["roe2018toolkit"]["summary"] == {"available": False, "reason": "none"}
+        assert sum(p["summary"]["available"] for p in papers) == 5
+        assert all(len(p["version"]) == 16 for p in papers)
 
     # ----------------------------------------------------------------------
     # Auth
@@ -295,11 +323,10 @@ class TestServerCore:
     # ----------------------------------------------------------------------
 
     def test_search_endpoint_with_stubbed_index(self, api_client, monkeypatch):
-        # Stub the search method on the cached profile.
+        # Stub the server's chunk search.
+        import researcher_profiles.api._semantic as semantic
         from researcher_profiles.embeddings.cache import SearchHit
 
-        cache = api_client.app.state.store
-        prof = cache.get(SLUG)
         fake_hits = [
             SearchHit(
                 text="example chunk",
@@ -312,17 +339,20 @@ class TestServerCore:
                 meta={"year": 2020},
             )
         ]
-        prof.index.search = MagicMock(return_value=fake_hits)  # type: ignore[assignment]
+        monkeypatch.setattr(
+            semantic, "search_chunks", lambda *a, **kw: (fake_hits[: kw["k"]], None)
+        )
 
         with TestClient(api_client.app) as c:
             r = c.post(
                 f"/api/v1/profiles/{SLUG}/search",
-                json={"query": "chromatin", "k": 3},
+                json={"query": "chromatin", "k": 300},
             )
         assert r.status_code == 200
         j = r.json()
         assert len(j["hits"]) == 1
         assert j["hits"][0]["source_id"] == "paper1"
+        assert j["k_applied"] == 20
 
     @pytest.mark.parametrize(
         "path, body, response_text, expected",
@@ -338,6 +368,18 @@ class TestServerCore:
         j = r.json()
         for dotted, want in expected.items():
             assert _dotted_get(j, dotted) == want
+
+    @pytest.mark.parametrize(
+        "path, body, response_text",
+        [(p, {**b, "k": 500}, t) for p, b, t in _persona_params(SLUG)],
+        ids=PERSONA_IDS,
+    )
+    def test_persona_k_is_clamped_and_reported(self, api_client, path, body, response_text):
+        _stub_llm_slug(api_client.app, SLUG, response_text)
+        with TestClient(api_client.app) as c:
+            r = c.post(path, json=body)
+        assert r.status_code == 200, r.text
+        assert r.json()["k_applied"] == 20
 
     @pytest.fixture
     def mixed_client(self, make_api_client, fixture_profiles_root):
@@ -415,8 +457,8 @@ class TestRegistryProofsServed:
                     "verifiedAt": "2026-09-01T12:00:00+00:00",
                 }
             ]
-        detail = client.get("/api/v1/profiles/ada").json()
-        assert [p["kind"] for p in detail["metadata"]["proof"]] == ["orcid_login"]
+        detail = client.get("/api/v1/profiles/ada", params={"view": "full"}).json()
+        assert [p["kind"] for p in detail["fields"]["proof"]] == ["orcid_login"]
 
     def test_both_urls_same_bytes_and_etag_and_304(self, client):
         a = client.get("/api/v1/profiles/ada/profile.jsonld")
@@ -741,6 +783,18 @@ class TestMatchEndpoint:
         assert vstore.calls[0][0] == "chromatin"
         assert vstore.calls[0][1]["k"] == 3
 
+    def test_match_counts_are_clamped_and_reported(self, api_client):
+        """Clamp and report: an oversized ``k`` runs at the cap, never a 422."""
+        vstore = self._use(api_client.app, _FakeVectorStore([_fake_match()]))
+        r = api_client.post(
+            "/api/v1/match",
+            json={"query": "chromatin", "k": 10_000, "prefilter": 10_000, "topk_chunks": 99},
+        )
+        assert r.status_code == 200, r.text
+        assert (r.json()["k_applied"], r.json()["prefilter_applied"]) == (50, 200)
+        sent = vstore.calls[0][1]
+        assert (sent["k"], sent["prefilter"], sent["topk_chunks"]) == (50, 200, 10)
+
     def test_match_includes_chunks_when_requested(self, api_client):
         self._use(api_client.app, _FakeVectorStore([_fake_match()]))
         r = api_client.post(
@@ -977,8 +1031,18 @@ class TestPreCommitHookOverHTTP:
             c.patch(f"/api/v1/profiles/{SLUG}/metadata", json={"field": "Genomics"}).status_code
             == 200
         )
-        assert c.put(f"/api/v1/profiles/{SLUG}/soul", json={"soul": "# soul\n"}).status_code == 200
+        assert (
+            c.patch(f"/api/v1/profiles/{SLUG}/metadata", json={"soul": "# soul\n"}).status_code
+            == 200
+        )
         assert [ctx.kind for ctx in seen] == ["document", "soul"]
+        # Both halves in one patch are one write: the hooks run once.
+        r = c.patch(
+            f"/api/v1/profiles/{SLUG}/metadata", json={"field": "Biology", "soul": "# again\n"}
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["updated"] == ["field", "soul"]
+        assert [ctx.kind for ctx in seen] == ["document", "soul", "soul"]
 
     def test_invalidate_after_write_no_longer_calls_any_hook(
         self, make_api_client, fixture_profiles_root

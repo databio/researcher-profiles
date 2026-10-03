@@ -618,8 +618,13 @@ class TestCreateAppOverAStore:
     def test_the_read_surface_is_backend_agnostic(self, both_stores, make_api_client, jane_doe):
         c = make_api_client(both_stores)
         assert [p["slug"] for p in c.get("/api/v1/profiles").json()["profiles"]] == ["jane-doe"]
-        assert c.get("/api/v1/profiles/jane-doe").json()["metadata"]["name"] == jane_doe.name
-        assert len(c.get("/api/v1/profiles/jane-doe/papers").json()) == len(jane_doe.papers)
+        assert c.get("/api/v1/profiles/jane-doe").json()["fields"]["name"] == jane_doe.name
+        rows = c.get("/api/v1/profiles/jane-doe/papers").json()["items"]
+        assert len(rows) == len(jane_doe.papers)
+        # Per-caller sizes come out the same from either backend: the store
+        # says which bodies it holds, the manifest or the store says how big.
+        assert sum(r["summary"]["available"] for r in rows) == 5
+        assert all(r["summary"]["bytes"] for r in rows if r["summary"]["available"])
 
     def test_the_document_route_serves_the_published_bytes(
         self, both_stores, make_api_client, jane_doe_dir
@@ -637,7 +642,9 @@ class TestCreateAppOverAStore:
     def test_a_write_through_a_route_fires_the_apps_hooks(self, both_stores, make_api_client):
         seen = []
         c = make_api_client(both_stores, pre_commit_hooks=[seen.append])
-        assert c.put("/api/v1/profiles/jane-doe/soul", json={"soul": "# via http\n"}).status_code
+        assert c.patch(
+            "/api/v1/profiles/jane-doe/metadata", json={"soul": "# via http\n"}
+        ).status_code
         assert [x.kind for x in seen] == ["soul"]
 
     def test_match_returns_the_profile_on_a_sql_store(self, indexed_sql_store, make_api_client):

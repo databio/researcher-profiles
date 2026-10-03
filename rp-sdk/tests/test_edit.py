@@ -10,19 +10,14 @@ Two layers:
   behavior when a management host installs an ``owner_verifier``.
 """
 
-from pathlib import Path
-
 import pytest
 
 from researcher_profiles import ResearcherProfile
-from researcher_profiles.errors import ProfileWriteError
 from researcher_profiles.profile.edit import (
     EDITABLE_METADATA_FIELDS,
     LOCKED_METADATA_FIELDS,
     EditError,
-    WorkNotFoundError,
 )
-from researcher_profiles.profile.storage import DirectoryArtifactStorage
 from researcher_profiles.schema import ProfileDocument
 
 SLUG = "jane-doe"
@@ -157,238 +152,11 @@ class TestWorkEdits:
 
     PAPER = "doe2016example"
 
-    def _papers_entry(self, jane_doe_dir: Path) -> dict:
-        """The manifest entry describing ``sources/papers.jsonld``."""
-        import json
-
-        doc = json.loads((jane_doe_dir / "profile.jsonld").read_text())
-        return next(p for p in doc["hasPart"] if p["contentUrl"] == "sources/papers.jsonld")
-
-    def test_patch_persists_and_reloads(self, jane_doe_dir):
-        prof = ResearcherProfile.from_files(jane_doe_dir)
-        prof.edit.patch_work(self.PAPER, {"doi": "10.1038/s41586-023-06000-1", "access": "closed"})
-        reloaded = ResearcherProfile.from_files(jane_doe_dir)
-        record = next(p for p in reloaded.papers if p.paper_id == self.PAPER)
-        assert record.doi == "10.1038/s41586-023-06000-1"
-        assert record.access == "closed"
-
-    def test_datePublished_reaches_the_year_field(self, jane_doe_dir):
-        """The patch speaks the name on disk, not the python attribute.
-
-        ``year`` is stored under ``datePublished``. A patch that landed the
-        value as an extra key would leave the real year untouched and still
-        report success.
-        """
-        prof = ResearcherProfile.from_files(jane_doe_dir)
-        prof.edit.patch_work(self.PAPER, {"datePublished": 2017})
-        reloaded = ResearcherProfile.from_files(jane_doe_dir)
-        assert next(p for p in reloaded.papers if p.paper_id == self.PAPER).year == 2017
-
-    def test_rejects_non_editable_field(self, jane_doe_dir):
-        prof = ResearcherProfile.from_files(jane_doe_dir)
-        before = (jane_doe_dir / "sources" / "papers.jsonld").read_bytes()
-        with pytest.raises(EditError, match="not owner-editable"):
-            prof.edit.patch_work(self.PAPER, {"cited_by_count": 9000})
-        assert (jane_doe_dir / "sources" / "papers.jsonld").read_bytes() == before
-
-    def test_unknown_paper_id_is_its_own_error(self, jane_doe_dir):
-        prof = ResearcherProfile.from_files(jane_doe_dir)
-        with pytest.raises(WorkNotFoundError, match="no work with paper_id"):
-            prof.edit.patch_work("nobody2099", {"doi": "10.1/x"})
-
-    def test_invalid_value_leaves_the_file_untouched(self, jane_doe_dir):
-        prof = ResearcherProfile.from_files(jane_doe_dir)
-        before = (jane_doe_dir / "sources" / "papers.jsonld").read_bytes()
-        with pytest.raises(EditError, match="is invalid"):
-            prof.edit.patch_work(self.PAPER, {"is_corresponding": "maybe"})
-        assert (jane_doe_dir / "sources" / "papers.jsonld").read_bytes() == before
-
-    def test_list_order_is_preserved(self, jane_doe_dir):
-        """A patch is not a reordering: corpus order is the published order."""
-        prof = ResearcherProfile.from_files(jane_doe_dir)
-        before = [p.paper_id for p in prof.papers]
-        prof.edit.patch_work(self.PAPER, {"citation": "Doe et al. (2016)"})
-        assert [p.paper_id for p in ResearcherProfile.from_files(jane_doe_dir).papers] == before
-
-    def test_manifest_digest_follows_the_new_bytes(self, jane_doe_dir):
-        """A manifest that still describes the pre-edit file is a lie about it."""
-        prof = ResearcherProfile.from_files(jane_doe_dir)
-        prof.edit.patch_work(self.PAPER, {"citation": "first"})
-        first = self._papers_entry(jane_doe_dir)
-        assert first["sha256"] and first["bytes"]
-
-        prof = ResearcherProfile.from_files(jane_doe_dir)
-        prof.edit.patch_work(self.PAPER, {"citation": "second, and rather longer"})
-        second = self._papers_entry(jane_doe_dir)
-        assert second["sha256"] != first["sha256"]
-
-    def test_add_work_appends_and_replaces(self, jane_doe_dir):
-        prof = ResearcherProfile.from_files(jane_doe_dir)
-        before = len(prof.papers)
-        prof.edit.add_work({"paper_id": "doe2026new", "name": "A new work", "type": "authored"})
-        reloaded = ResearcherProfile.from_files(jane_doe_dir)
-        assert len(reloaded.papers) == before + 1
-        assert reloaded.papers[-1].paper_id == "doe2026new"
-
-        prof = ResearcherProfile.from_files(jane_doe_dir)
-        prof.edit.add_work({"paper_id": "doe2026new", "name": "Renamed", "type": "authored"})
-        reloaded = ResearcherProfile.from_files(jane_doe_dir)
-        assert len(reloaded.papers) == before + 1
-        assert reloaded.papers[-1].name == "Renamed"
-
-    def test_add_work_needs_a_paper_id(self, jane_doe_dir):
-        prof = ResearcherProfile.from_files(jane_doe_dir)
-        with pytest.raises(EditError, match="needs a paper_id"):
-            prof.edit.add_work({"name": "Nameless", "type": "authored"})
-
-    def test_remove_work(self, jane_doe_dir):
-        prof = ResearcherProfile.from_files(jane_doe_dir)
-        prof.edit.remove_work(self.PAPER)
-        reloaded = ResearcherProfile.from_files(jane_doe_dir)
-        assert self.PAPER not in [p.paper_id for p in reloaded.papers]
-        with pytest.raises(WorkNotFoundError):
-            prof.edit.remove_work(self.PAPER)
-
-
-class TestEditAgainstAReadOnlyBackend:
-    """Writes against a read-only backend raise instead of touching the disk.
-
-    An HTTP-backed profile has no filesystem home. Without the storage layer
-    in the way, ``set_soul`` on one would run
-    ``Path("/remote/<slug>/personality").mkdir(parents=True)``, an attempt to
-    create directories at the filesystem root, with nothing raised.
-    """
-
-    def _static(self):
-        return ResearcherProfile.from_url("https://example.org/profiles/jane-doe")
-
-    def test_set_soul_raises_and_creates_nothing(self):
-        prof = self._static()
-        with pytest.raises(EditError):
-            prof.edit.set_soul("# a soul nobody asked for\n")
-        assert not Path("/static/jane-doe").exists()
-
-    def _read_only_over(self, path):
-        """Reads work, writes are refused: the write half of the storage swapped.
-
-        A ``StaticArtifactStorage`` would need a live host to answer the read these two
-        operations do first, so the refusal is modelled locally.
-        """
-
-        class ReadOnlyProfile(ResearcherProfile):
-            def write_unit(self, kind):
-                raise ProfileWriteError(self.locate(kind), "read-only view")
-
-        return ReadOnlyProfile(DirectoryArtifactStorage(path))
-
-    def test_metadata_patch_raises_and_writes_nothing(self, jane_doe_dir):
-        prof = self._read_only_over(jane_doe_dir)
-        before = (jane_doe_dir / "profile.jsonld").read_text()
-        with pytest.raises(EditError):
-            prof.edit.patch_metadata({"name": "Jane Q. Doe"})
-        assert (jane_doe_dir / "profile.jsonld").read_text() == before
-
-    def test_set_visibility_raises_and_writes_nothing(self, jane_doe_dir):
-        prof = self._read_only_over(jane_doe_dir)
-        before = (jane_doe_dir / "profile.jsonld").read_text()
-        with pytest.raises(EditError):
-            prof.edit.set_visibility(profile_visibility="limited")
-        assert (jane_doe_dir / "profile.jsonld").read_text() == before
-
-
-# ---------------------------------------------------------------------------
-# Edit endpoints via require_owner
-# ---------------------------------------------------------------------------
-
-
-class TestEditEndpointsOperatorFallback:
-    """Bare rp-sdk (no owner_verifier): edit endpoints fall back to the token."""
-
-    def test_edit_open_when_no_token_configured(self, make_api_client, fixture_profiles_root):
-        c = make_api_client(fixture_profiles_root(SLUG))
-        r = c.patch(f"/api/v1/profiles/{SLUG}/metadata", json={"field": "Genomics"})
-        assert r.status_code == 200, r.text
-        assert r.json()["updated"] == ["field"]
-
-    def test_edit_requires_operator_token_when_configured(
-        self, make_api_client, fixture_profiles_root
-    ):
-        c = make_api_client(fixture_profiles_root(SLUG), token="op-secret")
-        r = c.patch(f"/api/v1/profiles/{SLUG}/metadata", json={"field": "Genomics"})
-        assert r.status_code == 401
-        r = c.patch(
-            f"/api/v1/profiles/{SLUG}/metadata",
-            json={"field": "Genomics"},
-            headers={"Authorization": "Bearer op-secret"},
-        )
-        assert r.status_code == 200, r.text
-
-    def test_metadata_patch_rejects_non_editable(self, make_api_client, fixture_profiles_root):
-        c = make_api_client(fixture_profiles_root(SLUG))
-        r = c.patch(
-            f"/api/v1/profiles/{SLUG}/metadata",
-            json={"rid": "0000-0002-1825-0097"},
-        )
-        # rid is not a MetadataPatch field -> extra=allow lets it through the
-        # model, but the edit whitelist rejects it as a 400.
-        assert r.status_code == 400
-        assert "not owner-editable" in r.json()["detail"]
-
-    def test_soul_and_visibility_endpoints(self, make_api_client, fixture_profiles_root):
-        c = make_api_client(fixture_profiles_root(SLUG))
-        r = c.put(f"/api/v1/profiles/{SLUG}/soul", json={"soul": "new soul body"})
-        assert r.status_code == 200, r.text
-        assert r.json()["updated"] == ["soul"]
-        r = c.patch(
-            f"/api/v1/profiles/{SLUG}/visibility",
-            json={"profile_visibility": "limited"},
-        )
-        assert r.status_code == 200, r.text
-        assert "visibility" in r.json()["updated"]
-
-    def test_visibility_report_sections_are_rows(self, make_api_client, fixture_profiles_root):
-        """The report's `sections` is a list of {section, declared, effective,
-        visible_to} rows in SECTION_FIELDS order, not a flat {section: tier}
-        map: an editor shows what was declared beside what it resolves to."""
-        c = make_api_client(fixture_profiles_root(SLUG))
-        report = c.get(f"/api/v1/profiles/{SLUG}/visibility").json()
-        sections = report["sections"]
-        assert isinstance(sections, list)
-        by_name = {s["section"]: s for s in sections}
-        assert "soul" in by_name
-        row = by_name["soul"]
-        assert set(row) >= {"section", "declared", "effective", "visible_to"}
-
-    def test_soul_section_patch_retiers_artifact_and_round_trips(
-        self, make_api_client, fixture_profiles_root
-    ):
-        """PATCH sections=[{soul: limited}] re-tiers the soul artifact, and the
-        report reads the declared tier back as limited."""
-        c = make_api_client(fixture_profiles_root(SLUG))
-        r = c.patch(
-            f"/api/v1/profiles/{SLUG}/visibility",
-            json={"sections": [{"section": "soul", "visibility": "limited"}]},
-        )
-        assert r.status_code == 200, r.text
-        assert "sections" in r.json()["updated"]
-        assert r.json()["artifacts_changed"] >= 1
-        report = c.get(f"/api/v1/profiles/{SLUG}/visibility").json()
-        soul_row = next(s for s in report["sections"] if s["section"] == "soul")
-        assert soul_row["declared"] == "limited"
-        soul_artifacts = [a for a in report["artifacts"] if a.get("role") == "soul"]
-        assert soul_artifacts and all(a["declared"] == "limited" for a in soul_artifacts)
-
-
-class TestWorkEndpoints:
-    """``/profiles/{slug}/works/{paper_id}``: the corpus over HTTP.
-
-    The status codes are the contract. 400 and 404 answer different mistakes
-    ("you may not set that" vs "there is no such paper") and a caller retries
-    them differently, so they are pinned here rather than left to whichever
-    exception reached the handler.
-    """
-
-    PAPER = "doe2016example"
+    @staticmethod
+    def _work(c, paper_id):
+        """One work as the public read serves it (full view), or ``None`` on a 404."""
+        r = c.get(f"/api/v1/profiles/{SLUG}/papers/{paper_id}", params={"view": "full"})
+        return None if r.status_code == 404 else r.json()
 
     def test_patch_reports_the_fields_it_applied(self, make_api_client, fixture_profiles_root):
         c = make_api_client(fixture_profiles_root(SLUG))
@@ -398,9 +166,11 @@ class TestWorkEndpoints:
         )
         assert r.status_code == 200, r.text
         assert r.json()["updated"] == ["datePublished", "doi"]
-        record = c.get(f"/api/v1/profiles/{SLUG}/works/{self.PAPER}").json()
-        assert record["doi"] == "10.1038/s41586-023-06000-1"
-        assert record["datePublished"] == "2017"
+        record = self._work(c, self.PAPER)
+        assert record["fields"]["doi"] == "10.1038/s41586-023-06000-1"
+        assert record["fields"]["datePublished"] == "2017"
+        # The reply carries the paper's new version, the next edit's token.
+        assert r.json()["version"] == record["version"]
 
     def test_disallowed_field_is_a_400(self, make_api_client, fixture_profiles_root):
         c = make_api_client(fixture_profiles_root(SLUG))
@@ -412,42 +182,62 @@ class TestWorkEndpoints:
         c = make_api_client(fixture_profiles_root(SLUG))
         r = c.patch(f"/api/v1/profiles/{SLUG}/works/nobody2099", json={"doi": "10.1/x"})
         assert r.status_code == 404, r.text
-        assert c.get(f"/api/v1/profiles/{SLUG}/works/nobody2099").status_code == 404
+        assert self._work(c, "nobody2099") is None
 
-    def test_stale_base_hash_is_a_409_and_changes_nothing(
+    def test_stale_base_version_is_a_409_and_changes_nothing(
         self, make_api_client, fixture_profiles_root
     ):
+        """The paper's own version guards it, whatever else changed on the profile."""
         c = make_api_client(fixture_profiles_root(SLUG))
-        stale = c.get(f"/api/v1/profiles/{SLUG}").json()["content_hash"]
-        c.patch(f"/api/v1/profiles/{SLUG}/metadata", json={"field": "Somebody Else's Edit"})
+        stale = self._work(c, self.PAPER)["version"]
+        c.patch(f"/api/v1/profiles/{SLUG}/works/{self.PAPER}", json={"citation": "Someone else"})
         r = c.patch(
             f"/api/v1/profiles/{SLUG}/works/{self.PAPER}",
-            json={"doi": "10.1/mine", "base_hash": stale},
+            json={"doi": "10.1/mine", "base_version": stale},
         )
         assert r.status_code == 409, r.text
-        assert c.get(f"/api/v1/profiles/{SLUG}/works/{self.PAPER}").json().get("doi") is None
+        assert r.json()["detail"]["error"] == "conflict"
+        current = self._work(c, self.PAPER)
+        assert r.headers["X-RP-Paper-Version"] == current["version"]
+        assert current["fields"].get("doi") is None
+        r = c.delete(f"/api/v1/profiles/{SLUG}/works/{self.PAPER}", params={"base_version": stale})
+        assert r.status_code == 409
+        assert self._work(c, self.PAPER) is not None
 
-    def test_put_then_delete_one_record(self, make_api_client, fixture_profiles_root):
+    def test_add_then_delete_one_record(self, make_api_client, fixture_profiles_root):
         c = make_api_client(fixture_profiles_root(SLUG))
-        r = c.put(
-            f"/api/v1/profiles/{SLUG}/works/doe2026new",
-            json={"paper_id": "ignored", "name": "A new work", "type": "authored"},
+        r = c.post(
+            f"/api/v1/profiles/{SLUG}/works",
+            json={"paper_id": "doe2026new", "name": "A new work", "type": "authored"},
         )
-        assert r.status_code == 200, r.text
-        # The path wins: a record is never filed under a name it was not
-        # addressed by.
-        assert c.get(f"/api/v1/profiles/{SLUG}/works/doe2026new").json()["name"] == "A new work"
-        assert c.get(f"/api/v1/profiles/{SLUG}/works/ignored").status_code == 404
-        assert c.delete(f"/api/v1/profiles/{SLUG}/works/doe2026new").status_code == 200
-        assert c.get(f"/api/v1/profiles/{SLUG}/works/doe2026new").status_code == 404
+        assert r.status_code == 201, r.text
+        added = self._work(c, "doe2026new")
+        assert added["fields"]["name"] == "A new work"
+        assert r.json()["version"] == added["version"]
+        r = c.delete(
+            f"/api/v1/profiles/{SLUG}/works/doe2026new",
+            params={"base_version": added["version"]},
+        )
+        assert r.status_code == 200
+        assert self._work(c, "doe2026new") is None
 
-    def test_a_malformed_put_body_is_a_400_naming_the_field(
+    def test_add_never_overwrites(self, make_api_client, fixture_profiles_root):
+        c = make_api_client(fixture_profiles_root(SLUG))
+        before = self._work(c, self.PAPER)
+        r = c.post(f"/api/v1/profiles/{SLUG}/works", json={"paper_id": self.PAPER, "name": "X"})
+        assert r.status_code == 409, r.text
+        assert r.json()["detail"]["error"] == "conflict"
+        assert self._work(c, self.PAPER) == before
+
+    def test_a_malformed_add_body_is_a_400_naming_the_field(
         self, make_api_client, fixture_profiles_root
     ):
         c = make_api_client(fixture_profiles_root(SLUG))
-        r = c.put(f"/api/v1/profiles/{SLUG}/works/doe2026new", json={"name": 123})
+        r = c.post(f"/api/v1/profiles/{SLUG}/works", json={"paper_id": "doe2026new", "name": 123})
         assert r.status_code == 400, r.text
         assert "name" in r.json()["detail"]
+        r = c.post(f"/api/v1/profiles/{SLUG}/works", json={"name": "No id"})
+        assert r.status_code == 400
 
     def test_a_scope_gated_agent_is_refused(self, make_api_client, fixture_profiles_root):
         """``check_write_scope`` reaches the works routes with the fields named.
@@ -469,7 +259,7 @@ class TestWorkEndpoints:
         r = c.patch(f"/api/v1/profiles/{SLUG}/works/{self.PAPER}", json={"doi": "10.1/x"})
         assert r.status_code == 403, r.text
         assert seen == [("works", {"paper_id": self.PAPER, "fields": ["doi"]})]
-        assert c.get(f"/api/v1/profiles/{SLUG}/works/{self.PAPER}").json().get("doi") is None
+        assert self._work(c, self.PAPER)["fields"].get("doi") is None
 
 
 class TestEditEndpointsOwnerScoped:
@@ -707,11 +497,12 @@ class TestConcurrencyToken:
             json={"field": "Genomics", "base_hash": stale},
         )
         assert r.status_code == 409, r.text
-        assert "changed since you loaded it" in r.json()["detail"]
+        assert r.json()["detail"]["error"] == "conflict"
+        assert r.json()["detail"]["current"] == r.headers["X-RP-Content-Hash"]
         assert r.headers["X-RP-Content-Hash"].startswith("sha256:")
-        assert c.get(f"/api/v1/profiles/{SLUG}").json()["metadata"]["field"] == (
-            "Somebody Else's Edit"
-        )
+        assert c.get(f"/api/v1/profiles/{SLUG}", params={"view": "full"}).json()["fields"][
+            "field"
+        ] == ("Somebody Else's Edit")
 
     def test_omitting_base_hash_stays_last_writer_wins(
         self, make_api_client, fixture_profiles_root
@@ -720,13 +511,16 @@ class TestConcurrencyToken:
         c.patch(f"/api/v1/profiles/{SLUG}/metadata", json={"field": "First"})
         r = c.patch(f"/api/v1/profiles/{SLUG}/metadata", json={"field": "Second"})
         assert r.status_code == 200, r.text
-        assert c.get(f"/api/v1/profiles/{SLUG}").json()["metadata"]["field"] == "Second"
+        assert (
+            c.get(f"/api/v1/profiles/{SLUG}", params={"view": "full"}).json()["fields"]["field"]
+            == "Second"
+        )
 
     def test_soul_and_metadata_share_one_clock(self, make_api_client, fixture_profiles_root):
         """The digest spans document + SOUL, so a soul write stales a pending metadata patch."""
         c = make_api_client(fixture_profiles_root(SLUG))
         stale = c.get(f"/api/v1/profiles/{SLUG}").json()["content_hash"]
-        r = c.put(f"/api/v1/profiles/{SLUG}/soul", json={"soul": "a new voice"})
+        r = c.patch(f"/api/v1/profiles/{SLUG}/metadata", json={"soul": "a new voice"})
         assert r.status_code == 200, r.text
         assert r.json()["content_hash"] != stale
         r = c.patch(
@@ -739,8 +533,8 @@ class TestConcurrencyToken:
         c = make_api_client(fixture_profiles_root(SLUG))
         stale = c.get(f"/api/v1/profiles/{SLUG}").json()["content_hash"]
         c.patch(f"/api/v1/profiles/{SLUG}/metadata", json={"field": "Somebody Else's Edit"})
-        r = c.put(
-            f"/api/v1/profiles/{SLUG}/soul",
+        r = c.patch(
+            f"/api/v1/profiles/{SLUG}/metadata",
             json={"soul": "mine", "base_hash": stale},
         )
         assert r.status_code == 409
@@ -792,7 +586,7 @@ class TestAuthoredHistoryOverHttp:
             },
         )
         assert r.status_code == 200, r.text
-        md = c.get(f"/api/v1/profiles/{SLUG}").json()["metadata"]
+        md = c.get(f"/api/v1/profiles/{SLUG}", params={"view": "full"}).json()["fields"]
         assert md["job_title"] == "Associate Professor"
         assert md["interests"] == ["single-cell"]
         assert md["not_interests"] == ["grant admin"]

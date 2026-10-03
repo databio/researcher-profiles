@@ -590,6 +590,21 @@ class FilesystemProfileStore(_HookedStore, _AnalyticsAccessors):
         except OSError as e:
             raise ProfileNotFoundError(f"could not read {path}: {e}") from e
 
+    def held_artifacts(self, ref: str) -> dict[str, int | None]:
+        """Manifest entries whose file exists under the profile directory, with its size."""
+        slug = self.resolve_slug(ref)
+        profile_root = (self._root / slug).resolve()
+        out: dict[str, int | None] = {}
+        for part in self.get(slug).manifest():
+            path = profile_root / part.content_url
+            try:
+                out[part.content_url] = path.stat().st_size if path.is_file() else None
+            except OSError:
+                continue
+            if out[part.content_url] is None:
+                del out[part.content_url]
+        return out
+
     def artifact_bytes(self, ref: str, content_url: str) -> bytes:
         """Read one artifact, refusing anything that escapes the profile dir.
 

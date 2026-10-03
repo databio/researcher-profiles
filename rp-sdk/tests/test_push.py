@@ -95,7 +95,7 @@ class TestPush:
     ):
         root = fixture_profiles_root(SLUG)
         # Warm the cache with the original profile.
-        orig_name = api_client.get(f"/api/v1/profiles/{SLUG}").json()["metadata"]["name"]
+        orig_name = api_client.get(f"/api/v1/profiles/{SLUG}").json()["fields"]["name"]
 
         staged = fixture_profile(SLUG)
         py = (staged / "profile.jsonld").read_text()
@@ -107,7 +107,7 @@ class TestPush:
         assert r.json()["name"] == "Renamed Person"
         # The cached profile object was evicted -> reads reflect the new content.
         d = api_client.get(f"/api/v1/profiles/{SLUG}").json()
-        assert d["metadata"]["name"] == "Renamed Person"
+        assert d["fields"]["name"] == "Renamed Person"
         # No leftover staging/backup dirs in the profiles root or the listing.
         leftovers = [p.name for p in root.iterdir() if p.name.startswith((".upload-", ".old-"))]
         assert leftovers == []
@@ -268,13 +268,13 @@ class TestJsonUpsertAndMint:
         assert payload["name"] == "Ada Lovelace"
         assert "level" in payload
         assert payload["indexed"] is False  # JSON upsert never carries an index
-        assert c.get("/api/v1/profiles/ada").json()["metadata"]["name"] == "Ada Lovelace"
+        assert c.get("/api/v1/profiles/ada").json()["fields"]["name"] == "Ada Lovelace"
 
         # Replace: same slug + rid, new name.
         body["name"] = "Ada, Countess of Lovelace"
         r = c.put("/api/v1/profiles/ada", json=body)
         assert r.status_code == 200, r.text
-        assert c.get("/api/v1/profiles/ada").json()["metadata"]["name"] == (
+        assert c.get("/api/v1/profiles/ada").json()["fields"]["name"] == (
             "Ada, Countess of Lovelace"
         )
 
@@ -800,10 +800,10 @@ class TestPushKeepsWithheld:
             assert store.artifact_bytes(SLUG, rel)
 
     def _served_manifest(self, http) -> dict[str, dict]:
-        """``{contentUrl: entry}`` from ``GET /profiles/{slug}``: the committed index."""
-        resp = http.get(f"/api/v1/profiles/{SLUG}")
+        """``{contentUrl: entry}`` from ``GET /profiles/{slug}/files``: the committed index."""
+        resp = http.get(f"/api/v1/profiles/{SLUG}/files")
         assert resp.status_code == 200, resp.text
-        return {e["contentUrl"]: e for e in resp.json()["manifest"]}
+        return {e["contentUrl"]: e for e in resp.json()["files"]}
 
     @staticmethod
     def _drop_from_manifest(payload: bytes, prefix: str) -> bytes:

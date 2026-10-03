@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
 from pydantic import ValidationError
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlmodel import Session, select
 
 from ...build_state import BuildState
@@ -1102,6 +1102,36 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
             if row is None:  # pragma: no cover - resolve() already proved it
                 raise ProfileNotFoundError(rid)
             return canonical_dumps(row.document or {}).encode("utf-8")
+
+    def held_artifacts(self, ref: str) -> dict[str, int | None]:
+        """One ``SELECT`` over the ``rp_artifacts`` rows that hold a body.
+
+        A rendered collection always has one (it is regenerated on the way
+        out); any other row needs a ``text`` or ``data`` body. The size is the
+        row's ``size_bytes``, else the stored body's length.
+        """
+        rid = self.rid_for(ref)
+        with self.session() as s:
+            rows = s.exec(
+                select(
+                    ArtifactRow.content_url,
+                    ArtifactRow.size_bytes,
+                    func.length(ArtifactRow.text),
+                    func.length(ArtifactRow.data),
+                )
+                .where(ArtifactRow.profile_rid == rid)
+                .where(
+                    or_(
+                        ArtifactRow.rendered == True,  # noqa: E712 - SQL expression
+                        ArtifactRow.text.is_not(None),
+                        ArtifactRow.data.is_not(None),
+                    )
+                )
+            ).all()
+        return {
+            url: size if size is not None else (n_text or n_data)
+            for url, size, n_text, n_data in rows
+        }
 
     def artifact_bytes(self, ref: str, content_url: str) -> bytes:
         """One manifest artifact's bytes.
