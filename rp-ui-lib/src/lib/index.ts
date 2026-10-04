@@ -22,4 +22,20 @@ export type {
   ProfileSummary,
   PaperEntry,
   PaperSummary,
+  // The sized HTTP reads (`GET /api/v1/profiles/{slug}` and its sub-routes).
+  // The page-row type is `PaperRow` in `../types`; it is not re-exported here
+  // because the `PaperRow` component above already uses that name.
+  ProfileRecord,
+  ProfileParts,
+  Size,
+  Trimmed,
+  PaperPage,
+  PaperRecordView,
+  SummaryBatch,
+  FileList,
+  TextPage,
+  TextSection,
+  PassageRequest,
+  Passage,
+  PassageList,
 } from "../types";

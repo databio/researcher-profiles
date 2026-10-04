@@ -23,13 +23,27 @@ from pydantic import BaseModel
 from .models.api import (
     ArtifactTier,
     ArtifactVisibility,
+    FileList,
     PaperEntry,
+    PaperPage,
+    PaperRecordView,
+    PaperRow,
     PaperSummary,
+    Passage,
+    PassageList,
+    PassageRequest,
     ProfileDetail,
     ProfileMetadataPayload,
+    ProfileParts,
+    ProfileRecord,
     ProfileSummary,
     SectionTier,
     SectionTierReport,
+    Size,
+    SummaryBatch,
+    TextPage,
+    TextSection,
+    Trimmed,
     VisibilityPatch,
     VisibilityReport,
 )
@@ -99,11 +113,29 @@ def build_schemas() -> dict[str, dict]:
 class _WireBundle(BaseModel):
     """Wrapper so ``model_json_schema()`` emits every wire type under ``$defs``."""
 
+    # Display shapes: what the static publisher writes and rp-ui-lib renders.
     profile_detail: ProfileDetail
     profile_metadata: ProfileMetadataPayload
     profile_summary: ProfileSummary
     paper_entry: PaperEntry
     paper_summary: PaperSummary
+    # The sized HTTP reads: what ``GET /profiles/{slug}`` and its sub-routes
+    # answer. A host that calls the API types its responses with these and
+    # converts to the display shapes above at its boundary.
+    profile_record: ProfileRecord
+    profile_parts: ProfileParts
+    size: Size
+    trimmed: Trimmed
+    paper_page: PaperPage
+    paper_row: PaperRow
+    paper_record_view: PaperRecordView
+    summary_batch: SummaryBatch
+    file_list: FileList
+    text_page: TextPage
+    text_section: TextSection
+    passage_request: PassageRequest
+    passage: Passage
+    passage_list: PassageList
     # The privacy-tier surface. Without these the frontend has no typed
     # visibility bodies and would hand-write the shapes it renders, a second
     # definition of the contract and the one place a drift would be invisible.
@@ -118,10 +150,10 @@ class _WireBundle(BaseModel):
 def build_wire_schema() -> dict:
     """Return one combined JSON Schema document for the HTTP wire types.
 
-    Every wire model appears under ``$defs`` (``ProfileDetail``,
-    ``ProfileMetadataPayload``, ``ProfileSummary``, ``PaperEntry``,
-    ``PaperSummary``, ``VisibilityReport``, ``ArtifactTier``,
-    ``VisibilityPatch``, ``ArtifactVisibility``, ``SectionTier``), so a single
+    Every wire model appears under ``$defs``: the display shapes
+    (``ProfileDetail``, ``PaperEntry``, ...), the sized reads (``ProfileRecord``,
+    ``PaperPage``, ``PaperRow``, ``SummaryBatch``, ``FileList``, ``TextPage``,
+    ``PassageList``, ...) and the visibility bodies, so a single
     ``json-schema-to-typescript`` pass emits all interfaces.
     """
     schema = _WireBundle.model_json_schema()
