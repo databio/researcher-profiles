@@ -162,12 +162,35 @@ owner edit returns 409 rather than a silent clobber. Use `--force` to skip it.
 
 ### What push sends
 
-- Changed metadata fields go to `PATCH /api/v1/profiles/{slug}/metadata`.
-  Each field needs `write` on its part.
-- A changed SOUL body goes to `PUT /api/v1/profiles/{slug}/soul` and needs
-  `write` on `soul`.
+- One `PATCH /api/v1/profiles/{slug}/metadata` carries the changed fields and,
+  when the document has a body, the SOUL narrative as the field `soul`. Both
+  land in one write, so `content_hash` moves once. Each field needs `write` on
+  its part; `soul` needs `write` on `soul`.
+- The patch carries `base_hash`. If someone wrote since your pull, the answer
+  is `409` with `{"detail": {"error": "conflict", "current": "<hash>", ...}}`
+  and nothing changes. Pull again, redo your edit, push again.
 - Visibility is not yours to push. `rp profile visibility set` answers 403
   `not_delegable`.
+
+### Reading and writing over HTTP
+
+If you call the API yourself instead of `rp profile`:
+
+- `GET /api/v1/profiles/{slug}` is a short record: `fields`, `parts` (what you
+  may read deeper, and its size), `withheld` (field names you may not see;
+  each is `null`), and `content_hash`. Long lists are cut to
+  `{"top": [...], "total": n}`. Add `?view=full` for every field untrimmed
+  plus the `soul` and `expertise` bodies; read this before an edit.
+- `content_hash` is the `base_hash` you send with `PATCH .../metadata`.
+- `GET .../papers` is paged: `{items, total, next_cursor, has_more}`, up to
+  `?limit=100` rows a page; pass `?cursor=` to read on. Each row has the
+  paper's `version`.
+- Works (part `works`): `POST .../works` adds one paper (`paper_id` in the
+  body; an existing one is `409`, never overwritten). `PATCH
+  .../works/{paper_id}` corrects fields of one paper, and `DELETE
+  .../works/{paper_id}` removes it. Send the paper's `version` as
+  `base_version` (in the body for `PATCH`, as a query parameter for
+  `DELETE`) to get `409` instead of overwriting someone else's change.
 
 ### Pushing files
 
