@@ -26,7 +26,7 @@ import { FilesPanel } from "./FilesPanel";
 import { Copyable } from "./Copyable";
 import { useShellSlots } from "../slots";
 import { Link, useSearchParams } from "react-router";
-import { navigate, buildPath } from "../router";
+import { navigate, buildPath, resolveProfileRef } from "../router";
 
 /**
  * The built-in tabs, plus whatever a host application adds through the
@@ -51,7 +51,12 @@ interface ProfilePageProps {
 
 export function ProfilePage({ url: urlProp, activeTab, onTabChange }: ProfilePageProps = {}) {
   const [searchParams] = useSearchParams();
-  const url = urlProp ?? searchParams.get("u") ?? "";
+  const ref = urlProp ?? searchParams.get("u") ?? "";
+  const { centroids, cards: allCards, sources } = useStore();
+  // `u` may be a slug; it resolves once the sources holding it have loaded.
+  const target = useMemo(() => resolveProfileRef(ref, allCards, sources), [ref, allCards, sources]);
+  const url = target.kind === "url" ? target.url : "";
+  const refError = target.kind === "error" ? target.message : null;
   const [detail, setDetail] = useState<ProfileDetail | null>(null);
   const [papers, setPapers] = useState<PaperEntry[]>([]);
   const [resolved, setResolved] = useState<ResolvedProfile | null>(null);
@@ -94,6 +99,13 @@ export function ProfilePage({ url: urlProp, activeTab, onTabChange }: ProfilePag
     setEmb(null);
     setEmbError(null);
     setEmbRequested(false);
+    if (!url) {
+      // Still waiting on a source to resolve a slug, or nothing to resolve.
+      setDetail(null);
+      setError(refError);
+      setLoading(refError === null);
+      return;
+    }
 
     (async () => {
       try {
@@ -115,7 +127,7 @@ export function ProfilePage({ url: urlProp, activeTab, onTabChange }: ProfilePag
     })();
 
     return () => { cancelled = true; };
-  }, [url]);
+  }, [url, refError]);
 
   const loadSummary = useCallback(
     (paperId: string) =>
@@ -180,7 +192,6 @@ export function ProfilePage({ url: urlProp, activeTab, onTabChange }: ProfilePag
     [resolved],
   );
 
-  const { centroids, cards: allCards } = useStore();
   const similarProfiles = useMemo(() => {
     const results: { name: string; base: string; score: number }[] = [];
     for (const [, data] of centroids) {
@@ -209,13 +220,13 @@ export function ProfilePage({ url: urlProp, activeTab, onTabChange }: ProfilePag
     <div>
       <div className="profile-chrome">
         <span className="profile-chrome__origin">
-          <Copyable value={url} title="Copy profile URL">
-            {url}
+          <Copyable value={url || ref} title="Copy profile URL">
+            {url || ref}
           </Copyable>
         </span>
         <button
           className="btn btn--ghost"
-          onClick={() => navigate({ page: "validate", url })}
+          onClick={() => navigate({ page: "validate", url: url || ref })}
         >
           Validate this profile
         </button>

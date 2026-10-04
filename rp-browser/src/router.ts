@@ -17,7 +17,8 @@
  * Routes (browser paths, not hash fragments):
  *   /                              - landing (hero + what-this-is)
  *   /browse                        - sources + inventory
- *   /p?u=<encodeURIComponent(url)> - profile detail
+ *   /p?u=<encodeURIComponent(url)> - profile detail (`u` may also be a slug,
+ *                                    see `resolveProfileRef`)
  *   /clusters                      - cluster view
  *   /topics                        - topic view
  *   /search?q=...                  - free-text search
@@ -30,6 +31,8 @@
  *
  * ?list=<url> on first load bootstraps a source before routing settles.
  */
+
+import type { ProfileCard, SourceEntry } from "./store";
 
 export type Route =
   | { page: "home" }
@@ -137,4 +140,43 @@ export function navigate(route: Route): void {
 export function getBootstrapList(): string | null {
   const params = new URLSearchParams(window.location.search);
   return params.get("list");
+}
+
+// ---------------------------------------------------------------------------
+// The profile route's `u`: a profile URL or a slug
+// ---------------------------------------------------------------------------
+
+export type ProfileRef =
+  | { kind: "url"; url: string }
+  | { kind: "pending" }
+  | { kind: "error"; message: string };
+
+/**
+ * What `/p?u=<ref>` points at. A full http(s) URL is used as is. Anything else
+ * is read as a slug (`/p?u=sheffield-nathan`, the short link a person types)
+ * and looked up among the cards of the loaded sources, the host's home source
+ * first. While a source is still loading the answer is `pending`; when none has
+ * the slug it is an `error` that says so, never a thrown "Invalid URL".
+ */
+export function resolveProfileRef(
+  ref: string,
+  cards: ProfileCard[],
+  sources: SourceEntry[],
+): ProfileRef {
+  const text = ref.trim();
+  if (!text) return { kind: "error", message: "No profile given. Open a profile from Browse, or pass ?u=<profile URL>." };
+  if (/^[a-z][a-z0-9+.-]*:/i.test(text)) {
+    return /^https?:\/\//i.test(text)
+      ? { kind: "url", url: text }
+      : { kind: "error", message: `Only http(s) profile URLs are supported, got "${text}".` };
+  }
+  const home = new Set(sources.filter((s) => s.builtin).map((s) => s.url));
+  const matches = cards.filter((c) => c.slug === text);
+  const match = matches.find((c) => home.has(c.sourceUrl)) ?? matches[0];
+  if (match) return { kind: "url", url: match.base };
+  if (sources.some((s) => s.status === "loading")) return { kind: "pending" };
+  return {
+    kind: "error",
+    message: `"${text}" is not a profile URL, and no loaded source has a profile with that slug.`,
+  };
 }
