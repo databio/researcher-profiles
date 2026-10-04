@@ -76,7 +76,74 @@ function getState(): StoreState {
 }
 
 function setState(partial: Partial<StoreState>) {
+  // Cards set directly become the full card list too, so later adds and
+  // removals start from what the caller set.
+  if (partial.cards) allCards = partial.cards;
   state = { ...state, ...partial };
+  emit();
+}
+
+// ---------------------------------------------------------------------------
+// Card dedup
+// ---------------------------------------------------------------------------
+
+/**
+ * Every card from every source, duplicates included. `state.cards` is the
+ * deduplicated view of this list. Keeping the full list means removing one
+ * source falls back to another source's row for the same person instead of
+ * dropping that person.
+ */
+let allCards: ProfileCard[] = [];
+
+/** An ORCID in any of its spellings, reduced to the bare 16-digit id. */
+function ridKey(rid: string | null): string | null {
+  if (!rid) return null;
+  const bare = rid.trim().replace(/^https?:\/\/orcid\.org\//i, "").toUpperCase();
+  return bare || null;
+}
+
+/** How much of the browse row a card fills in. */
+function completeness(c: ProfileCard): number {
+  return (
+    (c.affiliation ? 1 : 0) +
+    (c.field ? 1 : 0) +
+    (c.paperCount > 0 ? 1 : 0) +
+    (c.summaryCount > 0 ? 1 : 0) +
+    (c.fulltextPct > 0 ? 1 : 0) +
+    (c.backendSpec ? 1 : 0)
+  );
+}
+
+/**
+ * One card per person. Two cards are the same person when they share an
+ * ORCID (rid) or a normalized base URL. Of the duplicates the most complete
+ * card is kept; on a tie the one loaded first wins.
+ */
+export function dedupeCards(cards: ProfileCard[]): ProfileCard[] {
+  const kept: ProfileCard[] = [];
+  const byRid = new Map<string, number>();
+  const byBase = new Map<string, number>();
+  for (const card of cards) {
+    const rid = ridKey(card.rid);
+    const idx = (rid !== null ? byRid.get(rid) : undefined) ?? byBase.get(card.base);
+    if (idx === undefined) {
+      const at = kept.length;
+      kept.push(card);
+      if (rid !== null) byRid.set(rid, at);
+      byBase.set(card.base, at);
+      continue;
+    }
+    if (completeness(card) > completeness(kept[idx])) kept[idx] = card;
+    if (rid !== null && !byRid.has(rid)) byRid.set(rid, idx);
+    if (!byBase.has(card.base)) byBase.set(card.base, idx);
+  }
+  return kept;
+}
+
+/** Replace the full card list and publish its deduplicated view. */
+function setAllCards(next: ProfileCard[], extra?: Partial<StoreState>) {
+  allCards = next;
+  state = { ...state, ...extra, cards: dedupeCards(next) };
   emit();
 }
 
@@ -112,9 +179,8 @@ function addSource(url: string, opts?: { builtin?: boolean }) {
 }
 
 function removeSource(url: string) {
-  setState({
+  setAllCards(allCards.filter((c) => c.sourceUrl !== url), {
     sources: state.sources.filter((s) => s.url !== url),
-    cards: state.cards.filter((c) => c.sourceUrl !== url),
     failures: state.failures.filter((f) => !f.url.startsWith(url)),
   });
 }
@@ -128,12 +194,12 @@ function updateSource(url: string, patch: Partial<SourceEntry>) {
 }
 
 function addCards(newCards: ProfileCard[]) {
-  // Deduplicate by normalized base URL
-  const existing = new Set(state.cards.map((c) => c.base));
-  const unique = newCards.filter((c) => !existing.has(c.base));
-  if (unique.length > 0) {
-    setState({ cards: [...state.cards, ...unique] });
-  }
+  if (newCards.length === 0) return;
+  // The same source re-ingested (same base, same source) replaces nothing.
+  const seen = new Set(allCards.map((c) => `${c.sourceUrl}\n${c.base}`));
+  const fresh = newCards.filter((c) => !seen.has(`${c.sourceUrl}\n${c.base}`));
+  if (fresh.length === 0) return;
+  setAllCards([...allCards, ...fresh]);
 }
 
 function addFailure(failure: FailedFetch) {
