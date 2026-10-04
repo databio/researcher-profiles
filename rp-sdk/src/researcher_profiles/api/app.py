@@ -12,6 +12,7 @@ from typing import Any, Optional
 from urllib.parse import quote
 
 from fastapi import FastAPI, Response
+from starlette.routing import Match, Mount
 
 # Import the package eagerly so a serving process pays the optional-extra
 # import cost at startup rather than on the first request that needs it.
@@ -255,7 +256,7 @@ def create_app(
     return app
 
 
-# ``/api/v1/profiles/{slug}/<artifact>``: an unrouted GET under a profile.
+# ``/api/v1/profiles/{slug}/<artifact>``: a GET under a profile.
 _SIBLING_ARTIFACT = re.compile(r"^(/api/v1/profiles/[^/]+/)(?!content/)(.+)$")
 
 
@@ -268,29 +269,38 @@ def _serve_artifacts_beside_the_document(app: FastAPI) -> None:
     at ``/api/v1/profiles/{slug}/personality/SOUL.md``, exactly as it does on a
     static site, where the document and its files are siblings.
 
-    This is the router's fallback, not a route: a GET that no route matched is
-    retried once as ``.../content/<artifact>``. Being last means it can never
-    shadow a route, including the ones a host such as Prosopia adds after this
-    app is built. Anything the content route refuses (not in the manifest, a
-    withheld tier) is still that route's 404.
+    A middleware, not a route: a GET under a profile that no route claims is
+    rewritten to ``.../content/<artifact>`` before routing. Mounts are ignored
+    when deciding "no route claims it", because a host may mount a catch-all
+    at ``/`` (Prosopia's SPA does), and that must not swallow these paths.
+    Routes are read per request, so ones a host adds after this app is built
+    (Prosopia's ``/overlay``) still win. Anything the content route refuses
+    (not in the manifest, a withheld tier) is still that route's 404.
     """
-    router = app.router
-    not_found = router.default
+    app.add_middleware(_SiblingArtifactMiddleware, router=app.router)
 
-    async def default(scope, receive, send):
+
+class _SiblingArtifactMiddleware:
+    def __init__(self, app, router) -> None:
+        self.app = app
+        self.router = router
+
+    async def __call__(self, scope, receive, send):
         if scope["type"] == "http" and scope["method"] in ("GET", "HEAD"):
             root = scope.get("root_path", "")
-            prefix = root if scope["path"].startswith(root) else ""
+            prefix = root if root and scope["path"].startswith(root) else ""
             m = _SIBLING_ARTIFACT.match(scope["path"][len(prefix) :])
-            if m:
+            if m and not self._routed(scope):
                 path = f"{prefix}{m.group(1)}content/{m.group(2)}"
-                await router.app(
-                    {**scope, "path": path, "raw_path": quote(path).encode()}, receive, send
-                )
-                return
-        await not_found(scope, receive, send)
+                scope = {**scope, "path": path, "raw_path": quote(path).encode()}
+        await self.app(scope, receive, send)
 
-    router.default = default
+    def _routed(self, scope) -> bool:
+        """True when a real route (not a mount) matches this path."""
+        return any(
+            not isinstance(route, Mount) and route.matches(scope)[0] != Match.NONE
+            for route in self.router.routes
+        )
 
 
 def _build_default_app() -> FastAPI:
