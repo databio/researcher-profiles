@@ -842,6 +842,57 @@ def _check_cross_artifact(root: Path, report: ProfileValidationReport) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Served links (a profile over HTTP)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class DeadLink:
+    """A manifest entry whose ``contentUrl`` does not resolve where it is served."""
+
+    content_url: str
+    href: str
+    status: int
+
+
+def served_dead_links(get: Any, profile_url: str) -> list[DeadLink]:
+    """Every manifest link that does not answer 200, read the way a consumer reads it.
+
+    Base conformance rule 6 (every ``hasPart`` / ``subjectOf`` entry resolves
+    at its ``contentUrl``), checked over HTTP rather than on disk. ``profile_url``
+    is turned into the document URL by the spec's consumer rule: used as is if it
+    ends in ``/profile.jsonld``, else ``/profile.jsonld`` is appended. Each
+    relative ``contentUrl`` is resolved against the URL the document was served
+    from (after redirects), as RFC 3986 says, and fetched.
+
+    ``get`` is any callable taking an absolute URL and returning a response with
+    ``status_code``, ``json()`` and optionally ``url`` (``httpx`` or a
+    ``TestClient``). Templated (``{...}``) and absolute contentUrls are skipped,
+    as the browser validator skips them.
+    """
+    from urllib.parse import urljoin
+
+    doc_url = profile_url
+    if not doc_url.endswith("/profile.jsonld"):
+        doc_url = doc_url.rstrip("/") + "/profile.jsonld"
+    r = get(doc_url)
+    if r.status_code != 200:
+        return [DeadLink("profile.jsonld", doc_url, r.status_code)]
+    served_at = str(getattr(r, "url", None) or doc_url)
+    doc = r.json()
+    dead: list[DeadLink] = []
+    for entry in list(doc.get("hasPart") or []) + list(doc.get("subjectOf") or []):
+        rel = entry.get("contentUrl") or ""
+        if not rel or "{" in rel or rel.startswith(("http://", "https://")):
+            continue
+        href = urljoin(served_at, rel)
+        status = get(href).status_code
+        if status != 200:
+            dead.append(DeadLink(rel, href, status))
+    return dead
+
+
+# ---------------------------------------------------------------------------
 # Fingerprint and version
 # ---------------------------------------------------------------------------
 

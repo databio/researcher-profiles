@@ -654,6 +654,11 @@ itself); any other path, including a traversal, is `404`.
 `GET /api/v1/profiles/{slug}/profile.jsonld`: projected by section visibility,
 with registry-issued proofs, a strong `ETag`, and the same cache headers.
 
+`/api/v1/profiles/{slug}/` is a base URL too: a GET there that no other route
+answers (`.../personality/SOUL.md`, `.../sources/papers.jsonld`) is served as
+`.../content/<artifact>`. So the document's links resolve from either URL it is
+served at, as they do on a static site.
+
 **Response 200**: the artifact bytes, with the manifest's `encodingFormat` as
 the content type. `X-RP-Effective-Tier` reports the artifact's effective tier
 with the derivation rule applied, so a derivative never advertises a looser tier

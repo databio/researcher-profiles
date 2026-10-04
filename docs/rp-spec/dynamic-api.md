@@ -165,6 +165,11 @@ Serve one manifest artifact, projected through the caller's viewer tier.
 `profile.jsonld` itself. Any other path returns `404`. Path traversals return
 `404`.
 
+`/profiles/{slug}/` MUST also be a base URL: since
+`/profiles/{slug}/profile.jsonld` serves the document, each of its relative
+`contentUrl`s MUST resolve under `/profiles/{slug}/` exactly as under
+`/profiles/{slug}/content/`.
+
 The response body is the artifact's raw bytes. The `Content-Type` header
 matches the manifest entry's `encodingFormat`. The `X-RP-Effective-Tier`
 header reports the artifact's effective privacy tier.

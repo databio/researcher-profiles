@@ -1072,3 +1072,40 @@ class TestPreCommitHookOverHTTP:
         cache.get(SLUG).save_soul("# written with no HTTP anywhere\n")
         assert [ctx.kind for ctx in seen] == ["soul"]
         assert seen[0].request is None
+
+
+class TestServedLinksResolve:
+    """Every URL that serves ``profile.jsonld`` is a base its links resolve from.
+
+    A consumer given a profile URL appends ``/profile.jsonld`` and resolves each
+    relative ``contentUrl`` against where the document came from (spec 3.3, Base
+    conformance rule 6). ``/api/v1/profiles/{slug}`` and its ``profile.jsonld``
+    answered 200 while every link resolved under them 404ed: the live Prosopia
+    profile page showed "Failed to load works ... HTTP 404".
+    """
+
+    BASE = "http://testserver/api/v1/profiles/jane-doe"
+
+    @staticmethod
+    def _dead(client, url):
+        from researcher_profiles.validate import served_dead_links
+
+        return {(d.content_url, d.status) for d in served_dead_links(client.get, url)}
+
+    def test_the_content_base_has_no_dead_link_but_withheld_fulltext(self, api_client):
+        dead = self._dead(api_client, f"{self.BASE}/content/")
+        assert dead and all(url.startswith("sources/papers/") for url, _ in dead)
+
+    @pytest.mark.parametrize("entry", ["", "/", "/profile.jsonld"])
+    def test_the_api_url_reads_like_the_content_base(self, api_client, entry):
+        assert self._dead(api_client, self.BASE + entry) == self._dead(
+            api_client, f"{self.BASE}/content/"
+        )
+
+    def test_unknown_paths_and_writes_are_unchanged(self, api_client):
+        assert api_client.get(f"{self.BASE}/no/such/file.md").status_code == 404
+        assert api_client.get(f"{self.BASE}/content/no/such/file.md").status_code == 404
+        assert api_client.post(f"{self.BASE}/personality/SOUL.md").status_code in (404, 405)
+        assert (
+            api_client.get("http://testserver/api/v1/nope/personality/SOUL.md").status_code == 404
+        )

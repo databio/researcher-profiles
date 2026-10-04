@@ -6,8 +6,10 @@ works (environment-driven configuration).
 
 import logging
 import os
+import re
 from collections.abc import Sequence
 from typing import Any, Optional
+from urllib.parse import quote
 
 from fastapi import FastAPI, Response
 
@@ -249,7 +251,46 @@ def create_app(
     # The product UI is the separately deployed rp-browser SPA; this app
     # serves JSON only.
     app.include_router(v1_public_router)
+    _serve_artifacts_beside_the_document(app)
     return app
+
+
+# ``/api/v1/profiles/{slug}/<artifact>``: an unrouted GET under a profile.
+_SIBLING_ARTIFACT = re.compile(r"^(/api/v1/profiles/[^/]+/)(?!content/)(.+)$")
+
+
+def _serve_artifacts_beside_the_document(app: FastAPI) -> None:
+    """Make ``/api/v1/profiles/{slug}/`` a base URL, like ``.../content/``.
+
+    ``GET /api/v1/profiles/{slug}/profile.jsonld`` serves the document, and a
+    consumer resolves its relative ``contentUrl``s against the URL it fetched
+    (spec 3.3, Base conformance rule 6). So ``personality/SOUL.md`` must answer
+    at ``/api/v1/profiles/{slug}/personality/SOUL.md``, exactly as it does on a
+    static site, where the document and its files are siblings.
+
+    This is the router's fallback, not a route: a GET that no route matched is
+    retried once as ``.../content/<artifact>``. Being last means it can never
+    shadow a route, including the ones a host such as Prosopia adds after this
+    app is built. Anything the content route refuses (not in the manifest, a
+    withheld tier) is still that route's 404.
+    """
+    router = app.router
+    not_found = router.default
+
+    async def default(scope, receive, send):
+        if scope["type"] == "http" and scope["method"] in ("GET", "HEAD"):
+            root = scope.get("root_path", "")
+            prefix = root if scope["path"].startswith(root) else ""
+            m = _SIBLING_ARTIFACT.match(scope["path"][len(prefix) :])
+            if m:
+                path = f"{prefix}{m.group(1)}content/{m.group(2)}"
+                await router.app(
+                    {**scope, "path": path, "raw_path": quote(path).encode()}, receive, send
+                )
+                return
+        await not_found(scope, receive, send)
+
+    router.default = default
 
 
 def _build_default_app() -> FastAPI:
