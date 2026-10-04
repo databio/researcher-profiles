@@ -353,5 +353,10 @@ DOCUMENT_FIELDS: frozenset[str] = frozenset(
         "affiliation_id",
         "job_title",
         "email",
+        # Owner-edited through the profile editor, never LLM-written.
+        "section_visibility",
+        "therapeutic_areas",
+        "site_capabilities",
+        "regulatory_experience",
     }
 )
