@@ -84,3 +84,20 @@ describe("addCards dedup", () => {
     expect(cards[0].sourceUrl).toBe(SINGLE);
   });
 });
+
+describe("sourceName", () => {
+  beforeEach(() => {
+    useStore.setState({ sources: [], cards: [], failures: [], centroids: new Map() });
+  });
+
+  it("names a source whose person is shown from another source", () => {
+    useStore.addCards([sparse]);
+    useStore.addCards([full]);
+    expect(useStore.getState().cards.some((c) => c.sourceUrl === SINGLE)).toBe(false);
+    expect(useStore.sourceName(SINGLE)).toBe("Nathan C. Sheffield");
+  });
+
+  it("returns null for a source with no cards", () => {
+    expect(useStore.sourceName("https://x.org/none.json")).toBeNull();
+  });
+});

@@ -202,6 +202,15 @@ function addCards(newCards: ProfileCard[]) {
   setAllCards([...allCards, ...fresh]);
 }
 
+/**
+ * The person's name for a source, taken from that source's own cards before
+ * dedup. A source whose person is shown from another source's card still has
+ * a name this way. Null when the source has no cards.
+ */
+function sourceName(url: string): string | null {
+  return allCards.find((c) => c.sourceUrl === url)?.name ?? null;
+}
+
 function addFailure(failure: FailedFetch) {
   setState({ failures: [...state.failures, failure] });
 }
@@ -246,6 +255,7 @@ export const useStore = Object.assign(
     removeSource,
     updateSource,
     addCards,
+    sourceName,
     addFailure,
     clearFailures,
     setCentroids,

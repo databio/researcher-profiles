@@ -75,8 +75,7 @@ export function SourcesPanel() {
       ) : (
         <ul className="list-plain flex flex-col gap-2">
           {ordered.map((s) => {
-            const named = cards.find((c) => c.sourceUrl === s.url);
-            const title = named?.name ?? shortLabel(s.url);
+            const title = useStore.sourceName(s.url) ?? shortLabel(s.url);
             return (
               <li key={s.url} className="sources__item">
                 <div className="sources__item-top">
