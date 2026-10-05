@@ -362,6 +362,37 @@ def test_validate_profile_dir_flags_legacy_cache_dirname(tmp_path: Path):
     assert generic_stale == [], f"Should not also appear as generic drift: {generic_stale}"
 
 
+
+def test_missing_derived_index_is_a_warning_not_a_failure(tmp_path: Path):
+    """A manifest entry for ``.cache/embeddings.sqlite`` with no file is a warning.
+
+    The index is derived and never in git, so a fresh clone lacks it. That is
+    "not built here yet", so it must not fail the profile.
+    """
+    profile_dir = tmp_path / "profile"
+    profile_dir.mkdir(parents=True)
+    write_raw_profile(
+        profile_dir,
+        {
+            **RAW_MINIMAL,
+            "hasPart": [
+                {
+                    "@type": "DataDownload",
+                    "name": "Embedding index (local sqlite)",
+                    "role": "embedding_index_sqlite",
+                    "encodingFormat": "application/vnd.sqlite3",
+                    "contentUrl": ".cache/embeddings.sqlite",
+                }
+            ],
+        },
+    )
+
+    report = validate_profile_dir(profile_dir)
+
+    assert report.cross_artifact == [], report.cross_artifact
+    assert [v.keyword for v in report.warnings] == ["index_not_built"]
+    assert "rp index" in report.warnings[0].fix
+
 @pytest.mark.parametrize(
     "raw_written_at, parses_as_str, expected",
     [

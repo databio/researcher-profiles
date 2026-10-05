@@ -118,6 +118,9 @@ class ProfileValidationReport:
     package_version: str
     artifacts: list[ArtifactResult] = field(default_factory=list)
     cross_artifact: list[Violation] = field(default_factory=list)
+    #: Reported but not failing: a derived index that is not built on this
+    #: machine (it is never in git, so a fresh clone lacks it).
+    warnings: list[Violation] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -689,6 +692,34 @@ def _split_legacy_cache_stale(
     return [entry for entry in stale if entry not in legacy]
 
 
+def is_derived_cache(entry: str) -> bool:
+    """A manifest path for a rebuildable index under ``.cache/`` (``rp index``)."""
+    from .schema.manifest import PUBLISHED_CACHE
+
+    return entry in {f"{CACHE_DIRNAME}/{name}" for name in PUBLISHED_CACHE}
+
+
+def _split_unbuilt_cache(stale: list[str], report: ProfileValidationReport) -> list[str]:
+    """Pull missing derived indexes out of ``stale`` and report them as a warning.
+
+    The index is derived and kept out of git, so a fresh clone has none. That
+    is "not built here yet", not a broken profile.
+    """
+    unbuilt = [entry for entry in stale if is_derived_cache(entry)]
+    if unbuilt:
+        report.warnings.append(
+            Violation(
+                json_pointer="/hasPart",
+                keyword="index_not_built",
+                message=f"derived index not built on this machine: {unbuilt}",
+                found="no file",
+                expected="a built index",
+                fix="run `rp index <profile>` or `rp queue reindex`",
+            )
+        )
+    return [entry for entry in stale if entry not in unbuilt]
+
+
 def _check_manifest_drift(root: Path, profile_doc: dict, report: ProfileValidationReport) -> None:
     """Manifest entries match what is on disk."""
     from .schema.manifest import manifest_drift
@@ -708,7 +739,7 @@ def _check_manifest_drift(root: Path, profile_doc: dict, report: ProfileValidati
                 fix="run `rp manifest --write` to regenerate",
             )
         )
-    stale = _split_legacy_cache_stale(root, drift["stale"], report)
+    stale = _split_unbuilt_cache(_split_legacy_cache_stale(root, drift["stale"], report), report)
     if stale:
         # Distinct keyword from ``manifest_unlisted``, because the two want
         # opposite actions. An unlisted file wants the manifest regenerated;
@@ -779,7 +810,9 @@ def _check_content_urls(root: Path, profile_doc: dict, report: ProfileValidation
                         fix="change to a relative path within the profile directory",
                     )
                 )
-            elif not (root / url).exists():
+            elif not (root / url).exists() and not is_derived_cache(url):
+                # A missing derived index is reported once, as a warning, by
+                # the drift check.
                 report.cross_artifact.append(
                     Violation(
                         json_pointer=f"/{section_name}/contentUrl",
@@ -964,6 +997,15 @@ def report_to_dict(report: ProfileValidationReport) -> dict[str, Any]:
             }
             for v in report.cross_artifact
         ],
+        "warnings": [
+            {
+                "json_pointer": v.json_pointer,
+                "keyword": v.keyword,
+                "message": v.message,
+                "fix": v.fix,
+            }
+            for v in report.warnings
+        ],
     }
 
 
@@ -1004,11 +1046,19 @@ def format_text_report(report: ProfileValidationReport) -> str:
         for v in report.cross_artifact:
             lines.append(f"    {v.json_pointer}: {v.keyword} - {v.message}")
 
+    if report.warnings:
+        lines.append("")
+        lines.append("  Warnings:")
+        for v in report.warnings:
+            lines.append(f"    {v.json_pointer}: {v.keyword} - {v.message}")
+            lines.append(f"      fix: {v.fix}")
+
     return "\n".join(lines)
 
 
 __all__ = [
     "RETIRED_TERMS",
+    "is_derived_cache",
     "ArtifactResult",
     "ProfileValidationReport",
     "TermUse",
