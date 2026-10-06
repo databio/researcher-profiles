@@ -478,7 +478,7 @@ link from a person to a grant is `rp:heldGrant`, an `rp:` term. See
 | `start` | string \| null | no | `null` | Start date. |
 | `end` | string \| null | no | `null` | End date. |
 | `abstract` | string \| null | no | `null` | Indexed alongside the title as `grant` chunks. |
-| `source` | string enum \| null | no | `null` | `grants-data` \| `manual` \| `reporter`: provenance. |
+| `source` | string enum \| null | no | `null` | `mygrants` \| `manual` \| `reporter`: provenance. |
 | `url` | string \| null | no | `null` | |
 
 Minimal valid example (`sources/grants.jsonld`):

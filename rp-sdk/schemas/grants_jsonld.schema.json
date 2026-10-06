@@ -146,7 +146,7 @@
           "anyOf": [
             {
               "enum": [
-                "grants-data",
+                "mygrants",
                 "manual",
                 "reporter"
               ],

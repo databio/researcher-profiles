@@ -263,9 +263,9 @@ class GrantRecord(JsonLdModel):
     start: str | None = None
     end: str | None = None
     abstract: str | None = None
-    #: Where the record came from: ``grants-data`` (lab service), ``manual``
+    #: Where the record came from: ``mygrants`` (MyGrants service), ``manual``
     #: (hand-supplied), or ``reporter`` (NIH RePORTER supplement).
-    source: Literal["grants-data", "manual", "reporter"] | None = None
+    source: Literal["mygrants", "manual", "reporter"] | None = None
     url: str | None = None
 
     @field_validator("funder", mode="before")

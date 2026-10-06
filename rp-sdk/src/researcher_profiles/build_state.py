@@ -44,10 +44,10 @@ PaperStatus = Literal[
     "manual",
 ]
 
-#: Where a profile's grant records came from. "grants-data" = fetched from a
-#: grants service; "manual" = a hand-supplied grants file; "none" = grants
+#: Where a profile's grant records came from. "mygrants" = fetched from the
+#: MyGrants service; "manual" = a hand-supplied grants file; "none" = grants
 #: explicitly not part of this profile.
-GrantsSource = Literal["grants-data", "manual", "none"]
+GrantsSource = Literal["mygrants", "manual", "none"]
 
 
 class _Sidecar(BaseModel):
