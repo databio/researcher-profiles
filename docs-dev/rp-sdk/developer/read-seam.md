@@ -27,11 +27,11 @@ The hooks live on `app.state.hooks` (an
 every one but the first takes a **caller**, never a request:
 
 ```python
-app.state.hooks.caller_resolver = my_caller      # (request) -> Caller
-app.state.hooks.viewer_resolver = my_resolver    # (caller, slug | None) -> ViewerTier
-app.state.hooks.profile_tier_floor = my_floor    # (caller, profile, slug) -> TierFloor
-app.state.hooks.store_for = my_view              # (caller, store) -> ProfileStore
-app.state.hooks.registry_proofs = my_proofs      # (rid) -> list[Proof]
+app.state.hooks.caller_resolver = my_caller  # (request) -> Caller
+app.state.hooks.viewer_resolver = my_resolver  # (caller, slug | None) -> ViewerTier
+app.state.hooks.profile_tier_floor = my_floor  # (caller, profile, slug) -> TierFloor
+app.state.hooks.store_for = my_view  # (caller, store) -> ProfileStore
+app.state.hooks.registry_proofs = my_proofs  # (rid) -> list[Proof]
 ```
 
 ### The caller
