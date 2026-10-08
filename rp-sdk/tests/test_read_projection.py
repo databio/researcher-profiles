@@ -25,11 +25,12 @@ Two rules run through everything here:
 
 import io
 import tarfile
+from dataclasses import replace
 
 import pytest
 from fastapi import HTTPException
 
-from researcher_profiles import ResearcherProfile
+from researcher_profiles import Forbidden, ResearcherProfile, Unauthenticated
 from researcher_profiles.api.caller import Caller
 from researcher_profiles.api.deps import ConsumerIdentity, TierFloor, default_caller_resolver
 from researcher_profiles.privacy import effective_tiers
@@ -153,7 +154,7 @@ def _build_full_profile(root, *, visibility: str = "public", overrides: dict | N
 def matrix_client(make_api_client, tmp_path):
     """Factory: ``matrix_client(visibility=..., overrides=...)`` -> TestClient.
 
-    Installs the ``X-Test-User`` owner-verifier stub (the same shape ``test_edit.py`` uses)
+    Installs the ``X-Test-User`` edit-gate stub (the same shape ``test_edit.py`` uses)
     and a consumer verifier that mints a tier per key, so all six viewer kinds
     are reachable from one app.
     """
@@ -164,12 +165,11 @@ def matrix_client(make_api_client, tmp_path):
         _build_full_profile(root, visibility=visibility, overrides=overrides)
         c = make_api_client(root, token=OPERATOR_TOKEN)
 
-        def _owner_verifier(request, slug):
-            user = request.headers.get("X-Test-User")
-            if not user:
-                raise HTTPException(status_code=401, detail="login required")
-            if user != "owner":
-                raise HTTPException(status_code=403, detail="not the owner")
+        def _edit_gate(caller, prof, *, read_ok=False):  # noqa: ARG001
+            if not caller.scopes:
+                raise Unauthenticated("login required")
+            if "user:owner" not in caller.scopes:
+                raise Forbidden("not the owner")
 
         def _consumer_verifier(request, scope):
             header = request.headers.get("authorization") or ""
@@ -190,13 +190,16 @@ def matrix_client(make_api_client, tmp_path):
         def _caller_resolver(request):
             # The owner reads their own profile whole; everyone else is the
             # bare-SDK caller (a consumer identity, the operator, anonymous).
-            if request.headers.get("X-Test-User") == "owner":
-                return Caller(tier="private")
-            return default_caller_resolver(request)
+            # A signed-in person carries ``user:<name>`` for the edit gate.
+            user = request.headers.get("X-Test-User")
+            if user == "owner":
+                return Caller(tier="private", scopes=frozenset({"user:owner"}))
+            caller = default_caller_resolver(request)
+            return replace(caller, scopes=frozenset({f"user:{user}"})) if user else caller
 
-        c.app.state.owner_verifier = _owner_verifier
         c.app.state.consumer_verifier = _consumer_verifier
         c.app.state.hooks.caller_resolver = _caller_resolver
+        c.app.state.hooks.edit_gate = _edit_gate
         return c
 
     return _make

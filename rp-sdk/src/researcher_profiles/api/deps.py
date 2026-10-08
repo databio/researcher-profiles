@@ -38,6 +38,8 @@ _WRITE_METHODS = frozenset({"PUT", "PATCH", "DELETE"})
 #: :func:`get_caller` refuses to run while one is present. Remove once every
 #: host is on ``app.state.hooks``.
 _RETIRED_HOOK_SLOTS = (
+    "owner_verifier",
+    "write_scope_verifier",
     "viewer_resolver",
     "profile_tier_floor",
     "registry_proofs",
@@ -118,35 +120,6 @@ def require_token(
         )
 
 
-def require_owner(
-    slug: str,
-    request: Request,
-    authorization: Optional[str] = Header(None),
-) -> None:
-    """Owner gate for the interactive edit endpoints.
-
-    This is the hook a management host plugs into. rp-sdk knows nothing
-    about user sessions; a host that adds them (a management host) sets a verifier on
-    ``app.state.owner_verifier``: a callable ``(request, slug) -> None`` that
-    resolves the session cookie to a user, checks the ownership table for
-    ``slug``, and raises ``HTTPException(401)`` (not logged in) or
-    ``HTTPException(403)`` (logged in, not the owner) as appropriate.
-
-    When no verifier is configured (bare rp-sdk), the edit endpoints fall back
-    to the operator bearer token, so a stand-alone reference server can still
-    edit with the operator credential, and the endpoints are never accidentally
-    open. This is the "mounted either operator-gated (bare rp-sdk) or
-    owner-gated (under a management host)" behavior the split calls for.
-    """
-    verifier = getattr(request.app.state, "owner_verifier", None)
-    if verifier is None:
-        # No session layer present: gate on the operator token, exactly like
-        # every other write endpoint.
-        require_token(request, authorization)
-        return
-    verifier(request, slug)
-
-
 @dataclass(frozen=True)
 class ConsumerIdentity:
     """The resolved identity of a calling consumer (an application).
@@ -172,7 +145,7 @@ class ConsumerIdentity:
 def require_scope(scope: str):
     """Build a dependency enforcing that the caller may use capability ``scope``.
 
-    This is the consumer-axis hook, parallel to ``require_owner``. A host
+    This is the consumer-axis hook, parallel to ``hooks.edit_gate``. A host
     (a management host) installs ``app.state.consumer_verifier``: a callable
     ``(request, scope) -> ConsumerIdentity`` that resolves the inbound credential
     to a consumer identity for ``scope``, raising ``HTTPException(401)`` for a
@@ -198,26 +171,6 @@ def require_scope(scope: str):
         request.state.consumer = identity
 
     return dep
-
-
-def check_write_scope(request: Request, action: str, detail: dict) -> None:
-    """Write-scope gate: may this credential make this change?
-
-    Parallel to ``require_owner`` (which answers "may you edit at all") and
-    ``require_scope`` (which answers "may this app use this capability").
-    This hook answers "may this credential make this specific write", so
-    scope-gated agents can be refused field-by-field.
-
-    A host installs ``app.state.write_scope_verifier``: a callable
-    ``(request, action, detail) -> None`` that raises ``HTTPException(403)``
-    when the credential lacks the required scope. When no verifier is
-    installed (bare rp-sdk), this is a no-op: all writes are allowed if
-    ``require_owner`` passed.
-    """
-    verifier = getattr(request.app.state, "write_scope_verifier", None)
-    if verifier is None:
-        return
-    verifier(request, action, detail)
 
 
 #: How ``?as=`` names a viewer, in the words a person uses rather than tier

@@ -154,7 +154,7 @@ def create_app(
     # The service every route and every host adapter calls: the store, the
     # hooks, and the caches (the lazily built graph, a rootless store's temp
     # export) that ``Service.invalidate`` drops after a write.
-    app.state.service = Service(store, app.state.hooks)
+    app.state.service = Service(store, app.state.hooks, open_mode=not app.state.token)
     # Consumer-to-scope hook for the write/heavy/LLM router. Left None here: a bare
     # rp-sdk server has no consumer layer, so ``require_scope`` falls back to the
     # operator token. A management host sets a callable here to switch
@@ -229,8 +229,9 @@ def create_app(
 
     # Always-gated write/heavy/LLM router.
     app.include_router(v1_router)
-    # Owner-scoped interactive edit router (gated by require_owner: operator
-    # token on bare rp-sdk, user session under a management host).
+    # Owner-scoped interactive edit router (gated by hooks.edit_gate inside the
+    # service functions: operator token on bare rp-sdk, user session under a
+    # management host).
     app.include_router(v1_edit_router)
     # Registry-browser read surface. Mounted with no router-level dependency:
     # every route on it resolves a viewer tier and projects its own response, so

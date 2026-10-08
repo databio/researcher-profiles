@@ -12,10 +12,11 @@ check of its own.
 from __future__ import annotations
 
 import logging
+from contextlib import nullcontext
 from typing import Any, Literal, Optional
 
-from ..errors import Invalid, NotFound
-from ..models.api import PaperPage, TextSection
+from ..errors import Conflict, Invalid, NotFound, Unauthenticated
+from ..models.api import EditResult, PaperPage, TextSection
 from ..privacy import (
     ViewerTier,
     effective_tiers,
@@ -24,6 +25,7 @@ from ..privacy import (
     profile_visible,
     tier_allows,
 )
+from ..profile.edit import EditError, WorkNotFoundError, paper_version
 from ..schema import PaperRecord
 from ..store import ProfileNotFoundError, ProfileStore
 from ..utils.paths import STORE_CACHE_DIRNAME
@@ -49,9 +51,14 @@ def profile_missing(ref: str) -> NotFound:
 class Service:
     """The store, the hooks, and the two caches every request shares. One per app."""
 
-    def __init__(self, store: ProfileStore, hooks: Optional[Hooks] = None):
+    def __init__(
+        self, store: ProfileStore, hooks: Optional[Hooks] = None, *, open_mode: bool = False
+    ):
         self.store = store
         self.hooks = hooks if hooks is not None else Hooks()
+        #: No operator token is configured (dev mode): with no ``edit_gate``
+        #: installed, anyone may edit. ``create_app`` sets it from its token.
+        self.open_mode = open_mode
         #: The profile graph, built lazily by ``deps.get_graph``.
         self.graph: Any = None
         #: The temp directory a rootless store is exported to for the graph.
@@ -500,8 +507,322 @@ def find_profile_passages(
     return profile_passages(store, prof, viewer, query, k)
 
 
+# ---------------------------------------------------------------------------
+# Edits
+#
+# Every edit loads the stored profile (never a caller's view of it), runs the
+# host's edit gate, checks the caller's version token, runs the host's
+# write-scope check for each action, writes in one write unit, records the
+# edit through ``hooks.record_edit``, and drops the caches.
+# ---------------------------------------------------------------------------
+
+
+def _load_for_edit(service: Service, ref: str):
+    try:
+        return service.store.get(ref)
+    except (ProfileNotFoundError, KeyError) as e:
+        raise profile_missing(ref) from e
+
+
+def require_edit(service: Service, caller: Caller, prof: Any, *, read_ok: bool = False) -> None:
+    """May this caller edit ``prof`` (or, with ``read_ok``, read its owner tooling)?
+
+    ``hooks.edit_gate(caller, prof, read_ok=...)`` when a host installed one;
+    it raises ``Unauthenticated``, ``Forbidden`` or ``NotFound``. Without one,
+    the operator credential edits (and anyone in open mode); everyone else is
+    ``Unauthenticated``.
+    """
+    gate = service.hooks.edit_gate
+    if gate is not None:
+        gate(caller, prof, read_ok=read_ok)
+        return
+    if caller.is_operator or service.open_mode:
+        return
+    raise Unauthenticated("invalid or missing bearer token")
+
+
+def _write_scope(service: Service, caller: Caller, prof: Any, action: str, detail: dict) -> None:
+    hook = service.hooks.write_scope
+    if hook is not None:
+        hook(caller, prof, action, detail)
+
+
+def _record(
+    service: Service, caller: Caller, prof: Any, action: str, fields: list, content_hash
+) -> None:
+    hook = service.hooks.record_edit
+    if hook is not None:
+        hook(caller, prof, action, list(fields), content_hash)
+
+
+def _check_base_hash(store: ProfileStore, ref: str, base_hash: Optional[str]) -> None:
+    """Refuse an edit composed against a version other than the current one.
+
+    Opt-in: a caller that sends no ``base_hash`` gets last-writer-wins. The
+    digest spans the document and the SOUL together, so metadata and soul
+    writes conflict with each other rather than each keeping a private clock.
+    """
+    if base_hash is None:
+        return
+    current = _content_hash(store, ref)
+    if current is None or current == base_hash:
+        return
+    raise Conflict(
+        "this profile changed since you loaded it; reload it and re-apply your edit",
+        current=current,
+        kind="profile",
+    )
+
+
+def _check_base_version(record: PaperRecord, base_version: Optional[str]) -> None:
+    """Refuse a work edit composed against another version of that work. Opt-in."""
+    if base_version is None:
+        return
+    current = paper_version(record)
+    if current == base_version:
+        return
+    raise Conflict(
+        "this paper changed since you loaded it; reload it and re-apply your edit",
+        current=current,
+        kind="paper",
+    )
+
+
+def _work(prof, paper_id: str) -> PaperRecord:
+    for record in prof.papers:
+        if record.paper_id == paper_id:
+            return record
+    raise NotFound(f"no work with paper_id {paper_id!r} in this profile")
+
+
+def _work_edit_error(e: EditError):
+    """``NotFound`` when the corpus has no such ``paper_id``, else ``Invalid``."""
+    if isinstance(e, WorkNotFoundError):
+        return NotFound(str(e))
+    return Invalid(str(e))
+
+
+def edit_metadata(
+    service: Service,
+    caller: Caller,
+    ref: str,
+    patch: dict,
+    *,
+    base_hash: Optional[str] = None,
+) -> EditResult:
+    """Patch owner-editable metadata, the narrative (``soul``) included.
+
+    Only the fields in ``patch`` change. ``soul`` replaces the narrative in the
+    same write unit, so the edit is atomic and ``content_hash`` moves once. A
+    stale ``base_hash`` is ``Conflict(kind="profile")``; a patch that would
+    produce an invalid document is ``Invalid`` and changes nothing.
+    """
+    store = service.store
+    prof = _load_for_edit(service, ref)
+    require_edit(service, caller, prof)
+    patch = dict(patch)
+    # Neither is a metadata field: ``slug`` is the address and renaming is not
+    # an edit; ``base_hash`` is the concurrency token.
+    patch.pop("slug", None)
+    patch.pop("base_hash", None)
+    has_soul = "soul" in patch
+    soul = patch.pop("soul", None)
+    _check_base_hash(store, store.resolve_slug(ref), base_hash)
+    actions: list[tuple[str, list[str]]] = []
+    if patch or not has_soul:
+        actions.append(("metadata", sorted(patch)))
+    if has_soul:
+        actions.append(("soul", []))
+    for action, fields in actions:
+        _write_scope(
+            service, caller, prof, action, {"fields": fields} if action == "metadata" else {}
+        )
+    try:
+        # One write unit when both halves change, so the edit is atomic and the
+        # hooks run once. The unit is named for the narrative, the half a hook
+        # that cares about embedded or overridable text must not miss.
+        with prof.write_unit("soul") if (patch and has_soul) else nullcontext():
+            if patch:
+                prof.edit.patch_metadata(patch)
+            if has_soul:
+                prof.edit.set_soul(soul if soul is not None else "")
+    except EditError as e:
+        raise Invalid(str(e)) from e
+    resolved = store.resolve_slug(ref)
+    new_hash = _content_hash(store, resolved)
+    for action, fields in actions:
+        _record(service, caller, prof, action, fields, new_hash)
+    service.invalidate(resolved)
+    return EditResult(
+        slug=resolved,
+        rid=getattr(prof, "rid", None),
+        updated=sorted([*patch.keys(), *(["soul"] if has_soul else [])]),
+        content_hash=new_hash,
+    )
+
+
+def edit_work(
+    service: Service,
+    caller: Caller,
+    ref: str,
+    paper_id: str,
+    patch: dict,
+    *,
+    base_version: Optional[str] = None,
+) -> EditResult:
+    """Patch owner-editable fields of one work. A stale ``base_version`` is a ``Conflict``."""
+    store = service.store
+    prof = _load_for_edit(service, ref)
+    require_edit(service, caller, prof)
+    patch = dict(patch)
+    patch.pop("base_version", None)
+    _check_base_version(_work(prof, paper_id), base_version)
+    fields = sorted(patch)
+    _write_scope(service, caller, prof, "works", {"paper_id": paper_id, "fields": fields})
+    try:
+        updated = prof.edit.patch_work(paper_id, patch)
+    except EditError as e:
+        raise _work_edit_error(e) from e
+    resolved = store.resolve_slug(ref)
+    new_hash = _content_hash(store, resolved)
+    _record(service, caller, prof, "works", fields, new_hash)
+    service.invalidate(resolved)
+    return EditResult(
+        slug=resolved,
+        rid=getattr(prof, "rid", None),
+        updated=fields,
+        content_hash=new_hash,
+        version=paper_version(updated),
+    )
+
+
+def add_work(service: Service, caller: Caller, ref: str, record: dict) -> EditResult:
+    """Add one new work. Never overwrites: an existing ``paper_id`` is ``Conflict(kind="exists")``.
+
+    ``EditManager.add_work`` keeps its replace-or-append semantics for the
+    CLI; the never-overwrite rule is this function's.
+    """
+    store = service.store
+    prof = _load_for_edit(service, ref)
+    require_edit(service, caller, prof)
+    paper_id = str(record.get("paper_id") or "").strip() if isinstance(record, dict) else ""
+    if not paper_id:
+        raise Invalid("a work record needs a paper_id")
+    if any(r.paper_id == paper_id for r in prof.papers):
+        raise Conflict("paper_id already exists; use PATCH", kind="exists")
+    _write_scope(service, caller, prof, "works", {"paper_id": paper_id, "fields": ["*"]})
+    try:
+        added = prof.edit.add_work({**record, "paper_id": paper_id})
+    except EditError as e:
+        raise _work_edit_error(e) from e
+    resolved = store.resolve_slug(ref)
+    new_hash = _content_hash(store, resolved)
+    _record(service, caller, prof, "works", ["*"], new_hash)
+    service.invalidate(resolved)
+    return EditResult(
+        slug=resolved,
+        rid=getattr(prof, "rid", None),
+        updated=[paper_id],
+        content_hash=new_hash,
+        version=paper_version(added),
+    )
+
+
+def remove_work(
+    service: Service,
+    caller: Caller,
+    ref: str,
+    paper_id: str,
+    *,
+    base_version: Optional[str] = None,
+) -> EditResult:
+    """Remove one work. A stale ``base_version`` is a ``Conflict`` and the work stays."""
+    store = service.store
+    prof = _load_for_edit(service, ref)
+    require_edit(service, caller, prof)
+    _check_base_version(_work(prof, paper_id), base_version)
+    _write_scope(service, caller, prof, "works", {"paper_id": paper_id, "fields": []})
+    try:
+        prof.edit.remove_work(paper_id)
+    except EditError as e:
+        raise _work_edit_error(e) from e
+    resolved = store.resolve_slug(ref)
+    new_hash = _content_hash(store, resolved)
+    _record(service, caller, prof, "works", [], new_hash)
+    service.invalidate(resolved)
+    return EditResult(
+        slug=resolved,
+        rid=getattr(prof, "rid", None),
+        updated=[paper_id],
+        content_hash=new_hash,
+    )
+
+
+def set_visibility(
+    service: Service,
+    caller: Caller,
+    ref: str,
+    *,
+    profile_visibility=None,
+    artifacts: Optional[list[dict]] = None,
+    sections: Optional[list[dict]] = None,
+    base_hash: Optional[str] = None,
+) -> EditResult:
+    """Set the profile-level default tier and/or per-artifact and per-section tiers."""
+    store = service.store
+    prof = _load_for_edit(service, ref)
+    require_edit(service, caller, prof)
+    artifacts = list(artifacts or [])
+    sections = list(sections or [])
+    _check_base_hash(store, store.resolve_slug(ref), base_hash)
+    _write_scope(
+        service,
+        caller,
+        prof,
+        "visibility",
+        {
+            "slug": ref,
+            "profile_visibility": profile_visibility,
+            "artifacts": artifacts,
+            "sections": sections,
+        },
+    )
+    try:
+        _doc, changed = prof.edit.set_visibility(
+            profile_visibility=profile_visibility,
+            artifacts=artifacts or None,
+            sections=sections or None,
+        )
+    except EditError as e:
+        raise Invalid(str(e)) from e
+    resolved = store.resolve_slug(ref)
+    new_hash = _content_hash(store, resolved)
+    _record(service, caller, prof, "visibility", [], new_hash)
+    service.invalidate(resolved)
+    updated = []
+    if profile_visibility is not None:
+        updated.append("visibility")
+    if artifacts:
+        updated.append("artifacts")
+    if sections:
+        updated.append("sections")
+    return EditResult(
+        slug=resolved,
+        rid=getattr(prof, "rid", None),
+        updated=updated,
+        artifacts_changed=changed,
+        content_hash=new_hash,
+    )
+
+
 __all__ = [
     "Service",
+    "add_work",
+    "edit_metadata",
+    "edit_work",
+    "remove_work",
+    "require_edit",
+    "set_visibility",
     "find_paper_passages",
     "find_profile_passages",
     "get_paper",

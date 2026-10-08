@@ -5,14 +5,16 @@ Two layers:
 - :mod:`researcher_profiles.profile.edit`: the on-disk mutation helpers (patch metadata,
   set soul, set visibility, patch/add/remove one work), including the
   re-validation guarantee and the legal ``paper_fulltext`` private pin.
-- the ``PATCH/PUT /api/v1/profiles/{slug}/...`` endpoints via ``require_owner``:
-  the operator-token fallback on bare rp-sdk, and the owner/non-owner/no-session
-  behavior when a management host installs an ``owner_verifier``.
+- the ``PATCH/PUT /api/v1/profiles/{slug}/...`` endpoints via the service's
+  edit gate: the operator-token fallback on bare rp-sdk, and the
+  owner/non-owner/no-session behavior when a management host installs
+  ``hooks.edit_gate``.
 """
 
 import pytest
 
-from researcher_profiles import ResearcherProfile
+from researcher_profiles import Forbidden, ResearcherProfile, Unauthenticated
+from researcher_profiles.api.caller import Caller
 from researcher_profiles.profile.edit import (
     EDITABLE_METADATA_FIELDS,
     LOCKED_METADATA_FIELDS,
@@ -240,22 +242,20 @@ class TestWorkEdits:
         assert r.status_code == 400
 
     def test_a_scope_gated_agent_is_refused(self, make_api_client, fixture_profiles_root):
-        """``check_write_scope`` reaches the works routes with the fields named.
+        """``hooks.write_scope`` reaches the works routes with the fields named.
 
         A host that hands out a narrow agent key needs the paper and the fields
         in the detail, or its verifier can only say yes or no to "edits works
         at all".
         """
-        from fastapi import HTTPException
-
         c = make_api_client(fixture_profiles_root(SLUG))
         seen: list[tuple[str, dict]] = []
 
-        def _verifier(request, action, detail):  # noqa: ARG001
+        def _write_scope(caller, prof, action, detail):  # noqa: ARG001
             seen.append((action, detail))
-            raise HTTPException(status_code=403, detail="scope profile:works required")
+            raise Forbidden("scope profile:works required")
 
-        c.app.state.write_scope_verifier = _verifier
+        c.app.state.hooks.write_scope = _write_scope
         r = c.patch(f"/api/v1/profiles/{SLUG}/works/{self.PAPER}", json={"doi": "10.1/x"})
         assert r.status_code == 403, r.text
         assert seen == [("works", {"paper_id": self.PAPER, "fields": ["doi"]})]
@@ -263,27 +263,30 @@ class TestWorkEdits:
 
 
 class TestEditEndpointsOwnerScoped:
-    """A management host installs an owner_verifier -> owner-scoped auth."""
+    """A management host installs an edit gate -> owner-scoped auth."""
 
     @pytest.fixture
     def owned_client(self, make_api_client, fixture_profiles_root):
         """A client whose app grants ownership of SLUG to 'owner', nobody else.
 
-        The stub verifier reads an ``X-Test-User`` header: 'owner' owns SLUG,
-        any other value is a logged-in non-owner, and its absence is no session.
+        The stub caller resolver reads an ``X-Test-User`` header onto the
+        caller's scopes; the stub gate says 'owner' owns SLUG, any other user
+        is a logged-in non-owner, and no user is no session.
         """
-        from fastapi import HTTPException
-
         c = make_api_client(fixture_profiles_root(SLUG))
 
-        def _verifier(request, slug):
+        def _caller(request):
             user = request.headers.get("X-Test-User")
-            if not user:
-                raise HTTPException(status_code=401, detail="login required")
-            if user != "owner":
-                raise HTTPException(status_code=403, detail="not the owner")
+            return Caller(scopes=frozenset({f"user:{user}"}) if user else frozenset())
 
-        c.app.state.owner_verifier = _verifier
+        def _gate(caller, prof, *, read_ok=False):  # noqa: ARG001
+            if not caller.scopes:
+                raise Unauthenticated("login required")
+            if "user:owner" not in caller.scopes:
+                raise Forbidden("not the owner")
+
+        c.app.state.hooks.caller_resolver = _caller
+        c.app.state.hooks.edit_gate = _gate
         return c
 
     def test_owner_can_edit(self, owned_client):
