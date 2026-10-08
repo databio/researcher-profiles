@@ -381,6 +381,7 @@ Python attribute name but stored on disk under the schema.org key
 | `pmid` | `pmid` | string \| null | no | `null` | |
 | `pmcid` | `pmcid` | string \| null | no | `null` | |
 | `openalex_id` | `openalex_id` | string \| null | no | `null` | |
+| `isVersionOf` | `is_version_of` | string \| null | no | `null` | `@id` of the work this record is a version of (`dcterms:isVersionOf`); a preprint names its journal article. |
 | `venue` | `venue` | string \| null | no | `null` | |
 | `type` | `type` | string \| null | no | `null` | Work type, e.g. `authored`. Unrelated to `@type`. |
 | `first_author` | `first_author` | string \| null | no | `null` | |

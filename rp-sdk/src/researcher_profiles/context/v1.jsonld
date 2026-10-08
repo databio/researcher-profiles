@@ -207,6 +207,7 @@
     "pmid": "rp:pmid",
     "pmcid": "rp:pmcid",
     "openalex_id": "rp:openalexId",
+    "isVersionOf": { "@id": "dcterms:isVersionOf", "@type": "@id" },
     "datePublished": { "@id": "schema:datePublished", "@type": "xsd:gYear" },
     "isPartOf": "schema:isPartOf",
     "author": { "@id": "schema:author", "@container": "@set" },

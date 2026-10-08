@@ -124,6 +124,7 @@ PAPER_KEY_ORDER: tuple[str, ...] = (
     "pmid",
     "pmcid",
     "openalex_id",
+    "isVersionOf",
     "datePublished",
     "isPartOf",
     "venue",

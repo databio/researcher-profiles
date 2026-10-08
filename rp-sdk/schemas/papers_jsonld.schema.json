@@ -239,6 +239,18 @@
           "default": null,
           "title": "Ispartof"
         },
+        "isVersionOf": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Isversionof"
+        },
         "is_corresponding": {
           "anyOf": [
             {

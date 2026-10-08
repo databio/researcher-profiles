@@ -64,6 +64,11 @@ class PaperRecord(ResearchOutput):
     pmid: str | None = None
     pmcid: str | None = None
     openalex_id: str | None = None
+    #: ``@id`` of the record this one is another version of
+    #: (``dcterms:isVersionOf``): a preprint names its journal article here.
+    #: The study is the target; this record is kept for completeness and is
+    #: not counted or summarized a second time.
+    is_version_of: str | None = Field(default=None, alias="isVersionOf")
 
     # Bibliographic detail
     venue: str | None = None

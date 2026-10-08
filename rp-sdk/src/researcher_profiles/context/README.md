@@ -132,6 +132,7 @@ context in which `summary` means `rp:summary` (the profile-level `summary` means
 | `url` | `schema:url` (`@id`) |
 | `paper_id` | `rp:paperId` |
 | `doi`, `pmid`, `pmcid`, `openalex_id` | `rp:doi`, `rp:pmid`, `rp:pmcid`, `rp:openalexId` |
+| `isVersionOf` | `dcterms:isVersionOf` (`@id`): the `@id` of the work this one is a version of (a preprint names its journal article) |
 | `venue` | `rp:venue` |
 | `type` | `rp:resourceType` |
 | `first_author`, `last_author` | `rp:firstAuthor`, `rp:lastAuthor` |

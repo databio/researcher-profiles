@@ -190,7 +190,7 @@ class TestSchemaExport:
         from researcher_profiles.validate import schema_fingerprint
 
         assert schema_fingerprint() == (
-            "c2c3db8f66d3030a865f93775b269e623fe4a56279e86acc6e611a52a82b66af"
+            "a1c005ac0ab51828881f497f9a724c865a783b744b46abb4d3f4240061b4f1d8"
         )
 
     def test_exported_schema_accepts_what_the_model_writes(self):
@@ -630,3 +630,18 @@ class TestJsonLdErgonomics:
             PaperRecord(title="T", openalex_id="W123").resolve_id() == "https://openalex.org/W123"
         )
         assert PaperRecord(title="T", paper_id="doe2020x").resolve_id() == "#paper/doe2020x"
+
+
+def test_a_preprint_links_to_its_journal_version_under_dcterms_is_version_of():
+    """``is_version_of`` is the ``isVersionOf`` link a preprint carries to the
+    journal article it became; it must survive a write and a read."""
+    target = "https://doi.org/10.3390/bioengineering11030263"
+    rec = PaperRecord(name="A preprint", paper_id="doe2023a", is_version_of=target)
+    data = rec.model_dump(mode="json")
+    assert data["isVersionOf"] == target
+    assert PaperRecord.model_validate(data).is_version_of == target
+    context_path = (
+        Path(__file__).resolve().parent.parent / "src/researcher_profiles/context/v1.jsonld"
+    )
+    term = json.loads(context_path.read_text())["@context"]["isVersionOf"]
+    assert term == {"@id": "dcterms:isVersionOf", "@type": "@id"}
