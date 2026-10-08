@@ -335,14 +335,24 @@ def known_terms(schema_name: str) -> frozenset[str]:
     if context_text is not None:
         try:
             ctx_doc = json.loads(context_text)
-            ctx = ctx_doc.get("@context", {})
-            for key in ctx:
-                if not key.startswith("@"):
-                    terms.add(key)
+            _collect_context_terms(ctx_doc.get("@context", {}), terms)
         except json.JSONDecodeError:
             pass
 
     return frozenset(terms)
+
+
+def _collect_context_terms(ctx: dict, terms: set[str]) -> None:
+    """Collect every term a context defines, including in scoped contexts.
+
+    A term defined only in a scoped context (``collaborators`` -> its entries'
+    ``relationship``) is declared vocabulary too.
+    """
+    for key, definition in ctx.items():
+        if not key.startswith("@"):
+            terms.add(key)
+        if isinstance(definition, dict) and isinstance(definition.get("@context"), dict):
+            _collect_context_terms(definition["@context"], terms)
 
 
 def _collect_property_names(schema: dict, terms: set[str]) -> None:

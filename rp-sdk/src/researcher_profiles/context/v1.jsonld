@@ -94,7 +94,11 @@
     "recurring_positions": { "@id": "rp:recurringPosition", "@container": "@set" },
     "intellectual_lineage": { "@id": "rp:intellectualLineage", "@container": "@set" },
     "critiques": { "@id": "rp:critique", "@container": "@set" },
-    "collaborators": { "@id": "schema:knows", "@container": "@set" },
+    "collaborators": {
+      "@id": "schema:knows",
+      "@container": "@set",
+      "@context": { "relationship": "rp:relationship" }
+    },
     "heldGrant": { "@id": "rp:heldGrant", "@container": "@set" },
 
     "rp:researchInterests": {

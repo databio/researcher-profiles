@@ -84,7 +84,7 @@ node type.
 | `recurring_positions` | `rp:recurringPosition` (`@set`) | |
 | `intellectual_lineage` | `rp:intellectualLineage` (`@set`) | |
 | `critiques` | `rp:critique` (`@set`) | |
-| `collaborators` | `schema:knows` (`@set`) | string or node |
+| `collaborators` | `schema:knows` (`@set`) | string or node; a node's `relationship` → `rp:relationship` |
 | `training` | `rp:training` (`@set`) | scoped: `kind`, `degree`, `institution`, `year_start`, `year_end`, `advisor` |
 | `career` | `rp:career` (`@set`) | scoped: `role` → `rp:careerRole`, `institution`, `start_year`, `end_year` |
 | `researchOutputs` | `rp:researchOutput` (`@set`) | scoped: `type` → `rp:researchOutputType`, `name`, `url` |

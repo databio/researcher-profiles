@@ -187,6 +187,17 @@ def test_known_terms_is_scoped_per_schema():
     assert "researchOutputs" in known_terms("profile_jsonld")
 
 
+def test_collaborator_relationship_is_declared():
+    """The spec's ``{name, affiliation, relationship}`` collaborator node is
+    declared vocabulary (a scoped term), not drift. The Python field name
+    ``research_outputs`` is not: on disk the key is ``researchOutputs``."""
+    doc = {
+        "collaborators": [{"name": "Al", "affiliation": "UVA", "relationship": "coauthor"}],
+        "research_outputs": [],
+    }
+    assert [t.term for t in undeclared_terms(doc, "profile_jsonld")] == ["research_outputs"]
+
+
 @pytest.mark.parametrize(
     "extra_fields, expected",
     [
