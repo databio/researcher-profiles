@@ -308,3 +308,14 @@ class TestHttpMapper:
     def test_not_found_and_unauthenticated(self):
         assert self._reply(NotFound("profile 'x' not found"))[:2] == (404, "profile 'x' not found")
         assert self._reply(Unauthenticated("login required"))[:2] == (401, "login required")
+
+
+def test_a_gate_not_found_names_the_callers_ref(store):
+    def hide(caller, prof, *, read_ok=False):  # noqa: ARG001
+        raise NotFound(f"profile {prof.slug!r} not found")
+
+    service = Service(store, Hooks(edit_gate=hide))
+    rid = store.get(SLUG).rid
+    with pytest.raises(NotFound) as e:
+        svc.edit_metadata(service, OWNER, rid, {"field": "X"})
+    assert e.value.what == f"profile {rid!r} not found"

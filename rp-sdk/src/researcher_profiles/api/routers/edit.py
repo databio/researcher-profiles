@@ -151,7 +151,7 @@ def get_profile_visibility(
     store = service.store
     prof = get_profile(slug, store)
     # Owner tooling: a caller who may read the profile whole is admitted too.
-    svc.require_edit(service, caller, prof, read_ok=True)
+    svc.require_edit(service, caller, prof, read_ok=True, ref=slug)
     resolved = store.resolve_slug(slug)
     explain = explain_tiers(prof.metadata)
     floor = service.floor(caller, prof, slug)

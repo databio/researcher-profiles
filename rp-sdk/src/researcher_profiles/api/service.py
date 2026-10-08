@@ -524,17 +524,28 @@ def _load_for_edit(service: Service, ref: str):
         raise profile_missing(ref) from e
 
 
-def require_edit(service: Service, caller: Caller, prof: Any, *, read_ok: bool = False) -> None:
+def require_edit(
+    service: Service,
+    caller: Caller,
+    prof: Any,
+    *,
+    read_ok: bool = False,
+    ref: Optional[str] = None,
+) -> None:
     """May this caller edit ``prof`` (or, with ``read_ok``, read its owner tooling)?
 
     ``hooks.edit_gate(caller, prof, read_ok=...)`` when a host installed one;
-    it raises ``Unauthenticated``, ``Forbidden`` or ``NotFound``. Without one,
-    the operator credential edits (and anyone in open mode); everyone else is
-    ``Unauthenticated``.
+    it raises ``Unauthenticated``, ``Forbidden`` or ``NotFound``. A gate's
+    ``NotFound`` is re-said for ``ref``, the caller's own input, so a refusal
+    never names the resolved slug. Without a gate, the operator credential
+    edits (and anyone in open mode); everyone else is ``Unauthenticated``.
     """
     gate = service.hooks.edit_gate
     if gate is not None:
-        gate(caller, prof, read_ok=read_ok)
+        try:
+            gate(caller, prof, read_ok=read_ok)
+        except NotFound as e:
+            raise profile_missing(ref if ref is not None else prof.slug) from e
         return
     if caller.is_operator or service.open_mode:
         return
@@ -619,7 +630,7 @@ def edit_metadata(
     """
     store = service.store
     prof = _load_for_edit(service, ref)
-    require_edit(service, caller, prof)
+    require_edit(service, caller, prof, ref=ref)
     patch = dict(patch)
     # Neither is a metadata field: ``slug`` is the address and renaming is not
     # an edit; ``base_hash`` is the concurrency token.
@@ -673,7 +684,7 @@ def edit_work(
     """Patch owner-editable fields of one work. A stale ``base_version`` is a ``Conflict``."""
     store = service.store
     prof = _load_for_edit(service, ref)
-    require_edit(service, caller, prof)
+    require_edit(service, caller, prof, ref=ref)
     patch = dict(patch)
     patch.pop("base_version", None)
     _check_base_version(_work(prof, paper_id), base_version)
@@ -704,7 +715,7 @@ def add_work(service: Service, caller: Caller, ref: str, record: dict) -> EditRe
     """
     store = service.store
     prof = _load_for_edit(service, ref)
-    require_edit(service, caller, prof)
+    require_edit(service, caller, prof, ref=ref)
     paper_id = str(record.get("paper_id") or "").strip() if isinstance(record, dict) else ""
     if not paper_id:
         raise Invalid("a work record needs a paper_id")
@@ -739,7 +750,7 @@ def remove_work(
     """Remove one work. A stale ``base_version`` is a ``Conflict`` and the work stays."""
     store = service.store
     prof = _load_for_edit(service, ref)
-    require_edit(service, caller, prof)
+    require_edit(service, caller, prof, ref=ref)
     _check_base_version(_work(prof, paper_id), base_version)
     _write_scope(service, caller, prof, "works", {"paper_id": paper_id, "fields": []})
     try:
@@ -771,7 +782,7 @@ def set_visibility(
     """Set the profile-level default tier and/or per-artifact and per-section tiers."""
     store = service.store
     prof = _load_for_edit(service, ref)
-    require_edit(service, caller, prof)
+    require_edit(service, caller, prof, ref=ref)
     artifacts = list(artifacts or [])
     sections = list(sections or [])
     _check_base_hash(store, store.resolve_slug(ref), base_hash)
