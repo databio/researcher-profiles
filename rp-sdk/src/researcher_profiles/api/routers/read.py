@@ -23,7 +23,6 @@ from ...models.api import (
     ProfileSummary,
     SummaryBatch,
     TextPage,
-    TextSection,
 )
 from ...models.published import ProfileCard, ProfileCollection
 from ...privacy import (
@@ -35,44 +34,38 @@ from ...privacy import (
     tier_allows,
 )
 from ...schema import (
-    PaperRecord,
     validate_ref,
 )
 from ...schema.jsonld import CONTEXT_URL
 from ...store import ProfileNotFoundError, ProfileStore
-from .._cursor import decode_cursor, encode_cursor
-from .._limits import BATCH_IDS_CAP, PAPERS_LIMIT, clamp
+from .. import service as svc
+from .._limits import BATCH_IDS_CAP
 from .._projection import (
     PUBLIC_DOCUMENT_MAX_AGE,
     VARY_ON_CREDENTIALS,
-    _content_hash,
     _gate_profile,
     _http_date,
     _profile_missing,
     _profile_summary,
-    artifact_visible,
     served_document_bytes,
     withheld,
 )
-from .._records import paper_record_view, paper_row, profile_record, summary_text
 from .._sizes import (
-    EXPERTISE_URL,
-    PAPERS_URL,
-    SOUL_URL,
     SizeIndex,
     summary_url,
-    text_url,
 )
-from .._text import page_text, sections_of
+from ..caller import Caller
 from ..deps import (
     get_caller,
     get_profile,
     get_profile_tier_floor,
+    get_read_caller,
     get_service,
     get_store,
     get_viewer_tier,
     viewer_tier_for,
 )
+from ..service import Service
 from ._routers import public_router
 
 logger = logging.getLogger(__name__)
@@ -287,8 +280,9 @@ def get_collection(
 def get_profile_detail(
     slug: str,
     request: Request,
-    store: ProfileStore = Depends(get_store),
     viewer: ViewerTier = Depends(get_viewer_tier),
+    service: Service = Depends(get_service),
+    caller: Caller = Depends(get_read_caller),
     view: Literal["record", "full"] = "record",
 ) -> Response:
     """One profile, sized for this caller.
@@ -306,21 +300,16 @@ def get_profile_detail(
     never ``""``: a client has to be able to tell withheld from empty.
 
     ``ETag`` is weak and derived from ``content_hash`` (plus the viewer tier and
-    the view), so ``If-None-Match`` answers 304 for one stored-column read.
+    the view), so ``If-None-Match`` answers 304 without a body.
     """
-    prof = get_profile(slug, store)
-    _gate_profile(get_service(request), get_caller(request), prof, viewer, slug)
-    resolved = store.resolve_slug(slug)
-    current = _content_hash(store, resolved)
+    record = svc.get_profile(service, caller, slug, view=view)
     headers = {"Cache-Control": "private, no-store", "Vary": VARY_ON_CREDENTIALS}
+    current = record.content_hash
     if current:
         etag = f'W/"{current.split(":", 1)[-1][:32]}-{viewer}-{view}"'
         headers["ETag"] = etag
         if request.headers.get("if-none-match") == etag:
             return Response(status_code=304, headers=headers)
-    record = profile_record(
-        prof, viewer, view=view, proofs=get_service(request).proofs(prof.metadata.rid), store=store
-    )
     return Response(
         content=record.model_dump_json(exclude_none=True),
         media_type="application/json",
@@ -540,25 +529,6 @@ def get_profile_artifact(
     )
 
 
-def _works_visible(prof, viewer: ViewerTier) -> bool:
-    return artifact_visible(
-        explain_tiers(prof.metadata), prof.metadata, PAPERS_URL, "works", viewer
-    )
-
-
-def _year_key(record: PaperRecord) -> int:
-    return record.year if isinstance(record.year, int) else -1
-
-
-def _split_ids(ids: str) -> list[str]:
-    out: list[str] = []
-    for raw in ids.split(","):
-        pid = raw.strip()
-        if pid and pid not in out:
-            out.append(pid)
-    return out
-
-
 @public_router.get(
     "/profiles/{slug}/papers",
     response_model=PaperPage,
@@ -566,10 +536,9 @@ def _split_ids(ids: str) -> list[str]:
 )
 def list_papers(
     slug: str,
-    request: Request,
     response: Response,
-    store: ProfileStore = Depends(get_store),
-    viewer: ViewerTier = Depends(get_viewer_tier),
+    service: Service = Depends(get_service),
+    caller: Caller = Depends(get_read_caller),
     limit: Optional[int] = None,
     cursor: Optional[str] = None,
     q: Optional[str] = None,
@@ -600,125 +569,20 @@ def list_papers(
     ``ids`` (a comma list, at most 20) reads those rows only, in that order,
     with no paging.
     """
-    prof = get_profile(slug, store)
-    _gate_profile(get_service(request), get_caller(request), prof, viewer, slug)
-    if not _works_visible(prof, viewer):
-        raise _profile_missing(slug)
-    response.headers["Cache-Control"] = "private, no-store"
-    response.headers["Vary"] = VARY_ON_CREDENTIALS
-    sizes = SizeIndex(prof, viewer, store, store.resolve_slug(slug))
-    papers = [p for p in prof.papers if p.paper_id]
-
-    if ids is not None:
-        wanted = _split_ids(ids)
-        taken = wanted[:BATCH_IDS_CAP]
-        by_id = {p.paper_id: p for p in papers}
-        rows = [paper_row(prof, sizes, by_id[pid]) for pid in taken if pid in by_id]
-        note = None
-        if len(wanted) > BATCH_IDS_CAP:
-            note = f"Only the first {BATCH_IDS_CAP} ids were read."
-        return PaperPage(
-            items=rows,
-            total=len(rows),
-            limit_applied=len(taken),
-            filters_applied={"ids": taken},
-            note=note,
-        )
-
-    filters = {"q": q, "year_min": year_min, "missing_ids": missing_ids, "has_text": has_text}
-    applied = {k: v for k, v in filters.items() if v not in (None, False, "")}
-    lim = clamp(limit, *PAPERS_LIMIT)
-    if year_min is not None:
-        papers = [p for p in papers if isinstance(p.year, int) and p.year >= year_min]
-    if missing_ids:
-        papers = [p for p in papers if not p.doi and not p.openalex_id]
-    if has_text is not None:
-        papers = [p for p in papers if sizes.text(p.paper_id).available == has_text]
-
-    if not q:
-        papers.sort(key=lambda p: (-_year_key(p), p.paper_id))
-        full_total = len(papers)
-        if cursor:
-            key = decode_cursor(cursor, filters).get("k")
-            if not (isinstance(key, list) and len(key) == 2):
-                decode_cursor("", filters)  # raises the cursor_mismatch 400
-            after = (-int(key[0]), str(key[1]))
-            papers = [p for p in papers if (-_year_key(p), p.paper_id) > after]
-        page = papers[:lim]
-        more = len(papers) > lim
-        next_cursor = (
-            encode_cursor({"k": [_year_key(page[-1]), page[-1].paper_id]}, filters)
-            if more and page
-            else None
-        )
-        return PaperPage(
-            items=[paper_row(prof, sizes, p) for p in page],
-            total=full_total,
-            limit_applied=lim,
-            next_cursor=next_cursor,
-            has_more=more,
-            filters_applied=applied,
-        )
-
-    from .._semantic import hybrid_rank_papers
-
-    candidates = []
-    for p in papers:
-        text, _ = summary_text(prof, sizes, p)
-        candidates.append(
-            {
-                "paper_id": p.paper_id,
-                "title": p.title,
-                "journal": p.journal,
-                "summary": text,
-                "abstract": p.abstract,
-            }
-        )
-    ranked, mode, note = hybrid_rank_papers(store, prof, viewer, q, candidates)
-    start = 0
-    if cursor:
-        start = decode_cursor(cursor, filters).get("o")
-        if not isinstance(start, int) or start < 0:
-            decode_cursor("", filters)
-    by_id = {p.paper_id: p for p in papers}
-    window = ranked[start : start + lim]
-    rows = []
-    for pid, score, matched_by in window:
-        row = paper_row(prof, sizes, by_id[pid])
-        row.score = round(score, 6)
-        row.matched_by = list(matched_by)
-        rows.append(row)
-    more = start + lim < len(ranked)
-    return PaperPage(
-        items=rows,
-        total=len(ranked),
-        limit_applied=lim,
-        next_cursor=encode_cursor({"o": start + lim}, filters) if more else None,
-        has_more=more,
-        filters_applied=applied,
-        search_mode_used=mode,
-        note=note,
+    page = svc.list_papers(
+        service,
+        caller,
+        slug,
+        q=q,
+        year_min=year_min,
+        missing_ids=missing_ids,
+        has_text=has_text,
+        limit=limit,
+        cursor=cursor,
+        ids=ids,
     )
-
-
-def _find_paper(prof, paper_id: str, slug: str) -> PaperRecord:
-    for record in prof.papers:
-        if record.paper_id == paper_id:
-            return record
-    raise HTTPException(status_code=404, detail=f"paper {paper_id!r} not found in profile {slug!r}")
-
-
-def _text_of(store: ProfileStore, slug: str, content_url: str) -> str:
-    """One artifact's stored text; a 404 that says so when its body was never pushed."""
-    try:
-        return store.artifact_bytes(store.resolve_slug(slug), content_url).decode(
-            "utf-8", errors="replace"
-        )
-    except (ProfileNotFoundError, KeyError) as e:
-        raise HTTPException(
-            status_code=404,
-            detail=f"{content_url!r} is listed for {slug!r} but its content was not uploaded",
-        ) from e
+    _no_store(response)
+    return page
 
 
 @public_router.get(
@@ -729,10 +593,9 @@ def _text_of(store: ProfileStore, slug: str, content_url: str) -> str:
 def get_paper(
     slug: str,
     paper_id: str,
-    request: Request,
     response: Response,
-    store: ProfileStore = Depends(get_store),
-    viewer: ViewerTier = Depends(get_viewer_tier),
+    service: Service = Depends(get_service),
+    caller: Caller = Depends(get_read_caller),
     view: Literal["record", "full"] = "record",
 ) -> PaperRecordView:
     """One paper: its fields, its summary inline, its sizes, and its version.
@@ -745,23 +608,9 @@ def get_paper(
     authors, 5 topics) and cuts the abstract at 1,500 chars; ``view="full"``
     returns the whole record.
     """
-    prof = get_profile(slug, store)
-    _gate_profile(get_service(request), get_caller(request), prof, viewer, slug)
-    if not _works_visible(prof, viewer):
-        raise _profile_missing(slug)
-    response.headers["Cache-Control"] = "private, no-store"
-    response.headers["Vary"] = VARY_ON_CREDENTIALS
-    record = _find_paper(prof, paper_id, slug)
-    sizes = SizeIndex(prof, viewer, store, store.resolve_slug(slug))
-    sections = None
-    if sizes.text(paper_id).available:
-        try:
-            body = _text_of(store, slug, text_url(paper_id))
-        except HTTPException:
-            body = None
-        if body is not None:
-            sections = [s.name for s in sections_of(body)]
-    return paper_record_view(prof, sizes, record, view=view, sections=sections)
+    record = svc.get_paper(service, caller, slug, paper_id, view=view)
+    _no_store(response)
+    return record
 
 
 @public_router.get("/profiles/{slug}/summaries", response_model=SummaryBatch)
@@ -784,7 +633,7 @@ def get_summaries(
     _gate_profile(get_service(request), get_caller(request), prof, viewer, slug)
     response.headers["Cache-Control"] = "private, no-store"
     response.headers["Vary"] = VARY_ON_CREDENTIALS
-    wanted = _split_ids(ids)
+    wanted = svc.split_ids(ids)
     taken, rest = wanted[:BATCH_IDS_CAP], wanted[BATCH_IDS_CAP:]
     sizes = SizeIndex(prof, viewer, store, store.resolve_slug(slug))
     summaries = prof.summaries
@@ -801,18 +650,6 @@ def get_summaries(
     )
 
 
-def _unknown_section(e: ValueError) -> HTTPException:
-    valid = e.args[1] if len(e.args) > 1 else []
-    return HTTPException(
-        status_code=400,
-        detail={
-            "error": "unknown_section",
-            "message": "that section does not exist in this text",
-            "valid": valid,
-        },
-    )
-
-
 @public_router.get(
     "/profiles/{slug}/papers/{paper_id}/text",
     response_model=TextPage,
@@ -821,10 +658,9 @@ def _unknown_section(e: ValueError) -> HTTPException:
 def get_paper_text(
     slug: str,
     paper_id: str,
-    request: Request,
     response: Response,
-    store: ProfileStore = Depends(get_store),
-    viewer: ViewerTier = Depends(get_viewer_tier),
+    service: Service = Depends(get_service),
+    caller: Caller = Depends(get_read_caller),
     section: Optional[str] = None,
     offset: int = 0,
     max_chars: Optional[int] = None,
@@ -837,26 +673,11 @@ def get_paper_text(
     with ``has_more`` and ``next_offset``. ``section=`` reads one heading's
     span (names are in ``sections``). Offsets are indices into the whole text.
     """
-    prof = get_profile(slug, store)
-    _gate_profile(get_service(request), get_caller(request), prof, viewer, slug)
-    response.headers["Cache-Control"] = "private, no-store"
-    response.headers["Vary"] = VARY_ON_CREDENTIALS
-    url = text_url(paper_id)
-    missing = HTTPException(
-        status_code=404, detail=f"no full text {paper_id!r} for profile {slug!r}"
+    page = svc.read_paper_text(
+        service, caller, slug, paper_id, section=section, offset=offset, max_chars=max_chars
     )
-    effective = effective_tiers(prof.metadata)
-    if url not in effective or not tier_allows(viewer, effective[url]):
-        raise missing
-    body = _text_of(store, slug, url)
-    try:
-        return page_text(body, section=section, offset=offset, max_chars=max_chars)
-    except ValueError as e:
-        raise _unknown_section(e) from e
-
-
-#: The narrative's two parts, in reading order: ``(section name, contentUrl, role)``.
-_NARRATIVE = (("soul", SOUL_URL, "soul"), ("expertise", EXPERTISE_URL, "expertise"))
+    _no_store(response)
+    return page
 
 
 @public_router.get(
@@ -866,10 +687,9 @@ _NARRATIVE = (("soul", SOUL_URL, "soul"), ("expertise", EXPERTISE_URL, "expertis
 )
 def get_profile_text(
     slug: str,
-    request: Request,
     response: Response,
-    store: ProfileStore = Depends(get_store),
-    viewer: ViewerTier = Depends(get_viewer_tier),
+    service: Service = Depends(get_service),
+    caller: Caller = Depends(get_read_caller),
     section: Optional[str] = None,
     offset: int = 0,
     max_chars: Optional[int] = None,
@@ -882,44 +702,13 @@ def get_profile_text(
     into it. Each part is gated like its content route. The response carries
     ``content_hash``, so an edit to the narrative needs no second read.
     """
-    prof = get_profile(slug, store)
-    _gate_profile(get_service(request), get_caller(request), prof, viewer, slug)
+    page = svc.read_profile_text(
+        service, caller, slug, section=section, offset=offset, max_chars=max_chars
+    )
+    _no_store(response)
+    return page
+
+
+def _no_store(response: Response) -> None:
     response.headers["Cache-Control"] = "private, no-store"
     response.headers["Vary"] = VARY_ON_CREDENTIALS
-    explain = explain_tiers(prof.metadata)
-    md = prof.metadata
-    bodies = {
-        name: (prof.soul if name == "soul" else prof.expertise)
-        for name, url, role in _NARRATIVE
-        if artifact_visible(explain, md, url, role, viewer)
-    }
-    names = [name for name, _url, _role in _NARRATIVE]
-    if section is not None and section.lower() not in names:
-        raise _unknown_section(ValueError("unknown section", names))
-    if section is not None:
-        section = section.lower()
-        if section not in bodies:
-            raise HTTPException(status_code=404, detail=f"no {section} text for profile {slug!r}")
-        page = page_text(bodies[section] or "", section=None, offset=offset, max_chars=max_chars)
-        page.section = section
-        page.sections = [TextSection(name=section, offset=0, chars=len(bodies[section] or ""))]
-    else:
-        if not bodies:
-            raise HTTPException(status_code=404, detail=f"no narrative for profile {slug!r}")
-        joined, spans = "", []
-        for name in names:
-            if name not in bodies:
-                continue
-            head = f"# {name.capitalize()}\n\n"
-            if joined:
-                joined += "\n\n"
-            spans.append(
-                TextSection(
-                    name=name, offset=len(joined) + len(head), chars=len(bodies[name] or "")
-                )
-            )
-            joined += head + (bodies[name] or "")
-        page = page_text(joined, section=None, offset=offset, max_chars=max_chars)
-        page.sections = spans
-    page.content_hash = _content_hash(store, store.resolve_slug(slug))
-    return page

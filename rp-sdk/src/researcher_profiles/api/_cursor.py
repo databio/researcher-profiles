@@ -20,7 +20,7 @@ import hashlib
 import json
 from typing import Any
 
-from fastapi import HTTPException
+from ..errors import Invalid
 
 
 def filters_hash(filters: dict[str, Any]) -> str:
@@ -36,19 +36,12 @@ def encode_cursor(position: dict[str, Any], filters: dict[str, Any]) -> str:
     return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
 
-def _bad(message: str) -> HTTPException:
-    return HTTPException(
-        status_code=400,
-        detail={
-            "error": "cursor_mismatch",
-            "message": message,
-            "hint": "start again without a cursor",
-        },
-    )
+def _bad(message: str) -> Invalid:
+    return Invalid(message, code="cursor_mismatch", hint="start again without a cursor")
 
 
 def decode_cursor(cursor: str, filters: dict[str, Any]) -> dict[str, Any]:
-    """The position a cursor carries; 400 ``cursor_mismatch`` if it is not this query's."""
+    """The position a cursor carries; ``Invalid(code="cursor_mismatch")`` if not this query's."""
     try:
         pad = "=" * (-len(cursor) % 4)
         payload = json.loads(base64.urlsafe_b64decode(cursor + pad))

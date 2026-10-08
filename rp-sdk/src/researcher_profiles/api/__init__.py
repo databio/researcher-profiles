@@ -31,10 +31,13 @@ Route handlers
     re-declare them on its own ``APIRouter`` with its own dependencies:
     ``list_profiles``, ``get_profile_detail``, ``list_papers``, ``get_paper``,
     ``get_summaries``, ``search_profile``, ``ask_profile``,
-    ``review_profile``, ``innovate_profile``, ``riff_profile``. Each takes the
-    store and the viewer tier as arguments, and a host supplies them through
-    its own ``Depends``. ``list_profiles`` returns a ``Response`` carrying the
-    ``rp:profileList`` envelope, not a list of models.
+    ``review_profile``, ``innovate_profile``, ``riff_profile``. The profile,
+    paper, text and passage handlers take the ``Service`` and a ``Caller``
+    (``deps.get_service``, ``deps.get_read_caller``) and call the service
+    function of the same job; the rest take the store and the viewer tier. A
+    host supplies them through its own ``Depends``. ``list_profiles`` returns
+    a ``Response`` carrying the ``rp:profileList`` envelope, not a list of
+    models.
 
 Service layer
     ``Service`` (``api.service``) holds the store, the hooks and the app's
