@@ -1,11 +1,15 @@
 # Agent editing: what a management host implements
 
-rp-sdk's edit endpoints are gated by `app.state.owner_verifier` (see
-[the read hooks](read-seam.md) and root `AGENTS.md`). A host that wants a
-separate, narrower agent credential, distinct from a full owner
-session, builds the pieces below on top of that hook. rp-sdk supplies the
-hook points (`require_owner`, `check_write_scope`); the host supplies the
-credential format, the principal lookup, and the access rules.
+rp-sdk's edits are service functions in
+[`api.service`](../../../rp-sdk/src/researcher_profiles/api/service.py):
+`edit_metadata`, `edit_work`, `add_work`, `remove_work` and `set_visibility`.
+Each takes the app's `Service`, an explicit `Caller` (see
+[the read hooks](read-seam.md)) and its arguments, holds every check, and
+raises typed errors (`researcher_profiles.errors`). The edit routes and a
+host's MCP tools are thin adapters over the same functions, so a check never
+lives only in a route or only in a tool. rp-sdk supplies the hook points on
+`app.state.hooks` (`edit_gate`, `write_scope`, `record_edit`); the host
+supplies the credential format, the principal lookup, and the access rules.
 
 ## The `rpa_` prefix
 
@@ -13,34 +17,46 @@ A host distinguishing agent keys from app keys can use a prefix convention
 (e.g. `rpa_` vs `rpk_`) so a leaked credential is identifiable from a log
 line. The format is up to the host, e.g. `rpa_<handle>_<random>`.
 
-## Authentication flow
+## What every edit function does, in order
 
-1. The host resolves the credential to whatever identity object it uses
-   internally (the principal).
-2. The host's `owner_verifier` checks that the principal holds an editor grant
-   on the profile, which satisfies rp-sdk's `require_owner` dependency.
-3. rp-sdk's `check_write_scope` calls the host's `write_scope_verifier` with
-   the action and its detail; the verifier raises 403 if the credential may not
-   make this write, before the write is applied.
+1. Loads the **stored** profile (never a caller's read view), or `NotFound`.
+2. Runs `hooks.edit_gate(caller, profile, read_ok=False)`: may this caller edit
+   this profile at all. It raises `Unauthenticated` (nobody signed in),
+   `Forbidden` (signed in, may not), or `NotFound` (may not even see it). With
+   no gate installed (bare rp-sdk), only the operator token edits, or anyone in
+   open mode.
+3. Checks the version token: a stale `base_hash` (profile) or `base_version`
+   (paper) is `Conflict` carrying the current one.
+4. Runs `hooks.write_scope(caller, profile, action, detail)` for each action
+   the edit makes: may this caller make this specific write. It raises
+   `InsufficientScope` (the credential lacks a scope; asking again could help)
+   or `Forbidden` (only the owner may change this).
+5. Writes, in one write unit. A patch that would produce an invalid document
+   is `Invalid` and changes nothing.
+6. Calls `hooks.record_edit(caller, profile, action, fields, content_hash)` once
+   per action that ran, with the new content hash. This is where a host writes
+   its audit row, so an edit made through any adapter is audited.
+7. Drops the caches (`Service.invalidate`).
 
-## The write-scope verifier
+The HTTP mapper (`api/_errors.py`) turns the typed errors into replies:
+`NotFound` 404, `Unauthenticated` 401, `Forbidden` 403 (with the host's
+`detail` dict when it gives one), `InsufficientScope` 403 with
+`{"error": "insufficient_access", "required", "missing", "hint"}`, `Conflict`
+409 with `{"error": "conflict", "current", "message"}` and `X-RP-Content-Hash`
+or `X-RP-Paper-Version`, `Invalid` 400, `RateLimited` 429 with `Retry-After`.
 
-Every edit route in `api/routes_edit.py` calls
-`check_write_scope(request, action, detail)` (defined in `api/deps.py`) after
-`require_owner` passes and before it touches the profile. `check_write_scope`
-looks up `app.state.write_scope_verifier`; when it is `None` (bare rp-sdk) the
-check is a no-op and any owner may make any write.
+## The write-scope hook
 
 A host that wants field-level scopes writes a callable with this shape and
-installs it on the app:
+installs it:
 
 ```python
-def write_scope_verifier(request: Request, action: str, detail: dict) -> None:
-    # Raise HTTPException(403) when the credential may not make this write.
+def write_scope(caller: Caller, profile, action: str, detail: dict) -> None:
+    # Raise InsufficientScope or Forbidden when this caller may not make this write.
     ...
 
 
-app.state.write_scope_verifier = write_scope_verifier
+app.state.hooks.write_scope = write_scope
 ```
 
 The actions rp-sdk passes, and what Prosopia (the reference host) requires
@@ -55,7 +71,8 @@ it touches.
 | `"works"` | `{"paper_id": "smith2023protein", "fields": ["doi"]}` | `write` on `works`; `fields` is `["*"]` for a whole-record `PUT` and `[]` for a `DELETE` |
 | `"visibility"` | `{"slug": "...", "profile_visibility": "...", "artifacts": [...]}` | never allowed for a key (`403 not_delegable`) |
 
-The 403 it raises looks like this (FastAPI wraps it in `detail`):
+A refusal the host raises as `Forbidden(detail={...})` reaches the client as
+that dict under `detail`; Prosopia's looks like this:
 
 ```json
 {
@@ -85,5 +102,7 @@ separate catalog endpoint for keys; Prosopia lists the parts at
 
 ## See also
 
-- `api/deps.py`: `require_owner`, `require_scope`, `check_write_scope` (the rp-sdk hooks a host builds on)
+- `api/service.py`: the edit and read functions, `require_edit`
+- `api/hooks.py`: the hooks a host builds on; `api/caller.py`: the caller
+- `api/deps.py`: `get_caller`, `get_service`, `require_scope`
 - `rp-sdk/skills/profile-agent/SKILL.md`: the agent-facing instructions

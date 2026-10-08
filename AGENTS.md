@@ -74,36 +74,54 @@ it is guarded by a byte lock.
 ## Host hooks the SDK leaves open
 
 rp-sdk serves profiles on its own with a single operator bearer token. A
-management host that adds people, sessions, and per-app keys sets these
-`app.state` attributes; bare rp-sdk leaves the callables `None` and falls back to
-the operator token. rp-sdk stays agnostic about how a host layers its own
-edits, grants, and consumers on top: never move those semantics into rp-sdk.
-The same list is in the `researcher_profiles.api` package docstring.
+management host that adds people, sessions, and per-app keys fills the seams
+below; bare rp-sdk leaves them at their defaults and falls back to the
+operator token. rp-sdk stays agnostic about how a host layers its own edits,
+grants, and consumers on top: never move those semantics into rp-sdk. The same
+list is in the `researcher_profiles.api` package docstring.
 
-- `app.state.store`: the `ProfileStore` every route reads and writes;
-  `create_app` sets it, and a host that mounts the routers or re-declares the
-  handlers on its own app sets it itself (`api/deps.py::get_store`).
-- `app.state.owner_verifier`: decides whether the caller may edit a profile's
-  canonical documents, and whether they may read its private artifacts.
-- `app.state.consumer_verifier`: checks a per-application scoped key.
-- `app.state.write_scope_verifier`: decides whether a credential may make one
-  specific write (`action`, `detail`); `api/deps.py::check_write_scope` calls it
-  before every edit route forwards the write. See
-  `docs-dev/rp-sdk/developer/agent-editing.md`.
+Logic and every permission check live in service functions
+(`api/service.py`: the profile, paper, text and passage reads, and the edits),
+which take the app's `Service` (`app.state.service`: the store, the hooks, the
+graph caches), an explicit `Caller` (`api/caller.py`) and their arguments, and
+raise the typed errors in `errors.py` (`NotFound`, `Unauthenticated`,
+`Forbidden`, `InsufficientScope`, `Conflict`, `Invalid`, `RateLimited`). The
+routes are thin adapters, `api/_errors.py` maps the errors to HTTP once, and a
+host's MCP server calls the same functions. Never put a check only in a route.
+
+- `app.state.store`: the `ProfileStore`; `create_app` sets it beside
+  `app.state.service`.
+- `app.state.hooks` (`api/hooks.py`), each caller-shaped except the first:
+  - `caller_resolver(request) -> Caller`: who is this request
+    (`deps.get_caller` memoizes it per request);
+  - `viewer_resolver(caller, slug | None) -> ViewerTier`: the most permissive
+    tier this caller may be shown for that profile (default
+    `deps.resolve_viewer_tier`);
+  - `profile_tier_floor(caller, profile, slug) -> TierFloor`: narrows a
+    profile's declared tier here, with the reason. See
+    `docs-dev/rp-sdk/developer/read-seam.md`;
+  - `edit_gate(caller, profile, *, read_ok)`: may this caller edit this
+    profile at all;
+  - `write_scope(caller, profile, action, detail)`: may it make this specific
+    write. See `docs-dev/rp-sdk/developer/agent-editing.md`;
+  - `record_edit(caller, profile, action, fields, content_hash)`: called after
+    every edit commits; the host's audit row;
+  - `registry_proofs(rid) -> list[Proof]`: registry-issued proofs per read;
+  - `store_for(caller, store)`: the per-caller read view; never used by edits.
+- `app.state.consumer_verifier`: checks a per-application scoped key on the
+  push/search/match plane (`require_scope`).
 - `app.state.push_gate`: `(request, slug, rid) -> None`, called on
   `PUT /profiles/{slug}` once the body's rid is known and before anything is
   committed; raises `HTTPException(403)` to refuse a push of that rid
-  (`api/routes_push.py`).
-- `app.state.viewer_resolver`: `(request, slug | None) -> ViewerTier`, the most
-  permissive tier this caller may be shown for that profile; every read is
-  projected through it, and the default is `api/deps.py::resolve_viewer_tier`.
-- `app.state.profile_tier_floor`: narrows a profile's declared privacy tier for
-  this host, and carries the sentence explaining why. See
-  `docs-dev/rp-sdk/developer/read-seam.md`.
+  (`api/routers/push.py`).
 - `app.state.embedding_healthy` and `app.state.embedding_health_detail`: a host
   that runs a startup query-embedding preflight sets the flag to `False` and
   the detail to its diagnosis, and `/health` answers 503 with it; bare rp-sdk
   leaves them `True` and `None`.
+
+The request-shaped slots these replaced (`app.state.owner_verifier`,
+`write_scope_verifier`, `viewer_resolver`, `profile_tier_floor`,
+`registry_proofs`) are gone; `deps.get_caller` raises if a host still sets one.
 
 Persistence is also swappable, but through a class rather than a hook. `ResearcherProfile` composes a
 `ArtifactStorage` (`storage.py`); the filesystem implementation is one backend

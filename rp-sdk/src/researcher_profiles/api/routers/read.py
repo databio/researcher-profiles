@@ -367,7 +367,7 @@ def get_profile_jsonld(
 
     The served document is the stored record plus any registry-issued proofs
     (``orcid_login``), which the registry computes on every request from its
-    own live state and never stores (``app.state.registry_proofs``). A profile
+    own live state and never stores (``app.state.hooks.registry_proofs``). A profile
     with no section projection and no registry proof is served as the exact
     bytes the store persisted (``store.document_bytes``), so the
     ``conformsTo`` claim is about a file anyone can retrieve byte for byte.

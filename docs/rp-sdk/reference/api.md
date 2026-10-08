@@ -367,8 +367,8 @@ holds.
 
 Serve the profile document: the stored record plus any **registry-issued
 proofs** (`orcid_login`), which the registry computes on each request and never
-stores. A host supplies them through the `app.state.registry_proofs` hook, a
-callable `(request, rid) -> list[Proof]` given the rid of the document being
+stores. A host supplies them through the `app.state.hooks.registry_proofs`
+hook, a callable `(rid) -> list[Proof]` given the rid of the document being
 served; bare rp-sdk leaves it `None`. A hook that raises is logged and treated
 as no proofs. When there is no section projection and no registry proof, the
 response is the exact bytes the store persisted, not a re-serialization, so a
@@ -1142,11 +1142,11 @@ retries once on parse failure.
 
 ## The owner edit surface
 
-Gated by `require_owner` rather than by the consumer token (see
+Gated by the service's edit gate rather than by the consumer token (see
 [Authentication](#authentication)). On bare rp-sdk that falls back to the
 operator bearer token. A host that runs the
 [management tier](../../rp-spec/dynamic-api.md#14-management-api) sets
-`app.state.owner_verifier` and these become per-person and per-profile.
+`app.state.hooks.edit_gate` and these become per-person and per-profile.
 
 | Method | Path | Description |
 |---|---|---|
