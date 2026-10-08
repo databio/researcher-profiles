@@ -280,6 +280,21 @@ def _collection_entries(storage, content_url: str) -> list:
     return data.get("hasPart", []) or []
 
 
+def _corpus_ids(storage) -> set[str] | None:
+    """Paper ids in ``sources/papers.jsonld``; None when the profile has none.
+
+    None means "no corpus to filter against" (an interview-built profile),
+    not "an empty corpus".
+    """
+    if not storage.artifact_text("sources/papers.jsonld"):
+        return None
+    return {
+        str(e["paper_id"])
+        for e in _collection_entries(storage, "sources/papers.jsonld")
+        if isinstance(e, dict) and e.get("paper_id")
+    }
+
+
 def _web_page_ids(storage) -> list[str]:
     """Stems of ``sources/web/*.md`` the storage holds, sorted."""
     try:
@@ -301,6 +316,7 @@ def enumerate_source_chunks(
     source_types=None,
     level: str | None = None,
     build_state=None,
+    corpus_only: bool = False,
 ) -> list[Chunk]:
     """Every chunk a profile's index is built over, read through ``ArtifactStorage``.
 
@@ -317,6 +333,11 @@ def enumerate_source_chunks(
     A ``lite`` profile is indexed over paper abstracts only (contaminated
     papers skipped); ``full`` and ``deep`` over expertise, SOUL and summaries,
     and ``deep`` adds grants, the CV and web pages.
+
+    ``corpus_only`` skips a summary whose paper is not in
+    ``sources/papers.jsonld`` (an orphan a builder keeps on disk until it
+    prunes it). Off by default: a profile from elsewhere may name its
+    summaries differently, and the format does not require them to match.
     """
     storage = getattr(source, "storage", source)
     if level is None:
@@ -356,7 +377,10 @@ def enumerate_source_chunks(
             out.extend(chunk_soul(text))
     if "paper_summary" in want:
         summaries = storage.load_summaries()
+        corpus = _corpus_ids(storage) if corpus_only else None
         for paper_id in sorted(summaries):
+            if corpus is not None and paper_id not in corpus:
+                continue
             out.extend(chunk_summary(summaries[paper_id], paper_id))
     if level == "deep":
         if "grant" in want:

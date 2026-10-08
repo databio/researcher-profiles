@@ -60,6 +60,8 @@
     "accessRights": { "@id": "dcterms:accessRights", "@type": "@id" },
     "bytes": "rp:bytes",
     "sha256": "rp:sha256",
+    "inputsDigest": "rp:inputsDigest",
+    "synthesisInputsDigest": "rp:synthesisInputsDigest",
     "hasCitationGraph": "rp:hasCitationGraph",
     "hasEmbeddingIndex": "rp:hasEmbeddingIndex",
     "expertiseCitesPaperIds": "rp:expertiseCitesPaperIds",

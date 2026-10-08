@@ -482,6 +482,11 @@ class ArtifactRef(JsonLdModel):
     #: write time.
     bytes: int | None = None
     sha256: str | None = None
+    #: Provenance for a GENERATED artifact: a digest of the inputs it was made
+    #: from (see the builder's fingerprints). Kept only while the file's
+    #: ``sha256`` is unchanged, so a hand-edited file carries none and reads as
+    #: edited rather than as current or stale.
+    inputs_digest: str | None = Field(default=None, alias="inputsDigest")
     #: This artifact's declared privacy tier. When not explicitly set it
     #: defaults to the role default (:func:`role_default_visibility`); e.g. a
     #: ``cv``/``web``/``paper_fulltext`` artifact defaults to ``private``.

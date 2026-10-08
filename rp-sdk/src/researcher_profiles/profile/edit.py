@@ -116,6 +116,7 @@ LOCKED_METADATA_FIELDS: frozenset[str] = frozenset(
         "has_citation_graph",
         "has_embedding_index",
         "expertise_cites_paper_ids",
+        "synthesis_inputs_digest",
         # the file manifest
         "has_part",
         "subject_of",

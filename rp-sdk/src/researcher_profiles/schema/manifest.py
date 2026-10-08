@@ -20,6 +20,7 @@ cache and are listed, as ``personality/topics.json``.
 """
 
 import hashlib
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
@@ -230,11 +231,43 @@ def _cache_parts(root: Path) -> list[ArtifactRef]:
     ]
 
 
+def _recorded_digests(root: Path) -> dict[tuple[str, str], str]:
+    """``(contentUrl, sha256) -> inputsDigest`` from the recorded manifest."""
+    try:
+        doc = json.loads((root / "profile.jsonld").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(doc, dict):
+        return {}
+    out: dict[tuple[str, str], str] = {}
+    for entry in [*(doc.get("hasPart") or []), *(doc.get("subjectOf") or [])]:
+        if not isinstance(entry, dict):
+            continue
+        url, sha, digest = entry.get("contentUrl"), entry.get("sha256"), entry.get("inputsDigest")
+        if url and sha and digest:
+            out[(str(url), str(sha))] = str(digest)
+    return out
+
+
+def _carry_digest(part: ArtifactRef, recorded: dict[tuple[str, str], str]) -> ArtifactRef:
+    """Keep a recorded ``inputs_digest`` only while the file is byte-identical.
+
+    A file whose bytes changed since the digest was stamped was edited by
+    something other than the generator, so it no longer gets to claim the
+    digest: it reads as edited, never as current.
+    """
+    if part.sha256:
+        part.inputs_digest = recorded.get((part.content_url, part.sha256))
+    return part
+
+
 def build_manifest(profile_dir: str | Path) -> tuple[list[ArtifactRef], list[ArtifactRef]]:
     """Return ``(hasPart, subjectOf)`` for the profile at ``profile_dir``.
 
     ``subjectOf`` carries the persona documents, things *about* the person.
     ``hasPart`` carries everything else: the record, its sources, the index.
+    An ``inputsDigest`` already recorded in ``profile.jsonld`` is carried over
+    for every file whose ``sha256`` still matches.
     """
     root = Path(profile_dir)
     subjects = _present_parts(root, _SUBJECT_SPECS)
@@ -244,8 +277,9 @@ def build_manifest(profile_dir: str | Path) -> tuple[list[ArtifactRef], list[Art
     parts.extend(_present_parts(root, _INDEX_SPECS))
     parts.extend(_cache_parts(root))
 
-    parts = [_stamp(p, root) for p in parts]
-    subjects = [_stamp(s, root) for s in subjects]
+    recorded = _recorded_digests(root)
+    parts = [_carry_digest(_stamp(p, root), recorded) for p in parts]
+    subjects = [_carry_digest(_stamp(s, root), recorded) for s in subjects]
     return parts, subjects
 
 
