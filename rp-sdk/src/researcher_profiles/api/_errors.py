@@ -14,7 +14,8 @@ error                  status  body
 ``InsufficientScope``  403     ``{"detail": {"error": "insufficient_access",
                                "required", "missing", "hint"}}``
 ``Conflict``           409     ``{"detail": {"error": "conflict", "current",
-                               "message"}}`` + ``X-RP-Content-Hash`` (profile) or
+                               "message"}}`` (or the error's own ``detail``) +
+                               ``X-RP-Content-Hash`` (profile) or
                                ``X-RP-Paper-Version`` (paper)
 ``Invalid``            400     ``{"detail": {"error": code, "message", "valid"}}``
                                when ``code`` is set, else ``{"detail": message}``
@@ -53,7 +54,7 @@ def service_error_response(request: Request, exc: ServiceError) -> JSONResponse:
         status = 403
         detail = {
             "error": "insufficient_access",
-            "required": sorted(exc.needed),
+            "required": list(exc.required),
             "missing": list(exc.missing),
             "hint": exc.hint,
         }
@@ -62,8 +63,11 @@ def service_error_response(request: Request, exc: ServiceError) -> JSONResponse:
     elif isinstance(exc, Conflict):
         status = 409
         detail = {"error": "conflict", "message": exc.message}
-        if exc.current is not None:
+        if exc.detail is not None:
+            detail = exc.detail
+        elif exc.current is not None:
             detail = {"error": "conflict", "current": exc.current, "message": exc.message}
+        if exc.current is not None:
             if exc.kind == "profile":
                 headers["X-RP-Content-Hash"] = exc.current
             elif exc.kind == "paper":

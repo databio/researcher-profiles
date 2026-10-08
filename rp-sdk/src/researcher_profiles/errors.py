@@ -133,17 +133,24 @@ class Forbidden(ServiceError):
 
 
 class InsufficientScope(ServiceError):
-    """The credential lacks a scope this needs; asking again could help (403)."""
+    """The credential lacks a scope this needs; asking again could help (403).
+
+    ``needed`` is the scope the credential lacks. ``required`` and ``missing``
+    name what the write needed and what of it is missing, in the host's terms
+    (prosopia's parts); they default to the scopes.
+    """
 
     def __init__(
         self,
         needed: frozenset[str],
         *,
         missing: list[str] | None = None,
+        required: list[str] | None = None,
         hint: str | None = None,
     ):
         self.needed = frozenset(needed)
         self.missing = list(missing) if missing is not None else sorted(self.needed)
+        self.required = list(required) if required is not None else sorted(self.needed)
         self.hint = hint
         super().__init__(f"needs scope {', '.join(sorted(self.needed))}")
 
@@ -153,6 +160,8 @@ class Conflict(ServiceError):
 
     ``kind`` says which version ``current`` is: a profile's content hash, a
     paper's version, or ``"exists"`` for a create that would overwrite.
+    ``detail`` is the wire detail a host wants passed through as is (a plain
+    sentence its interface matches on); without it the mapper builds one.
     """
 
     def __init__(
@@ -161,10 +170,12 @@ class Conflict(ServiceError):
         *,
         current: str | None = None,
         kind: Literal["profile", "paper", "exists"] = "profile",
+        detail: str | dict | None = None,
     ):
         self.message = message
         self.current = current
         self.kind = kind
+        self.detail = detail
         super().__init__(message)
 
 

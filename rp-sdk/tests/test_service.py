@@ -264,3 +264,47 @@ class TestInvalidate:
         service.graph = object()
         svc.edit_metadata(service, OWNER, SLUG, {"field": "X"})
         assert service.graph is None
+
+
+class TestHttpMapper:
+    """The one place typed errors become HTTP: the shapes the SPA and ``rp`` read."""
+
+    def _reply(self, exc):
+        import json
+
+        from researcher_profiles.api import service_error_response
+
+        r = service_error_response(None, exc)
+        return r.status_code, json.loads(r.body)["detail"], r.headers
+
+    def test_conflict_carries_the_current_version_header(self):
+        status, detail, headers = self._reply(Conflict("stale", current="v2", kind="paper"))
+        assert status == 409
+        assert detail == {"error": "conflict", "current": "v2", "message": "stale"}
+        assert headers["X-RP-Paper-Version"] == "v2"
+
+    def test_a_host_detail_passes_through(self):
+        assert self._reply(Conflict("x", kind="exists", detail="you already have one"))[1] == (
+            "you already have one"
+        )
+        assert self._reply(Forbidden("x", detail={"error": "not_delegable"}))[1] == {
+            "error": "not_delegable"
+        }
+
+    def test_insufficient_scope_names_the_parts(self):
+        status, detail, _ = self._reply(
+            InsufficientScope({"profiles:write"}, required=["summary"], missing=["summary"])
+        )
+        assert status == 403
+        assert detail["error"] == "insufficient_access"
+        assert detail["required"] == ["summary"] and detail["missing"] == ["summary"]
+
+    def test_invalid_with_a_code_lists_valid_values(self):
+        status, detail, _ = self._reply(Invalid("no", code="unknown_section", valid=["a"]))
+        assert status == 400
+        assert detail == {"error": "unknown_section", "message": "no", "valid": ["a"]}
+        assert self._reply(Invalid("bad patch"))[1] == "bad patch"
+
+    def test_not_found_and_unauthenticated(self):
+        assert self._reply(NotFound("profile 'x' not found"))[:2] == (404, "profile 'x' not found")
+        assert self._reply(Unauthenticated("login required"))[:2] == (401, "login required")
