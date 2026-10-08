@@ -20,13 +20,16 @@ def _index_root(profile):
     return profile.require_directory("the embedding index")
 
 
-def build_index(profile, *, force: bool = False, backend=None) -> IndexReport:
+def build_index(
+    profile, *, force: bool = False, backend=None, corpus_only: bool = False
+) -> IndexReport:
     """Build (or refresh) the embedding index for a profile.
 
     ``profile`` may be either a :class:`ResearcherProfile` or a path-like
     pointing at a profile directory. The function is the thin, importable
     entry point used by the create/update pipeline; the heavy lifting
-    lives on :class:`SqliteEmbeddingIndex`.
+    lives on :class:`SqliteEmbeddingIndex`. ``corpus_only`` leaves out
+    summaries of papers not in ``sources/papers.jsonld``.
     """
     from pathlib import Path
 
@@ -38,5 +41,5 @@ def build_index(profile, *, force: bool = False, backend=None) -> IndexReport:
     else:
         profile_path = Path(profile)
         document = None
-    idx = SqliteEmbeddingIndex(profile_path, profile_document=document)
+    idx = SqliteEmbeddingIndex(profile_path, profile_document=document, corpus_only=corpus_only)
     return idx.build_index(force=force, backend=backend)

@@ -112,6 +112,7 @@ KEY_ORDER: tuple[str, ...] = (
     "collaborators",
     "anchor",
     "paper_stats",
+    "synthesisInputsDigest",
     "hasPart",
     "subjectOf",
 )
@@ -168,6 +169,7 @@ PART_KEY_ORDER: tuple[str, ...] = (
     "derivedFrom",
     "bytes",
     "sha256",
+    "inputsDigest",
 )
 
 # One merged rank map. ``canonical_dumps`` walks untyped dicts, so a single

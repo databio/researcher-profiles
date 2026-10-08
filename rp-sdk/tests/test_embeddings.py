@@ -1104,3 +1104,31 @@ class TestChunkEnumeration:
             for c in SqliteEmbeddingIndex(d)._enumerate_chunks()
         ]
         assert keys == [("paper_abstract", "a2020x", 0)]
+
+
+def test_corpus_only_leaves_out_summaries_of_papers_not_in_the_corpus(tmp_path):
+    """The builder's corpus filter is opt-in: off, every summary is indexed."""
+    from researcher_profiles.embeddings.cache import SqliteEmbeddingIndex
+
+    d = build_profile_dir(
+        tmp_path / "p",
+        papers=[{"paper_id": "paperA", "title": "A", "year": 2020}],
+    )
+
+    def summary_ids(idx):
+        return {c.source_id for c in idx._enumerate_chunks() if c.source_type == "paper_summary"}
+
+    assert summary_ids(SqliteEmbeddingIndex(d)) == {"paperA", "paperB"}
+    assert summary_ids(SqliteEmbeddingIndex(d, corpus_only=True)) == {"paperA"}
+
+
+def test_citation_tags_of_every_paper_id_shape_are_stripped():
+    """siller-karsten ids end at the year (live2005) or carry a numbered
+    suffix (extracellular2023_2); their tags were left in embedded text."""
+    from researcher_profiles.embeddings.chunking import _strip_citations
+
+    text = (
+        "A [live2005, gi2007] B [extracellular2023_2] C [2016activation] "
+        "D [corces2016lineage] E [20261062] F [2005] G [interview]"
+    )
+    assert _strip_citations(text) == "A  B  C  D  E  F [2005] G [interview]"

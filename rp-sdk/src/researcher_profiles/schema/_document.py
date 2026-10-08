@@ -128,6 +128,10 @@ class ProfileDocument(JsonLdModel):
     #: Date-anchored eligibility facts. LLM-synthesized (requires judgment
     #: over CV/ORCID/web); ``None`` on profiles not yet re-synthesized.
     career_stage: CareerStage | None = None
+    #: Provenance for the LLM-synthesized fields above: a digest of the inputs
+    #: they were written from. A builder compares it against the current inputs
+    #: to decide whether the synthesis is current or stale.
+    synthesis_inputs_digest: str | None = Field(default=None, alias="synthesisInputsDigest")
 
     #: The manifest. Every artifact in the profile, typed and relatively
     #: linked, so an agent landing on a published directory never has to guess.
@@ -331,6 +335,7 @@ DERIVED_FIELDS: frozenset[str] = frozenset(
 DOCUMENT_FIELDS: frozenset[str] = frozenset(
     {
         "research_interests",
+        "synthesis_inputs_digest",
         "context",
         "id_",
         "type_",

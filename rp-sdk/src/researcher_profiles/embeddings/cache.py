@@ -185,8 +185,17 @@ class SqliteEmbeddingIndex:
 
     SCHEMA_VERSION = INDEX_SCHEMA_VERSION
 
-    def __init__(self, profile_dir: str | os.PathLike, *, profile_document: Any = None):
+    def __init__(
+        self,
+        profile_dir: str | os.PathLike,
+        *,
+        profile_document: Any = None,
+        corpus_only: bool = False,
+    ):
         self.profile_dir = Path(profile_dir).expanduser().resolve()
+        #: Leave out summaries of papers not in sources/papers.jsonld (see
+        #: :func:`~.chunking.enumerate_source_chunks`).
+        self.corpus_only = corpus_only
         if not self.profile_dir.is_dir():
             raise FileNotFoundError(f"profile dir not found: {self.profile_dir}")
         # Serve-time derived index: profile-adjacent cache, not build state.
@@ -259,6 +268,7 @@ class SqliteEmbeddingIndex:
             DirectoryArtifactStorage(self.profile_dir),
             level=self._level(),
             build_state=BuildState.load(self.profile_dir),
+            corpus_only=self.corpus_only,
         )
 
     # ------------------------------------------------------------------
