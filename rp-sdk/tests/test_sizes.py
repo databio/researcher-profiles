@@ -8,6 +8,8 @@ never retries a part it cannot have.
 
 import pytest
 
+from researcher_profiles.api.caller import Caller
+
 SLUG = "jane-doe"
 TIERS = ["public", "limited", "private"]
 
@@ -16,7 +18,9 @@ TIERS = ["public", "limited", "private"]
 def client(make_api_client, fixture_profiles_root):
     """jane-doe on a directory store; the caller's tier comes from ``X-Tier``."""
     c = make_api_client(fixture_profiles_root(SLUG))
-    c.app.state.viewer_resolver = lambda request, slug: request.headers.get("X-Tier", "public")
+    c.app.state.hooks.caller_resolver = lambda request: Caller(
+        tier=request.headers.get("X-Tier", "public")
+    )
     return c
 
 

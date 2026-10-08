@@ -409,7 +409,7 @@ def _login_proofs(doc: dict, key: str = "proof") -> list[dict]:
 class TestRegistryProofsServed:
     """Registry-issued proofs are attached when a document is served.
 
-    ``app.state.registry_proofs`` computes them per read. Both ``profile.jsonld``
+    ``app.state.hooks.registry_proofs`` computes them per read. Both ``profile.jsonld``
     URLs and the detail payload carry them; the archive does not; a stored copy is
     never served; without the hook the stored bytes go out verbatim.
     """
@@ -433,11 +433,11 @@ class TestRegistryProofsServed:
         c = make_api_client(store)
         state = {"when": "2026-09-01T12:00:00+00:00"}
 
-        def hook(request, rid):
+        def hook(rid):
             calls.append(rid)
             return [_proof(state["when"])] if rid == _PROOF_ORCID else []
 
-        c.app.state.registry_proofs = hook
+        c.app.state.hooks.registry_proofs = hook
         c.hook_state = state
         return c
 
@@ -514,10 +514,10 @@ class TestRegistryProofsServed:
     def test_raising_hook_is_a_200_without_proof(self, store, make_api_client):
         c = make_api_client(store)
 
-        def boom(request, rid):
+        def boom(rid):
             raise RuntimeError("nope")
 
-        c.app.state.registry_proofs = boom
+        c.app.state.hooks.registry_proofs = boom
         r = c.get("/api/v1/profiles/ada/profile.jsonld")
         assert r.status_code == 200
         assert _login_proofs(r.json()) == []
@@ -569,7 +569,7 @@ class TestRegistryProofsServed:
             "lee", staged, survivor_rid=_PROOF_ORCID, survivor_slug="ada", build_missing_index=False
         )
         c = make_api_client(store)
-        c.app.state.registry_proofs = lambda request, rid: (
+        c.app.state.hooks.registry_proofs = lambda rid: (
             calls.append(rid) or ([_proof()] if rid == _PROOF_ORCID else [])
         )
         doc = c.get("/api/v1/profiles/lee/profile.jsonld").json()
@@ -1049,13 +1049,12 @@ class TestPreCommitHookOverHTTP:
     ):
         """The cache half stayed; the hook half moved off it entirely."""
         from researcher_profiles.api import invalidate_after_write
-        from researcher_profiles.api.deps import get_store
 
         seen = []
         root = fixture_profiles_root(SLUG)
         c = make_api_client(root, pre_commit_hooks=[seen.append])
         request = SimpleNamespace(app=c.app)
-        store = get_store(request)
+        store = c.app.state.service.store
         before = store.generation
         invalidate_after_write(request, store, SLUG)
         assert seen == []

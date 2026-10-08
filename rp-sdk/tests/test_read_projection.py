@@ -30,7 +30,8 @@ import pytest
 from fastapi import HTTPException
 
 from researcher_profiles import ResearcherProfile
-from researcher_profiles.api.deps import ConsumerIdentity, TierFloor
+from researcher_profiles.api.caller import Caller
+from researcher_profiles.api.deps import ConsumerIdentity, TierFloor, default_caller_resolver
 from researcher_profiles.privacy import effective_tiers
 from researcher_profiles.schema import ArtifactRef
 
@@ -186,8 +187,16 @@ def matrix_client(make_api_client, tmp_path):
                 )
             raise HTTPException(status_code=401, detail="invalid or unknown API key")
 
+        def _caller_resolver(request):
+            # The owner reads their own profile whole; everyone else is the
+            # bare-SDK caller (a consumer identity, the operator, anonymous).
+            if request.headers.get("X-Test-User") == "owner":
+                return Caller(tier="private")
+            return default_caller_resolver(request)
+
         c.app.state.owner_verifier = _owner_verifier
         c.app.state.consumer_verifier = _consumer_verifier
+        c.app.state.hooks.caller_resolver = _caller_resolver
         return c
 
     return _make
@@ -852,7 +861,7 @@ class TestProfileCollection:
 
 
 class TestHostFloorHook:
-    """``app.state.profile_tier_floor`` returns a ``TierFloor``: tier and reason.
+    """``app.state.hooks.profile_tier_floor`` returns a ``TierFloor``: tier and reason.
 
     Decision and explanation are one value produced by one call, so the
     sentence can never describe a rule that did not run. A separate static
@@ -864,7 +873,7 @@ class TestHostFloorHook:
         c = matrix_client()
         assert _detail(c, "anonymous").status_code == 200
 
-        c.app.state.profile_tier_floor = lambda request, prof, slug: TierFloor(
+        c.app.state.hooks.profile_tier_floor = lambda caller, prof, slug: TierFloor(
             "limited", "held back"
         )
         assert _detail(c, "anonymous").status_code == 404
@@ -872,7 +881,7 @@ class TestHostFloorHook:
 
     def test_the_floor_is_a_narrowing_not_a_blackout(self, matrix_client):
         c = matrix_client()
-        c.app.state.profile_tier_floor = lambda request, prof, slug: TierFloor(
+        c.app.state.hooks.profile_tier_floor = lambda caller, prof, slug: TierFloor(
             "limited", "held back"
         )
         assert _detail(c, "consumer_lab").status_code == 200
@@ -880,7 +889,7 @@ class TestHostFloorHook:
 
     def test_the_report_carries_the_reason_the_hook_returned(self, matrix_client):
         c = matrix_client()
-        c.app.state.profile_tier_floor = lambda request, prof, slug: TierFloor(
+        c.app.state.hooks.profile_tier_floor = lambda caller, prof, slug: TierFloor(
             "limited", "you have not published this profile."
         )
         report = _get(c, f"/api/v1/profiles/{SLUG}/visibility", "owner").json()
@@ -890,7 +899,7 @@ class TestHostFloorHook:
     def test_the_reason_varies_with_the_profile(self, matrix_client):
         """One static string could not do this, which is why it is gone."""
         c = matrix_client()
-        c.app.state.profile_tier_floor = lambda request, prof, slug: TierFloor(
+        c.app.state.hooks.profile_tier_floor = lambda caller, prof, slug: TierFloor(
             "limited", f"{slug} is held back"
         )
         report = _get(c, f"/api/v1/profiles/{SLUG}/visibility", "owner").json()
@@ -898,7 +907,7 @@ class TestHostFloorHook:
 
     def test_no_floor_reports_no_reason(self, matrix_client):
         c = matrix_client()
-        c.app.state.profile_tier_floor = lambda request, prof, slug: TierFloor()
+        c.app.state.hooks.profile_tier_floor = lambda caller, prof, slug: TierFloor()
         report = _get(c, f"/api/v1/profiles/{SLUG}/visibility", "owner").json()
         assert report["profile_floor"] is None
         assert report["profile_floor_reason"] is None

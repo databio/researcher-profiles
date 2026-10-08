@@ -38,9 +38,8 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from ..privacy import ViewerTier
-from . import deps
 from .caller import Caller
-from .deps import TierFloor
+from .deps import TierFloor, default_caller_resolver, resolve_viewer_tier
 
 
 def _no_floor(_caller: Caller, _prof: Any, _slug: Optional[str]) -> TierFloor:
@@ -51,11 +50,9 @@ def _no_floor(_caller: Caller, _prof: Any, _slug: Optional[str]) -> TierFloor:
 class Hooks:
     """The host seams. Mutable: a host assigns the fields it fills."""
 
-    caller_resolver: Callable[[Any], Caller] = field(
-        default=lambda request: deps.default_caller_resolver(request)
-    )
+    caller_resolver: Callable[[Any], Caller] = field(default=default_caller_resolver)
     viewer_resolver: Callable[[Caller, Optional[str]], ViewerTier] = field(
-        default=lambda caller, slug: deps.resolve_viewer_tier(caller, slug)
+        default=resolve_viewer_tier
     )
     profile_tier_floor: Callable[[Caller, Any, Optional[str]], TierFloor] = field(default=_no_floor)
     edit_gate: Optional[Callable[[Caller, Any], None]] = None

@@ -27,7 +27,9 @@ from ..env import RETIRED_ENV_VARS
 from ..models.api import HealthResponse
 from ..store import ProfileStore, build_store
 from ..store.config import DATABASE_URL_ENV_VAR, PROFILES_ROOT_ENV_VAR
+from ._errors import install_service_errors
 from .deps import configure_logging
+from .hooks import Hooks
 
 # The six route modules hang their handlers on the three routers declared in
 # ``_projection`` at import time, so importing them here is what puts the routes
@@ -44,6 +46,7 @@ from .routers import (  # noqa: F401
 from .routers._routers import edit_router as v1_edit_router
 from .routers._routers import public_router as v1_public_router
 from .routers._routers import router as v1_router
+from .service import Service
 
 logger = logging.getLogger(__name__)
 
@@ -76,12 +79,11 @@ def create_app(
         create_app(SqlProfileStore("postgresql://user@host/db"))
 
     Read privacy is a property of each profile and each caller, not a switch on
-    the read surface: every read route resolves a viewer tier through
-    ``app.state.viewer_resolver`` and projects its response. That slot is
-    optional and is left ``None`` here; when it is unset the routes fall back to
-    :func:`researcher_profiles.api.deps.resolve_viewer_tier`, which is the right
-    answer for a directory you mean to serve whole. A host with sessions or
-    grants installs its own. See ``docs-dev/rp-sdk/developer/read-seam.md``.
+    the read surface: every read resolves a viewer tier through
+    ``app.state.hooks.viewer_resolver`` and projects its response. The default
+    is :func:`researcher_profiles.api.deps.resolve_viewer_tier`, which is the
+    right answer for a directory you mean to serve whole. A host with sessions
+    or grants installs its own. See ``docs-dev/rp-sdk/developer/read-seam.md``.
 
     Parameters
     ----------
@@ -143,16 +145,16 @@ def create_app(
     if accept_fulltext is None:
         accept_fulltext = _env_flag("RESEARCHER_PROFILES_ACCEPT_FULLTEXT")
     app.state.accept_fulltext = accept_fulltext
-    # Lazily built on first graph query (COI / reviewers / neighbors); see
-    # deps.get_graph. Dropped by _invalidate_after_write. Ranking has no
-    # equivalent slot: its managers cache on the store itself and drop their
-    # snapshot when the store's write generation moves (deps.get_match_store).
-    app.state.graph = None
-    # Session-to-owner hook for the interactive edit endpoints. Left None here: a
-    # bare rp-sdk server has no user sessions, so ``require_owner`` falls back to
-    # the operator token. A management host sets a callable here to
-    # switch the edit endpoints to owner-scoped auth. See deps.require_owner.
-    app.state.owner_verifier = None
+    # The host seams (``api.hooks.Hooks``): caller-shaped callables a host
+    # assigns, e.g. ``app.state.hooks.viewer_resolver = ...``. Bare rp-sdk
+    # leaves them at their defaults: the operator token edits, the consumer
+    # identity or the operator token sets the read tier, no floor, no proofs.
+    # See ``docs-dev/rp-sdk/developer/read-seam.md``.
+    app.state.hooks = Hooks()
+    # The service every route and every host adapter calls: the store, the
+    # hooks, and the caches (the lazily built graph, a rootless store's temp
+    # export) that ``Service.invalidate`` drops after a write.
+    app.state.service = Service(store, app.state.hooks)
     # Consumer-to-scope hook for the write/heavy/LLM router. Left None here: a bare
     # rp-sdk server has no consumer layer, so ``require_scope`` falls back to the
     # operator token. A management host sets a callable here to switch
@@ -167,22 +169,6 @@ def create_app(
     # ``HTTPException(403)`` to refuse. Left None: bare rp-sdk has one operator
     # token and no notion of whose profile a rid is.
     app.state.push_gate = None
-    # Viewer-tier hook: ``(request, slug | None) -> ViewerTier``, the most
-    # permissive tier this caller may be shown. Left None here, so bare rp-sdk
-    # uses ``deps.resolve_viewer_tier`` (owner verifier, then consumer identity,
-    # then operator token, else public). A host that knows about sessions and
-    # grants installs its own. Every read is projected through it.
-    app.state.viewer_resolver = None
-    # Host floor hook: ``(request, profile, slug) -> deps.TierFloor``, meaning "no
-    # matter what this document declares, it may not go above X here", together
-    # with the sentence explaining it. A management host pins a profile whose owner has
-    # not published it; bare rp-sdk has no such policy, so a profile's own
-    # declaration is the whole story. See deps.get_profile_tier_floor.
-    app.state.profile_tier_floor = None
-    #: ``Callable[[Request, str], list[Proof]]`` or None. Given the rid of the
-    #: document being served, returns the registry-issued proofs to attach
-    #: (see REGISTRY_ISSUED_PROOF_KINDS). A plain rp-sdk server has none.
-    app.state.registry_proofs = None
     # Health flag: a host that runs a startup query-embedding preflight
     # flips this to False so ``/health`` answers 503 and the
     # container's HEALTHCHECK stops routing traffic to a deployment whose
@@ -198,6 +184,9 @@ def create_app(
     # See ResearcherProfile.write_unit for the ordering and failure contracts.
     for hook in pre_commit_hooks or ():
         store.add_pre_commit_hook(hook)
+
+    # The HTTP mapper: every typed service error becomes its status and body.
+    install_service_errors(app)
 
     if not app.state.token:
         logger.warning(

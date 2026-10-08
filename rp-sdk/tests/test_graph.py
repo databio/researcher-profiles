@@ -331,11 +331,11 @@ def test_push_invalidates_graph(make_api_client, store: Path):
     # Warm the graph and its on-disk cache.
     r = client.get("/api/v1/graph/neighbors/alice")
     assert r.status_code == 200
-    assert client.app.state.graph is not None
+    assert client.app.state.service.graph is not None
     assert graph_db_path(store).is_file()
 
-    # A metadata patch funnels through _invalidate_after_write.
+    # A metadata patch funnels through Service.invalidate.
     r = client.patch("/api/v1/profiles/carol/metadata", json={"field": "Genomics"})
     assert r.status_code == 200, r.text
-    assert client.app.state.graph is None
+    assert client.app.state.service.graph is None
     assert not graph_db_path(store).is_file()

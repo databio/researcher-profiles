@@ -47,7 +47,6 @@ from ..schema import (
 )
 from ..schema.jsonld import canonical_dumps
 from ..store import ProfileStore
-from ..utils.paths import STORE_CACHE_DIRNAME
 from .deps import (
     get_profile_tier_floor,
     viewer_tier_for,
@@ -59,64 +58,11 @@ logger = logging.getLogger(__name__)
 def invalidate_after_write(request: Request, store: ProfileStore, slug: str) -> None:
     """Drop every cache that could still reflect the pre-edit profile.
 
-    The cached profile object and the store's on-disk ``.cache`` memos
-    (centroids/topics/graph): the exact set ``put_profile`` invalidates after a
-    tarball push, factored out so the granular edit endpoints stay consistent
-    with it. ``store.evict`` also bumps the store's write generation, which is
-    the whole in-process invalidation for ranking: the analytics snapshot is
-    stamped with that generation and rebuilds itself.
-
-    **Cache invalidation only.** Dependent-state maintenance does not belong
-    here: this function runs after the write is durable, inside a swallowing
-    ``try/except``, and only for routes that call it. That job lives on the
-    write hooks, ``ResearcherProfile.add_pre_commit_hook``
-    (see :meth:`researcher_profiles.profile.ResearcherProfile.write_unit`),
-    where it runs inside the write, before commit, and is not swallowed.
-
-    Failures here stay swallowed: a stale-cache rebuild is cheap and
-    re-eviction is idempotent.
+    ``store`` is unused: the service drops the caches of the store it holds.
+    See :meth:`researcher_profiles.api.service.Service.invalidate`.
     """
-    store.evict(slug)
-    # The derived graph follows the same rule: drop the in-process snapshot and the
-    # on-disk cache so the next graph query rebuilds over the new corpus. A full
-    # rebuild (not an incremental patch) is the source of truth, so a stale
-    # graph can never survive a push, metadata patch, or visibility change.
-    request.app.state.graph = None
-    # A rootless store materializes into a temp directory that `get_graph`
-    # (see api/deps.py `materialize_store_to_tempdir`) caches on
-    # `_registry_tempdir` and reuses across requests. Dropping the graph
-    # snapshot above is not enough on such a store: the next rebuild would
-    # re-read the same stale temp dir and never see this write. Drop it so the
-    # next graph query re-exports the live corpus. /match no longer needs this:
-    # it ranks over the store's own vector rows, which this write already
-    # updated.
-    tempdir = getattr(request.app.state, "_registry_tempdir", None)
-    if tempdir is not None:
-        cleanup = getattr(tempdir, "cleanup", None)
-        if callable(cleanup):
-            try:
-                cleanup()
-            except OSError:
-                pass
-        request.app.state._registry_tempdir = None
-    # This loop needs a filesystem root. The serve-time derived caches under
-    # the profile's ``.cache/`` and the store's ``.cache/`` are not covered by ``ArtifactStorage``
-    # (regenerable binary artifacts, sqlite handles: different semantics), so
-    # they are not fixed here. A store that is not a directory has none of
-    # them, which is what ``root is None`` means.
-    root = store.root
-    if root is None:
-        return
-    # These names are defined by ``analytics.centroids.CentroidManager.cache_path``,
-    # ``analytics.match.MatchManager.topics_cache_path``, and ``graph.cache.graph_db_path``;
-    # kept literal here because this path must work without importing them.
-    for cache_name in ("centroids.npz", "topics.json", "graph.sqlite"):
-        fp = root / STORE_CACHE_DIRNAME / cache_name
-        if fp.exists():
-            try:
-                fp.unlink()
-            except OSError:
-                pass
+    del store
+    request.app.state.service.invalidate(slug)
 
 
 def _profile_summary(prof, viewer: ViewerTier) -> ProfileSummary:
@@ -153,20 +99,11 @@ def metadata_payload(
 def registry_proofs(request: Request, rid: str) -> list[Proof]:
     """The registry-issued proofs to attach when serving the document of ``rid``.
 
-    Calls ``app.state.registry_proofs`` (``(request, rid) -> list[Proof]``);
-    ``[]`` when the slot is unset, which is every bare rp-sdk server. A hook
-    that raises is logged and treated as ``[]``: a proof failure must never
-    fail a public read.
+    ``app.state.hooks.registry_proofs`` through
+    :meth:`researcher_profiles.api.service.Service.proofs`: ``[]`` when unset,
+    and a hook that raises is logged and treated as ``[]``.
     """
-    hook = getattr(request.app.state, "registry_proofs", None)
-    if hook is None:
-        return []
-    try:
-        return list(hook(request, rid) or [])
-    # Boundary: whatever the host's hook raises, the read still succeeds.
-    except Exception:
-        logger.warning("registry_proofs hook failed for %r", rid, exc_info=True)
-        return []
+    return request.app.state.service.proofs(rid)
 
 
 def _served(prof, viewer: ViewerTier, proofs: Sequence[Proof]) -> ProfileDocument:

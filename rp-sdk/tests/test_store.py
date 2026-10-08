@@ -667,7 +667,7 @@ class TestCreateAppOverAStore:
         assert body["total_profiles"] >= 1
         assert body["ranked_profiles"] == len(matches)
         # Nothing was exported: the temp dir exists only for the graph now.
-        assert getattr(c.app.state, "_registry_tempdir", None) is None
+        assert c.app.state.service.registry_tempdir is None
 
     def test_match_fails_loud_when_the_embedding_backend_is_unavailable(
         self, indexed_sql_store, make_api_client, monkeypatch
@@ -1045,7 +1045,10 @@ class TestSqlVectorsAtQueryTime:
             raise AssertionError("materialization must not build an embedding index")
 
         monkeypatch.setattr(emb, "build_index", _never)
-        request = types.SimpleNamespace(app=types.SimpleNamespace(state=types.SimpleNamespace()))
+        from researcher_profiles.api.service import Service
+
+        state = types.SimpleNamespace(service=Service(indexed_sql_store))
+        request = types.SimpleNamespace(app=types.SimpleNamespace(state=state))
         root = materialize_store_to_tempdir(request, indexed_sql_store)
         assert (Path(root) / "jane-doe" / "profile.jsonld").is_file()
         assert not (Path(root) / "jane-doe" / ".cache" / "embeddings.sqlite").exists()
@@ -1056,7 +1059,9 @@ class TestSqlVectorsAtQueryTime:
         import types
 
         from researcher_profiles.api.deps import materialize_store_to_tempdir
+        from researcher_profiles.api.service import Service
 
-        request = types.SimpleNamespace(app=types.SimpleNamespace(state=types.SimpleNamespace()))
+        state = types.SimpleNamespace(service=Service(indexed_sql_store))
+        request = types.SimpleNamespace(app=types.SimpleNamespace(state=state))
         first = materialize_store_to_tempdir(request, indexed_sql_store)
         assert materialize_store_to_tempdir(request, indexed_sql_store) == first

@@ -9,7 +9,6 @@ import io
 import re
 import tarfile
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -197,15 +196,13 @@ class TestPush:
         to move that generation (which is what rebuilds the roster) and take
         the on-disk ``.cache`` memos with it.
         """
-        from researcher_profiles.api.deps import get_store
-
         reg_dir = fixture_profiles_root(SLUG) / ".cache"
         reg_dir.mkdir()
         (reg_dir / "centroids.npz").write_bytes(b"stale")
         (reg_dir / "topics.json").write_text("{}")
 
         app = api_client.app
-        store = get_store(SimpleNamespace(app=app))
+        store = app.state.service.store
         before = store.generation
         roster = store._rostered()
         assert roster.slugs == [SLUG]

@@ -18,6 +18,7 @@ import pytest
 
 from researcher_profiles import ResearcherProfile
 from researcher_profiles.api import _semantic
+from researcher_profiles.api.caller import Caller
 from researcher_profiles.embeddings.cache import SqliteEmbeddingIndex
 
 from .factories import ConceptBackend, build_profile_dir, refresh_manifest
@@ -93,7 +94,9 @@ def sql_client(tmp_path, concept, make_api_client):
     for d in (a, b):
         store.put(ResearcherProfile.from_files(d))
     c = make_api_client(store, token=TOKEN)
-    c.app.state.viewer_resolver = lambda request, slug: request.headers.get("X-Tier", "public")
+    c.app.state.hooks.caller_resolver = lambda request: Caller(
+        tier=request.headers.get("X-Tier", "public")
+    )
     return c
 
 

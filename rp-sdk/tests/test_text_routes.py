@@ -24,7 +24,7 @@ def _long_text() -> str:
 def client(make_api_client, fixture_profiles_root):
     root = fixture_profiles_root(SLUG)
     c = make_api_client(root)
-    c.app.state.viewer_resolver = lambda request, slug: "private"
+    c.app.state.hooks.viewer_resolver = lambda caller, slug: "private"
     c.profile_dir = root / SLUG
     return c
 
