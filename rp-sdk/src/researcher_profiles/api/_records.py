@@ -1,7 +1,7 @@
 """The sized record shapes: one profile, one paper, one paper row.
 
-Built in one place so every surface that serves them (the REST routes, and the
-MCP server that calls those routes) gets the same trim. The default
+Built in one place so every surface that serves them (the REST routes, and a
+host's MCP server, both through ``api.service``) gets the same trim. The default
 ``record`` view holds what an agent or a list view commonly needs and stays
 under 8 KB: long lists are cut to their top entries with a total, and the
 JSON-LD plumbing and the file manifest are left out. ``view="full"`` keeps
@@ -10,17 +10,16 @@ every field, untrimmed.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any, Literal, Optional
-
-from fastapi import Request
 
 from ..models.api import PaperRecordView, PaperRow, ProfileParts, ProfileRecord
 from ..privacy import SECTION_FIELDS, ViewerTier, section_tiers, tier_allows
 from ..profile.edit import paper_version
 from ..profile.payloads import metadata_payload_dict
-from ..schema import PaperRecord
+from ..schema import PaperRecord, Proof
 from ..store import ProfileStore
-from ._projection import _content_hash, registry_proofs
+from ._projection import _content_hash
 from ._sizes import SizeIndex
 
 View = Literal["record", "full"]
@@ -122,14 +121,17 @@ def profile_record(
     viewer: ViewerTier,
     *,
     view: View,
-    request: Request,
+    proofs: Sequence[Proof] = (),
     store: ProfileStore,
     sizes: Optional[SizeIndex] = None,
 ) -> ProfileRecord:
-    """One profile as ``view`` shows it to ``viewer``. The one trim."""
+    """One profile as ``view`` shows it to ``viewer``. The one trim.
+
+    ``proofs`` are the registry-issued proofs to attach (``Service.proofs``).
+    """
     resolved = store.resolve_slug(prof.slug)
     sizes = sizes or SizeIndex(prof, viewer, store, resolved)
-    data = metadata_payload_dict(prof, viewer, proofs=registry_proofs(request, prof.metadata.rid))
+    data = metadata_payload_dict(prof, viewer, proofs=proofs)
     for key in _MANIFEST_KEYS:
         data.pop(key, None)
     hidden = [f for f in _withheld_fields(prof, viewer) if f in data or f in _RECORD_PLAIN]

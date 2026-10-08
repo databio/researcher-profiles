@@ -34,12 +34,12 @@ from ...store import ProfileStore
 from .._projection import (
     _content_hash,
     _is_hard_floor,
-    invalidate_after_write,
 )
 from ..deps import (
     check_write_scope,
     get_profile,
     get_profile_tier_floor,
+    get_service,
     get_store,
 )
 from ._routers import edit_router
@@ -164,7 +164,7 @@ def patch_profile_metadata(
     except EditError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     resolved = store.resolve_slug(slug)
-    invalidate_after_write(request, store, resolved)
+    get_service(request).invalidate(resolved)
     return EditResult(
         slug=resolved,
         rid=getattr(prof, "rid", None),
@@ -221,7 +221,7 @@ def patch_profile_work(
     except EditError as e:
         raise _work_edit_error(e) from e
     resolved = store.resolve_slug(slug)
-    invalidate_after_write(request, store, resolved)
+    get_service(request).invalidate(resolved)
     return EditResult(
         slug=resolved,
         rid=getattr(prof, "rid", None),
@@ -265,7 +265,7 @@ def add_profile_work(
     except EditError as e:
         raise _work_edit_error(e) from e
     resolved = store.resolve_slug(slug)
-    invalidate_after_write(request, store, resolved)
+    get_service(request).invalidate(resolved)
     return EditResult(
         slug=resolved,
         rid=getattr(prof, "rid", None),
@@ -296,7 +296,7 @@ def delete_profile_work(
     except EditError as e:
         raise _work_edit_error(e) from e
     resolved = store.resolve_slug(slug)
-    invalidate_after_write(request, store, resolved)
+    get_service(request).invalidate(resolved)
     return EditResult(
         slug=resolved,
         rid=getattr(prof, "rid", None),
@@ -425,7 +425,7 @@ def patch_profile_visibility(
         )
     except EditError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
-    invalidate_after_write(request, store, store.resolve_slug(slug))
+    get_service(request).invalidate(store.resolve_slug(slug))
     updated = []
     if body.profile_visibility is not None:
         updated.append("visibility")

@@ -1044,19 +1044,15 @@ class TestPreCommitHookOverHTTP:
         assert r.json()["updated"] == ["field", "soul"]
         assert [ctx.kind for ctx in seen] == ["document", "soul", "soul"]
 
-    def test_invalidate_after_write_no_longer_calls_any_hook(
-        self, make_api_client, fixture_profiles_root
-    ):
+    def test_invalidate_no_longer_calls_any_hook(self, make_api_client, fixture_profiles_root):
         """The cache half stayed; the hook half moved off it entirely."""
-        from researcher_profiles.api import invalidate_after_write
-
         seen = []
         root = fixture_profiles_root(SLUG)
         c = make_api_client(root, pre_commit_hooks=[seen.append])
-        request = SimpleNamespace(app=c.app)
-        store = c.app.state.service.store
+        service = c.app.state.service
+        store = service.store
         before = store.generation
-        invalidate_after_write(request, store, SLUG)
+        service.invalidate(SLUG)
         assert seen == []
         # The cache half stayed, and it is the write generation now: bumping it
         # is the whole in-process invalidation for ranking.

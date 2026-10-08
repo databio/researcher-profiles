@@ -422,7 +422,7 @@ def get_match_store(request: Request):
     Nothing is cached on ``app.state``: the managers cache on the store, which
     already lives at ``app.state.store``, and they drop their snapshot whenever
     the store's write generation moves. That is what replaced the registry
-    object this dependency used to build and ``invalidate_after_write`` used to
+    object this dependency used to build and the write path used to
     null out.
 
     Construction writes nothing, so the ``rid <-> slug`` lookup index is

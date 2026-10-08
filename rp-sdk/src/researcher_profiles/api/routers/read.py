@@ -65,8 +65,10 @@ from .._sizes import (
 )
 from .._text import page_text, sections_of
 from ..deps import (
+    get_caller,
     get_profile,
     get_profile_tier_floor,
+    get_service,
     get_store,
     get_viewer_tier,
     viewer_tier_for,
@@ -307,7 +309,7 @@ def get_profile_detail(
     the view), so ``If-None-Match`` answers 304 for one stored-column read.
     """
     prof = get_profile(slug, store)
-    _gate_profile(request, prof, viewer, slug)
+    _gate_profile(get_service(request), get_caller(request), prof, viewer, slug)
     resolved = store.resolve_slug(slug)
     current = _content_hash(store, resolved)
     headers = {"Cache-Control": "private, no-store", "Vary": VARY_ON_CREDENTIALS}
@@ -316,7 +318,9 @@ def get_profile_detail(
         headers["ETag"] = etag
         if request.headers.get("if-none-match") == etag:
             return Response(status_code=304, headers=headers)
-    record = profile_record(prof, viewer, view=view, request=request, store=store)
+    record = profile_record(
+        prof, viewer, view=view, proofs=get_service(request).proofs(prof.metadata.rid), store=store
+    )
     return Response(
         content=record.model_dump_json(exclude_none=True),
         media_type="application/json",
@@ -341,7 +345,7 @@ def get_profile_files(
     server holds.
     """
     prof = get_profile(slug, store)
-    _gate_profile(request, prof, viewer, slug)
+    _gate_profile(get_service(request), get_caller(request), prof, viewer, slug)
     response.headers["Cache-Control"] = "private, no-store"
     response.headers["Vary"] = VARY_ON_CREDENTIALS
     explain = explain_tiers(prof.metadata)
@@ -385,7 +389,7 @@ def get_profile_jsonld(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     prof = get_profile(slug, store)
-    _gate_profile(request, prof, viewer, slug)
+    _gate_profile(get_service(request), get_caller(request), prof, viewer, slug)
     return _document_response(request, store, prof, viewer, slug)
 
 
@@ -400,7 +404,9 @@ def _document_response(
     :func:`served_document_bytes`).
     """
     try:
-        data = served_document_bytes(request, store, prof, viewer, store.resolve_slug(slug))
+        data = served_document_bytes(
+            get_service(request), store, prof, viewer, store.resolve_slug(slug)
+        )
     except (ProfileNotFoundError, KeyError) as e:
         raise _profile_missing(slug) from e
     # A strong etag over the served bytes, so the short revalidation above is a
@@ -467,7 +473,7 @@ def get_profile_artifact(
     looser tier than its sources.
     """
     prof = get_profile(slug, store)
-    _gate_profile(request, prof, viewer, slug)
+    _gate_profile(get_service(request), get_caller(request), prof, viewer, slug)
     resolved = store.resolve_slug(slug)
 
     # ``profile.jsonld`` is the manifest, not an entry in it, so it is resolved
@@ -595,7 +601,7 @@ def list_papers(
     with no paging.
     """
     prof = get_profile(slug, store)
-    _gate_profile(request, prof, viewer, slug)
+    _gate_profile(get_service(request), get_caller(request), prof, viewer, slug)
     if not _works_visible(prof, viewer):
         raise _profile_missing(slug)
     response.headers["Cache-Control"] = "private, no-store"
@@ -668,7 +674,7 @@ def list_papers(
                 "abstract": p.abstract,
             }
         )
-    ranked, mode, note = hybrid_rank_papers(request, store, prof, viewer, q, candidates)
+    ranked, mode, note = hybrid_rank_papers(store, prof, viewer, q, candidates)
     start = 0
     if cursor:
         start = decode_cursor(cursor, filters).get("o")
@@ -740,7 +746,7 @@ def get_paper(
     returns the whole record.
     """
     prof = get_profile(slug, store)
-    _gate_profile(request, prof, viewer, slug)
+    _gate_profile(get_service(request), get_caller(request), prof, viewer, slug)
     if not _works_visible(prof, viewer):
         raise _profile_missing(slug)
     response.headers["Cache-Control"] = "private, no-store"
@@ -775,7 +781,7 @@ def get_summaries(
     rows' ``summary`` size gives.
     """
     prof = get_profile(slug, store)
-    _gate_profile(request, prof, viewer, slug)
+    _gate_profile(get_service(request), get_caller(request), prof, viewer, slug)
     response.headers["Cache-Control"] = "private, no-store"
     response.headers["Vary"] = VARY_ON_CREDENTIALS
     wanted = _split_ids(ids)
@@ -832,7 +838,7 @@ def get_paper_text(
     span (names are in ``sections``). Offsets are indices into the whole text.
     """
     prof = get_profile(slug, store)
-    _gate_profile(request, prof, viewer, slug)
+    _gate_profile(get_service(request), get_caller(request), prof, viewer, slug)
     response.headers["Cache-Control"] = "private, no-store"
     response.headers["Vary"] = VARY_ON_CREDENTIALS
     url = text_url(paper_id)
@@ -877,7 +883,7 @@ def get_profile_text(
     ``content_hash``, so an edit to the narrative needs no second read.
     """
     prof = get_profile(slug, store)
-    _gate_profile(request, prof, viewer, slug)
+    _gate_profile(get_service(request), get_caller(request), prof, viewer, slug)
     response.headers["Cache-Control"] = "private, no-store"
     response.headers["Vary"] = VARY_ON_CREDENTIALS
     explain = explain_tiers(prof.metadata)

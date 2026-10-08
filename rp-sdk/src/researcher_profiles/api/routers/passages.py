@@ -14,7 +14,13 @@ from ...privacy import ViewerTier, explain_tiers
 from ...store import ProfileStore
 from .._passages import paper_passages, profile_passages
 from .._projection import _gate_profile, _profile_missing, artifact_visible
-from ..deps import get_profile, get_store, get_viewer_tier
+from ..deps import (
+    get_caller,
+    get_profile,
+    get_service,
+    get_store,
+    get_viewer_tier,
+)
 from ._routers import public_router
 
 
@@ -40,7 +46,7 @@ def find_paper_passages(
     ``k`` defaults to 3 and is clamped to 10.
     """
     prof = get_profile(slug, store)
-    _gate_profile(request, prof, viewer, slug)
+    _gate_profile(get_service(request), get_caller(request), prof, viewer, slug)
     if not artifact_visible(
         explain_tiers(prof.metadata), prof.metadata, "sources/papers.jsonld", "works", viewer
     ):
@@ -48,7 +54,7 @@ def find_paper_passages(
     record = next((p for p in prof.papers if p.paper_id == paper_id), None)
     if record is None:
         raise HTTPException(status_code=404, detail=f"no paper {paper_id!r} in profile {slug!r}")
-    return paper_passages(request, store, prof, viewer, record, body.query, body.k)
+    return paper_passages(store, prof, viewer, record, body.query, body.k)
 
 
 @public_router.post(
@@ -70,5 +76,5 @@ def find_profile_passages(
     and ``note`` names it. ``k`` defaults to 3 and is clamped to 10.
     """
     prof = get_profile(slug, store)
-    _gate_profile(request, prof, viewer, slug)
-    return profile_passages(request, store, prof, viewer, body.query, body.k)
+    _gate_profile(get_service(request), get_caller(request), prof, viewer, slug)
+    return profile_passages(store, prof, viewer, body.query, body.k)

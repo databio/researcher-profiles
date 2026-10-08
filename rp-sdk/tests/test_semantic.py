@@ -114,7 +114,7 @@ def _rank(client, q, *, viewer="private", hide_summaries=()):
         }
         for p in PAPERS
     ]
-    return _semantic.hybrid_rank_papers(client, store, prof, viewer, q, cands)
+    return _semantic.hybrid_rank_papers(store, prof, viewer, q, cands)
 
 
 class TestHybridRanking:
@@ -232,7 +232,6 @@ class TestSearchRouteOnSqlStore:
         store.evict(SLUG)
         prof = store.get(SLUG)
         hits, note = _semantic.search_chunks(
-            sql_client,
             store,
             prof,
             "private",

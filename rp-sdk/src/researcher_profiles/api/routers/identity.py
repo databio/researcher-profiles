@@ -13,8 +13,11 @@ from fastapi.responses import JSONResponse
 from ...models.api import ResolveCandidate, ResolveRequest, ResolveResponse
 from ...resolve import ResolveError, resolve_person
 from ...store import ProfileStore
-from .._projection import invalidate_after_write
-from ..deps import get_store, require_scope
+from ..deps import (
+    get_service,
+    get_store,
+    require_scope,
+)
 from ._routers import router
 
 
@@ -48,7 +51,7 @@ def resolve_identity(
     except ResolveError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     if result.created:
-        invalidate_after_write(request, store, store.resolve_slug(result.rid))
+        get_service(request).invalidate(store.resolve_slug(result.rid))
     payload = ResolveResponse(
         rid=result.rid,
         created=result.created,

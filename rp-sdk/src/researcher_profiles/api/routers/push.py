@@ -30,10 +30,11 @@ from ...schema import (
 from ...store import ProfileStore
 from .._projection import (
     _gate_profile,
-    invalidate_after_write,
 )
 from ..deps import (
+    get_caller,
     get_profile,
+    get_service,
     get_store,
     get_viewer_tier,
     require_scope,
@@ -197,7 +198,7 @@ async def _put_profile_json(
     except ProfileWriteError as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
 
-    invalidate_after_write(request, store, slug)
+    get_service(request).invalidate(slug)
 
     logger.info("profile %s JSON upsert", slug)
     return PushResponse(
@@ -255,7 +256,7 @@ async def _put_profile_tarball(
     # on-disk registry caches. Extraction restores archive mtimes, which can
     # predate centroids.npz, so the mtime check alone cannot be trusted to
     # notice a replaced profile.
-    invalidate_after_write(request, store, slug)
+    get_service(request).invalidate(slug)
 
     logger.info("profile %s pushed (%d bytes)", slug, len(data))
     return PushResponse(
@@ -313,7 +314,7 @@ def get_profile_archive(
     # the path below is built from a real directory name rather than the
     # caller-supplied reference.
     prof = get_profile(slug, store)
-    _gate_profile(request, prof, viewer, slug)
+    _gate_profile(get_service(request), get_caller(request), prof, viewer, slug)
     slug = store.resolve_slug(slug)
     root = store.root
     try:

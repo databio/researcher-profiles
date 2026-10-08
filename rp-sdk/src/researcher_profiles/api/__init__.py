@@ -36,18 +36,29 @@ Route handlers
     its own ``Depends``. ``list_profiles`` returns a ``Response`` carrying the
     ``rp:profileList`` envelope, not a list of models.
 
+Service layer
+    ``Service`` (``api.service``) holds the store, the hooks and the app's
+    caches; ``create_app`` builds one on ``app.state.service``. The functions
+    beside it (``get_profile``, ``list_papers``, the text and passage reads,
+    ``edit_metadata``, ``add_work`` and the other edits) take the service, a
+    ``Caller`` (``api.caller``) and their arguments, hold every permission
+    check, and raise the typed errors in ``researcher_profiles.errors``. The
+    routes are thin adapters over them, and a host's MCP server calls the same
+    functions. ``api._errors.service_error_response`` maps the typed errors to
+    HTTP; ``create_app`` installs it. After a write, ``Service.invalidate``
+    drops every cache that could reflect the old profile.
+
 Read projection
-    ``artifact_visible``, ``invalidate_after_write``, ``metadata_payload`` and
-    ``withheld`` are the functions the route modules project through. A host
-    that composes its own surface uses the same four, so it and the SDK cannot
-    disagree about what a viewer may see or about what a write invalidates.
-    ``registry_proofs``, ``served_document`` and ``served_document_bytes``
-    build the served ``profile.jsonld``: the stored record plus the
-    registry-issued proofs the ``registry_proofs`` hook computes per read.
+    ``artifact_visible``, ``metadata_payload`` and ``withheld`` are the
+    functions the route modules project through. A host that composes its own
+    surface uses the same three, so it and the SDK cannot disagree about what
+    a viewer may see. ``served_document`` and ``served_document_bytes`` build
+    the served ``profile.jsonld``: the stored record plus the registry-issued
+    proofs ``Service.proofs`` computes per read.
 
 ``api.deps``
     The dependency callables a host reuses or wraps: ``get_store``,
-    ``get_viewer_tier``, ``get_registry``, ``require_scope``,
+    ``get_service``, ``get_caller``, ``get_viewer_tier``, ``require_scope``,
     ``ConsumerIdentity`` (what a ``consumer_verifier`` returns), ``TierFloor``
     (what a ``profile_tier_floor`` returns) and
     ``materialize_store_to_tempdir`` (how a store without a filesystem root is
@@ -60,28 +71,29 @@ Read projection
     ``PROFILE_TOP_LEVEL``, ``SOURCES_MEMBERS``, ``CACHE_MEMBERS`` and
     ``DEFAULT_MAX_UPLOAD_BYTES``.
 
-``app.state`` hooks
-    Every route reads its store from ``app.state.store``; a host that mounts
-    the routers or re-declares the handlers sets it to a ``ProfileStore``.
-    ``create_app`` sets the auth and policy hooks to ``None`` and a host
-    replaces them with callables: ``owner_verifier``, ``consumer_verifier``,
-    ``write_scope_verifier``, ``push_gate``, ``viewer_resolver``,
-    ``profile_tier_floor`` and ``registry_proofs``. A host that runs an
-    embedding preflight reports it through ``embedding_healthy`` and
-    ``embedding_health_detail``. Each is
-    described where ``create_app`` sets it and in the root ``AGENTS.md``.
+``app.state.hooks``
+    The host seams, one field per seam on a ``Hooks`` (``api.hooks``), every
+    one but ``caller_resolver`` taking a ``Caller`` instead of a request:
+    ``caller_resolver``, ``viewer_resolver``, ``profile_tier_floor``,
+    ``edit_gate``, ``write_scope``, ``record_edit``, ``registry_proofs`` and
+    ``store_for``. A host assigns the ones it fills. Two request-shaped hooks
+    stay on ``app.state`` because they gate the push/search/match plane:
+    ``consumer_verifier`` and ``push_gate``. A host that runs an embedding
+    preflight reports it through ``app.state.embedding_healthy`` and
+    ``embedding_health_detail``. Each is described in ``api.hooks``, where
+    ``create_app`` sets it, and in the root ``AGENTS.md``.
 """
 
 from ._projection import (
     artifact_visible,
-    invalidate_after_write,
     metadata_payload,
-    registry_proofs,
     served_document,
     served_document_bytes,
     withheld,
 )
 from .app import create_app
+from .caller import ANONYMOUS, Caller
+from .hooks import Hooks
 from .routers._routers import edit_router, public_router, router
 from .routers.generative import ask_profile, innovate_profile, review_profile, riff_profile
 from .routers.read import (
@@ -92,8 +104,13 @@ from .routers.read import (
     list_profiles,
 )
 from .routers.search import search_profile
+from .service import Service
 
 __all__ = [
+    "ANONYMOUS",
+    "Caller",
+    "Hooks",
+    "Service",
     "artifact_visible",
     "ask_profile",
     "create_app",
@@ -102,12 +119,10 @@ __all__ = [
     "get_profile_detail",
     "get_summaries",
     "innovate_profile",
-    "invalidate_after_write",
     "list_papers",
     "list_profiles",
     "metadata_payload",
     "public_router",
-    "registry_proofs",
     "review_profile",
     "riff_profile",
     "router",

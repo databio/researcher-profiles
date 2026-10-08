@@ -250,12 +250,7 @@ def _query_backend(store) -> Any:
         return _backends[spec]
 
 
-def _store_of(request_or_app) -> Any:
-    app = getattr(request_or_app, "app", request_or_app)
-    return getattr(getattr(app, "state", None), "store", None)
-
-
-def encode(request, text: str, *, timeout_s: Optional[float] = None):
+def encode(store, text: str, *, timeout_s: Optional[float] = None):
     """``(unit vector | None, encoder name | None, note | None)`` for ``text``.
 
     ``timeout_s`` defaults to :data:`EMBED_TIMEOUT_S`.
@@ -263,7 +258,7 @@ def encode(request, text: str, *, timeout_s: Optional[float] = None):
     import numpy as np
 
     timeout_s = EMBED_TIMEOUT_S if timeout_s is None else timeout_s
-    backend = _query_backend(_store_of(request))
+    backend = _query_backend(store)
     if backend is None:
         return None, None, NOTE_NO_ENCODER
     name = str(getattr(backend, "name", ""))
@@ -290,18 +285,18 @@ def encode(request, text: str, *, timeout_s: Optional[float] = None):
     return vec, name, None
 
 
-def embed_query(request, text: str, *, timeout_s: Optional[float] = None):
+def embed_query(store, text: str, *, timeout_s: Optional[float] = None):
     """The query as a unit vector in the store's space, or ``None`` (fall back)."""
-    return encode(request, text, timeout_s=timeout_s)[0]
+    return encode(store, text, timeout_s=timeout_s)[0]
 
 
-def warm_encoder(app_or_request) -> bool:
+def warm_encoder(store) -> bool:
     """Load the query encoder and embed one dummy query. ``True`` when it worked.
 
     Call once at startup so the first real search does not pay the model load
     inside its 3 s budget.
     """
-    vec, _name, _note = encode(app_or_request, "warm up", timeout_s=120.0)
+    vec, _name, _note = encode(store, "warm up", timeout_s=120.0)
     return vec is not None
 
 
@@ -341,7 +336,6 @@ def _visible_hits(prof_md, viewer: ViewerTier, hits) -> list:
 
 
 def semantic_hits(
-    request,
     store,
     prof,
     viewer: ViewerTier,
@@ -366,7 +360,7 @@ def semantic_hits(
     index = profile_vectors(store, prof.slug)
     if index is None:
         return [], NOTE_NO_VECTORS
-    vec, name, note = encode(request, query)
+    vec, name, note = encode(store, query)
     if vec is None:
         return [], note
     if not same_space(name, index.backend_spec) or vec.shape[0] != index.dim:
@@ -510,7 +504,7 @@ def join_notes(*notes: Optional[str]) -> Optional[str]:
 
 
 def search_chunks(
-    request, store, prof, viewer: ViewerTier, query: str, *, source_types: Iterable[str], k: int
+    store, prof, viewer: ViewerTier, query: str, *, source_types: Iterable[str], k: int
 ) -> tuple[Optional[list], Optional[str]]:
     """Semantic top-``k`` chunks of one profile, with their text, as ``(hits, note)``.
 
@@ -522,7 +516,7 @@ def search_chunks(
     from ..embeddings.cache import SearchHit
 
     raw, note = semantic_hits(
-        request, store, prof, viewer, query, source_types=source_types, k=max(k * 4, k)
+        store, prof, viewer, query, source_types=source_types, k=max(k * 4, k)
     )
     if note is not None:
         return None, note
@@ -559,7 +553,7 @@ def search_chunks(
 
 
 def hybrid_rank_papers(
-    request, store, prof, viewer: ViewerTier, q: str, candidates: list[dict]
+    store, prof, viewer: ViewerTier, q: str, candidates: list[dict]
 ) -> tuple[list[tuple[str, float, list[str]]], str, Optional[str]]:
     """Rank a profile's papers for ``q``: meaning plus keywords, merged with RRF.
 
@@ -585,7 +579,7 @@ def hybrid_rank_papers(
     ]
     keyword = BM25(docs).ranking(q, ids) if ids else []
 
-    hits, note = semantic_hits(request, store, prof, viewer, q, source_types=_PAPER_TYPES, k=10_000)
+    hits, note = semantic_hits(store, prof, viewer, q, source_types=_PAPER_TYPES, k=10_000)
     semantic: list[str] = []
     if note is None:
         best: dict[str, float] = {}

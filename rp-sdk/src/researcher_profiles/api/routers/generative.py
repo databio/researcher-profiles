@@ -32,7 +32,9 @@ from .._projection import (
     _gate_profile,
 )
 from ..deps import (
+    get_caller,
     get_profile,
+    get_service,
     get_store,
     get_viewer_tier,
     require_scope,
@@ -85,7 +87,7 @@ def ask_profile(
     viewer: ViewerTier = Depends(get_viewer_tier),
 ) -> LLMTextResponse:
     prof = get_profile(slug, store)
-    _gate_profile(request, prof, viewer, slug)
+    _gate_profile(get_service(request), get_caller(request), prof, viewer, slug)
     k = clamp(body.k, 5, PERSONA_K_CAP)
     try:
         resp = prof.persona.ask(
@@ -119,7 +121,7 @@ def review_profile(
     viewer: ViewerTier = Depends(get_viewer_tier),
 ) -> LLMTextResponse:
     prof = get_profile(slug, store)
-    _gate_profile(request, prof, viewer, slug)
+    _gate_profile(get_service(request), get_caller(request), prof, viewer, slug)
     k = clamp(body.k, 5, PERSONA_K_CAP)
     try:
         resp = prof.persona.review(
@@ -153,7 +155,7 @@ def innovate_profile(
     viewer: ViewerTier = Depends(get_viewer_tier),
 ) -> IdeaList:
     prof = get_profile(slug, store)
-    _gate_profile(request, prof, viewer, slug)
+    _gate_profile(get_service(request), get_caller(request), prof, viewer, slug)
     k = clamp(body.k, 12, PERSONA_K_CAP)
     try:
         ideas = prof.persona.innovate(
@@ -199,7 +201,7 @@ def riff_profile(
     viewer: ViewerTier = Depends(get_viewer_tier),
 ) -> RiffList:
     prof = get_profile(slug, store)
-    _gate_profile(request, prof, viewer, slug)
+    _gate_profile(get_service(request), get_caller(request), prof, viewer, slug)
     k = clamp(body.k, 4, PERSONA_K_CAP)
     try:
         riffs = prof.persona.riff(

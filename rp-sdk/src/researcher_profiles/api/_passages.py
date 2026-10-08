@@ -129,9 +129,7 @@ class _Candidate:
         self.vector_key = vector_key
 
 
-def _rank(
-    request, store, prof, viewer, query: str, cands: list[_Candidate], *, types, source_id, k
-):
+def _rank(store, prof, viewer, query: str, cands: list[_Candidate], *, types, source_id, k):
     """Fuse a semantic and a keyword ranking over ``cands``.
 
     Returns ``(fused, semantic_ran, note, stale)``. Only candidates with a
@@ -159,7 +157,7 @@ def _rank(
         note = None
     else:
         hits, note = sem.semantic_hits(
-            request, store, prof, viewer, query, source_types=types, source_id=source_id, k=10_000
+            store, prof, viewer, query, source_types=types, source_id=source_id, k=10_000
         )
         if note is None:
             ran = True
@@ -182,7 +180,7 @@ def _summary_text(prof, viewer, explain, paper_id: str, record) -> tuple[Optiona
 
 
 def paper_passages(
-    request, store, prof, viewer: ViewerTier, record, query: str, k: Optional[int]
+    store, prof, viewer: ViewerTier, record, query: str, k: Optional[int]
 ) -> PassageList:
     """The passages of one paper (``record``) that best answer ``query``."""
     from ..embeddings.chunking import chunk_abstract, chunk_summary
@@ -231,7 +229,7 @@ def paper_passages(
 
     types = {"paper_summary", "paper_abstract"}
     fused, ran, sem_note, stale = _rank(
-        request, store, prof, viewer, query, cands, types=types, source_id=pid, k=k_applied
+        store, prof, viewer, query, cands, types=types, source_id=pid, k=k_applied
     )
     notes.append(sem.stale_note(stale))
     if ran:
@@ -246,9 +244,7 @@ def paper_passages(
 _PROFILE_SOURCES = ("soul", "expertise", "cv", "web", "grant")
 
 
-def profile_passages(
-    request, store, prof, viewer: ViewerTier, query: str, k: Optional[int]
-) -> PassageList:
+def profile_passages(store, prof, viewer: ViewerTier, query: str, k: Optional[int]) -> PassageList:
     """The passages of one profile's narrative, CV, web pages and grants."""
     from ..embeddings.chunking import enumerate_source_chunks
 
@@ -297,7 +293,7 @@ def profile_passages(
                 )
 
     fused, ran, sem_note, stale = _rank(
-        request, store, prof, viewer, query, cands, types=set(searched), source_id=None, k=k_applied
+        store, prof, viewer, query, cands, types=set(searched), source_id=None, k=k_applied
     )
     notes.append(sem.stale_note(stale))
     if ran:

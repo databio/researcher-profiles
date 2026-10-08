@@ -60,9 +60,11 @@ from .._projection import (
     _visible_hits,
 )
 from ..deps import (
+    get_caller,
     get_graph,
     get_match_store,
     get_profile,
+    get_service,
     get_store,
     get_viewer_tier,
     require_scope,
@@ -97,7 +99,7 @@ def search_profile(
     ``SNIPPET_CHARS`` (``truncated``).
     """
     prof = get_profile(slug, store)
-    _gate_profile(request, prof, viewer, slug)
+    _gate_profile(get_service(request), get_caller(request), prof, viewer, slug)
     k = clamp(body.k, *SEARCH_K)
     allowed = _allowed_source_types(prof.metadata, viewer)
     types = list(allowed) if allowed is not None else list(CHUNK_SOURCE_TYPE_ROLE)
@@ -105,9 +107,7 @@ def search_profile(
     if requested is not None:
         requested = [requested] if isinstance(requested, str) else list(requested)
         types = [st for st in types if st in requested]
-    hits, note = _semantic.search_chunks(
-        request, store, prof, viewer, body.query, source_types=types, k=k
-    )
+    hits, note = _semantic.search_chunks(store, prof, viewer, body.query, source_types=types, k=k)
     if hits is None:
         # No vectors for this profile, or no usable query encoder: the
         # operation is not available here, which is not a server fault.
@@ -542,7 +542,7 @@ def rank_works_for_profile(
     profile's topics and citation neighborhood, then ranks them.
     """
     prof = get_profile(slug, store)
-    _gate_profile(request, prof, viewer, slug)
+    _gate_profile(get_service(request), get_caller(request), prof, viewer, slug)
     rank = _rank_works()
     k = clamp(body.k, *RANK_K)
     max_pages = clamp(body.max_pages, 5, RANK_MAX_PAGES_CAP)

@@ -511,7 +511,7 @@ class TestSearchProjection:
 
         captured: dict = {}
 
-        def _search(request, store, prof, viewer, query, *, source_types, k):
+        def _search(store, prof, viewer, query, *, source_types, k):
             captured["source_types"] = list(source_types)
             # Ignores the restriction on purpose: the route's own drop is the guarantee.
             return [_Hit(t) for t in ("paper_summary", "cv", "web", "grant")], None

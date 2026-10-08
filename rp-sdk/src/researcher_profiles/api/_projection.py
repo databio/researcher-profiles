@@ -7,10 +7,10 @@ beside this, in :mod:`.routers._routers`.
 
 Some of these are the hooks a hosting service composes against, and they are
 re-exported without an underscore from ``researcher_profiles.api``:
-``artifact_visible``, ``invalidate_after_write``, ``metadata_payload``,
-``withheld``, and the serve-time document helpers ``registry_proofs``,
-``served_document`` and ``served_document_bytes``. Everything else here is
-internal to the route modules.
+``artifact_visible``, ``metadata_payload``, ``withheld``, and the serve-time
+document helpers ``served_document`` and ``served_document_bytes``. Everything
+else here is internal to the route modules. Cache invalidation after a write
+is ``Service.invalidate``.
 """
 
 import json
@@ -19,8 +19,9 @@ from collections.abc import Sequence
 from datetime import datetime, timezone
 from email.utils import format_datetime
 
-from fastapi import HTTPException, Request
+from fastapi import Request
 
+from ..errors import NotFound
 from ..models.api import (
     ProfileMetadataPayload,
     ProfileSummary,
@@ -55,16 +56,6 @@ from .deps import (
 logger = logging.getLogger(__name__)
 
 
-def invalidate_after_write(request: Request, store: ProfileStore, slug: str) -> None:
-    """Drop every cache that could still reflect the pre-edit profile.
-
-    ``store`` is unused: the service drops the caches of the store it holds.
-    See :meth:`researcher_profiles.api.service.Service.invalidate`.
-    """
-    del store
-    request.app.state.service.invalidate(slug)
-
-
 def _profile_summary(prof, viewer: ViewerTier) -> ProfileSummary:
     """Validate the shared summary projection into the wire model.
 
@@ -86,7 +77,7 @@ def metadata_payload(
     cannot drift. The projection is ``payloads.metadata_payload_dict``.
 
     ``proofs`` are the registry-issued proofs to attach to this read (see
-    :func:`registry_proofs`); any stored copy of such a proof is dropped.
+    ``Service.proofs``); any stored copy of such a proof is dropped.
     """
     return ProfileMetadataPayload.model_validate(metadata_payload_dict(prof, viewer, proofs=proofs))
 
@@ -96,23 +87,13 @@ def metadata_payload(
 # ---------------------------------------------------------------------------
 
 
-def registry_proofs(request: Request, rid: str) -> list[Proof]:
-    """The registry-issued proofs to attach when serving the document of ``rid``.
-
-    ``app.state.hooks.registry_proofs`` through
-    :meth:`researcher_profiles.api.service.Service.proofs`: ``[]`` when unset,
-    and a hook that raises is logged and treated as ``[]``.
-    """
-    return request.app.state.service.proofs(rid)
-
-
 def _served(prof, viewer: ViewerTier, proofs: Sequence[Proof]) -> ProfileDocument:
     md = prof.metadata
     doc = project_document(md, viewer)
     return doc.model_copy(update={"proof": strip_registry_issued_proofs(doc.proof) + list(proofs)})
 
 
-def served_document(request: Request, prof, viewer: ViewerTier) -> ProfileDocument:
+def served_document(service, prof, viewer: ViewerTier) -> ProfileDocument:
     """The document a registry serves: the stored record plus its registry proofs.
 
     Projected for ``viewer`` (sections and ``accessRights``). The stored
@@ -120,11 +101,11 @@ def served_document(request: Request, prof, viewer: ViewerTier) -> ProfileDocume
     the hook's are appended. Never mutates ``prof.metadata``: the store caches
     that object.
     """
-    return _served(prof, viewer, registry_proofs(request, prof.metadata.rid))
+    return _served(prof, viewer, service.proofs(prof.metadata.rid))
 
 
 def served_document_bytes(
-    request: Request, store: ProfileStore, prof, viewer: ViewerTier, slug: str
+    service, store: ProfileStore, prof, viewer: ViewerTier, slug: str
 ) -> bytes:
     """The ``profile.jsonld`` bytes to serve for ``prof`` to ``viewer``.
 
@@ -136,7 +117,7 @@ def served_document_bytes(
     with no hook must not serve one either). Raises what ``document_bytes``
     raises when the store has lost the profile.
     """
-    proofs = registry_proofs(request, prof.metadata.rid)
+    proofs = service.proofs(prof.metadata.rid)
     stored_registry_proof = any(p.kind in REGISTRY_ISSUED_PROOF_KINDS for p in prof.metadata.proof)
     if not prof.metadata.section_visibility and not proofs and not stored_registry_proof:
         # The stored JSON as written, plus the derived ``accessRights`` labels.
@@ -194,14 +175,14 @@ def _http_date(iso: str | None) -> str | None:
         return None
 
 
-def _profile_missing(ref: str) -> HTTPException:
+def _profile_missing(ref: str) -> NotFound:
     """The 404 for "no such profile" and for "not for you": byte-identical."""
-    return HTTPException(status_code=404, detail=f"profile {ref!r} not found")
+    return NotFound(f"profile {ref!r} not found")
 
 
-def _gate_profile(request: Request, prof, viewer: ViewerTier, ref: str) -> None:
-    """Raise the not-found 404 unless ``viewer`` may see this profile."""
-    floor = get_profile_tier_floor(request, prof, ref)
+def _gate_profile(service, caller, prof, viewer: ViewerTier, ref: str) -> None:
+    """Raise the not-found unless ``viewer`` may see this profile."""
+    floor = service.floor(caller, prof, ref)
     if not profile_visible(prof.metadata, viewer, floor=floor.tier):
         raise _profile_missing(ref)
 
@@ -301,7 +282,7 @@ def _visible_hits(prof_md, viewer: ViewerTier, hits) -> list:
 
 
 # ---------------------------------------------------------------------------
-# Owner-scoped interactive edits (edit_router; gated by require_owner)
+# Owner-scoped interactive edits (edit_router)
 # ---------------------------------------------------------------------------
 
 
