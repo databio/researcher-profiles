@@ -47,8 +47,9 @@ Service layer
     ``Caller`` (``api.caller``) and their arguments, hold every permission
     check, and raise the typed errors in ``researcher_profiles.errors``. The
     routes are thin adapters over them, and a host's MCP server calls the same
-    functions. ``api._errors.service_error_response`` maps the typed errors to
-    HTTP; ``create_app`` installs it. After a write, ``Service.invalidate``
+    functions. ``service_error_response`` maps the typed errors to HTTP;
+    ``create_app`` installs it, and a host that re-declares the handlers on
+    its own app calls ``install_service_errors(app)``. After a write, ``Service.invalidate``
     drops every cache that could reflect the old profile.
 
 Read projection
@@ -87,6 +88,7 @@ Read projection
     ``create_app`` sets it, and in the root ``AGENTS.md``.
 """
 
+from ._errors import install_service_errors, service_error_response
 from ._projection import (
     artifact_visible,
     metadata_payload,
@@ -121,6 +123,7 @@ __all__ = [
     "get_paper",
     "get_profile_detail",
     "get_summaries",
+    "install_service_errors",
     "innovate_profile",
     "list_papers",
     "list_profiles",
@@ -132,5 +135,6 @@ __all__ = [
     "search_profile",
     "served_document",
     "served_document_bytes",
+    "service_error_response",
     "withheld",
 ]
