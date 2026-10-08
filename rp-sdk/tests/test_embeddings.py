@@ -1120,3 +1120,15 @@ def test_corpus_only_leaves_out_summaries_of_papers_not_in_the_corpus(tmp_path):
 
     assert summary_ids(SqliteEmbeddingIndex(d)) == {"paperA", "paperB"}
     assert summary_ids(SqliteEmbeddingIndex(d, corpus_only=True)) == {"paperA"}
+
+
+def test_citation_tags_of_every_paper_id_shape_are_stripped():
+    """siller-karsten ids end at the year (live2005) or carry a numbered
+    suffix (extracellular2023_2); their tags were left in embedded text."""
+    from researcher_profiles.embeddings.chunking import _strip_citations
+
+    text = (
+        "A [live2005, gi2007] B [extracellular2023_2] C [2016activation] "
+        "D [corces2016lineage] E [20261062] F [2005] G [interview]"
+    )
+    assert _strip_citations(text) == "A  B  C  D  E  F [2005] G [interview]"

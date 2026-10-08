@@ -6,8 +6,13 @@ from dataclasses import dataclass, field
 # Heading detection
 _H2_RE = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
 _H3_RE = re.compile(r"^###\s+(.+?)\s*$", re.MULTILINE)
-# Citation tags like [foo2024bar] or [foo2024bar, baz2025qux]
-_CITATION_RE = re.compile(r"\[(?:[a-z][a-z0-9]*\d{4}[a-z0-9]+(?:,\s*)?)+\]")
+# Citation tags like [foo2024bar] or [foo2024bar, baz2025qux]. A paper id
+# holds a 4-digit year and may end there (live2005), carry a numbered suffix
+# (extracellular2023_2), start with the year (2016activation), or be all
+# digits (20261062, 8+ so a bracketed year never matches). Keep in step with
+# agent-runners pipelines/rprofiles/summaries.py PAPER_ID_PATTERN.
+_PAPER_ID = r"(?:[^\W\d_A-Z][\w-]*?\d{4}[\w-]*|\d{4}[^\W\d_A-Z]{2,}[\w-]*|\d{8,})"
+_CITATION_RE = re.compile(rf"\[(?:{_PAPER_ID}(?:,\s*)?)+\]")
 _ABSTRACT_ONLY_RE = re.compile(r"\[abstract-only\]\s*", re.IGNORECASE)
 
 MAX_CHUNK_CHARS = 8000
