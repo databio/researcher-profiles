@@ -163,7 +163,7 @@ class ProfileStore(Protocol):
           own filesystem (``api.upload``, ``api.routers.push``); each already
           has a scratch-space fallback for ``None``.
         * Invalidating those same store-wide caches after a write
-          (``api._projection``). They sit outside ``ArtifactStorage``, so
+          (``api.service.Service.invalidate``). They sit outside ``ArtifactStorage``, so
           nothing else can drop them; a ``None`` root means there are none.
 
         ``tests/test_guardrails.py`` holds the allowlist to match, so a new

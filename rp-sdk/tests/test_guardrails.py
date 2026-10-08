@@ -819,6 +819,7 @@ class TestStoragePurity:
         "analytics/match.py",
         "analytics/roster.py",
         "api/_projection.py",
+        "api/service.py",
         "api/deps.py",
         "api/routers/push.py",
         "api/upload.py",
