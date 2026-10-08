@@ -279,7 +279,7 @@ class TestEditEndpointsOwnerScoped:
             user = request.headers.get("X-Test-User")
             return Caller(scopes=frozenset({f"user:{user}"}) if user else frozenset())
 
-        def _gate(caller, prof, *, read_ok=False):  # noqa: ARG001
+        def _gate(caller, prof, *, read_ok=False, ref=None):  # noqa: ARG001
             if not caller.scopes:
                 raise Unauthenticated("login required")
             if "user:owner" not in caller.scopes:

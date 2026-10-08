@@ -165,7 +165,7 @@ def matrix_client(make_api_client, tmp_path):
         _build_full_profile(root, visibility=visibility, overrides=overrides)
         c = make_api_client(root, token=OPERATOR_TOKEN)
 
-        def _edit_gate(caller, prof, *, read_ok=False):  # noqa: ARG001
+        def _edit_gate(caller, prof, *, read_ok=False, ref=None):  # noqa: ARG001
             if not caller.scopes:
                 raise Unauthenticated("login required")
             if "user:owner" not in caller.scopes:

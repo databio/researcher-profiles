@@ -42,7 +42,7 @@ class Recorder:
         self.calls.append((caller, prof.slug, action, fields, content_hash))
 
 
-def _gate(caller, prof, *, read_ok=False):  # noqa: ARG001
+def _gate(caller, prof, *, read_ok=False, ref=None):  # noqa: ARG001
     if not caller.scopes:
         raise Unauthenticated("login required")
     if "user:owner" not in caller.scopes:
@@ -311,7 +311,7 @@ class TestHttpMapper:
 
 
 def test_a_gate_not_found_names_the_callers_ref(store):
-    def hide(caller, prof, *, read_ok=False):  # noqa: ARG001
+    def hide(caller, prof, *, read_ok=False, ref=None):  # noqa: ARG001
         raise NotFound(f"profile {prof.slug!r} not found")
 
     service = Service(store, Hooks(edit_gate=hide))

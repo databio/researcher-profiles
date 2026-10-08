@@ -100,8 +100,8 @@ host's MCP server calls the same functions. Never put a check only in a route.
   - `profile_tier_floor(caller, profile, slug) -> TierFloor`: narrows a
     profile's declared tier here, with the reason. See
     `docs-dev/rp-sdk/developer/read-seam.md`;
-  - `edit_gate(caller, profile, *, read_ok)`: may this caller edit this
-    profile at all;
+  - `edit_gate(caller, profile, *, read_ok, ref)`: may this caller edit this
+    profile at all (`ref` is how the caller named it);
   - `write_scope(caller, profile, action, detail)`: may it make this specific
     write. See `docs-dev/rp-sdk/developer/agent-editing.md`;
   - `record_edit(caller, profile, action, fields, content_hash)`: called after

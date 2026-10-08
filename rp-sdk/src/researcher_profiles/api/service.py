@@ -534,18 +534,19 @@ def require_edit(
 ) -> None:
     """May this caller edit ``prof`` (or, with ``read_ok``, read its owner tooling)?
 
-    ``hooks.edit_gate(caller, prof, read_ok=...)`` when a host installed one;
-    it raises ``Unauthenticated``, ``Forbidden`` or ``NotFound``. A gate's
-    ``NotFound`` is re-said for ``ref``, the caller's own input, so a refusal
-    never names the resolved slug. Without a gate, the operator credential
+    ``hooks.edit_gate(caller, prof, read_ok=..., ref=...)`` when a host
+    installed one; it raises ``Unauthenticated``, ``Forbidden`` or
+    ``NotFound``. ``ref`` is the caller's own input, for a refusal that must
+    not name the resolved slug; a gate's ``NotFound`` is re-said for it too. Without a gate, the operator credential
     edits (and anyone in open mode); everyone else is ``Unauthenticated``.
     """
     gate = service.hooks.edit_gate
     if gate is not None:
+        ref = ref if ref is not None else prof.slug
         try:
-            gate(caller, prof, read_ok=read_ok)
+            gate(caller, prof, read_ok=read_ok, ref=ref)
         except NotFound as e:
-            raise profile_missing(ref if ref is not None else prof.slug) from e
+            raise profile_missing(ref) from e
         return
     if caller.is_operator or service.open_mode:
         return

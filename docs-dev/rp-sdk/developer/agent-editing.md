@@ -20,7 +20,7 @@ line. The format is up to the host, e.g. `rpa_<handle>_<random>`.
 ## What every edit function does, in order
 
 1. Loads the **stored** profile (never a caller's read view), or `NotFound`.
-2. Runs `hooks.edit_gate(caller, profile, read_ok=False)`: may this caller edit
+2. Runs `hooks.edit_gate(caller, profile, read_ok=False, ref=...)`: may this caller edit
    this profile at all. It raises `Unauthenticated` (nobody signed in),
    `Forbidden` (signed in, may not), or `NotFound` (may not even see it). With
    no gate installed (bare rp-sdk), only the operator token edits, or anyone in

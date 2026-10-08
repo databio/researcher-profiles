@@ -14,10 +14,11 @@ rp-sdk server leaves them at their defaults:
     Default: :func:`researcher_profiles.api.deps.resolve_viewer_tier`.
 ``profile_tier_floor(caller, profile, slug | None) -> TierFloor``
     A host ceiling on one profile, with its reason. Default: no floor.
-``edit_gate(caller, profile, *, read_ok=False) -> None``
+``edit_gate(caller, profile, *, read_ok=False, ref) -> None``
     May this caller edit this profile at all (``read_ok``: or read its owner
-    tooling, the visibility report). Raises ``Unauthenticated``, ``Forbidden``
-    or ``NotFound``. ``None``: the operator credential (or open mode, no token
+    tooling, the visibility report). ``ref`` is how the caller named the
+    profile, for a refusal that must not disclose its resolved slug. Raises
+    ``Unauthenticated``, ``Forbidden`` or ``NotFound``. ``None``: the operator credential (or open mode, no token
     configured) edits, nobody else.
 ``write_scope(caller, profile, action, detail) -> None``
     May this caller make this specific write. Raises ``InsufficientScope`` or
