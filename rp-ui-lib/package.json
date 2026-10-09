@@ -1,7 +1,7 @@
 {
   "name": "@researcher-profiles/ui-lib",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "description": "Canonical presentational library for the researcher-profiles wire contract.",
   "exports": {

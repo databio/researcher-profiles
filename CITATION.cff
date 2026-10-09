@@ -15,7 +15,7 @@ authors:
 repository-code: "https://github.com/databio/researcher-profiles"
 url: "https://github.com/databio/researcher-profiles"
 license: MIT
-version: 0.3.0
+version: 0.2.0
 keywords:
   - researcher profile
   - JSON-LD

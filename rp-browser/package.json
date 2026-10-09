@@ -1,7 +1,7 @@
 {
   "name": "@researcher-profiles/browser",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "description": "Researcher Profile Browser and Conformance Validator: a serverless SPA for browsing and validating published researcher profiles.",
   "scripts": {

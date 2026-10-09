@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "researcher-profiles"
-version = "0.3.0"
+version = "0.2.0"
 description = "Portable, validated representation of on-disk researcher profiles."
 readme = "README.md"
 requires-python = ">=3.12"
