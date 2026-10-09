@@ -185,42 +185,9 @@ def load_graph(root: str | Path) -> tuple[list[PersonNode], list[GraphEdge], dic
     return nodes, edges, meta
 
 
-def delete_profile(root: str | Path, rid: str) -> None:
-    """Remove one profile's node and its incident edges from the store.
-
-    The incremental primitive: on a single-profile change a caller may drop that
-    profile's rows and re-derive, rather than rebuilding the whole graph. It is
-    the full rebuild, not this, that remains the source of truth (the write
-    invalidation path unlinks the DB and rebuilds), so this can never silently
-    diverge from a clean build.
-    """
-    path = graph_db_path(root)
-    if not path.is_file():
-        return
-    conn = sqlite3.connect(str(path))
-    try:
-        conn.execute("DELETE FROM nodes WHERE person_key = ?", (rid,))
-        conn.execute("DELETE FROM edges WHERE src_key = ? OR dst_key = ?", (rid, rid))
-        conn.commit()
-    finally:
-        conn.close()
-
-
-def unlink_graph(root: str | Path) -> None:
-    """Delete the on-disk graph cache (called by the post-write invalidation hook)."""
-    path = graph_db_path(root)
-    if path.exists():
-        try:
-            path.unlink()
-        except OSError:
-            pass
-
-
 __all__ = [
     "GRAPH_DB_NAME",
     "graph_db_path",
     "save_graph",
     "load_graph",
-    "delete_profile",
-    "unlink_graph",
 ]

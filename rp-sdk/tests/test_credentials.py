@@ -21,8 +21,10 @@ from researcher_profiles.cli.auth import credentials as creds
 from researcher_profiles.cli.auth.agent import (
     AgentAPIError,
     Credential,
+    CredentialError,
     InsufficientAccessError,
     ManagementClient,
+    resolve_credential,
 )
 
 SERVER = "https://people.example.org"
@@ -35,6 +37,49 @@ def stored(tmp_path):
     login = creds.Login(url=SERVER, token="rpk_stored", orcid="0000-0002-1825-0097", name="Jane")
     creds.save_login(login)
     return login
+
+
+class TestConfigDir:
+    @pytest.fixture
+    def agent_env(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("RESEARCHER_PROFILES_AGENT_KEY", raising=False)
+        monkeypatch.delenv("RESEARCHER_PROFILES_API_URL", raising=False)
+        monkeypatch.delenv("RESEARCHER_PROFILES_AUTH_HOST", raising=False)
+
+    def _write_toml(self, mode):
+        d = creds.config_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        f = d / "credentials.toml"
+        f.write_text('default = "h"\n[hosts.h]\nkey = "rpa_x"\nurl = "https://x"\n')
+        f.chmod(mode)
+        return f
+
+    def test_xdg(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+        assert creds.config_dir() == tmp_path / "researcher-profiles"
+
+    def test_home_fallback(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        assert creds.config_dir() == tmp_path / ".config" / "researcher-profiles"
+
+    def test_both_files_share_folder(self, agent_env):
+        assert creds.credentials_path().parent == creds.config_dir()
+        with pytest.raises(CredentialError) as exc:
+            resolve_credential()
+        assert str(creds.config_dir() / "credentials.toml") in str(exc.value)
+
+    def test_agent_toml_resolves(self, agent_env):
+        f = self._write_toml(0o600)
+        cred = resolve_credential()
+        assert cred.key == "rpa_x"
+        assert str(f) in cred.source
+
+    def test_agent_toml_bad_permissions(self, agent_env):
+        self._write_toml(0o644)
+        with pytest.raises(CredentialError, match="chmod 600"):
+            resolve_credential()
 
 
 class TestStore:

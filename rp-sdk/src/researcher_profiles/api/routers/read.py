@@ -172,6 +172,7 @@ def list_profiles(
                 summary_count=s.summary_count,
                 fulltext_pct=s.fulltext_pct,
                 contaminated_count=s.contaminated_count,
+                clinical=s.clinical,
             )
             for s in summaries
         ],

@@ -6,7 +6,8 @@ Resolution order for credentials:
 2. ``RESEARCHER_PROFILES_AGENT_KEY`` / ``RESEARCHER_PROFILES_API_URL``
    environment variables
 3. Nearest ``.env`` walked up from the working directory
-4. ``$XDG_CONFIG_HOME/researcher-profiles/credentials.toml``
+4. ``credentials.toml`` in the folder from ``credentials.config_dir()``
+   (``$XDG_CONFIG_HOME/researcher-profiles``)
 """
 
 import os
@@ -18,6 +19,7 @@ import httpx
 import tomllib
 
 from ...env import check_retired_env_vars
+from .credentials import config_dir
 
 AGENT_KEY_PREFIX = "rpa_"
 CONFIG_FILENAME = "credentials.toml"
@@ -94,13 +96,6 @@ def _parse_dotenv(path: Path) -> dict[str, str]:
     return result
 
 
-def _config_dir() -> Path:
-    xdg = os.environ.get("XDG_CONFIG_HOME")
-    if xdg:
-        return Path(xdg) / "researcher-profiles"
-    return Path.home() / ".config" / "researcher-profiles"
-
-
 def _check_permissions(path: Path) -> None:
     """Refuse a credentials file with group/other bits set."""
     mode = path.stat().st_mode
@@ -148,7 +143,7 @@ def resolve_credential(
             return Credential(key=dotenv_key, url=dotenv_url, source=str(dotenv))
 
     # 4. credentials.toml
-    config_path = _config_dir() / CONFIG_FILENAME
+    config_path = config_dir() / CONFIG_FILENAME
     looked_at.append(str(config_path))
     if config_path.is_file():
         _check_permissions(config_path)

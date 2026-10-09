@@ -20,7 +20,7 @@ deleting it is free; the next query rebuilds it.
 """
 
 from .build import build_graph, load_profiles
-from .cache import graph_db_path, unlink_graph
+from .cache import graph_db_path
 from .graph import CoiReason, CoiVerdict, Neighbor, ProfileGraph
 from .identity import NameIndex, normalize_institution, normalize_name, paper_identity_key
 from .model import (
@@ -50,5 +50,4 @@ __all__ = [
     "normalize_institution",
     "paper_identity_key",
     "graph_db_path",
-    "unlink_graph",
 ]

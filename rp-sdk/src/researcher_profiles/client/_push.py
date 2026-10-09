@@ -253,17 +253,6 @@ def _local_manifest_entries(src: Path) -> dict[str, dict]:
     return {e["contentUrl"]: e for e in entries if isinstance(e, dict) and e.get("contentUrl")}
 
 
-def _local_roles(src: Path) -> dict[str, str]:
-    """``contentUrl -> role`` from the profile's own manifest.
-
-    Roles only. The recorded digests are deliberately not read: a manifest
-    written before the last edit would report a changed file as unchanged,
-    which is the one answer a preflight must never give. A role that is a
-    little stale only mislabels a group heading.
-    """
-    return {url: (e.get("role") or UNKNOWN_ROLE) for url, e in _local_manifest_entries(src).items()}
-
-
 def _local_stale_entries(src: Path) -> list[str]:
     """Local manifest entries naming a file the directory does not have.
 

@@ -46,7 +46,8 @@ class Login:
     name: Optional[str] = None
 
 
-def _config_dir() -> Path:
+def config_dir() -> Path:
+    """The folder holding both CLI credential files: ``$XDG_CONFIG_HOME/researcher-profiles``, else ``~/.config/researcher-profiles``."""
     xdg = os.environ.get("XDG_CONFIG_HOME")
     if xdg:
         return Path(xdg) / "researcher-profiles"
@@ -54,7 +55,7 @@ def _config_dir() -> Path:
 
 
 def credentials_path() -> Path:
-    return _config_dir() / CREDENTIALS_FILENAME
+    return config_dir() / CREDENTIALS_FILENAME
 
 
 def server_base(url: str) -> str:
@@ -306,6 +307,7 @@ __all__ = [
     "LoginError",
     "TOKEN_ENV_VAR",
     "clear_login",
+    "config_dir",
     "credentials_path",
     "load_login",
     "login",

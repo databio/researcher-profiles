@@ -480,32 +480,6 @@ def materialize_store_to_tempdir(request: Request, store: ProfileStore):
     return root
 
 
-def _directory_root(request: Request, feature: str):
-    """The store's filesystem root, or a 503 naming what needs one.
-
-    Not for ranking: vectors go through
-    :class:`~researcher_profiles.store.VectorStore` now, and a store without
-    that capability is told so by ``store._analytics.require_vector_store``.
-    What is left here is ``graph.sqlite``, a regenerable sqlite handle
-    ``ArtifactStorage`` does not cover and that has no interface of its own. A
-    store that is not a directory says so with ``root is None``, and this turns
-    that into an actionable 503 instead of a crash on a synthetic path. See
-    :mod:`researcher_profiles.store`.
-    """
-    store = request.app.state.store
-    root = store.root
-    if root is None:
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                f"{feature} needs a filesystem profiles root; this server is backed by "
-                f"{store.location}. Export profiles to a directory and serve those, or "
-                "run this feature against a directory-backed deployment."
-            ),
-        )
-    return root
-
-
 def get_graph(request: Request):
     """Lazily build (and cache) the profile graph over the app's store.
 

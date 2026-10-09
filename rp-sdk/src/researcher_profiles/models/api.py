@@ -38,6 +38,9 @@ class ProfileListEntry(_APIModel):
     summary_count: int = 0
     fulltext_pct: float = 0.0
     contaminated_count: int = 0
+    #: True when the caller's view of the profile lists therapeutic areas:
+    #: a clinical researcher. Follows the section's privacy for this caller.
+    clinical: bool = False
 
 
 class ProfileListResponse(_APIModel):
@@ -69,6 +72,9 @@ class ProfileSummary(_APIModel):
     summary_count: int = 0
     fulltext_pct: float = 0.0
     contaminated_count: int = 0
+    #: True when the caller's view of the profile lists therapeutic areas:
+    #: a clinical researcher. Follows the section's privacy for this caller.
+    clinical: bool = False
 
 
 class ProfileMetadataPayload(_APIModel):

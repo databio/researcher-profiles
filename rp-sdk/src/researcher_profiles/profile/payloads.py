@@ -74,6 +74,9 @@ def profile_summary_dict(prof: ResearcherProfile, viewer: ViewerTier) -> dict[st
         "summary_count": summary_count,
         "fulltext_pct": fulltext_pct,
         "contaminated_count": contaminated_count,
+        # From the PROJECTED document, so a withheld Clinical section never
+        # shows through as true.
+        "clinical": bool(md.therapeutic_areas),
     }
 
 
