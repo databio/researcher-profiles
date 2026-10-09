@@ -36,8 +36,9 @@ class ProfileListEntry(_APIModel):
     summary_count: int = 0
     fulltext_pct: float = 0.0
     contaminated_count: int = 0
-    #: True when the caller's view of the profile lists therapeutic areas:
-    #: a clinical researcher. Follows the section's privacy for this caller.
+    #: True when this caller can see a clinical facet: therapeutic areas, a
+    #: non-empty site_capabilities block, or a trials source. Computed from the
+    #: projected document, so a section the caller may not read never sets it.
     clinical: bool = False
 
 
@@ -68,8 +69,9 @@ class ProfileSummary(_APIModel):
     summary_count: int = 0
     fulltext_pct: float = 0.0
     contaminated_count: int = 0
-    #: True when the caller's view of the profile lists therapeutic areas:
-    #: a clinical researcher. Follows the section's privacy for this caller.
+    #: True when this caller can see a clinical facet: therapeutic areas, a
+    #: non-empty site_capabilities block, or a trials source. Computed from the
+    #: projected document, so a section the caller may not read never sets it.
     clinical: bool = False
 
 

@@ -11,8 +11,14 @@ from typing import Any
 import pydantic
 
 from ..build_state import BuildState
-from ..privacy import ViewerTier, project_document
-from ..schema import strip_registry_issued_proofs
+from ..privacy import (
+    DerivationCycleError,
+    ViewerTier,
+    effective_tiers,
+    project_document,
+    tier_allows,
+)
+from ..schema import ProfileDocument, strip_registry_issued_proofs
 from . import ResearcherProfile
 
 
@@ -60,8 +66,47 @@ def profile_summary_dict(prof: ResearcherProfile, viewer: ViewerTier) -> dict[st
         "contaminated_count": contaminated_count,
         # From the projected document, so a withheld Clinical section never
         # shows through as true.
-        "clinical": bool(md.therapeutic_areas),
+        "clinical": bool(md.therapeutic_areas)
+        or _has_site_capabilities(md.site_capabilities)
+        or _has_trials_part(prof.metadata, viewer),
     }
+
+
+def _has_site_capabilities(caps: Any) -> bool:
+    """True when a ``site_capabilities`` block has something in it.
+
+    Disease areas, patient populations, phase experience, or an enrollment
+    capacity band.
+    """
+    if caps is None:
+        return False
+    infra = caps.infrastructure
+    return bool(
+        caps.disease_areas
+        or caps.patient_populations
+        or (infra is not None and infra.phase_experience)
+        or caps.enrollment_capacity
+    )
+
+
+def _has_trials_part(doc: ProfileDocument, viewer: ViewerTier) -> bool:
+    """True when ``viewer`` may read a ``trials`` source of ``doc``.
+
+    Reads the manifest only (never the artifact bytes), through the same
+    effective tiers every file read is checked against.
+    """
+    entries = [p for p in doc.has_part if p.role == "trials"]
+    if not entries:
+        return False
+    try:
+        effective = effective_tiers(doc)
+    except DerivationCycleError:
+        # No effective tier exists for a cycle; withhold rather than guess.
+        return False
+    return any(
+        p.content_url in effective and tier_allows(viewer, effective[p.content_url])
+        for p in entries
+    )
 
 
 def metadata_payload_dict(
