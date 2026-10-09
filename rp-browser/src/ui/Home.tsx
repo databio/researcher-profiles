@@ -1,9 +1,6 @@
 /**
- * The landing page at `#/`. A first-time visitor lands here rather than in the
- * inventory, so the page explains what a researcher profile is before showing
- * any sources. It is the front door: a hero, one paragraph that says what this
- * is, and two clear next steps. A host application can add its logo and lede
- * (`homeHero`) and replace the calls to action through the shell slots.
+ * The landing page: what a researcher profile is, before any sources. A host
+ * can add a logo and lede (`homeHero`) and replace the calls to action.
  */
 import { Link } from "react-router";
 import type { ReactNode } from "react";

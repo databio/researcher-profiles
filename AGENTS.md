@@ -119,10 +119,6 @@ host's MCP server calls the same functions. Never put a check only in a route.
   the detail to its diagnosis, and `/health` answers 503 with it; bare rp-sdk
   leaves them `True` and `None`.
 
-The request-shaped slots these replaced (`app.state.owner_verifier`,
-`write_scope_verifier`, `viewer_resolver`, `profile_tier_floor`,
-`registry_proofs`) are gone; `deps.get_caller` raises if a host still sets one.
-
 Persistence is also swappable, but through a class rather than a hook. `ResearcherProfile` composes a
 `ArtifactStorage` (`storage.py`); the filesystem implementation is one backend
 among several, and `store/sql/` is a peer backing store rather than a

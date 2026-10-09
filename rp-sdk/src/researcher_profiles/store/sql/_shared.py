@@ -1,11 +1,6 @@
-"""The artifact addresses and row queries both halves of the SQL backend read.
+"""Artifact addresses and row queries shared by both halves of the SQL backend.
 
-This is the leaf of the ``store.sql`` package: it imports nothing from its
-siblings, so :mod:`._store` and :mod:`._storage` can both depend on it without
-a cycle. What lives here is exactly what the two classes share: the manifest
-addresses with a fixed meaning (the rendered collections, the persona
-documents), the summary naming rule, and the two ``rp_artifacts`` reads that
-a store-level export and a profile-level load answer identically.
+The package leaf: imports nothing from its siblings, to avoid a cycle.
 """
 
 from typing import Any, Optional
@@ -48,7 +43,7 @@ def _summary_id(part_or_url: Any) -> Optional[str]:
 
 
 def _is_text(encoding_format: Optional[str], content_url: str) -> bool:
-    """Which body column an artifact lands in. Defined once, in ``manifest``."""
+    """Which body column an artifact lands in."""
     return is_text_artifact(encoding_format, content_url)
 
 

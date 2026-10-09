@@ -1,12 +1,4 @@
-/**
- * Manifest-driven data layer.
- *
- * A published profile is a single `schema:Person` document (profile.jsonld).
- * The document itself carries the profile metadata; every other file (works,
- * persona docs, per-paper summaries, embeddings) is reached through a typed
- * manifest entry resolved by `role` to a relative `contentUrl`, never a
- * guessed path.
- */
+/** Manifest-driven data layer: every file is reached by manifest `role`. */
 
 import type { ProfileDetail, PaperEntry, ProfileMetadataPayload } from "@rp/ui-lib/types";
 import { worksGraphToPapers } from "@rp/ui-lib";
@@ -50,11 +42,7 @@ async function fetchText(url: string): Promise<string> {
   return new TextDecoder().decode(outcome.value);
 }
 
-/**
- * Assemble the full profile detail (metadata + expertise + soul) for a resolved
- * profile. The metadata is the profile.jsonld document itself; the persona documents
- * (`expertise`, `soul`) are separate files listed in `subjectOf`.
- */
+/** Assemble profile detail: the profile document plus the `expertise` and `soul` files. */
 export async function getProfileDetail(
   resolved: ResolvedProfile,
 ): Promise<ProfileDetail> {
@@ -79,11 +67,8 @@ export async function getProfileDetail(
 }
 
 /**
- * Fetch the paper corpus for a resolved profile (manifest role `works`).
- *
- * The `works` file is a JSON-LD graph (a `Collection` with a `hasPart` array of
- * ScholarlyArticle nodes). `worksGraphToPapers` maps that graph to PaperEntry
- * rows; a shape it cannot read yields an empty list rather than a crash.
+ * Fetch the paper corpus (manifest role `works`). A works graph of a shape
+ * `worksGraphToPapers` cannot read yields an empty list.
  */
 export async function getProfilePapers(
   resolved: ResolvedProfile,
@@ -100,9 +85,7 @@ export async function getProfilePapers(
     );
   }
 
-  // The works graph does not say which papers have a summary; the manifest
-  // does (one `paper_summary` entry per paper). Fill the flag from it so the
-  // list only offers a summary that exists.
+  // Only the manifest says which papers have a summary.
   return worksGraphToPapers(outcome.value).map((p) =>
     p.summary_available === undefined && p.paper_id
       ? { ...p, summary_available: summaryUrl(resolved.manifest, p.paper_id) !== null }
@@ -112,11 +95,7 @@ export async function getProfilePapers(
 
 /**
  * Fetch the per-profile embedding metadata (index + chunk manifest), or null
- * when the profile publishes no embeddings.
- *
- * Reached through the typed manifest entry (`embedding_index`), never a
- * guessed path. A profile without an `embedding_index` entry has no published
- * vectors.
+ * when the manifest has no `embedding_index` entry.
  */
 export async function getProfileEmbeddings(
   resolved: ResolvedProfile,
@@ -141,10 +120,7 @@ export async function getProfileEmbeddings(
   return { index: indexOutcome.value, chunks };
 }
 
-/**
- * Fetch a single paper summary by resolving its `paper_summary` manifest entry.
- * Summaries are markdown files, so the raw text is returned.
- */
+/** Fetch one paper's summary markdown via its `paper_summary` manifest entry. */
 export async function getPaperSummary(
   resolved: ResolvedProfile,
   paperId: string,

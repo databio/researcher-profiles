@@ -3,7 +3,7 @@
 Run every year or two, not on a schedule: a refresh changes what every stored
 code resolves to, so it is a deliberate, reviewed commit.
 
-- OpenAlex: pages through ``/topics`` (cursor pagination, 200 per page). The
+- OpenAlex: pages through ``/topics`` (cursor pagination). The
   release is the snapshot month, since OpenAlex publishes no release number.
 - MeSH: parses NLM's annual descriptor XML (``desc2026.xml``, or the
   ``desc2026.gz`` NLM also ships). The release is the year in the file name.
@@ -27,7 +27,7 @@ from . import MESH_FILE, MESH_SYSTEM, OPENALEX_FILE, OPENALEX_SYSTEM
 if TYPE_CHECKING:
     from ..openalex_client import OpenAlexClient
 
-#: OpenAlex's largest page size (200 is deprecated).
+#: OpenAlex's largest supported page size.
 PER_PAGE = 100
 #: Entry terms kept per descriptor. The tail is orthographic variants that
 #: match nothing a person types and inflate the file.
@@ -115,18 +115,19 @@ def _dump(obj: Any) -> bytes:
 
 
 def write_openalex(topics: list[dict], release: str, out_dir: Path) -> Path:
-    """One topic per line, so a refresh reviews as a readable diff."""
+    """Gzipped, one topic per line inside, so the decompressed text diffs readably."""
     path = out_dir / OPENALEX_FILE
     head = json.dumps({"release": release, "system": OPENALEX_SYSTEM})[:-1]
     rows = ",\n".join(json.dumps(t, ensure_ascii=False) for t in topics)
-    path.write_text(f'{head}, "topics": [\n{rows}\n]}}\n', encoding="utf-8")
+    text = f'{head}, "topics": [\n{rows}\n]}}\n'
+    # mtime=0: the same input gives the same bytes, so a no-op refresh is no diff.
+    path.write_bytes(gzip.compress(text.encode("utf-8"), mtime=0))
     return path
 
 
 def write_mesh(descriptors: list[dict], release: str, out_dir: Path) -> Path:
     path = out_dir / MESH_FILE
     doc = {"release": release, "system": MESH_SYSTEM, "descriptors": descriptors}
-    # mtime=0: the same input gives the same bytes, so a no-op refresh is no diff.
     path.write_bytes(gzip.compress(_dump(doc), mtime=0))
     return path
 

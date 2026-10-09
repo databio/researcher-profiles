@@ -28,13 +28,8 @@ def render_profile(
 ) -> None:
     """Refresh a single profile folder in place.
 
-    Rebuilds the manifest into ``profile.jsonld`` (``hasPart`` / ``subjectOf``
-    plus the ``index.html`` entry and the consumer flags) and renders
-    ``index.html`` at ``public``.
-
-    This writes nothing outside the profile folder and gates on nothing.
-    Deployment is ``rp publish --who <tier>`` (:func:`publish_collection`), then
-    any sync of its output folder.
+    Rebuilds the manifest and consumer flags in ``profile.jsonld`` and renders
+    ``index.html`` at ``public``. Writes nothing outside the profile folder.
     """
     prof_dir = Path(profile_dir).expanduser().resolve()
     if not (prof_dir / "profile.jsonld").is_file():
@@ -43,9 +38,7 @@ def render_profile(
     prof = ResearcherProfile.from_files(prof_dir)
 
     # ---- self-heal the servable flat embeddings -----------------------
-    # If a fresh sqlite index exists but the flat form is missing/stale, write
-    # it now (idempotent) so `rp render` on its own produces a consistent served
-    # form rather than depending on a build tool having done it first.
+    # Rewrite the flat form from the sqlite index (idempotent).
     from ..embeddings.flat import write_flat_export
 
     write_flat_export(prof_dir, profile_document=prof.metadata)
@@ -53,10 +46,8 @@ def render_profile(
     # ---- refresh the manifest -----------------------------------------
     parts, subjects = build_manifest(prof_dir)
 
-    # A rendered profile advertises its HTML entry point. The manifest lists the
-    # profile's own files with relative contentUrls, so the consumer-skill
-    # document is not a manifest entry: it ships with the SDK and is advertised
-    # site-wide by `rp site`'s SKILL.md, not per profile.
+    # A rendered profile advertises its HTML entry point. The consumer skill is
+    # advertised site-wide, not per profile.
     parts = [p for p in parts if p.content_url != "index.html"]
     parts.append(
         ArtifactRef(
@@ -75,9 +66,7 @@ def render_profile(
     published_paper_ids = {p.paper_id for p in _published_papers(prof) if p.paper_id}
 
     has_citation_graph = (prof_dir / "sources" / "citations.json").is_file()
-    # The flag means "the served flat index exists", not the
-    # private, never-deployed sqlite. A public copy advertises embeddings
-    # only when it actually ships them.
+    # The served flat index, not the private sqlite.
     has_embedding_index = (prof_dir / "embeddings" / "index.json").is_file()
     expertise_cites: bool | None = None
     if prof.expertise:
@@ -85,9 +74,6 @@ def render_profile(
         expertise_cites = bool(cited & published_paper_ids)
 
     # ---- write profile.jsonld -----------------------------------------
-    # All three flags are real ProfileDocument fields, so this is a model copy
-    # and one ``save_profile`` call: it canonicalizes, stamps dateModified
-    # against what the store already holds, re-validates, and persists.
     update: dict[str, Any] = {
         "has_citation_graph": has_citation_graph,
         "has_embedding_index": has_embedding_index,
@@ -97,9 +83,7 @@ def render_profile(
     prof.save_profile(prof.metadata.model_copy(update=update))
 
     # ---- render index.html --------------------------------------------
-    # ``public``: the in-place page sits beside the private files, and a
-    # profile folder is not an audience-specific export. ``rp publish`` renders
-    # its own page per audience instead of copying this one.
+    # ``public``: ``rp publish`` renders its own page per audience.
     html = render_page(prof, "public", base_url=base_url, no_index=no_index)
     (prof_dir / "index.html").write_text(html, encoding="utf-8")
 
@@ -113,11 +97,9 @@ def render_page(
 ) -> str:
     """The profile's ``index.html`` as a viewer entitled to ``viewer`` sees it.
 
-    No exclude list can redact a field out of a page that already contains it,
-    so the page is projected at render time: the same projection the HTTP read
-    uses decides the inline sections, and each manifest-backed block (expertise,
-    SOUL, the works and grants lists) appears only when its artifact's
-    effective tier reaches ``viewer``.
+    Projected at render time, since no exclude list can redact a field out of
+    a finished page. Inline sections use the HTTP read's projection; each
+    manifest-backed block appears only when its artifact reaches ``viewer``.
     """
     detail = profile_detail_dict(prof, viewer)
     tiers = effective_tiers(prof.metadata)

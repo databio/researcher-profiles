@@ -1,31 +1,10 @@
 """The embedding backends: the models that turn text into vectors, local or API.
 
-Backends produce dense vectors for arbitrary text. The default backend is
-the local sentence-transformers ``all-MiniLM-L6-v2`` model, which runs
-locally with no API key or network access (dim=384).
-
-Tradeoffs
----------
-
-- Local sentence-transformers (default): portable, no keys, free,
-  offline. ~400MB model download on first use. Lower semantic quality
-  than frontier API models. dim=384 (small, fast index).
-- fastembed: the same weights as ``st:`` (default ``all-MiniLM-L6-v2``,
-  dim=384) run through ONNX Runtime instead of PyTorch. No API key, no
-  network after the first model download, and ~175MB installed instead
-  of ~6GB, the difference between a local encoder fitting in a
-  container and not. Its vectors are numerically near-identical to
-  ``st:``'s (see ``FastEmbedBackend``), but its index is not
-  interchangeable with an ``st:``-built one: the recorded backend name
-  differs, and ``build_index`` refuses a mismatch.
-- OpenAI / Voyage: higher quality, no model download, but require
-  API keys, network, and per-call cost. A profile indexed with one of
-  these cannot be searched offline. Larger vectors mean a
-  larger on-disk index.
-
-Default is ``st:all-MiniLM-L6-v2`` for portability. The backend used at
-build time is persisted in the per-profile index; search instantiates
-the same backend automatically.
+The default, ``st:all-MiniLM-L6-v2`` (dim=384), runs locally with no API key
+or network after the first download. OpenAI and Voyage need keys, network and
+per-call cost, so a profile indexed with them cannot be searched offline. The
+backend used at build time is recorded in the index, and search uses the same
+one.
 """
 
 import logging
@@ -53,19 +32,11 @@ class EmbeddingBackend(Protocol):
 def _usable_device() -> str | None:
     """Pick the device sentence-transformers should load the model on.
 
-    ``torch.cuda.is_available()`` answers "is there a driver and a card",
-    not "can this torch build run on that card". A GPU whose compute
-    capability the installed torch has no compiled kernels for (e.g. a
-    Pascal sm_61 card under a build shipping sm_75 and up) passes that
-    check and then raises ``CUDA error: no kernel image is available for
-    execution on the device`` on the first forward pass, deep inside the
-    model where the cause is unrecognizable.
-
-    So check up front and return ``"cpu"`` when the card cannot run this
-    build; the embedding model is small enough that CPU is a real
-    fallback, not a degraded one. ``RESEARCHER_PROFILES_EMBEDDING_DEVICE``
-    overrides. Returns ``None`` to mean "let sentence-transformers decide",
-    which is what happens on any machine whose GPU this torch does support.
+    ``torch.cuda.is_available()`` is true for a GPU the installed torch has no
+    kernels for (e.g. sm_61 under a build shipping sm_75 and up), which then
+    fails on the first forward pass with "no kernel image is available". So
+    return ``"cpu"`` for such a card. ``RESEARCHER_PROFILES_EMBEDDING_DEVICE``
+    overrides. ``None`` means "let sentence-transformers decide".
     """
     check_retired_env_vars()
     override = os.environ.get("RESEARCHER_PROFILES_EMBEDDING_DEVICE")
@@ -77,9 +48,8 @@ def _usable_device() -> str | None:
         if not torch.cuda.is_available():
             return None
         major, minor = torch.cuda.get_device_capability()
-        # A kernel compiled for sm_XY runs on any device of the same major
-        # version with an equal-or-higher minor, torch's own binary
-        # compatibility rule.
+        # torch's binary compatibility rule: sm_XY runs on the same major
+        # with an equal-or-higher minor.
         for arch in torch.cuda.get_arch_list():
             if not arch.startswith("sm_"):
                 continue
@@ -89,8 +59,6 @@ def _usable_device() -> str | None:
                     return None
         return "cpu"
     except (ImportError, RuntimeError, AttributeError, ValueError):
-        # An unexpected torch shape is not our problem to diagnose; leave
-        # device selection where it was.
         logger.debug("could not probe the torch device; leaving it unset", exc_info=True)
         return None
 
@@ -98,26 +66,10 @@ def _usable_device() -> str | None:
 class SentenceTransformerBackend:
     """Local sentence-transformers backend. Default. dim depends on model.
 
-    Concurrency notes
-    -----------------
-
-    SentenceTransformer / PyTorch model construction is not thread-safe:
-    parallel calls to ``SentenceTransformer(model_name)`` can race during
-    meta-tensor materialization and raise
-    ``NotImplementedError: Cannot copy out of meta tensor; no data!``.
-
-    We defend against this two ways:
-
-    1. A class-level lock serializes the actual construction.
-    2. A class-level cache shares one underlying model across all
-       backend instances using the same ``model_name``, so N profiles
-       all using ``st:all-MiniLM-L6-v2`` share a single ~80MB model
-       in memory instead of loading it once per profile.
-
-    ``model.encode()`` itself is internally thread-safe in
-    sentence-transformers (it uses a stateless forward pass under
-    ``torch.no_grad()``), so sharing the loaded model across threads is
-    safe.
+    Thread safety: model construction is not thread-safe (parallel calls race
+    and raise "Cannot copy out of meta tensor"), so it runs under a class
+    lock, and one model per ``model_name`` is shared process-wide.
+    ``encode()`` on a loaded model is safe to share across threads.
     """
 
     _DEFAULT_DIMS = {
@@ -126,9 +78,6 @@ class SentenceTransformerBackend:
         "all-mpnet-base-v2": 768,
     }
 
-    # Process-wide model cache keyed by model_name. Multiple
-    # SqliteEmbeddingIndex instances sharing the same model don't each pay the
-    # download + RAM cost, and we avoid the concurrent-init race.
     _MODEL_CACHE: dict[str, object] = {}
     _MODEL_LOCK = threading.Lock()
 
@@ -144,8 +93,6 @@ class SentenceTransformerBackend:
         cached = SentenceTransformerBackend._MODEL_CACHE.get(self.model_name)
         if cached is None:
             with SentenceTransformerBackend._MODEL_LOCK:
-                # Re-check under the lock: another thread may have
-                # finished loading while we were waiting.
                 cached = SentenceTransformerBackend._MODEL_CACHE.get(self.model_name)
                 if cached is None:
                     try:
@@ -164,7 +111,7 @@ class SentenceTransformerBackend:
                     )
                     SentenceTransformerBackend._MODEL_CACHE[self.model_name] = cached
         self._model = cached
-        # Refine dim from the actual model in case our table is stale.
+        # The loaded model's dim wins over the table.
         try:
             self.dim = int(self._model.get_sentence_embedding_dimension())
         except (AttributeError, TypeError, ValueError):
@@ -184,11 +131,9 @@ class SentenceTransformerBackend:
         return [list(map(float, v)) for v in arr]
 
 
-#: The batch size every fastembed backend uses when it was given none. ``None``
-#: (the default) keeps fastembed's own, 256, which on abstract-length texts
-#: peaks near 4.7 GB. A host on a small machine sets it once at startup with
-#: :func:`set_fastembed_batch_size`, which reaches every backend the SDK builds
-#: internally (index builds, vector refreshes, centroids), not only its own.
+#: Batch size for fastembed backends given none. ``None`` keeps fastembed's
+#: own (256), which peaks near 4.7 GB on abstract-length texts. Set with
+#: :func:`set_fastembed_batch_size`; it reaches every backend the SDK builds.
 _FASTEMBED_BATCH_SIZE: int | None = None
 
 
@@ -203,36 +148,15 @@ def set_fastembed_batch_size(batch_size: int | None) -> None:
 class FastEmbedBackend:
     """Local ONNX backend via fastembed. Same weights as ``st:``, no torch.
 
-    ``st:all-MiniLM-L6-v2`` and ``fastembed:all-MiniLM-L6-v2`` run the same
-    published model. fastembed executes it under ONNX Runtime rather than
-    PyTorch, which is why it costs ~175 MB installed instead of ~6 GB, and is
-    what makes a local encoder viable in a container.
+    About 175 MB installed instead of about 6 GB, so a local encoder fits in a
+    container. Vectors agree with ``st:`` at cosine >= 0.999999, but the index
+    is not interchangeable: ``name`` differs, and ``build_index`` refuses a
+    mismatch (switch with ``rp index <profile> --force``).
 
-    The two are not interchangeable against an already-built index. ``name``
-    differs, and ``build_index`` refuses a backend whose name does not match
-    the one recorded in the index. Switching an existing index between them
-    needs ``rp index <profile> --force``. Measured on the probe text plus a
-    handful of realistic profile sentences, the two backends' vectors agree
-    at cosine >= 0.999999, effectively identical, since it is the same
-    trained weights and the ONNX export is a numerical conversion, not a
-    retrain, so a value computed under one backend is a safe drop-in
-    estimate under the other even though the index itself is not, and
-    `EMBEDDING_PROBE_TEXT`-based consistency checks hold across the switch.
-
-    Concurrency notes
-    -----------------
-
-    ``TextEmbedding(...)`` downloads and initializes an ONNX session. As with
-    sentence-transformers we serialize construction behind a class-level lock
-    and share one session per model name process-wide, so N profiles on the
-    same model pay the download and the RAM once. ``embed()`` on a constructed
-    session is a stateless forward pass and is safe to share across threads.
+    Thread safety matches :class:`SentenceTransformerBackend`.
     """
 
-    # fastembed addresses models by their full HuggingFace path. Accept the
-    # short name the rest of the SDK uses and map it, so a spec string reads
-    # the same for `st:` and `fastembed:`. An unmapped name is passed through
-    # untouched, which lets a caller name any model fastembed supports.
+    # Short name -> fastembed's HuggingFace path. Unmapped names pass through.
     _MODEL_MAP = {
         "all-MiniLM-L6-v2": "sentence-transformers/all-MiniLM-L6-v2",
         "all-MiniLM-L12-v2": "sentence-transformers/all-MiniLM-L12-v2",
@@ -263,8 +187,6 @@ class FastEmbedBackend:
         cached = FastEmbedBackend._MODEL_CACHE.get(self.model_name)
         if cached is None:
             with FastEmbedBackend._MODEL_LOCK:
-                # Re-check under the lock: another thread may have
-                # finished loading while we were waiting.
                 cached = FastEmbedBackend._MODEL_CACHE.get(self.model_name)
                 if cached is None:
                     try:
@@ -286,7 +208,6 @@ class FastEmbedBackend:
         if not texts:
             return []
         model = self._load()
-        # fastembed's embed() returns a generator of numpy arrays.
         size = self.batch_size or _FASTEMBED_BATCH_SIZE
         kw = {"batch_size": size} if size else {}
         vectors = [list(map(float, v)) for v in model.embed(texts, **kw)]
@@ -332,7 +253,6 @@ class OpenAIBackend:
             return []
         client = self._client_or_raise()
         out: list[list[float]] = []
-        # Batch up to 100 inputs per request.
         for i in range(0, len(texts), 100):
             batch = texts[i : i + 100]
             resp = client.embeddings.create(model=self.model, input=batch)
@@ -396,9 +316,8 @@ def get_backend(spec: str | dict | None, *, batch_size: int | None = None) -> Em
     - ``{"backend": "st", "model": "...", "dim": 384}`` -> full override
     - ``None`` -> package default (``st:all-MiniLM-L6-v2``)
 
-    ``batch_size`` (or a dict spec's ``"batch_size"``) is passed through to
-    the fastembed backend, the only one that takes it; ``None`` keeps the
-    library's own default. Setting it for any other backend is an error.
+    ``batch_size`` (or a dict spec's ``"batch_size"``) applies only to
+    fastembed; setting it for any other backend raises ``ValueError``.
     """
     from ..utils.const import DEFAULT_BACKEND_SPEC
 

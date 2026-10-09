@@ -1,11 +1,4 @@
-"""``prof.persona``: the LLM-backed persona surface.
-
-Defines :class:`PersonaManager`, the object ``ResearcherProfile.persona``
-hands back. The heavy lifting (prompt building, the LLM client, the ask/
-review bodies) stays in :mod:`researcher_profiles.generative.llm`,
-:mod:`researcher_profiles.generative` and :mod:`researcher_profiles.generative.chat`;
-this module imports and calls them.
-"""
+"""``prof.persona``: the LLM-backed persona surface."""
 
 from typing import Any, Optional
 
@@ -15,17 +8,11 @@ from ..generative.llm import _ask, _review
 class PersonaManager:
     """``prof.persona``: the LLM-backed persona surface.
 
-    Five verbs over one persona: ``ask`` and ``review`` live in
-    :mod:`researcher_profiles.generative.llm`, ``innovate`` and ``riff`` in
-    :mod:`researcher_profiles.generative`, and ``chat`` in
-    :mod:`researcher_profiles.generative.chat`. Their bodies stay in those modules. This
-    class imports and calls them, so no single module swallows three others
-    while callers still get one object.
+    The verb bodies live in :mod:`researcher_profiles.generative`.
 
     Every method raises ``PersonaUnavailableError`` when
-    ``not profile.has_persona`` (a lite profile never synthesized SOUL /
-    expertise, and role-playing an empty persona is worse than refusing). The
-    HTTP layer maps that to 409.
+    ``not profile.has_persona``: role-playing an empty persona is worse than
+    refusing.
     """
 
     def __init__(self, profile: Any):

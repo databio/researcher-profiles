@@ -41,12 +41,8 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
 def skill_resource_root():
     """Return the packaged consumer-skill tree as an ``importlib`` traversable.
 
-    The skill ships *inside* the package (``researcher_profiles/skill/``) and is
-    reached through the resource API, never through ``__file__`` arithmetic.
-    Walking up from ``__file__`` would only work in a source checkout: from a
-    wheel, an sdist install, or a container image the repo layout is not there.
-    ``importlib.resources`` asks the loader that actually imported the package
-    where its data lives, so the answer is right for every install layout.
+    Uses the resource API, not ``__file__`` paths, so it works from a wheel or
+    any other install layout, not only a source checkout.
     """
     from importlib.resources import files
 
@@ -54,11 +50,7 @@ def skill_resource_root():
 
 
 def iter_skill_files(skill_root):
-    """Yield ``(relative_posix_path, traversable)`` for every file under a tree.
-
-    The skill has subdirectories (``examples/``, ``reference/``), and the
-    resource API has no ``rglob``, so the recursion is written out here.
-    """
+    """Yield ``(relative_posix_path, traversable)`` for every file under a tree (recursive)."""
     from pathlib import PurePosixPath
 
     def _walk(node, prefix: PurePosixPath):

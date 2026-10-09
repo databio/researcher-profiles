@@ -1,17 +1,11 @@
-"""``rp render``, ``rp site``, ``rp publish`` and ``rp push``: how a profile goes out.
-
-``render`` writes a profile's own HTML in place, ``site`` writes the collection
-files for a set of profiles, ``publish`` writes the static tree one audience
-may see, and ``push`` uploads a built directory to a remote API server.
-"""
+"""``rp render``, ``rp site``, ``rp publish`` and ``rp push``: how a profile goes out."""
 
 import argparse
 import json
 import sys
 from collections.abc import Callable
 
-# ``utils.paths`` is stdlib-only by contract (see its package docstring), so
-# naming the retired cache directory here costs the parser nothing.
+# ``utils.paths`` is stdlib-only, so this import keeps the parser cheap.
 from ..utils.paths import LEGACY_CACHE_DIRNAME
 from ._shared import (
     _EG_SLUG,
@@ -54,9 +48,6 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
         "rp site ~/researcher-profiles -o ./_site --no-index",
     )
     p_site.add_argument("profiles_dir", help="Root directory containing profile subdirectories")
-    # ``-o`` is the Unix spelling for an output location and costs nothing to
-    # accept; ``--out`` stays the primary name because every existing script and
-    # doc uses it.
     p_site.add_argument(
         "-o", "--out", required=True, help="Output directory for the collection files"
     )
@@ -121,6 +112,11 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
         "--dry-run",
         action="store_true",
         help="Print what ships and what is withheld, and why. Writes nothing.",
+    )
+    p_publish.add_argument(
+        "--change-audience",
+        action="store_true",
+        help="Allow --who to be wider than the audience the folder was last published for",
     )
     add_json(p_publish, "Emit the export plan and result as JSON")
 
@@ -271,6 +267,7 @@ def _cmd_publish(args: argparse.Namespace) -> int:
             no_index=args.no_index,
             now=args.now,
             dry_run=args.dry_run,
+            change_audience=args.change_audience,
         )
     except (PublishError, ValidationError) as e:
         print(f"publish refused: {e}", file=sys.stderr)
@@ -306,8 +303,6 @@ def _cmd_publish(args: argparse.Namespace) -> int:
 _PLAN_PATH_CAP = 20
 
 #: What each archive-builder drop reason means to somebody reading a push.
-#: ``legacy_cache`` never reaches here (``push_profile`` refuses it outright),
-#: but a reason with no sentence still gets one.
 _DROP_WARNINGS = {
     "not_in_spec": "are not profile members and did not ship",
     "legacy_cache": f"are under the retired {LEGACY_CACHE_DIRNAME}/ directory and did not ship",
@@ -334,9 +329,7 @@ def _path_block(group: str, paths: list[str]) -> list[str]:
 def _push_mode(args: argparse.Namespace) -> str | None:
     """The push mode the flags name, or ``None`` when they contradict.
 
-    ``--only`` means merge: naming a file to send has never meant "and delete
-    the rest of the profile". ``--prune`` is the opposite instruction, so
-    pairing it with either keep flag is a mistake worth stopping on.
+    ``--only`` means merge. ``--prune`` with either keep flag contradicts.
     """
     if args.prune and (args.only or args.merge):
         return None
@@ -348,12 +341,7 @@ def _push_mode(args: argparse.Namespace) -> str | None:
 
 
 def _manifest_line(plan) -> str:
-    """The one line that says whether the profile is about to get smaller.
-
-    First, before the group counts, because it is the answer to the question a
-    reader actually has. ``removed 0`` was true of the push that deleted 53
-    artifacts; ``141 entries -> 88`` would not have been.
-    """
+    """The one line that says whether the profile is about to get smaller (printed first)."""
     counts = plan.counts()
     detail = f"{counts['removed']} removed"
     if counts["respliced"]:
@@ -367,9 +355,7 @@ def _manifest_line(plan) -> str:
 def _plan_report(plan, url: str, mode: str) -> list[str]:
     """The human dry-run report: the manifest line, counts, then the paths.
 
-    ``unchanged`` and ``kept`` get a count and no listing: they are the part of
-    the profile nothing is about to happen to, and listing them would bury the
-    three groups that matter.
+    ``unchanged`` and ``kept`` get a count and no listing.
     """
     from ..client import PLAN_GROUPS
 
@@ -382,11 +368,9 @@ def _plan_report(plan, url: str, mode: str) -> list[str]:
 
 
 def _warn_dropped(dropped: dict[str, list[str]]) -> None:
-    """Say out loud, on stderr, what the archive builder left behind.
+    """Warn on stderr about what the archive builder left behind.
 
-    Withheld fulltext is a count and not a warning: it is the default, it is
-    the copyright-safe answer, and flagging it every push would train the
-    reader to ignore the lines that do mean something.
+    Withheld fulltext is the default, so it is a count, not a warning.
     """
     fulltext = dropped.get("fulltext") or []
     if fulltext:
@@ -403,38 +387,13 @@ def _warn_dropped(dropped: dict[str, list[str]]) -> None:
         print(f"warning: {len(paths)} path(s) {what}: {shown}", file=sys.stderr)
 
 
-def _report_insufficient_access(e, *, only: bool) -> None:
-    """Name, on stderr, the parts a refused push needed and the key lacks.
-
-    Exit 1, not 2: nothing was mistyped. The key's table on the server is
-    what stands in the way, and only the account holder can change it.
-    """
-    print("push refused: nothing was written.", file=sys.stderr)
-    if e.missing:
-        print(f"  needs Write on: {', '.join(e.missing)}", file=sys.stderr)
-    if e.needs_replace:
-        print(
-            f"  also changes {', '.join(e.needs_replace)}, which only a key allowed "
-            'to "Replace whole profiles" may change',
-            file=sys.stderr,
-        )
-    if e.hint and not (e.missing or e.needs_replace):
-        print(e.hint, file=sys.stderr)
-    if only:
-        # --only still sends the local profile.jsonld, whose inline sections
-        # (summary, expertise, ...) replace the server's.
-        print(
-            "profile.jsonld travels with --only: its sections must match the "
-            "server's, or ask the account holder to change this key's access "
-            "on the Privacy page.",
-            file=sys.stderr,
-        )
-    else:
-        print(
-            "Send only the files you may write (--only <file>), or ask the account "
-            "holder to change this key's access on the Privacy page.",
-            file=sys.stderr,
-        )
+def _report_refusal(e) -> None:
+    """``push refused [code]: what``, the detail lines, then ``next: fix``."""
+    print(f"push refused [{e.code}]: {e}", file=sys.stderr)
+    for line in e.details:
+        print(f"  {line}", file=sys.stderr)
+    if e.fix:
+        print(f"  next: {e.fix}", file=sys.stderr)
 
 
 def _cmd_push(args: argparse.Namespace) -> int:
@@ -448,23 +407,16 @@ def _cmd_push(args: argparse.Namespace) -> int:
         return EXIT_USAGE
     mode = _push_mode(args)
     if mode is None:
-        print(
-            "--prune deletes what the push does not carry; --only and --merge keep it. Pick one.",
-            file=sys.stderr,
-        )
+        print("push: --prune conflicts with --only/--merge; pick one", file=sys.stderr)
         return EXIT_USAGE
     url, token = _remote_target(args.url, args.token)
     if not url:
         print(
-            "no server URL given. Name one, or log in once:\n"
-            "  rp push <profile> --url https://profiles.example.org\n"
-            "  rp login https://profiles.example.org",
+            "push failed [no-url]: no server URL\n  next: --url <base>, or `rp login <base>` once",
             file=sys.stderr,
         )
         return EXIT_USAGE
-    # Both halves of "what is about to overwrite what", named before anything
-    # moves and on every run, dry or not. A push that turned out to have read
-    # the wrong directory is only obvious afterwards if it said which one.
+    # Name source and target on every run, so a wrong directory is visible.
     slug = args.slug or target.name
     print(f"source: {target}", file=sys.stderr)
     print(f"target: {url}/api/v1/profiles/{slug} (mode: {mode})", file=sys.stderr)
@@ -480,52 +432,24 @@ def _cmd_push(args: argparse.Namespace) -> int:
             force=args.force,
             dry_run=args.dry_run,
         )
-    except PushWouldRemove as e:
-        _warn_dropped(e.plan.dropped)
-        print(f"push refused: {e}", file=sys.stderr)
-        print(_manifest_line(e.plan), file=sys.stderr)
-        for line in _path_block("removed", e.plan.paths("removed")):
-            print(line, file=sys.stderr)
-        if e.plan.shrinks and not e.plan.paths("removed"):
-            # Nothing landed in ``removed``, so the usual three-flag hint is
-            # the wrong advice: the manifest being pushed is the problem.
-            print(
-                "The local manifest lists fewer artifacts than the server does. "
-                "That is usually a\npartial copy of the profile, not a deletion "
-                "you meant: check `rp where` and push\nfrom the directory that "
-                "built it, or --force if the entries really should go.",
-                file=sys.stderr,
-            )
-            return EXIT_USAGE
-        print(
-            "re-run with --merge to keep them, --force to remove them, "
-            "or --prune to also drop kept fulltext/index",
-            file=sys.stderr,
-        )
-        return EXIT_USAGE
-    except PushInsufficientAccess as e:
-        _report_insufficient_access(e, only=bool(args.only))
-        return EXIT_ERROR
     except PushRefused as e:
-        print(f"push refused: {e}", file=sys.stderr)
-        return EXIT_USAGE
+        if isinstance(e, PushWouldRemove):
+            _warn_dropped(e.plan.dropped)
+        _report_refusal(e)
+        # Exit 1 for the server's part-by-part refusal: nothing was mistyped.
+        return EXIT_ERROR if isinstance(e, PushInsufficientAccess) else EXIT_USAGE
     except httpx.HTTPError as e:
-        # The server could not be reached or would not answer. That is a
-        # general error (1), not a usage error (2): nothing was mistyped.
-        print(f"push failed: {url}: {e}", file=sys.stderr)
         print(
-            f"Check the server is up and the URL is the API base:\n  rp listr --url {url}",
+            f"push failed [unreachable]: {url}: {e}\n"
+            f"  next: `rp listr --url {url}` to check the server is up and the URL is the API base",
             file=sys.stderr,
         )
         return EXIT_ERROR
     except (FileNotFoundError, PermissionError, RuntimeError, ValueError) as e:
-        print(f"push failed: {e}", file=sys.stderr)
         print(
-            "Check the profile is built and the target accepts you:\n"
-            f"  rp validate {args.profile}\n"
-            f"  rp login {url}                (push your own profile)\n"
-            "  rp push ... --token <token>   (or export "
-            "RESEARCHER_PROFILES_TOKEN)",
+            f"push failed: {e}\n"
+            f"  next: `rp validate {args.profile}`; for auth, `rp login {url}` "
+            "or --token <token> (or RESEARCHER_PROFILES_TOKEN)",
             file=sys.stderr,
         )
         return EXIT_USAGE
@@ -563,10 +487,8 @@ def _cmd_push(args: argparse.Namespace) -> int:
 def _report_manifest_counts(summary: dict, plan) -> None:
     """Say what the server holds now, and shout if that is less than before.
 
-    The server's own post-commit count, not the client's prediction: the point
-    is to catch the case where the two disagree. A push whose artifact count
-    fell is reported on stderr as well, because by this point the bytes are
-    already gone and a line buried in stdout is not a warning.
+    Uses the server's post-commit count, not the client's prediction, to catch
+    a disagreement. A drop is also reported on stderr.
     """
     counts = summary.get("manifest_counts") or {}
     if not counts:

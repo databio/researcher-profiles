@@ -512,6 +512,37 @@ Build fields (`status`, `contaminated`) stay in `.build/`, never here.
 | `role` | `pi`, `co_pi`, `co_i`, `other` |
 | `status` | `funded`, `pending`, `completed` |
 
+#### Text artifacts
+
+A file whose manifest `role` is `paper_fulltext` or `paper_summary` is a text
+artifact. It MUST be readable text, not binary data decoded as text. The rule
+is "no garbage", not "ASCII only": Greek letters, math symbols, accented
+names, curly quotes, and dashes are all fine. A text artifact fails when any
+of these holds:
+
+1. Its bytes are not valid UTF-8.
+2. It contains a NUL character (U+0000).
+3. U+FFFD REPLACEMENT CHARACTER makes up more than 1% of its characters.
+4. Control characters other than tab (U+0009), line feed (U+000A), and
+   carriage return (U+000D) make up more than 2% of its characters. A control
+   character is one in U+0000-U+001F or U+007F-U+009F (Unicode general
+   category `Cc`).
+5. It is a raw PDF body: after an optional byte order mark and whitespace it
+   starts with `%PDF-` followed by a digit, or it contains two or more
+   distinct PDF structure markers from this list: a line starting with
+   `<n> <n> obj`, a line starting with `endobj`, a line starting with
+   `endstream`, `stream` followed by a line break and then `x` or U+FFFD, a
+   line starting with `startxref`, a line starting with `%%EOF`. One marker
+   alone never fails, so prose that mentions `endobj` is safe.
+
+Shares count Unicode code points over the whole decoded text. For text that
+is not valid UTF-8, a validator decodes it with each invalid sequence replaced
+by U+FFFD and applies rules 2-5 to the result as well. The thresholds are
+shares, not "any", because real PDF text extraction leaves a few stray
+characters behind (a form feed per page break, math-font brackets mapped to
+control codes, an unmappable glyph as U+FFFD), while binary decoded as text is
+dense with them.
+
 ### 3.3. Conformance
 
 Two conformance levels are defined.
@@ -526,6 +557,8 @@ A profile conforms at Base level when:
 4. `conformsTo` contains the `@context` value
 5. `name`, `rid`, and `level` are present and well-formed
 6. Every `hasPart` / `subjectOf` entry resolves at its `contentUrl`
+7. Every `paper_fulltext` and `paper_summary` file it serves passes the
+   [text artifact](#text-artifacts) rule
 
 #### Searchable conformance
 
@@ -549,7 +582,6 @@ reveals whether artifacts exist, but a consumer MUST validate rather than trust.
 - Central discovery hub: this specification defines no central registry or
   federation protocol. A registry is any host that serves the API, static or
   dynamic, and each one publishes its own `collection.jsonld` listing.
-  [Prosopia](https://village.databio.org/prosopia/) is one hosted registry.
 - Chatbot interface: persona methods are SDK features, not format.
 - SPARQL: JSON-LD is for crawlers and agents, not triplestores.
 - Profile creation: how to build is out of scope.
@@ -573,7 +605,7 @@ no fixed range or neutral value, so this spec adds both.
 | `concept` | REQUIRED | The term (below) |
 | `weight` | optional | A number from -1 to 1. +1 is a core interest, 0 is declared neutral, -1 is a hard exclude, and values between -1 and 0 mean rank lower. **A missing weight means unknown, never 0.** |
 | `method` | REQUIRED | `declared` (the person said it), `inferred` (computed from papers or written by a model), or `imported` (copied from another record, e.g. ORCID keywords) |
-| `generator` | REQUIRED | What produced the entry, e.g. `user`, `llm`, `prosopia-wizard`, `openalex-topics@2026-09` |
+| `generator` | REQUIRED | What produced the entry, e.g. `user`, `llm`, `profile-wizard`, `openalex-topics@2026-09` |
 | `assertedAt` | REQUIRED | When the entry was made (`prov:generatedAtTime`). The same person may reassess a concept; this says which entry is newer |
 | `evidence` | optional | `{papers: [...], share: 0.45}`. Raw counts and shares live here, never in `weight` |
 

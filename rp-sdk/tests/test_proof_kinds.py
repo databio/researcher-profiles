@@ -22,7 +22,7 @@ from researcher_profiles.schema_export import export_schemas
 
 ORCID = "0000-0002-1825-0097"
 OTHER_ORCID = "0000-0001-5109-3700"
-ISSUER = "https://prosopia.databio.org"
+ISSUER = "https://profiles.example.org"
 WHEN = "2026-09-01T12:00:00+00:00"
 
 
@@ -67,8 +67,8 @@ class TestOrcidLoginProof:
     @pytest.mark.parametrize(
         "overrides",
         [
-            {"issuer": "prosopia.databio.org"},
-            {"issuer": "ftp://prosopia.databio.org"},
+            {"issuer": "profiles.example.org"},
+            {"issuer": "ftp://profiles.example.org"},
             {"orcid": "0000-0002-1825-0098"},
             {"orcid": f"https://orcid.org/{ORCID}"},
             {"orcid": "local:jane-doe-a3f19c"},

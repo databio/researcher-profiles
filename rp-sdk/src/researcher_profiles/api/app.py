@@ -31,9 +31,7 @@ from ._errors import install_service_errors
 from .deps import configure_logging
 from .hooks import Hooks
 
-# The six route modules hang their handlers on the three routers declared in
-# ``_projection`` at import time, so importing them here is what puts the routes
-# on the routers. Nothing in this file calls into them by name.
+# Importing the route modules registers their handlers on the routers.
 from .routers import (  # noqa: F401
     edit,
     generative,
@@ -68,9 +66,7 @@ def create_app(
 ) -> FastAPI:
     """Build a FastAPI app over a :class:`~researcher_profiles.store.ProfileStore`.
 
-    Takes a store rather than a directory, so the same server can be backed by
-    a directory or a database. There is no path-accepting form; wrap a
-    directory in ``FilesystemProfileStore(dir)`` and pass that::
+    Wrap a directory in ``FilesystemProfileStore(dir)``::
 
         from researcher_profiles.store import FilesystemProfileStore
         create_app(FilesystemProfileStore("~/researcher-profiles"))
@@ -78,20 +74,14 @@ def create_app(
         from researcher_profiles.store.sql import SqlProfileStore   # [sql]
         create_app(SqlProfileStore("postgresql://user@host/db"))
 
-    Read privacy is a property of each profile and each caller, not a switch on
-    the read surface: every read resolves a viewer tier through
-    ``app.state.hooks.viewer_resolver`` and projects its response. The default
-    is :func:`researcher_profiles.api.deps.resolve_viewer_tier`, which is the
-    right answer for a directory you mean to serve whole. A host with sessions
-    or grants installs its own. See ``docs-dev/rp-sdk/developer/read-seam.md``.
+    Every read resolves a viewer tier through
+    ``app.state.hooks.viewer_resolver`` and projects its response. See
+    ``docs-dev/rp-sdk/developer/read-seam.md``.
 
     Parameters
     ----------
     store:
-        The profile store to serve. Any object satisfying the
-        :class:`~researcher_profiles.store.ProfileStore` protocol. Its LRU
-        capacity (if it has one) is the store's business, not this
-        function's.
+        Any :class:`~researcher_profiles.store.ProfileStore`.
     token:
         If set, ``Authorization: Bearer <token>`` is required on every
         endpoint. If ``None`` or empty the server runs in open mode and
@@ -105,18 +95,15 @@ def create_app(
         ``RESEARCHER_PROFILES_ACCEPT_FULLTEXT`` env var, else False, in
         which case ``sources/papers/`` is stripped during ingest and never
         touches the profiles root. This is the copyright boundary on the way
-        IN: without it the registry would be trusting every client to have
-        excluded the text. Enable it only on a private registry entitled to
-        hold the corpus.
+        in, so the registry does not rely on clients excluding the text.
+        Enable it only on a private registry entitled to hold the corpus.
     pre_commit_hooks:
-        Callables a management host registers to run inside every profile
-        write, before commit. See
-        :meth:`researcher_profiles.profile.ResearcherProfile.write_unit`. Each
-        takes one :class:`~researcher_profiles.profile.WriteContext`. A hook
-        that raises aborts the write; nothing is swallowed. Registered once
-        here at composition time, on the store rather than on ``app.state``, so
-        writes that never touch an HTTP route still fire it. Equivalent to
-        calling ``store.add_pre_commit_hook`` yourself before building the app.
+        Callables run inside every profile write, before commit; each takes
+        one :class:`~researcher_profiles.profile.WriteContext` and a raise
+        aborts the write. Registered on the store, not ``app.state``, so
+        writes that bypass the HTTP routes (CLI, background jobs) still fire
+        them. See
+        :meth:`researcher_profiles.profile.ResearcherProfile.write_unit`.
     """
     if not isinstance(store, ProfileStore):
         raise TypeError(
@@ -134,9 +121,6 @@ def create_app(
             "innovate, riff."
         ),
     )
-    # The store. ``app.state.profiles_dir`` is gone with it: a store that is a
-    # directory answers ``store.root``, and one that is not answers ``None``
-    # instead of handing out a path that does not exist.
     app.state.store = store
     app.state.token = token or None
     from .upload import DEFAULT_MAX_UPLOAD_BYTES
@@ -145,47 +129,25 @@ def create_app(
     if accept_fulltext is None:
         accept_fulltext = _env_flag("RESEARCHER_PROFILES_ACCEPT_FULLTEXT")
     app.state.accept_fulltext = accept_fulltext
-    # The host seams (``api.hooks.Hooks``): caller-shaped callables a host
-    # assigns, e.g. ``app.state.hooks.viewer_resolver = ...``. Bare rp-sdk
-    # leaves them at their defaults: the operator token edits, the consumer
-    # identity or the operator token sets the read tier, no floor, no proofs.
-    # See ``docs-dev/rp-sdk/developer/read-seam.md``.
+    # Host seams; see ``api.hooks``.
     app.state.hooks = Hooks()
-    # The service every route and every host adapter calls: the store, the
-    # hooks, and the caches (the lazily built graph, a rootless store's temp
-    # export) that ``Service.invalidate`` drops after a write.
     app.state.service = Service(store, app.state.hooks, open_mode=not app.state.token)
-    # Consumer-to-scope hook for the write/heavy/LLM router. Left None here: a bare
-    # rp-sdk server has no consumer layer, so ``require_scope`` falls back to the
-    # operator token. A management host sets a callable here to switch
-    # those endpoints to scoped per-consumer keys. See deps.require_scope.
+    # Consumer-to-scope hook. ``None``: ``require_scope`` falls back to the
+    # operator token. See deps.require_scope.
     app.state.consumer_verifier = None
     # Push-identity hook: ``(request, slug, rid) -> None``, called on
-    # ``PUT /profiles/{slug}`` once the body's rid is known and before anything
-    # is committed. ``require_scope("push")`` runs before the body is read, so
-    # it can only ever answer "may this credential push at all"; a host whose
-    # keys are bounded to particular people's profiles (a management host's
-    # ``push_own``) answers "may it push this rid" here, raising
-    # ``HTTPException(403)`` to refuse. Left None: bare rp-sdk has one operator
-    # token and no notion of whose profile a rid is.
+    # ``PUT /profiles/{slug}`` once the body's rid is known and before commit.
+    # ``require_scope("push")`` runs before the body is read, so it can only
+    # answer "may this credential push at all"; this hook answers "may it push
+    # this rid", raising ``HTTPException(403)`` to refuse.
     app.state.push_gate = None
-    # Health flag: a host that runs a startup query-embedding preflight
-    # flips this to False so ``/health`` answers 503 and the
-    # container's HEALTHCHECK stops routing traffic to a deployment whose
-    # /match would otherwise silently return 200 {"matches": []} forever.
-    # Bare rp-sdk never sets it, so /health stays "ok" here.
+    # A host's embedding preflight sets this False so ``/health`` answers 503;
+    # otherwise /match would silently return no matches.
     app.state.embedding_healthy = True
     app.state.embedding_health_detail = None
-    # Pre-commit hook for hosts. Registered on the store (here, the profile
-    # cache), not on ``app.state``: a hook registered on an app only fires for
-    # writes that went through a route that remembered to fire it, so a
-    # background writer that bypasses the routes would skip it. On the store it
-    # fires for every write: API routes, CLI, and out-of-process runs alike.
-    # See ResearcherProfile.write_unit for the ordering and failure contracts.
     for hook in pre_commit_hooks or ():
         store.add_pre_commit_hook(hook)
 
-    # The HTTP mapper: every typed service error becomes its status and body.
     install_service_errors(app)
 
     if not app.state.token:
@@ -198,11 +160,9 @@ def create_app(
     async def _stamp_viewer_tier(request, call_next):
         """Report the tier every projected response was computed against.
 
-        ``X-RP-Viewer-Tier`` makes a preview verifiable from outside the body: a
-        client (or a test) can assert what it was shown as without parsing what
-        it was shown. Stamped from ``request.state``, which
-        ``deps.get_viewer_tier`` sets as it resolves, so refusals carry it too,
-        and a route that never resolved a tier never claims one.
+        ``X-RP-Viewer-Tier`` lets a client check what it was shown as without
+        parsing the body. Set from ``request.state`` (``deps.get_viewer_tier``),
+        so refusals carry it too and a route that resolved no tier claims none.
         """
         response = await call_next(request)
         tier = getattr(request.state, "viewer_tier", None)
@@ -227,20 +187,13 @@ def create_app(
             profile_count=len(store.list_slugs()),
         )
 
-    # Always-gated write/heavy/LLM router.
     app.include_router(v1_router)
-    # Owner-scoped interactive edit router (gated by hooks.edit_gate inside the
-    # service functions: operator token on bare rp-sdk, user session under a
-    # management host).
+    # Gated by hooks.edit_gate inside the service functions.
     app.include_router(v1_edit_router)
-    # Registry-browser read surface. Mounted with no router-level dependency:
-    # every route on it resolves a viewer tier and projects its own response, so
-    # a refusal is a 404 on one profile rather than a 401 on the whole registry.
-    # A router-level gate could only ever ask "is this caller a credential we
-    # recognize", which is the wrong question. It locked a signed-in owner out
-    # of their own profile while an `rpk_` key read everybody else's.
-    # The product UI is the separately deployed rp-browser SPA; this app
-    # serves JSON only.
+    # No router-level dependency: every read route resolves a viewer tier and
+    # projects its own response, so a refusal is a 404 on one profile rather
+    # than a 401 on the whole registry. A router-level gate can only ask "is
+    # this a known credential", which is the wrong question for reads.
     app.include_router(v1_public_router)
     _serve_artifacts_beside_the_document(app)
     return app
@@ -259,13 +212,11 @@ def _serve_artifacts_beside_the_document(app: FastAPI) -> None:
     at ``/api/v1/profiles/{slug}/personality/SOUL.md``, exactly as it does on a
     static site, where the document and its files are siblings.
 
-    A middleware, not a route: a GET under a profile that no route claims is
-    rewritten to ``.../content/<artifact>`` before routing. Mounts are ignored
-    when deciding "no route claims it", because a host may mount a catch-all
-    at ``/`` (Prosopia's SPA does), and that must not swallow these paths.
-    Routes are read per request, so ones a host adds after this app is built
-    (Prosopia's ``/overlay``) still win. Anything the content route refuses
-    (not in the manifest, a withheld tier) is still that route's 404.
+    A GET under a profile that no route claims is rewritten to
+    ``.../content/<artifact>`` before routing. Mounts are ignored when
+    deciding "no route claims it", so a host's catch-all mount at ``/`` does
+    not swallow these paths. Routes are read per request, so routes a host
+    adds later still win.
     """
     app.add_middleware(_SiblingArtifactMiddleware, router=app.router)
 
@@ -296,11 +247,8 @@ class _SiblingArtifactMiddleware:
 def _build_default_app() -> FastAPI:
     """The env-driven app for ``uvicorn researcher_profiles.api.app:app``.
 
-    Reads nothing about which store to build itself: :func:`build_store`
-    (called with no store arguments here) is the one place that env-to-store
-    composition rule lives, so this and ``python -m researcher_profiles.api``
-    can never disagree about it. ``build_store`` raises ``ValueError`` when
-    neither ``$RESEARCHER_PROFILES_DATABASE_URL`` nor
+    The store comes from :func:`build_store`, which raises ``ValueError``
+    when neither ``$RESEARCHER_PROFILES_DATABASE_URL`` nor
     ``$RESEARCHER_PROFILES_ROOT`` is set.
     """
     configure_logging()
@@ -312,22 +260,15 @@ def _build_default_app() -> FastAPI:
     )
 
 
-# Module-level app for `uvicorn researcher_profiles.api.app:app`. Built
-# lazily so importing this module without env vars set (e.g. for tests)
-# doesn't crash.
+# ``None`` when no store is configured, so importing this module never fails.
 app: Optional[FastAPI]
 try:
-    # A retired ``RP_*`` name counts as "something is configured" here too,
-    # even though it does not satisfy build_store(): the point is to let
-    # build_store() raise its fail-loud RetiredEnvVarError instead of quietly
-    # skipping straight to `app = None`, which would import cleanly and 404
-    # every request with no clue that a renamed variable is the reason.
+    # A retired env var name also counts, so build_store() raises its
+    # RetiredEnvVarError instead of silently leaving ``app = None``.
     _configured = os.environ.get(PROFILES_ROOT_ENV_VAR) or os.environ.get(DATABASE_URL_ENV_VAR)
     _retired_set = any(os.environ.get(name) for name in RETIRED_ENV_VARS)
     app = _build_default_app() if (_configured or _retired_set) else None
-# Boundary: process start-up against whatever the environment says. A
-# misconfigured server must still import, so it starts with no app and 404s;
-# without this log it would do so with no explanation anywhere.
+# Boundary: a misconfigured server must still import; log why it has no app.
 except Exception:  # pragma: no cover
     logger.exception("could not build the default app from the environment")
     app = None

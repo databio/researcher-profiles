@@ -1,18 +1,6 @@
 /**
- * Route model + path helpers for the browser (history) router.
- *
- * The app runs on react-router v7's `createBrowserRouter` (see `routes.tsx`).
- * This module holds the small, framework-agnostic pieces the rest of the app
- * depends on:
- *
- *   - the `Route` discriminated union, so call sites say
- *     `navigate({ page: "profile", url })` instead of hand-writing paths;
- *   - `buildPath(route)` -> the real, history-API path for a route (used by
- *     `<Link to>` and by `navigate`);
- *   - `navigate(route)` -> imperative navigation from non-hook code, delegating
- *     to the live router registered by `routes.tsx` (`registerRouter`);
- *   - `pageOf(pathname)` -> the inverse of `buildPath`, so the shell can derive
- *     the active page from `useLocation().pathname` for nav highlighting.
+ * Route model and path helpers, free of React imports. The router itself is
+ * built in `routes.tsx`.
  *
  * Routes (browser paths, not hash fragments):
  *   /                              - landing (hero + what-this-is)
@@ -71,9 +59,7 @@ export function buildPath(route: Route): string {
 
 /**
  * The active page for a (basename-relative) pathname, for nav highlighting.
- * `null` for anything this app does not serve, including a host application's
- * own routes, so mounting this app under a host never lights up the wrong
- * nav link.
+ * `null` for anything this app does not serve, including a host's own routes.
  */
 export function pageOf(pathname: string): Route["page"] | null {
   const p = pathname.replace(/\/+$/, "") || "/";
@@ -112,20 +98,16 @@ interface NavigableRouter {
 let liveRouter: NavigableRouter | null = null;
 
 /**
- * Register the live router instance. Called once by `routes.tsx` after the
- * browser router is created. Kept here (rather than importing the router into
- * this module) so `router.ts` stays free of any React/route-table imports and
- * there is no import cycle: `routes.tsx` -> components -> `router.ts`.
+ * Register the live router instance. Registration, rather than an import,
+ * avoids the cycle `routes.tsx` -> components -> `router.ts`.
  */
 export function registerRouter(router: NavigableRouter): void {
   liveRouter = router;
 }
 
 /**
- * Imperative navigation for event handlers in plain functions. Prefer
- * `<Link to={buildPath(route)}>` in JSX; use this where a click handler must
- * navigate. No-ops (with a warning) before the router is registered, which
- * cannot happen at runtime once the app has mounted.
+ * Imperative navigation for plain functions. Prefer `<Link to={buildPath(route)}>`
+ * in JSX. Warns and does nothing before the router is registered.
  */
 export function navigate(route: Route): void {
   const to = buildPath(route);
@@ -152,11 +134,9 @@ export type ProfileRef =
   | { kind: "error"; message: string };
 
 /**
- * What `/p?u=<ref>` points at. A full http(s) URL is used as is. Anything else
- * is read as a slug (`/p?u=sheffield-nathan`, the short link a person types)
- * and looked up among the cards of the loaded sources, the host's home source
- * first. While a source is still loading the answer is `pending`; when none has
- * the slug it is an `error` that says so, never a thrown "Invalid URL".
+ * What `/p?u=<ref>` points at. An http(s) URL is used as is. Anything else is a
+ * slug looked up among loaded cards, the host's home source first. `pending`
+ * while a source still loads; an `error` result, never a throw, otherwise.
  */
 export function resolveProfileRef(
   ref: string,

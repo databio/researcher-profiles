@@ -1,13 +1,11 @@
 """The one HTTP client for OpenAlex, and the only holder of an OpenAlex API key.
 
-Every OpenAlex request in rp-sdk (and in the services built on it) goes
-through :class:`OpenAlexClient`. Callers build a client once and pass the
-object around; no other function takes or reads a key string.
+Callers build a client once and pass the object around; no other function
+takes or reads a key string.
 
 The key goes in the ``Authorization: Bearer`` header and nowhere else: never a
-URL, query param, log line, exception message, or repr. Since February 2026
-OpenAlex requires a key (no key gets about $0.10 of usage a day, a free key
-$1); the old ``mailto`` "polite pool" address is ignored, so it is gone too.
+URL, query param, log line, exception message, or repr. OpenAlex requires a
+key (no key gets about $0.10 of usage a day, a free key $1).
 
 Errors are mapped to three types whose messages carry only a status and a
 path, never the request URL (which holds search terms) or the key:
@@ -64,9 +62,6 @@ def _float(value: Any) -> float | None:
 
 class OpenAlexClient:
     """The only code that sends HTTP to OpenAlex, and the only holder of the key.
-
-    The key goes in the ``Authorization: Bearer`` header and nowhere else:
-    never a URL, query param, log line, exception message, or repr.
 
     ``cost_usd`` sums ``meta.cost_usd`` over this client's calls;
     ``remaining_usd`` is the account's budget left today, from the newest

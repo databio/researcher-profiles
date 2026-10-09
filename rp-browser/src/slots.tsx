@@ -1,14 +1,7 @@
 /**
- * The host-application extension points.
- *
- * This app is complete on its own: served from any static host it browses,
- * validates, and explains published researcher profiles with no server behind
- * it. A host application can also mount it (see `mount.tsx`) and add its own
- * chrome around it: extra nav links, an identity cluster, a different empty
- * screen, extra profile tabs. Those additions arrive through this context and
- * nowhere else, so the public bundle never carries host-specific code.
- *
- * Every slot is empty by default. Empty is the standalone app.
+ * Host-application extension points. Host additions arrive only through this
+ * context, so the public bundle never carries host-specific code. Every slot
+ * is empty by default, which is the standalone app.
  */
 import { createContext, useContext, type ReactNode } from "react";
 
@@ -47,9 +40,8 @@ export interface HomeHero {
 }
 
 /**
- * Chrome a host application can add when it embeds this SPA. Every field is
- * empty by default, which is the standalone static-host app. A host installs
- * its own values with <ShellSlotsProvider> inside mountApp's `wrap`.
+ * Chrome a host can add when it embeds this SPA, installed with
+ * <ShellSlotsProvider> inside mountApp's `wrap`.
  */
 export interface ShellSlots {
   /** Replaces the built-in logo and app name at the left of the header. */

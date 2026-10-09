@@ -20,12 +20,9 @@ def resolve_rid(
 ) -> ResolveResult:
     """Resolve a person descriptor to a ``rid`` against the identity authority.
 
-    The consumer-side half of ``POST /api/v1/identity/resolve``: a service
-    holding a free-text name or a bare ORCID calls this at its boundary and
-    stores the returned ``rid`` (as a scholarcore ``PersonRef``), instead of
-    hand-rolling HTTP or minting its own local id, which is worse. Resolution
-    is authoritative and idempotent server-side: the same person resolved
-    from two services gets the same ``rid``.
+    Calls ``POST /api/v1/identity/resolve``. Resolution is idempotent
+    server-side: the same person resolved from two services gets the same
+    ``rid``.
 
     ``rid`` is an ORCID or a ``local:`` id the resolver minted. ``token`` must
     carry the ``resolve`` scope (falls back to the

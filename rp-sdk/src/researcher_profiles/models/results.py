@@ -1,9 +1,4 @@
-"""Result objects SDK methods hand back in-process: what ``prof.cite``,
-``prof.ask``, ``prof.topics``, ``store.match``, ``rank_works``,
-``prof.coverage`` and friends return. Plain dataclasses, not wire models: the
-JSON shapes the HTTP API serves live in :mod:`.api` and are never these
-classes.
-"""
+"""Result objects SDK methods return in-process. Plain dataclasses, not wire models."""
 
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -74,10 +69,6 @@ class CitationRef:
 class PersonaResponse:
     """What every persona method returns: ``.ask``, ``.review``, ``Chat.send``.
 
-    One shape, because the three answer the same kind of question: a piece of
-    text written in the researcher's voice, plus the papers it leaned on and
-    the accounting for the call that produced it.
-
     ``grounded`` is ``False`` when the model cited a ``paper_id`` that is not in
     this profile's paper set: the answer may still be useful, but it left the
     corpus. ``refused`` is ``True`` when strict-corpus retrieval came back too
@@ -85,10 +76,8 @@ class PersonaResponse:
     ``refusal_reason`` then carries the retrieval score and threshold. A refusal
     is a successful call, not an error.
 
-    ``raw`` is the provider's own response object, for callers that need
-    something this dataclass does not expose. It is local-only: the HTTP API
-    never serializes it, so a response that arrived over the wire has
-    ``raw=None``.
+    ``raw`` is the provider's own response object. It is local-only: a
+    response that arrived over the HTTP API has ``raw=None``.
     """
 
     text: str
@@ -145,12 +134,10 @@ class GenerativeParseError(ProfileError):
 class PersonaUnavailableError(ProfileError):
     """Raised when a persona method is called on a profile with no persona.
 
-    The persona endpoints (``.ask``/``.review``/``.innovate``/``.riff``)
-    require a fully-synthesized profile: both ``expertise.md`` and ``SOUL.md``
-    must be present and non-empty (see ``ResearcherProfile.has_persona``). An
-    incomplete / "lite" profile is a client-visible precondition failure, not a
-    server error, and must not silently role-play an empty persona. Subclasses
-    ``ProfileError`` so library callers can catch either this or the base.
+    The persona methods (``.ask``/``.review``/``.innovate``/``.riff``) need
+    both ``expertise.md`` and ``SOUL.md`` non-empty (see
+    ``ResearcherProfile.has_persona``). A client-visible precondition failure,
+    not a server error, so a lite profile never role-plays an empty persona.
     """
 
     def __init__(self, slug: str):
@@ -237,7 +224,6 @@ class Match:
         """
         if self.explanation is not None:
             return self.explanation
-        # Build a brief prompt from evidence; call LLM via the package adapter.
         from ..generative.llm import LLMClient
 
         prof = self.profile

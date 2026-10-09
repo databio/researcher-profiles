@@ -1,11 +1,5 @@
 """The character rule for a profile's text artifacts (paper full text, summaries).
 
-One rule, used in two places: the builder calls :func:`text_artifact_problems`
-right after it downloads a paper or accepts a summary (so a garbled file is
-never written as good), and ``rp validate`` calls it on every
-``sources/papers/*.md`` and ``sources/summaries/*.summary.md`` (so one that got
-through anyway fails the profile).
-
 The rule is "no garbage", not "ASCII only". Greek letters, math symbols,
 accented names, curly quotes, and em-dashes are all fine. What fails:
 
@@ -21,14 +15,13 @@ accented names, curly quotes, and em-dashes are all fine. What fails:
   that mentions ``endobj`` in prose is safe.
 
 Why shares and not "any": real PDF text extraction leaves a few stray
-characters behind. Math fonts map big brackets to U+0010-U+001B, pdftotext
-writes a form feed at each page break, and an unmappable glyph becomes one
-U+FFFD. Measured over ~7,400 paper and summary files on disk, legitimate
-papers top out at 0.09% U+FFFD and 1.3% control characters, while every
-binary-as-text file sits at 4.6% or more U+FFFD and 4.9% or more control
-characters. The thresholds sit in that gap.
+characters (math-font brackets as U+0010-U+001B, form feeds at page breaks,
+one U+FFFD per unmappable glyph). Over ~7,400 files, good papers top out at
+0.09% U+FFFD and 1.3% control characters; every binary-as-text file has 4.6%
+or more U+FFFD and 4.9% or more control characters. The thresholds sit in
+that gap.
 
-Stdlib only, so the builder can import it without pulling in anything else.
+Stdlib only.
 """
 
 from __future__ import annotations
@@ -87,8 +80,7 @@ def text_artifact_problems(content: bytes | str, *, min_chars: int = 0) -> list[
         content: The file's raw bytes (preferred: invalid UTF-8 is only
             detectable on bytes) or already-decoded text.
         min_chars: When positive, also fail text with fewer than this many
-            characters after trimming whitespace. The builder passes a floor
-            for full text; the validator does not (size is not a format rule).
+            characters after trimming whitespace.
 
     Returns:
         One human-readable sentence per failed rule, in a stable order.

@@ -1,10 +1,7 @@
 """What one audience may receive from one profile: the shared egress projection.
 
-Two writers ship a profile to a reader who is not its owner: the HTTP
-archive (:func:`~researcher_profiles.api.upload.build_viewer_archive`) and the
-static export (:func:`~researcher_profiles.publish.publish_collection`). Both
-build from :func:`plan_profile_export`, so the two cannot disagree about what a
-tier may see.
+Both the HTTP archive and the static export build from
+:func:`plan_profile_export`, so they cannot disagree about what a tier may see.
 """
 
 import os
@@ -43,9 +40,7 @@ class ExportPlan:
     files: list[str]
     #: Profile-relative paths on disk that do not ship, each with the reason.
     withheld: dict[str, str] = field(default_factory=dict)
-    #: Whether the ``embeddings/index.json`` artifact reaches this viewer. When
-    #: it does not, nothing under ``embeddings/`` ships, whatever its source,
-    #: and the projected document says ``hasEmbeddingIndex: false``.
+    #: Whether the ``embeddings/index.json`` artifact reaches this viewer.
     embeddings: bool = False
 
 

@@ -1,10 +1,4 @@
-"""Candidate works ranked against one profile, the mirror of ``match.rank``.
-
-``store.match.rank`` ranks profiles against a free-text query;
-:func:`rank_works_against_profile` ranks candidate works (e.g. new OpenAlex
-results from ``openalex.fetch_new_works``) against one profile's embedding
-vector. Both diversify through the shared :func:`mmr_indices` helper.
-"""
+"""Candidate works ranked against one profile's embedding vector."""
 
 import json
 import logging
@@ -116,13 +110,8 @@ def rank_works_against_profile(
     """Rank candidate works against one profile's embedding vector.
 
     ``works`` are ``PaperRecord``-like objects (title + optional abstract).
-    The profile side is ``profile.index.embedding(kind)``: ``centroid`` by
-    default, ``summary``/``expertise`` as alternatives. Each candidate's
-    title+abstract is embedded with the same backend that built the profile's
-    index (or an explicit ``backend``), cosine-scored, optionally filtered by
-    ``threshold``, MMR-diversified, and returned best-first as
-    :class:`~researcher_profiles.models.results.RankedWork` with overlapping-topic
-    evidence.
+    Works are embedded with the profile index's backend unless ``backend`` is
+    given, filtered by ``threshold``, MMR-diversified, and returned best-first.
     """
     if not works:
         return []

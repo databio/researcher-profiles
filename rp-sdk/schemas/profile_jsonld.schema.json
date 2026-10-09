@@ -54,7 +54,7 @@
     },
     "ArtifactRef": {
       "additionalProperties": true,
-      "description": "One manifest entry: a typed link to one artifact (file) inside the profile.\n\n``contentUrl`` is always a relative path, so a profile stays portable\nacross servers. Copying the directory to a different host cannot break a\nsingle link.",
+      "description": "One manifest entry: a typed link to one artifact (file) inside the profile.\n\n``contentUrl`` is always a relative path, so a profile stays portable\nacross servers.",
       "properties": {
         "@context": {
           "anyOf": [
@@ -253,7 +253,7 @@
     },
     "CareerStage": {
       "additionalProperties": true,
-      "description": "Date-anchored career-stage and eligibility facts (``rp:careerStage``).\n\nStores anchor facts, not verdicts. Eligibility (NIH ESI, K99, NSF CAREER,\n...) is always evaluated relative to an application due date, so the\nprofile never records \"is_esi: true\". It records the dated facts an\nevaluator applies a NOFO's rule to at evaluation time. ``as_of`` is when\nthe facts were assessed (distinct from the profile build date). ``None``\nand ``\"unknown\"`` are legal everywhere so an evaluator can say \"can't\ndetermine\" instead of guessing. ``sources_checked`` disambiguates the\nnulls: a null fact whose source category was checked is an established\nabsence; a null fact whose category was never checked is unknown.\n\nOut of scope (use ``notes`` or ask the human): citizenship /\nvisa status, postdoc research-months accounting, ESI extensions.",
+      "description": "Date-anchored career-stage and eligibility facts (``rp:careerStage``).\n\nStores anchor facts, not verdicts. Eligibility (NIH ESI, K99, NSF CAREER,\n...) depends on an application due date, so the profile records the dated\nfacts an evaluator applies a rule to, never \"is_esi: true\". ``None`` and\n``\"unknown\"`` are legal everywhere so an evaluator can say \"can't\ndetermine\" instead of guessing.\n\nOut of scope (use ``notes`` or ask the human): citizenship /\nvisa status, postdoc research-months accounting, ESI extensions.",
       "properties": {
         "as_of": {
           "description": "ISO date on which these facts were assessed. not the profile build date. Every fact below is a claim as of this date.",
@@ -503,7 +503,7 @@
     },
     "Identifier": {
       "additionalProperties": true,
-      "description": "A ``schema:PropertyValue`` identifier node.\n\nUsed for the identifiers that are not the profile's ``@id``: OpenAlex,\nScopus, and whatever an older ``external_ids`` block carried.",
+      "description": "A ``schema:PropertyValue`` identifier node.\n\nFor identifiers other than the profile's ``@id``, such as OpenAlex or Scopus.",
       "properties": {
         "@context": {
           "anyOf": [
@@ -559,7 +559,7 @@
     },
     "InterestConcept": {
       "additionalProperties": true,
-      "description": "The concept a :class:`ResearchInterest` points at.\n\nTwo forms, never mixed. A **coded** concept names a term in a controlled\nvocabulary: ``system`` (the vocabulary URI), ``code``, ``display`` (the\nlabel snapshot a human reads), an optional pinned ``version``, and the\nterm's own IRI as ``@id``. A **text-only** concept is a ``label`` with\n``unmapped: true`` and no ``@id``, ``system`` or ``code``: an interest no\nvocabulary covers, kept rather than forced onto a wrong term.\n\nThe field names follow FHIR ``Coding`` (``system``, ``code``,\n``display``, ``version``), so a Coding view is a rename, not a mapping.\nThis is a separate type from :class:`ConceptReference`, which stays the\nshape of ``therapeutic_areas``.",
+      "description": "The concept a :class:`ResearchInterest` points at.\n\nTwo forms, never mixed. A **coded** concept names a term in a controlled\nvocabulary: ``system`` (the vocabulary URI), ``code``, ``display`` (the\nlabel snapshot a human reads), an optional pinned ``version``, and the\nterm's own IRI as ``@id``. A **text-only** concept is a ``label`` with\n``unmapped: true`` and no ``@id``, ``system`` or ``code``: an interest no\nvocabulary covers, kept rather than forced onto a wrong term.\n\nThe field names follow FHIR ``Coding`` (``system``, ``code``,\n``display``, ``version``), so a Coding view is a rename, not a mapping.",
       "properties": {
         "@context": {
           "anyOf": [
@@ -857,7 +857,7 @@
           }
         }
       ],
-      "description": "One verification proof attached to a profile (``rp:proof``).\n\nThe format standardizes the *envelope*: what is asserted (``kind``), who\nvouches (``issuer``), when it was last confirmed (``verifiedAt``), and,\nfor checkable proofs, how to check it. It stays neutral on the identity\n*source*. A profile may carry zero, one, or many proofs at once; a\nconsumer picks its own trust threshold over the proofs whose ``kind`` it\nunderstands.\n\n``extra=\"allow\"`` (inherited from :class:`JsonLdModel`) matters here:\ndifferent kinds carry different members, and future kinds add members\nthis version does not model. Unknown members are preserved, never\nrejected.",
+      "description": "One verification proof attached to a profile (``rp:proof``).\n\nThe format standardizes the *envelope*: what is asserted (``kind``), who\nvouches (``issuer``), when it was last confirmed (``verifiedAt``), and,\nfor checkable proofs, how to check it. It stays neutral on the identity\n*source*. A profile may carry zero, one, or many proofs at once; a\nconsumer picks its own trust threshold over the proofs whose ``kind`` it\nunderstands.\n\nMembers this version does not model are preserved, never rejected.",
       "properties": {
         "@context": {
           "anyOf": [
@@ -1113,7 +1113,7 @@
     },
     "ResearchOutput": {
       "additionalProperties": true,
-      "description": "The base type for every research output a researcher produces.\n\nAn entry in the ``researchOutputs`` list (``rp:researchOutput``) is a\n``ResearchOutput`` directly: software, a dataset, a protocol, a reagent, or\nanother non-paper output. Papers are not stored here \u2014 they live in\n``sources/papers.jsonld`` \u2014 but :class:`~.PaperRecord` is a *specialization*\nof this class, and future output kinds (grants, abstracts, presentations,\npatents, standards) are expected to specialize it too, adding their own\ntype-specific fields on top of this shared core.\n\nIt is a :class:`~.JsonLdModel`, not a plain nested value object, because a\nresearch output is a citable thing with an identity: a DOI, a repository\nURL, a grant number. ``@id`` and ``@type`` are therefore available on every\noutput; both are optional, and a generic output needs neither.\n\n``type`` is free text, not a closed enum. The recommended vocabulary is\n``software``, ``dataset``, ``protocol``, ``reagent``, ``model``, ``grant``,\n``abstract``, ``presentation``, ``patent``, ``standard`` (see\n``docs/rp-spec/index.md``); a publisher may use any other value.",
+      "description": "The base type for every research output a researcher produces.\n\nAn entry in the ``researchOutputs`` list (``rp:researchOutput``): software,\na dataset, a protocol, a reagent, or another non-paper output. Papers live\nin ``sources/papers.jsonld``; :class:`~.PaperRecord` specializes this class.\n\nA research output is a citable thing, so it may carry an optional ``@id``\nand ``@type``.\n\n``type`` is free text, not a closed enum. The recommended vocabulary is\n``software``, ``dataset``, ``protocol``, ``reagent``, ``model``, ``grant``,\n``abstract``, ``presentation``, ``patent``, ``standard`` (see\n``docs/rp-spec/index.md``); a publisher may use any other value.",
       "properties": {
         "@context": {
           "anyOf": [
@@ -1193,7 +1193,7 @@
     },
     "SectionVisibility": {
       "additionalProperties": true,
-      "description": "A declared privacy tier for one inline section of the document.\n\nArtifacts carry their own tier on an :class:`ArtifactRef`; the fields\n*inside* ``profile.jsonld`` had nowhere to carry one, so a private summary\nor a private methods list rode out in a public document however carefully\nthe files were excluded. The section names are a closed set on purpose:\n:data:`researcher_profiles.privacy.SECTION_FIELDS` maps each to the exact\nfields it governs, and a section nothing maps to would be a tier that\nsilently protects nothing.",
+      "description": "A declared privacy tier for one inline section of the document.\n\nThe tier for fields inside ``profile.jsonld``, as :class:`ArtifactRef`\ncarries one for files. The section names are a closed set so that every\nsection maps to the fields it governs; an unmapped section would protect\nnothing.",
       "properties": {
         "@context": {
           "anyOf": [
@@ -1266,7 +1266,7 @@
     },
     "SiteCapabilities": {
       "additionalProperties": true,
-      "description": "A clinical site's capacity to host trials (``rp:siteCapabilities``).\n\nTyped rather than a free dict so the owner editor can round-trip it and\nthe privacy projection can drop it as one section. See the optional\nclinical extension in ``docs/rp-spec/index.md``.",
+      "description": "A clinical site's capacity to host trials (``rp:siteCapabilities``).\n\nSee the optional clinical extension in ``docs/rp-spec/index.md``.",
       "properties": {
         "disease_areas": {
           "default": [],

@@ -1,12 +1,4 @@
-"""The transactional boundary and hook engine for one profile's writes.
-
-:class:`WriteUnit` owns the per-profile write machinery so that
-:class:`~researcher_profiles.profile.ResearcherProfile` does not: the pre/post
-commit hook lists, the open context, the nesting depth, the deferred-hook flag,
-and the compensation list. The profile keeps only ``write_unit(kind)`` / ``add_pre_commit_hook`` / ``add_post_commit_hook``
-as one-line delegations, because those three are the public interface that
-``api.deps`` and out-of-tree callers register against.
-"""
+"""The transactional boundary and hook engine for one profile's writes."""
 
 import logging
 from collections.abc import Callable, Iterator
@@ -46,12 +38,11 @@ class WriteContext:
     #: deadlock against the row this unit already holds.
     session: Any | None
     #: ``True`` when the hook's writes will commit or roll back atomically with
-    #: this unit. Branch on this, not on ``session is None``. The two are not
-    #: synonyms and will diverge the moment a second backend appears.
+    #: this unit. Branch on this, not on ``session is None``; they are not
+    #: synonyms.
     atomic: bool
     #: The ambient HTTP request when the write came from an API route; ``None``
-    #: for CLI, pipeline, and out-of-process writes. A hook that dereferences
-    #: this unconditionally will break every non-HTTP write path.
+    #: for CLI, pipeline, and out-of-process writes.
     request: Any | None = None
     #: For ``kind == "merge"`` only: the rid and slug of the profile this write
     #: retires into ``rid`` (``SqlProfileStore.merge_into``). ``None`` otherwise.
@@ -66,24 +57,17 @@ WriteHook = Callable[[WriteContext], None]
 class WriteUnit:
     """The transactional boundary and hook engine for one profile.
 
-    Composed onto the profile rather than inherited, so a storage backend
-    supplies only ``new_write_context`` / ``refresh_derived`` / ``commit`` /
-    ``rollback`` and never has to reimplement the ordering contract.
+    A storage backend supplies only ``new_write_context`` /
+    ``refresh_derived`` / ``commit`` / ``rollback``; this owns the ordering.
 
-    On rollback, this always runs its own registered compensations (only the
-    filesystem backend registers any), then calls the backend's ``rollback``.
-    On the filesystem, the compensations are the rollback. Separating them
-    means a transactional backend cannot accidentally inherit compensation
-    semantics.
+    On rollback, registered compensations run first (only the filesystem
+    backend registers any), then the backend's ``rollback``.
     """
 
     def __init__(self, profile: "ResearcherProfile", storage: "ArtifactStorage") -> None:
         self._profile = profile
         self._storage = storage
         self._pre_commit_hooks: list[WriteHook] = []
-        #: Fire-and-forget notifications run after a write unit commits; see
-        #: :meth:`add_post_commit_hook`. Unlike ``_pre_commit_hooks`` these
-        #: never abort a write, so there is no pending/deferral bookkeeping.
         self._post_commit_hooks: list[WriteHook] = []
         self._ctx: WriteContext | None = None
         self._depth: int = 0
@@ -134,9 +118,8 @@ class WriteUnit:
     def run_pre_commit_hooks(self, ctx: WriteContext) -> None:
         """Fire the pre-commit hooks for this unit, exactly once.
 
-        A nested writer defers to the outermost unit rather than firing again,
-        so wrapping several writes in one unit produces one hook run
-        immediately before the single commit.
+        A nested writer defers to the outermost unit, so several writes in one
+        unit produce one hook run just before the single commit.
         """
         if self._depth > 1:
             self._hooks_pending = True
@@ -144,12 +127,7 @@ class WriteUnit:
         self._fire_pre_commit_hooks(ctx)
 
     def _fire_post_commit_hooks(self, ctx: WriteContext) -> None:
-        """Run every registered post-commit hook, swallowing its failures.
-
-        The write already committed by the time this runs, so a failing hook
-        has nothing to roll back and must never propagate: it is logged at
-        WARNING and the remaining hooks still run.
-        """
+        """Run every post-commit hook; a failure is logged at WARNING, never raised."""
         for hook in list(self._post_commit_hooks):
             try:
                 hook(ctx)
@@ -181,58 +159,34 @@ class WriteUnit:
     def open(self, kind: str) -> Iterator[WriteContext]:
         """The transactional boundary for one logical write.
 
-        Joins an ambient unit if one is already open on this profile;
-        otherwise opens one and commits it on clean exit. Nesting is therefore
-        safe and does not produce nested commits or a second hook run, which
-        is what lets a caller wrap several writes in a single atomic
-        operation.
+        Joins an ambient unit if one is open on this profile; otherwise opens
+        one and commits it on clean exit. Nesting never produces nested
+        commits or a second hook run.
 
-        Ordering contract: within one unit, in this exact order:
+        Ordering contract, within one unit:
 
         1. The artifact bytes/rows are written through the storage backend.
-        2. Store-maintained derived state is refreshed
-           (``storage.refresh_derived``): for a SQL store, the
-           ``content_hash`` column. This happens before the hooks, so a
-           hook calling ``content_hash`` observes the new content. A hook that
-           hashed pre-write content would mark dependent state stale against
-           the wrong digest. ``content_hash`` spans the document and the
-           soul, so a soul-only write refreshes it too. This is why derived
-           state is refreshed by the write unit, not by ``save_document``.
-        3. Registered ``pre_commit_hook``s run, in registration order, each
-           receiving the same :class:`WriteContext`.
-        4. Only then does the unit commit.
-        5. Registered ``post_commit_hook``s run, in registration order, each
-           receiving the same :class:`WriteContext`. Unlike step 3, a raising
-           hook here is caught and logged, never propagated. The write is
-           already committed, and there is nothing left to abort.
+        2. Derived state is refreshed (``storage.refresh_derived``), so a hook
+           calling ``content_hash`` sees the new content.
+        3. Pre-commit hooks run in registration order.
+        4. The unit commits.
+        5. Staged cache updates apply, so a rolled-back write leaves the cache
+           matching the store.
+        6. Post-commit hooks run in registration order; a raise is logged,
+           never propagated.
 
-        In-memory cache updates staged by a public writer run after the
-        outer commit and before post-commit hooks, so a rolled-back write
-        leaves the profile cache matching the store rather than a write that
-        never landed.
+        Failure contract: a raising pre-commit hook aborts the write. The unit
+        does not commit, a transactional backend rolls back, and the exception
+        propagates as :class:`~researcher_profiles.errors.WriteHookError`
+        naming the hook (the original as ``__cause__``). The first raise stops
+        the rest.
 
-        Failure contract: a hook raising aborts the write. The unit does
-        not commit, a transactional backend rolls back, and the exception
-        propagates wrapped in :class:`~researcher_profiles.errors.WriteHookError`
-        naming the hook (the original as ``__cause__``). Nothing is swallowed.
-        Hooks run in registration order, and the first raise stops the rest.
-        A partial run followed by a rollback is fine; a partial run followed
-        by a commit is not.
-
-        Filesystem semantics: that backend has no session and no
-        transaction. It still runs every registered hook, at the same logical
-        point, so the observable contract is identical across backends. Only
-        atomicity differs, and ``ctx.atomic`` is how a hook is told which it is
-        getting. A raising hook does not undo the write there beyond the
-        best-effort compensations registered on this unit.
-
-        A hook written against a transactional store must branch on
-        ``ctx.atomic`` and choose explicitly: raise
-        :class:`~researcher_profiles.errors.TransactionRequired`, or degrade to
-        a non-atomic write it has consciously decided is acceptable. What it
-        must not do is pass ``ctx.session`` (``None`` on the filesystem) into a
-        call that quietly opens its own autocommitting connection and then
-        reports success.
+        The filesystem backend has no transaction but runs hooks at the same
+        point; only atomicity differs, and ``ctx.atomic`` says which. A hook
+        that needs atomicity must branch on ``ctx.atomic``: raise
+        :class:`~researcher_profiles.errors.TransactionRequired`, or knowingly
+        degrade. It must never pass ``ctx.session`` (``None`` on the
+        filesystem) into a call that opens its own autocommitting connection.
         """
         if self._ctx is not None:
             self._depth += 1
@@ -255,11 +209,7 @@ class WriteUnit:
             self._commit(ctx)
             for name, value in self._after_commit.items():
                 setattr(self._profile, name, value)
-            # Only the outermost unit reaches this line (a nested `open`
-            # call returns early in the branch above, before any commit), so a
-            # batch of writes grouped under one explicit unit fires post-commit
-            # hooks once, after the single commit, exactly like the pre-commit
-            # hooks it mirrors.
+            # Only the outermost unit reaches here, so post-commit hooks fire once.
             self._fire_post_commit_hooks(ctx)
         except BaseException:
             self._run_compensations()
@@ -273,8 +223,6 @@ class WriteUnit:
             self._after_commit = {}
 
     # --- backend calls --------------------------------------------------
-    #
-    # The storage backend owns the transaction; this owns the ordering.
 
     def _new_context(self, kind: str) -> WriteContext:
         return self._storage.new_write_context(self._profile, kind)

@@ -9,10 +9,8 @@ Run with:
 The host surface
 ================
 
-A host is a service that serves these routes, mounts them under its own
-prefix and auth, or composes its own surface on top of the same projection.
 The names below are the stable surface a host builds against. Anything not
-listed here is internal to the route modules.
+listed here is internal.
 
 Application factory
     ``create_app`` builds the bare server: every router mounted, every
@@ -29,36 +27,24 @@ Routers
 Route handlers
     The read, search and generative handlers are exported so a host can
     re-declare them on its own ``APIRouter`` with its own dependencies:
-    ``list_profiles``, ``get_profile_detail``, ``list_papers``, ``get_paper``,
-    ``get_summaries``, ``search_profile``, ``ask_profile``,
-    ``review_profile``, ``innovate_profile``, ``riff_profile``. The profile,
-    paper, text and passage handlers take the ``Service`` and a ``Caller``
-    (``deps.get_service``, ``deps.get_read_caller``) and call the service
-    function of the same job; the rest take the store and the viewer tier. A
-    host supplies them through its own ``Depends``. ``list_profiles`` returns
-    a ``Response`` carrying the ``rp:profileList`` envelope, not a list of
-    models.
+    see ``__all__``. The profile, paper, text and passage handlers take the
+    ``Service`` and a ``Caller`` (``deps.get_service``,
+    ``deps.get_read_caller``); the rest take the store and the viewer tier.
+    ``list_profiles`` returns a ``Response`` carrying the ``rp:profileList``
+    envelope, not a list of models.
 
 Service layer
-    ``Service`` (``api.service``) holds the store, the hooks and the app's
-    caches; ``create_app`` builds one on ``app.state.service``. The functions
-    beside it (``get_profile``, ``list_papers``, the text and passage reads,
-    ``edit_metadata``, ``add_work`` and the other edits) take the service, a
-    ``Caller`` (``api.caller``) and their arguments, hold every permission
-    check, and raise the typed errors in ``researcher_profiles.errors``. The
-    routes are thin adapters over them, and a host's MCP server calls the same
-    functions. ``service_error_response`` maps the typed errors to HTTP;
-    ``create_app`` installs it, and a host that re-declares the handlers on
-    its own app calls ``install_service_errors(app)``. After a write, ``Service.invalidate``
-    drops every cache that could reflect the old profile.
+    ``Service`` and its functions (``api.service``) hold every permission
+    check; ``create_app`` builds one on ``app.state.service``.
+    ``service_error_response`` maps the typed errors to HTTP; a host that
+    re-declares the handlers on its own app calls
+    ``install_service_errors(app)``.
 
 Read projection
-    ``artifact_visible``, ``metadata_payload`` and ``withheld`` are the
-    functions the route modules project through. A host that composes its own
-    surface uses the same three, so it and the SDK cannot disagree about what
-    a viewer may see. ``served_document`` and ``served_document_bytes`` build
-    the served ``profile.jsonld``: the stored record plus the registry-issued
-    proofs ``Service.proofs`` computes per read.
+    ``artifact_visible``, ``metadata_payload`` and ``withheld``. A host that
+    composes its own surface uses the same three, so it and the SDK cannot
+    disagree about what a viewer may see. ``served_document`` and
+    ``served_document_bytes`` build the served ``profile.jsonld``.
 
 ``api.deps``
     The dependency callables a host reuses or wraps: ``get_store``,
@@ -76,16 +62,10 @@ Read projection
     ``DEFAULT_MAX_UPLOAD_BYTES``.
 
 ``app.state.hooks``
-    The host seams, one field per seam on a ``Hooks`` (``api.hooks``), every
-    one but ``caller_resolver`` taking a ``Caller`` instead of a request:
-    ``caller_resolver``, ``viewer_resolver``, ``profile_tier_floor``,
-    ``edit_gate``, ``write_scope``, ``record_edit``, ``registry_proofs`` and
-    ``store_for``. A host assigns the ones it fills. Two request-shaped hooks
-    stay on ``app.state`` because they gate the push/search/match plane:
-    ``consumer_verifier`` and ``push_gate``. A host that runs an embedding
-    preflight reports it through ``app.state.embedding_healthy`` and
-    ``embedding_health_detail``. Each is described in ``api.hooks``, where
-    ``create_app`` sets it, and in the root ``AGENTS.md``.
+    A ``Hooks`` (see ``api.hooks``). Two request-shaped hooks stay on
+    ``app.state`` because they gate the push/search/match plane:
+    ``consumer_verifier`` and ``push_gate``. An embedding preflight reports
+    through ``app.state.embedding_healthy`` and ``embedding_health_detail``.
 """
 
 from ._errors import install_service_errors, service_error_response

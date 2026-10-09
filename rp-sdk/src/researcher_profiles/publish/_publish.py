@@ -1,13 +1,4 @@
-"""Export a set of profiles as the static tree one audience may see.
-
-:func:`publish_collection` is the whole privacy story for a static host. It
-writes a self-contained folder holding exactly what one viewer tier may read:
-each visible profile projected through :func:`plan_profile_export`, its page
-rendered at that tier, its embeddings exported at that tier, and the
-collection files built for that tier. Uploading the folder is a separate, dumb
-step (``aws s3 sync``, ``rclone``, ``wrangler``, ``rsync``) that needs no
-filtering.
-"""
+"""Export a set of profiles as the static tree one audience may see."""
 
 import json
 import logging
@@ -21,7 +12,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from ..errors import ProfileError, ProfileLoadError
-from ..privacy import ViewerTier, derivation_errors, profile_visible
+from ..privacy import ViewerTier, derivation_errors, profile_visible, tier_allows
 from ..profile import ResearcherProfile
 from ..schema.jsonld import canonical_dumps
 from ..utils.clock import now_iso
@@ -36,6 +27,9 @@ logger = logging.getLogger(__name__)
 #: replace the folder's contents; its file list is what lets that run remove
 #: the files a tightened tier no longer allows, and nothing else.
 MARKER = ".rp-publish.json"
+
+
+_TIERS = ("public", "limited", "private")
 
 
 class PublishError(ProfileError):
@@ -96,9 +90,8 @@ def _source_dirs(source: Path) -> list[Path]:
 def _check_out(out: Path) -> dict[str, Any] | None:
     """The previous run's marker, or ``None`` for an absent or empty ``out``.
 
-    Raises when ``out`` holds something this command did not write: the export
-    owns its folder, and removing files from a folder it does not own is how a
-    publish deletes somebody's work.
+    Raises when ``out`` holds something this command did not write, so a
+    publish never deletes somebody else's files.
     """
     if not out.exists():
         return None
@@ -135,11 +128,9 @@ def _stage_embeddings(
 ) -> list[str] | None:
     """Export ``embeddings/`` at ``viewer`` from the local sqlite into the stage.
 
-    Only called when the ``embeddings/index.json`` artifact itself reaches
-    ``viewer``. Returns the profile-relative paths staged, or ``None`` when
-    there is no local index to export from, in which case the profile's own
-    (``public``) flat files ship through the plan like any other artifact.
-    Records the centroid of the rows staged in ``centroids``.
+    Returns the profile-relative paths staged, or ``None`` when there is no
+    local index (then the profile's own ``public`` flat files ship through the
+    plan). Records the centroid of the staged rows in ``centroids``.
     """
     if not (cache_dir(prof_dir) / "embeddings.sqlite").is_file():
         return None
@@ -174,38 +165,47 @@ def publish_collection(
     no_index: bool = False,
     now: str | None = None,
     dry_run: bool = False,
+    change_audience: bool = False,
 ) -> PublishResult:
     """Write the static tree an audience at ``viewer`` may see into ``out``.
 
-    ``source`` is a profiles root or one profile folder. For every profile the
-    viewer may see (``privacy.profile_visible``), ``profiles/<slug>/`` gets the
-    projected ``profile.jsonld``, each artifact whose effective tier the viewer
-    may see, ``index.html`` rendered at ``viewer``, and ``embeddings/`` exported
-    at ``viewer``. The collection files (:func:`build_site`) are built for the
-    same audience into the same tree.
+    ``source`` is a profiles root or one profile folder. Each visible profile
+    gets ``profiles/<slug>/`` projected through :func:`plan_profile_export`,
+    with its page and embeddings rendered at ``viewer``; the collection files
+    (:func:`build_site`) are built for the same audience.
 
-    ``out`` is owned by this command. A non-empty folder without the
-    ``.rp-publish.json`` marker is refused. A re-run removes every file the
-    previous run wrote that this one does not, so a tier tightened since the
-    last export disappears from the tree. Everything is staged first and
-    committed together; if this raises, ``out`` is as it was.
+    ``out`` is owned by this command: a non-empty folder without the
+    ``.rp-publish.json`` marker is refused, and a re-run removes every file the
+    previous run wrote that this one does not, so a tightened tier disappears.
+    Everything is staged and committed together; if this raises, ``out`` is
+    as it was.
 
-    Refuses (:class:`PublishError`) when any profile does not load, since
-    leaving it out would prune its last published copy, or when any profile's
-    ``derivedFrom`` graph does not resolve: a restriction that cannot be
-    computed is not guessed at. ``dry_run`` builds the tree in a scratch folder,
-    reports it and what a real run would prune (``would_remove``), and writes
-    nothing to ``out``.
+    Raises :class:`PublishError` when any profile does not load (leaving it out
+    would prune its last published copy) or when a ``derivedFrom`` graph does
+    not resolve (a restriction is never guessed at). ``dry_run`` reports what
+    would be written and pruned (``would_remove``) without touching ``out``.
 
-    ``embeddings/`` ships only when the ``embeddings/index.json`` artifact's
-    effective tier reaches ``viewer``; the collection centroid of each profile
-    is the mean of exactly the rows shipped.
+    Re-publishing into a folder last written for a narrower audience (say
+    ``public`` then ``limited``) is refused unless ``change_audience`` is true;
+    narrowing is always allowed.
     """
     src = Path(source).expanduser().resolve()
     dest = Path(out).expanduser().resolve()
     if not src.is_dir():
         raise FileNotFoundError(f"no such profiles folder: {src}")
     previous = _check_out(dest)
+    prev_who = (previous or {}).get("who")
+    if (
+        prev_who in _TIERS
+        and not change_audience
+        and tier_allows(viewer, prev_who)
+        and not tier_allows(prev_who, viewer)
+    ):
+        raise PublishError(
+            f"{dest} was last published for --who {prev_who}; --who {viewer} would "
+            "widen its audience. Pass change_audience=True (--change-audience) "
+            "if that is intended."
+        )
     timestamp = now_iso(now)
     result = PublishResult(out_dir=dest, viewer=viewer, dry_run=dry_run)
 
@@ -238,8 +238,7 @@ def publish_collection(
         except ValidationError as e:
             failed.append(f"{entry.name}: {e}")
     if failed:
-        # Skipping it is not an option: the previous export's files for it
-        # would be pruned, so one broken profile would take its live copy down.
+        # Skipping would prune its live copy.
         raise PublishError(
             "refusing to publish: a profile does not load. Fix it (rp validate) "
             "or move it out of the profiles folder.\n  " + "\n  ".join(failed)
@@ -251,8 +250,6 @@ def publish_collection(
         )
 
     if dry_run:
-        # Build the whole tree off to one side and throw it away: the only way
-        # to know exactly which files a real run writes, and so which it prunes.
         scratch = Path(tempfile.mkdtemp(prefix=".rp-publish-dry-"))
         stage = _SiteStage(scratch)
         try:
@@ -272,9 +269,8 @@ def publish_collection(
         try:
             written = _stage_all(stage, visible, plans, result, timestamp, base_url, no_index)
             slugs = sorted(p.slug for p in result.profiles)
-            # The committed marker still lists what the previous run wrote, so
-            # a crash before pruning finishes leaves those files on the next
-            # run's list instead of orphaned in the tree forever.
+            # Carry the previous run's files, so a crash before pruning
+            # finishes does not orphan them.
             carried = set((previous or {}).get("files", []))
             stage.write(MARKER, _marker(viewer, timestamp, slugs, set(written) | carried))
             stage.commit()
@@ -314,8 +310,7 @@ def _stage_all(
         base = f"profiles/{prof.slug}"
         export = ProfileExport(slug=prof.slug, withheld=dict(plan.withheld))
 
-        # ``embeddings/`` ships only when its own artifact reaches the viewer;
-        # chunk-level filtering below that is not a substitute for that gate.
+        # Chunk-level filtering is not a substitute for the artifact's own gate.
         embeddings = None
         if plan.embeddings:
             embeddings = _stage_embeddings(stage, entry, prof, viewer, base, centroids)
@@ -390,8 +385,7 @@ def _marker(viewer: ViewerTier, timestamp: str, slugs: list[str], files: set[str
 def _stale(out: Path, previous: dict[str, Any] | None, written: set[str]) -> list[str]:
     """The files the previous export wrote that this one does not.
 
-    Only paths the previous marker lists are candidates, so nothing this
-    command did not write is ever touched.
+    Only paths the previous marker lists are candidates.
     """
     if not previous:
         return []

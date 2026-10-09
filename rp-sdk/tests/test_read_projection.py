@@ -278,55 +278,49 @@ class TestProfileGate:
         assert detail.status_code == (200 if visible else 404), detail.text
         assert [p["slug"] for p in listing] == ([SLUG] if visible else [])
         assert jsonld.status_code == (200 if visible else 404)
-
-    def test_viewer_tier_is_stamped_on_every_response(self, matrix_client, viewer, profile_tier):
-        c = matrix_client(visibility=profile_tier)
-        r = _detail(c, viewer)
-        assert r.headers["X-RP-Viewer-Tier"] == VIEWER_TIERS[viewer]
+        # The viewer tier is stamped on every response, refusals included.
+        assert detail.headers["X-RP-Viewer-Tier"] == VIEWER_TIERS[viewer]
 
 
 @pytest.mark.parametrize("viewer,profile_tier", VISIBLE_COMBOS)
-@pytest.mark.parametrize("role", sorted(ROLE_ARTIFACTS))
 class TestArtifactGate:
-    """Gate two: which of its pieces does this viewer receive?"""
+    """Gate two: which of its pieces does this viewer receive?
 
-    def test_manifest_reports_the_effective_tier(self, matrix_client, viewer, profile_tier, role):
-        c = matrix_client(visibility=profile_tier)
-        r = _files(c, viewer)
-        assert r.status_code == 200, r.text
-        entry = next(m for m in r.json()["files"] if m["contentUrl"] == ROLE_ARTIFACTS[role])
-        assert entry["effective_visibility"] == _expected_effective(role, profile_tier)
+    Each test walks every role against one built profile; the role is named in
+    the assertion message, so a failure still says which artifact leaked.
+    """
 
-    def test_withheld_names_exactly_what_was_not_served(
-        self, matrix_client, viewer, profile_tier, role
+    def test_manifest_reports_effective_tier_and_withholds_the_rest(
+        self, matrix_client, viewer, profile_tier
     ):
         c = matrix_client(visibility=profile_tier)
         r = _files(c, viewer)
         assert r.status_code == 200, r.text
+        files = {m["contentUrl"]: m for m in r.json()["files"]}
         withheld = set(r.json()["withheld"])
-        assert (ROLE_ARTIFACTS[role] in withheld) is not _sees(role, viewer, profile_tier)
+        for role, url in ROLE_ARTIFACTS.items():
+            expected = _expected_effective(role, profile_tier)
+            assert files[url]["effective_visibility"] == expected, role
+            # `withheld` names exactly what was not served.
+            assert (url in withheld) is not _sees(role, viewer, profile_tier), role
 
-
-@pytest.mark.parametrize("viewer,profile_tier", VISIBLE_COMBOS)
-@pytest.mark.parametrize("role", ["soul", "expertise"])
-class TestBodiesOnProfileDetail:
-    """The two bodies the full view carries, and their sizes in the record."""
-
-    def test_body_is_served_only_when_the_tier_allows(
-        self, matrix_client, viewer, profile_tier, role
+    def test_detail_bodies_are_served_only_when_the_tier_allows(
+        self, matrix_client, viewer, profile_tier
     ):
+        """The two bodies the full view carries, and their sizes in the record."""
         c = matrix_client(visibility=profile_tier)
         r = _detail(c, viewer, params={"view": "full"})
         assert r.status_code == 200, r.text
-        body = r.json().get(role)
-        part = r.json()["parts"][role]
-        if _sees(role, viewer, profile_tier):
-            assert body
-            assert part["available"] is True and part["bytes"]
-        else:
-            # Withheld is absent/None, never "": a client has to tell them apart.
-            assert body is None
-            assert part == {"available": False, "reason": "not_permitted"}
+        for role in ("soul", "expertise"):
+            body = r.json().get(role)
+            part = r.json()["parts"][role]
+            if _sees(role, viewer, profile_tier):
+                assert body, role
+                assert part["available"] is True and part["bytes"], role
+            else:
+                # Withheld is absent/None, never "": a client has to tell them apart.
+                assert body is None, role
+                assert part == {"available": False, "reason": "not_permitted"}, role
 
 
 @pytest.mark.parametrize("declared", ["public", "limited", "private"])
@@ -346,10 +340,7 @@ class TestMostRestrictiveComposition:
             "paper_summary", profile_tier, declared
         )
 
-    def test_an_anonymous_viewer_gets_it_only_when_both_are_public(
-        self, matrix_client, declared, profile_tier
-    ):
-        c = matrix_client(visibility=profile_tier, overrides={"paper_summary": declared})
+        # An anonymous viewer gets it only when both are public.
         both_public = declared == "public" and profile_tier == "public"
         if profile_tier != "public":
             # The profile itself is hidden from an anonymous caller.
@@ -391,18 +382,16 @@ class TestRefusalIsIndistinguishableFromAbsence:
     def test_bodies_are_byte_identical(self, matrix_client, path):
         c = matrix_client(visibility="private")
         held = _get(c, path.format(slug=SLUG), "anonymous")
-        absent = _get(c, path.format(slug=SLUG), "anonymous")
         missing = _get(c, path.format(slug="nobody-at-all"), "anonymous")
-        assert held.status_code == 404
-        assert absent.status_code == 404
+        assert held.status_code == missing.status_code == 404
         # Same status AND same body: a distinguishable message is an oracle.
         assert held.json()["detail"].replace(SLUG, "nobody-at-all") == missing.json()["detail"]
 
-    def test_papers_and_summary_refusals_are_404(self, matrix_client):
+    def test_papers_refusal_is_404(self, matrix_client):
+        # The /summaries refusal on a hidden profile is asserted in
+        # TestMostRestrictiveComposition.
         c = matrix_client(visibility="limited")
         assert _get(c, f"/api/v1/profiles/{SLUG}/papers", "anonymous").status_code == 404
-        r = _get(c, f"/api/v1/profiles/{SLUG}/summaries", "anonymous", params={"ids": "paperA"})
-        assert r.status_code == 404
 
 
 # ---------------------------------------------------------------------------
@@ -476,20 +465,15 @@ class TestArchiveProjection:
             assert name not in excluded, f"{name} is above public but shipped"
             assert not name.startswith(".cache/")
 
-    def test_the_cv_ships_only_to_a_caller_entitled_to_it(self, matrix_client):
-        c = matrix_client()
-        public = self._members(_get(c, f"/api/v1/profiles/{SLUG}/archive", "consumer_public"))
-        operator = self._members(_get(c, f"/api/v1/profiles/{SLUG}/archive", "operator"))
-        assert "sources/cv.md" not in public
-        assert "sources/cv.md" in operator
-
-    def test_fulltext_ships_only_to_a_caller_entitled_to_it(self, matrix_client):
+    def test_private_defaults_ship_only_to_a_caller_entitled_to_them(self, matrix_client):
         # Paper full text is an ordinary private-default artifact: withheld
         # from a public caller, shipped to a private (operator/owner) one,
         # exactly like the CV. No role floor holds it back from everyone.
         c = matrix_client()
         public = self._members(_get(c, f"/api/v1/profiles/{SLUG}/archive", "consumer_public"))
         operator = self._members(_get(c, f"/api/v1/profiles/{SLUG}/archive", "operator"))
+        assert "sources/cv.md" not in public
+        assert "sources/cv.md" in operator
         assert not any(m.startswith("sources/papers/") for m in public)
         assert any(m.startswith("sources/papers/") for m in operator)
 
@@ -529,7 +513,7 @@ class TestSearchProjection:
         [("consumer_public", False), ("consumer_lab", False), ("operator", True)],
     )
     def test_private_chunks_are_dropped(self, searchable, viewer, leaks_allowed):
-        c, _captured = searchable
+        c, captured = searchable
         r = c.post(
             f"/api/v1/profiles/{SLUG}/search",
             json={"query": "anything"},
@@ -542,15 +526,8 @@ class TestSearchProjection:
             assert {"cv", "web", "grant"} <= types
         else:
             assert not (types & {"cv", "web", "grant"}), f"{viewer} was shown private chunks"
-
-    def test_the_restriction_is_pushed_into_the_query(self, searchable):
-        c, captured = searchable
-        c.post(
-            f"/api/v1/profiles/{SLUG}/search",
-            json={"query": "anything"},
-            headers=VIEWER_HEADERS["consumer_public"],
-        )
-        assert "cv" not in captured["source_types"]
+            # The restriction is also pushed into the query itself.
+            assert "cv" not in captured["source_types"]
 
 
 # ---------------------------------------------------------------------------
@@ -663,6 +640,12 @@ class TestVisibilityReport:
         assert any("sources/cv.md" in phrase for phrase in note["raised_by"])
         # And an anonymous reader never receives it.
         assert "derived-note.md" in set(_files(c, "anonymous").json()["withheld"])
+        # The content route gates it at its derived tier too, not its declared one.
+        owner = _content(c, "owner", "derived-note.md")
+        assert owner.status_code == 200, owner.text
+        assert owner.headers["X-RP-Effective-Tier"] == "private"
+        assert _content(c, "anonymous", "derived-note.md").status_code == 404
+        assert _content(c, "stranger", "derived-note.md").status_code == 404
 
 
 # ---------------------------------------------------------------------------
@@ -687,40 +670,27 @@ class TestContentRouteMatrix:
     detail route.
     """
 
-    @pytest.mark.parametrize("role", list(ROLE_ARTIFACTS))
-    def test_body_is_served_only_when_the_tier_allows(
-        self, matrix_client, viewer, profile_tier, role
-    ):
+    def test_body_is_served_only_when_the_tier_allows(self, matrix_client, viewer, profile_tier):
         c = matrix_client(visibility=profile_tier)
-        order = ("public", "limited", "private")
-        profile_ok = order.index(profile_tier) <= order.index(VIEWER_TIERS[viewer])
-        r = _content(c, viewer, ROLE_ARTIFACTS[role])
+        profile_ok = _profile_visible(viewer, profile_tier)
+        for role, url in ROLE_ARTIFACTS.items():
+            r = _content(c, viewer, url)
+            if role in HARD_FLOORS:
+                # 403 whether or not the caller may see the profile at all,
+                # except that the profile gate runs first, so a caller who
+                # cannot see the profile gets the profile's 404 and learns nothing.
+                assert r.status_code == (403 if profile_ok else 404), (role, r.text)
+            elif profile_ok and _sees(role, viewer, profile_tier):
+                assert r.status_code == 200, (role, r.text)
+                expected = _expected_effective(role, profile_tier)
+                assert r.headers["X-RP-Effective-Tier"] == expected, role
+            else:
+                assert r.status_code == 404, (role, r.text)
 
-        if role in HARD_FLOORS:
-            # 403 whether or not the caller may see the profile at all, except
-            # that the profile gate runs first, so a caller who cannot see the
-            # profile gets the profile's 404 and learns nothing.
-            assert r.status_code == (403 if profile_ok else 404), r.text
-            return
-        if not profile_ok:
-            assert r.status_code == 404
-            return
-        if _sees(role, viewer, profile_tier):
-            assert r.status_code == 200, r.text
-            assert r.headers["X-RP-Effective-Tier"] == _expected_effective(role, profile_tier)
-        else:
-            assert r.status_code == 404, r.text
-
-    def test_the_document_resolves_from_the_content_base(self, matrix_client, viewer, profile_tier):
-        """``/content/`` is a base URL: ``profile.jsonld`` resolves out of it.
-
-        This is the single thing that makes one explorer build work against a
-        hosted registry and a rendered static site alike. It points at a base
-        and follows relative ``contentUrl``s from the document it finds there.
-        """
-        c = matrix_client(visibility=profile_tier)
-        order = ("public", "limited", "private")
-        profile_ok = order.index(profile_tier) <= order.index(VIEWER_TIERS[viewer])
+        # ``/content/`` is a base URL: ``profile.jsonld`` resolves out of it.
+        # This is the single thing that makes one explorer build work against a
+        # hosted registry and a rendered static site alike. It points at a base
+        # and follows relative ``contentUrl``s from the document it finds there.
         via_content = _content(c, viewer, "profile.jsonld")
         direct = _get(c, f"/api/v1/profiles/{SLUG}/profile.jsonld", viewer)
         assert via_content.status_code == direct.status_code == (200 if profile_ok else 404)
@@ -743,15 +713,6 @@ class TestContentRouteEffectiveTier:
         assert lab.headers["X-RP-Effective-Tier"] == "limited"
         assert _content(c, "anonymous", ROLE_ARTIFACTS["works"]).status_code == 404
 
-    def test_a_derived_artifact_is_gated_at_its_derived_tier(self, matrix_client, tmp_path):
-        c = matrix_client()
-        _add_derived_note(c, tmp_path)
-        owner = _content(c, "owner", "derived-note.md")
-        assert owner.status_code == 200, owner.text
-        assert owner.headers["X-RP-Effective-Tier"] == "private"
-        assert _content(c, "anonymous", "derived-note.md").status_code == 404
-        assert _content(c, "stranger", "derived-note.md").status_code == 404
-
 
 class TestContentRouteRefusalsAreOpaque:
     def test_withheld_and_unknown_are_byte_identical(self, matrix_client):
@@ -768,12 +729,6 @@ class TestContentRouteRefusalsAreOpaque:
         r = _content(c, "anonymous", "personality/SOUL.md")
         missing = _get(c, "/api/v1/profiles/no-such-slug/content/personality/SOUL.md", "anonymous")
         assert r.status_code == missing.status_code == 404
-
-    def test_never_shared_cached(self, matrix_client):
-        c = matrix_client()
-        r = _content(c, "anonymous", "personality/SOUL.md")
-        assert r.status_code == 200
-        assert r.headers["Cache-Control"] == "private, no-store"
 
     def test_traversal_is_a_404(self, matrix_client):
         c = matrix_client()
@@ -802,6 +757,7 @@ class TestProfileCollection:
     @pytest.mark.parametrize("viewer", VIEWER_KINDS)
     def test_membership_matches_the_listing_exactly(self, matrix_client, viewer, profile_tier):
         c = matrix_client(visibility=profile_tier)
+        # A registry with nothing visible is an empty bundle, not an error.
         bundle = self._bundle(c, viewer)
         listing = _get(c, "/api/v1/profiles", viewer).json()["profiles"]
         assert [card["slug"] for card in bundle["cards"]] == [p["slug"] for p in listing]
@@ -835,19 +791,6 @@ class TestProfileCollection:
         for field in ("name", "level", "affiliation", "field", "paper_count", "summary_count"):
             assert card[field] == summary[field], field
 
-    def test_an_empty_registry_is_an_empty_bundle_not_an_error(self, matrix_client):
-        c = matrix_client(visibility="private")
-        bundle = self._bundle(c, "anonymous")
-        assert bundle["cards"] == []
-        assert bundle["count"] == 0
-
-    def test_it_is_never_shared_cached(self, matrix_client):
-        # Membership is a function of who asked, so one caller's copy must never
-        # be handed to the next.
-        c = matrix_client()
-        r = _get(c, "/api/v1/collection.json", "anonymous")
-        assert r.headers["Cache-Control"] == "private, no-store"
-
     def test_it_is_stamped_with_the_viewer_tier(self, matrix_client):
         c = matrix_client()
         assert _get(c, "/api/v1/collection.json", "operator").headers["X-RP-Viewer-Tier"] == (
@@ -872,51 +815,31 @@ class TestHostFloorHook:
     this profile" about a profile they claimed last week.
     """
 
-    def test_a_floor_hides_a_public_profile_from_an_anonymous_caller(self, matrix_client):
+    def test_a_floor_narrows_without_blacking_out_and_reports_its_reason(self, matrix_client):
         c = matrix_client()
         assert _detail(c, "anonymous").status_code == 200
 
-        c.app.state.hooks.profile_tier_floor = lambda caller, prof, slug: TierFloor(
-            "limited", "held back"
-        )
-        assert _detail(c, "anonymous").status_code == 404
-        assert _get(c, "/api/v1/profiles", "anonymous").json()["profiles"] == []
-
-    def test_the_floor_is_a_narrowing_not_a_blackout(self, matrix_client):
-        c = matrix_client()
-        c.app.state.hooks.profile_tier_floor = lambda caller, prof, slug: TierFloor(
-            "limited", "held back"
-        )
-        assert _detail(c, "consumer_lab").status_code == 200
-        assert _detail(c, "owner").status_code == 200
-
-    def test_the_report_carries_the_reason_the_hook_returned(self, matrix_client):
-        c = matrix_client()
-        c.app.state.hooks.profile_tier_floor = lambda caller, prof, slug: TierFloor(
-            "limited", "you have not published this profile."
-        )
-        report = _get(c, f"/api/v1/profiles/{SLUG}/visibility", "owner").json()
-        assert report["profile_floor"] == "limited"
-        assert report["profile_floor_reason"] == "you have not published this profile."
-
-    def test_the_reason_varies_with_the_profile(self, matrix_client):
-        """One static string could not do this, which is why it is gone."""
-        c = matrix_client()
+        # The reason varies with the profile: one static string could not do
+        # this, which is why it is gone.
         c.app.state.hooks.profile_tier_floor = lambda caller, prof, slug: TierFloor(
             "limited", f"{slug} is held back"
         )
+        # A public profile is hidden from an anonymous caller...
+        assert _detail(c, "anonymous").status_code == 404
+        assert _get(c, "/api/v1/profiles", "anonymous").json()["profiles"] == []
+        # ...but the floor is a narrowing, not a blackout.
+        assert _detail(c, "consumer_lab").status_code == 200
+        assert _detail(c, "owner").status_code == 200
+        # The owner's report carries the reason the hook returned.
         report = _get(c, f"/api/v1/profiles/{SLUG}/visibility", "owner").json()
+        assert report["profile_floor"] == "limited"
         assert report["profile_floor_reason"] == f"{SLUG} is held back"
 
-    def test_no_floor_reports_no_reason(self, matrix_client):
+    @pytest.mark.parametrize("hook_set", [True, False], ids=["empty-floor", "unset-hook"])
+    def test_no_floor_reports_no_reason(self, matrix_client, hook_set):
         c = matrix_client()
-        c.app.state.hooks.profile_tier_floor = lambda caller, prof, slug: TierFloor()
-        report = _get(c, f"/api/v1/profiles/{SLUG}/visibility", "owner").json()
-        assert report["profile_floor"] is None
-        assert report["profile_floor_reason"] is None
-
-    def test_an_unset_hook_is_an_empty_floor(self, matrix_client):
-        c = matrix_client()
+        if hook_set:
+            c.app.state.hooks.profile_tier_floor = lambda caller, prof, slug: TierFloor()
         report = _get(c, f"/api/v1/profiles/{SLUG}/visibility", "owner").json()
         assert report["profile_floor"] is None
         assert report["profile_floor_reason"] is None
@@ -951,34 +874,40 @@ class TestCredentialSensitiveCaching:
         assert r.status_code == 200, path
         assert r.headers["Vary"] == "Authorization, Cookie", path
 
-    def test_the_anonymous_document_is_shareable_for_a_minute(self, matrix_client):
+    @pytest.mark.parametrize(
+        "path, viewer, cache_control",
+        [
+            # The one shareable body: the anonymous document, for a minute.
+            (f"/api/v1/profiles/{SLUG}/profile.jsonld", "anonymous", "public, max-age=60"),
+            # Every other tier of the same document is never stored.
+            (f"/api/v1/profiles/{SLUG}/profile.jsonld", "owner", "private, no-store"),
+            (f"/api/v1/profiles/{SLUG}", "anonymous", "private, no-store"),
+            (
+                f"/api/v1/profiles/{SLUG}/content/personality/SOUL.md",
+                "anonymous",
+                "private, no-store",
+            ),
+            # Collection membership is a function of who asked, so one caller's
+            # copy must never be handed to the next.
+            ("/api/v1/collection.json", "anonymous", "private, no-store"),
+        ],
+        ids=["anonymous-document", "owner-document", "detail", "content", "collection"],
+    )
+    def test_only_the_anonymous_document_is_shareable(
+        self, matrix_client, path, viewer, cache_control
+    ):
         c = matrix_client()
-        r = _get(c, f"/api/v1/profiles/{SLUG}/profile.jsonld", "anonymous")
-        assert r.headers["Cache-Control"] == "public, max-age=60"
+        r = _get(c, path, viewer)
+        assert r.status_code == 200, r.text
+        assert r.headers["Cache-Control"] == cache_control
 
-    def test_every_other_tier_is_never_stored(self, matrix_client):
+    def test_the_document_carries_a_strong_etag_that_revalidates(self, matrix_client):
         c = matrix_client()
-        r = _get(c, f"/api/v1/profiles/{SLUG}/profile.jsonld", "owner")
-        assert r.headers["Cache-Control"] == "private, no-store"
-
-    def test_the_document_carries_a_strong_etag_over_its_bytes(self, matrix_client):
-        c = matrix_client()
-        r = _get(c, f"/api/v1/profiles/{SLUG}/profile.jsonld", "anonymous")
-        etag = r.headers["ETag"]
+        path = f"/api/v1/profiles/{SLUG}/profile.jsonld"
+        etag = _get(c, path, "anonymous").headers["ETag"]
         assert etag.startswith('"') and etag.endswith('"')
-        again = _get(c, f"/api/v1/profiles/{SLUG}/profile.jsonld", "anonymous")
-        assert again.headers["ETag"] == etag
-
-    def test_a_matching_etag_revalidates_to_304(self, matrix_client):
-        c = matrix_client()
-        etag = _get(c, f"/api/v1/profiles/{SLUG}/profile.jsonld", "anonymous").headers["ETag"]
-        r = c.get(
-            f"/api/v1/profiles/{SLUG}/profile.jsonld",
-            headers={**VIEWER_HEADERS["anonymous"], "If-None-Match": etag},
-        )
+        assert _get(c, path, "anonymous").headers["ETag"] == etag
+        # A matching ETag revalidates to an empty 304.
+        r = c.get(path, headers={**VIEWER_HEADERS["anonymous"], "If-None-Match": etag})
         assert r.status_code == 304
         assert r.content == b""
-
-    def test_the_detail_route_is_never_stored(self, matrix_client):
-        c = matrix_client()
-        assert _detail(c, "anonymous").headers["Cache-Control"] == "private, no-store"

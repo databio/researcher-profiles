@@ -190,7 +190,7 @@ class TestSchemaExport:
         from researcher_profiles.validate import schema_fingerprint
 
         assert schema_fingerprint() == (
-            "a1c005ac0ab51828881f497f9a724c865a783b744b46abb4d3f4240061b4f1d8"
+            "cc81b19010b469c6ad585e0e150d39c44ab5ec6afed9bf72551181af19c9eec1"
         )
 
     def test_exported_schema_accepts_what_the_model_writes(self):

@@ -1,17 +1,7 @@
 /**
- * The app shell: top nav (brand / primary nav / a host slot), an optional
- * sources sidebar for the Browse area, and the routed page in <main>.
- *
- * This is the react-router layout route element; every page renders through
- * its <Outlet>. It carries the cross-cutting shell logic: which nav link is
- * active, whether the Browse analysis tabs and sources sidebar show, and the
- * bootstrap effects (persisted sources + ?list=, in routes.tsx's loader).
- *
- * A host application adds nav links and a header cluster through the shell
- * slots (`slots.tsx`); this file knows nothing about what they contain.
- *
- * Chrome is styled with utility classes + BEM (components.css) and design
- * tokens: no inline styles, no per-file CSS module for the shell.
+ * The app shell and layout route element: top nav, the Browse sources
+ * sidebar, and the routed page in <main>. Styled with utility classes, BEM
+ * (components.css) and design tokens, no inline styles.
  */
 import { Link, Outlet, useLocation } from "react-router";
 import { pageOf } from "./router";
@@ -28,12 +18,8 @@ export function AppLayout() {
   const { cards } = useStore();
   const slots = useShellSlots();
 
-  // Persisted-sources restore + ?list= bootstrap happen once, before first
-  // paint, in the layout route's loader (see routes.tsx bootstrapLoader).
-
   const showAnalysisTabs = cards.length > 0;
 
-  // The Browse area is the only place the sources sidebar is meaningful.
   const inBrowse =
     page === "browse" ||
     page === "clusters" ||

@@ -2,7 +2,7 @@
 
 One level down, each profile's own artifacts are handled by
 :class:`researcher_profiles.profile.storage.ArtifactStorage`. A ``ProfileStore``
-is what an HTTP app, an ingest path, or a management host is handed.
+is what an HTTP app or ingest path is handed.
 
 Three backends ship in the SDK:
 
@@ -15,22 +15,13 @@ Store                            Backing                      Extra
 ===============================  ===========================  ============
 
 :class:`~.protocol.VectorStore` is an optional capability protocol: a store that
-can also hand out a profile's vectors (:meth:`vector_index`, :meth:`centroid`,
-:meth:`centroids_matrix`). All three backends implement it and share one read
-implementation (:class:`~researcher_profiles.embeddings.flat.FlatEmbeddingIndex`),
-so cosine is computed the same way everywhere. It is kept separate from
-``ProfileStore`` so a backend without vectors fails an ``isinstance`` check
-rather than raising from half its contract, and so the base contract stays
-importable without numpy.
+can also hand out a profile's vectors. All three backends implement it and
+share one read implementation
+(:class:`~researcher_profiles.embeddings.flat.FlatEmbeddingIndex`), so cosine
+is computed the same way everywhere.
 
-The cross-profile analytics ``store.centroids``, ``store.match`` and
-``store.indexes`` (:mod:`researcher_profiles.analytics`) hang off the store as
-accessors, the way ``prof.cite`` hangs off a profile.
-
-:attr:`ProfileStore.root` is the store's directory, or ``None`` when it has
-none. Only a short sanctioned list may branch on it; that list lives on the
-:attr:`~.protocol.ProfileStore.root` property in ``store/protocol.py``, in one
-copy, and is not restated here.
+Only a sanctioned list may branch on :attr:`~.protocol.ProfileStore.root`; see
+that property.
 """
 
 from importlib import import_module
@@ -71,19 +62,11 @@ _LAZY_NAMES = {
 
 
 def __getattr__(name: str):
-    """PEP 562: import the SQL backend on first use, not on package import.
+    """PEP 562: import the SQL and HTTP backends on first use.
 
-    A ``try: from .sql import ... except ImportError: pass`` at module scope
-    would be the obvious thing and is wrong, because it defers nothing on a
-    machine that actually has the extra: it only guards absence. Every
-    ``import researcher_profiles`` on a developer box or a container with
-    ``[sql]`` installed would then pay SQLAlchemy's import cost, including the
-    commands that must stay light (``rp list`` over a 300-member roster
-    must never touch a database, and a downstream guardrail asserts exactly
-    that). Optional means optional at runtime, not merely at install time.
-
-    A resolved name is cached into ``globals()``, so the cost is paid once and
-    later accesses are ordinary attribute lookups.
+    A guarded module-level import would still load SQLAlchemy whenever the
+    extra is installed; light commands such as ``rp list`` must not (a
+    guardrail asserts it). The resolved name is cached in ``globals()``.
     """
     lazy = _LAZY_NAMES.get(name)
     if lazy is None:

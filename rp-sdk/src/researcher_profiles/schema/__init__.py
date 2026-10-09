@@ -9,9 +9,8 @@ The published record is JSON-LD:
 Build bookkeeping is not part of that record; it lives in
 ``.build/<slug>/meta/build_state.json`` (see :mod:`researcher_profiles.build_state`).
 
-The format gate is ``conformsTo`` (a resolvable IRI), not an integer
-``schema_version``. A document without it (which is what every pre-cutover
-file looks like) fails to load, naming the one format it could have been.
+The format gate is ``conformsTo`` (a resolvable IRI). A document without it
+fails to load, naming the one format it could have been.
 
 **JSON-LD shape lives in the serializers, not in the attribute types.**
 ``p.affiliation`` is a ``str``; ``paper.year`` is an ``int``; ``paper.journal``
@@ -22,7 +21,7 @@ turns them back. Python callers never touch a node object they did not ask for.
 How the schema package is laid out
 ==================================
 
-Every name is imported from ``researcher_profiles.schema``; the modules below
+Import every name from ``researcher_profiles.schema``; the modules below
 are private and may move. ``_common`` is the leaf (the format hint, the depth
 and privacy tiers, the provenance labels, the tolerant ``_Base``) and
 ``_identity`` wraps scholarcore's rid grammar with RP-specific hints. The
@@ -32,8 +31,6 @@ the :class:`ArtifactRef` manifest entry), ``_proof`` (the verification envelope)
 (the ``sources/`` sidecars: papers, grants, summary frontmatter).
 """
 
-# Shared biographical and identity primitives from scholarcore, the one
-# implementation. RP's wrappers over the rid grammar live in ``_identity``.
 from scholarcore import CareerEntry, Training
 from scholarcore.identity import LOCAL_RID_RE, is_local, is_rid, orcid_of
 

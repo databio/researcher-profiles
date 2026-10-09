@@ -1,8 +1,4 @@
-/**
- * Global application state for the explorer.
- *
- * Uses a simple pub/sub store pattern. Components subscribe via useStore hook.
- */
+/** Global pub/sub state for the explorer. Components subscribe via `useStore`. */
 
 import type { FetchOutcome } from "./net/fetchJson";
 
@@ -18,9 +14,8 @@ export interface SourceEntry {
   profileCount: number;
   backendSpec?: string | null;
   /**
-   * True for a home source a host application adds on its own
-   * (`/api/v1/collection.json`). Never persisted to localStorage and never
-   * shown with a remove button. It isn't a source the visitor added.
+   * A home source the host app adds itself, not the visitor. Never persisted
+   * and never removable.
    */
   builtin?: boolean;
 }
@@ -116,10 +111,15 @@ function completeness(c: ProfileCard): number {
 
 /**
  * One card per person. Two cards are the same person when they share an
- * ORCID (rid) or a normalized base URL. Of the duplicates the most complete
- * card is kept; on a tie the one loaded first wins.
+ * ORCID (rid) or a normalized base URL. Of the duplicates a card from a
+ * builtin (home) source wins, as in `resolveProfileRef`; among cards of equal
+ * standing the most complete is kept, and on a tie the one loaded first wins.
  */
-export function dedupeCards(cards: ProfileCard[]): ProfileCard[] {
+export function dedupeCards(
+  cards: ProfileCard[],
+  builtinUrls: ReadonlySet<string> = new Set(),
+): ProfileCard[] {
+  const rank = (c: ProfileCard) => (builtinUrls.has(c.sourceUrl) ? 1 : 0);
   const kept: ProfileCard[] = [];
   const byRid = new Map<string, number>();
   const byBase = new Map<string, number>();
@@ -133,17 +133,24 @@ export function dedupeCards(cards: ProfileCard[]): ProfileCard[] {
       byBase.set(card.base, at);
       continue;
     }
-    if (completeness(card) > completeness(kept[idx])) kept[idx] = card;
+    const cur = kept[idx];
+    if (rank(card) > rank(cur) || (rank(card) === rank(cur) && completeness(card) > completeness(cur))) {
+      kept[idx] = card;
+    }
     if (rid !== null && !byRid.has(rid)) byRid.set(rid, idx);
     if (!byBase.has(card.base)) byBase.set(card.base, idx);
   }
   return kept;
 }
 
+function builtinSourceUrls(sources: SourceEntry[]): Set<string> {
+  return new Set(sources.filter((s) => s.builtin).map((s) => s.url));
+}
+
 /** Replace the full card list and publish its deduplicated view. */
 function setAllCards(next: ProfileCard[], extra?: Partial<StoreState>) {
   allCards = next;
-  state = { ...state, ...extra, cards: dedupeCards(next) };
+  state = { ...state, ...extra, cards: dedupeCards(next, builtinSourceUrls(state.sources)) };
   emit();
 }
 
@@ -152,7 +159,6 @@ function setAllCards(next: ProfileCard[], extra?: Partial<StoreState>) {
 // ---------------------------------------------------------------------------
 
 function addSource(url: string, opts?: { builtin?: boolean }) {
-  // Deduplicate
   if (state.sources.some((s) => s.url === url)) return;
   setState({
     sources: [
@@ -166,8 +172,7 @@ function addSource(url: string, opts?: { builtin?: boolean }) {
       },
     ],
   });
-  // Trigger ingestion asynchronously. Never let a rejection hang the source
-  // at "loading" forever: surface it as an error on the entry instead.
+  // A rejection must not leave the source stuck at "loading".
   import("./model/sources")
     .then((mod) => mod.ingestSource(url))
     .catch((err) => {

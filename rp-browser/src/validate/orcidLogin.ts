@@ -21,9 +21,7 @@ import type { CheckResult } from "./types";
 
 const ORCID_RE = /^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$/;
 
-/**
- * Validate an ORCID checksum digit (ISO 7064 Mod 11,2).
- */
+/** Validate an ORCID checksum digit (ISO 7064 Mod 11,2). */
 export function isValidOrcidChecksum(orcid: string): boolean {
   const digits = orcid.replace(/-/g, "");
   if (digits.length !== 16) return false;

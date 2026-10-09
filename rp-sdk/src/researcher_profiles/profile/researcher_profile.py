@@ -38,26 +38,10 @@ How a profile is assembled
   Each is built lazily, so a core-only install still imports this module and a
   missing extra raises an ``ImportError`` naming it at first use.
 
-Package layout
---------------
-
-Each capability manager sits in its own file beside this one
-(``profile/persona.py``, ``profile/index.py``, ``profile/cite.py``,
-``profile/coverage.py``, ``profile/topics.py``) and holds only the thin manager
-class. The real work lives in :mod:`~researcher_profiles.generative`,
-:mod:`~researcher_profiles.embeddings`, and the ``cite`` / ``coverage`` /
-``topics`` modules.
-
-What this class keeps
----------------------
-
-Identity (``slug`` / ``rid``), the lazy caches, and the ``save_*`` writers. Each
-writer runs inside one write unit and calls one storage method, and along the
-way it validates the change, stamps ``dateModified``, and updates the caches, so
-every backend gets that for free.
+The ``save_*`` writers validate, stamp ``dateModified``, and update the caches
+inside one write unit, so every backend gets that for free.
 
 The persona verbs raise ``PersonaUnavailableError`` when ``not self.has_persona``
-(for example a ``lite`` profile that never synthesized a SOUL or expertise),
 rather than role-play an empty persona. The HTTP layer maps that to a 409.
 """
 
@@ -108,20 +92,12 @@ class ResearcherProfile:
     """
 
     def __init__(self, storage: ArtifactStorage, *, eager: bool = False) -> None:
-        # One argument, a storage backend, never a path. ``from_files`` /
-        # ``from_db`` / ``from_api`` / ``from_url`` are the documented entry
-        # points and each builds the right backend.
         self._storage: ArtifactStorage = storage
         self._slug: str = storage.slug
 
-        # The transaction and hook engine: the hook lists, the open context,
-        # the nesting depth, the deferred-hook flag, and the compensation list
-        # all live on this object.
         self._writes = WriteUnit(self, self._storage)
 
-        # Lazily-built capability managers. Deferred so a core-only install
-        # still imports, and a missing extra raises an ImportError naming it
-        # at first use rather than at import time.
+        # Built on first access; see the module docstring.
         self._persona_mgr: Any = None
         self._index_mgr: Any = None
         self._cite_mgr: Any = None
@@ -141,7 +117,6 @@ class ResearcherProfile:
         self._summaries: Any = UNSET
 
         if eager:
-            # Touch each lazy property to force loading and surface errors.
             _ = self.metadata
             _ = self.expertise
             _ = self.soul
@@ -201,10 +176,8 @@ class ResearcherProfile:
         which case ``slug`` must be provided, or a slug-qualified URL like
         ``http://localhost:8109/api/v1/profiles/jane-doe``.
 
-        The returned object is an ordinary ``ResearcherProfile`` over an
-        ``ApiArtifactStorage``: read-only, with an HTTP-backed ``persona`` and a
-        ``search``-only ``index``. The import is deferred, same shape as
-        :meth:`from_db`, so a core-only install still imports this module.
+        The result is read-only, with an HTTP-backed ``persona`` and a
+        ``search``-only ``index``.
         """
         from ..client import ApiArtifactStorage, _split_profile_url
 
@@ -252,12 +225,7 @@ class ResearcherProfile:
         timeout: float = 30.0,
         client: Any = None,
     ) -> list[dict[str, Any]]:
-        """List the profiles a remote server holds.
-
-        Returns plain dicts shaped like ``ProfileSummary``. A listing is not a
-        profile, so this is a classmethod on the entry-point class rather than
-        anything on an instance.
-        """
+        """List the profiles a remote server holds, as dicts shaped like ``ProfileSummary``."""
         from ..client import _fetch_profiles, _split_profile_url
 
         base_url, _ = _split_profile_url(url)
@@ -282,10 +250,6 @@ class ResearcherProfile:
         is a rid or a slug (rid wins, as everywhere)::
 
             prof = ResearcherProfile.from_db("postgresql://…/rp", "jane-doe")
-
-        The import below is deferred, the same shape as ``from_api`` /
-        ``from_url``: naming this method must not pull SQLAlchemy, which is
-        exactly the cost the ``sql`` extra exists to avoid.
         """
         from ..store.sql import SqlProfileStore
 
@@ -297,7 +261,7 @@ class ResearcherProfile:
 
     @property
     def storage(self) -> "ArtifactStorage":
-        """The composed backend. Where every artifact of this profile lives."""
+        """The storage backend holding every artifact of this profile."""
         return self._storage
 
     @property
@@ -311,11 +275,7 @@ class ResearcherProfile:
         return self._storage.directory
 
     def require_directory(self, what: str) -> Path:
-        """The backing directory, or a :class:`CapabilityUnavailableError`.
-
-        The one place a directory-needing capability asks, so the message
-        naming the way out is written once instead of in three backends.
-        """
+        """The backing directory, or raise :class:`CapabilityUnavailableError`."""
         d = self.directory
         if d is None:
             raise CapabilityUnavailableError(
@@ -330,28 +290,24 @@ class ResearcherProfile:
     def locate(self, *parts: str) -> str:
         """A human-readable locator for a logical artifact, display only.
 
-        Never parse this, never join to it, never open it. Storage backends
-        return whatever names the artifact best: a path, a URL, a table/row
-        reference. It exists so error messages and CLI output can say where
-        something lives without anyone assuming that where is a directory.
+        Never parse, join, or open it. It may be a path, a URL, or a table/row
+        reference.
         """
         return self._storage.locate(*parts)
 
     def persisted_document(self) -> dict[str, Any]:
         """The serialized document the store currently holds; ``{}`` when absent.
 
-        The ``dateModified`` comparison basis. Public because an ingest
-        legitimately needs it, though it is not :attr:`metadata`, which is
-        validated and may carry unsaved edits.
+        The ``dateModified`` comparison basis. Unlike :attr:`metadata`, it never
+        carries unsaved edits.
         """
         return self._storage.load_persisted_document()
 
     def content_hash(self) -> str:
         """``"sha256:<hex>"`` over the canonical document and the SOUL text.
 
-        Store-maintained derived state, refreshed inside the write unit before
-        the pre-commit hooks run, so a hook reading it observes post-write
-        content. Identical across backends by construction.
+        Refreshed inside the write unit before the pre-commit hooks run, so a
+        hook sees post-write content. Identical across backends.
         """
         return self._storage.content_hash()
 
@@ -363,10 +319,8 @@ class ResearcherProfile:
     def slug(self) -> str:
         """Display handle, derived from the profile directory name.
 
-        This is not identity. It is a human-readable label that carries no
-        authority, may collide across registry roots, and may be renamed
-        freely by renaming the directory. Never persist it as a foreign
-        key, and never use it to join across systems. Use :attr:`rid` instead.
+        Not identity: it may collide across registry roots and may be renamed.
+        Never persist it as a foreign key or join on it. Use :attr:`rid`.
         """
         return self._slug
 
@@ -382,35 +336,24 @@ class ResearcherProfile:
     def rid_or_empty(self) -> str:
         """The rid, or ``""`` when no document is readable yet.
 
-        A profile being created has no readable document; identity is not a
-        precondition for writing one. Used to name a write unit.
+        A profile being created has no readable document yet.
         """
         try:
             return self.rid
         except ProfileError:
             return ""
 
-    # ==================================================================
+    # ------------------------------------------------------------------
     # The write unit
-    # ==================================================================
-    #
-    # Persistence itself lives on the composed ``storage`` backend; what stays
-    # here is the hook registration a management host uses, and
-    # the public ``save_*`` writers below, which carry the validation,
-    # ``dateModified`` stamping and cache bookkeeping every backend inherits
-    # for free.
+    # ------------------------------------------------------------------
 
     def add_pre_commit_hook(self, hook: WriteHook) -> None:
         """Register a callable to run inside every write unit, before commit.
 
         Hooks run in registration order and receive one :class:`WriteContext`.
         A hook that raises aborts the write (see :meth:`write_unit`).
-
-        Registration belongs on the store, not on an HTTP app: a hook
-        registered here fires for API routes, CLI writes, and out-of-process
-        pipeline writes alike. :meth:`ProfileStore.add_pre_commit_hook`
-        is the store-level entry point that threads hooks onto every profile
-        it hands out.
+        :meth:`ProfileStore.add_pre_commit_hook` registers one on every
+        profile a store hands out.
         """
         self._writes.add_pre_commit_hook(hook)
 
@@ -421,34 +364,19 @@ class ResearcherProfile:
     def add_post_commit_hook(self, hook: WriteHook) -> None:
         """Register a callable to run after a write unit commits successfully.
 
-        The pre-commit/post-commit distinction is about what a hook is allowed
-        to do, not only when it runs. A pre-commit hook observes a write in
-        progress and may abort it (a raise rolls the unit back). A post-commit
-        hook observes a write that has already landed and must not abort
-        anything, because there is nothing left to roll back. Use this for
-        fire-and-forget notifications to something outside the store (e.g.
-        pushing to an external search index) where blocking, or failing, a
-        profile write on that system's availability would be wrong.
-
-        Fires exactly once per outermost :meth:`write_unit`, after that unit's
-        own commit. Nested units never fire it, mirroring how pre-commit
-        hooks collapse a batch of writes wrapped in one explicit ``write_unit``
-        into a single hook run. A raising hook is caught and logged at
-        ``WARNING``, never propagated; see :meth:`_fire_post_commit_hooks`.
-
-        Registration belongs on the store, not on an HTTP app, for the same
-        reason ``add_pre_commit_hook`` does: it must fire for API routes, CLI
-        writes, and out-of-process pipeline writes alike.
+        For fire-and-forget notifications outside the store, where a write
+        should not fail because another system is down. Fires once per
+        outermost :meth:`write_unit`. A raising hook is logged at ``WARNING``,
+        never propagated.
         """
         self._writes.add_post_commit_hook(hook)
 
     def write_unit(self, kind: str) -> AbstractContextManager["WriteContext"]:
         """The transactional boundary for one logical write.
 
-        A one-line delegation to
-        :meth:`researcher_profiles.profile.write_unit.WriteUnit.open`, which owns the
-        ordering and failure contracts. This stays a real method because
-        ``api.deps`` and the guardrail suite monkeypatch it.
+        See :meth:`researcher_profiles.profile.write_unit.WriteUnit.open` for
+        the ordering and failure contracts. ``api.deps`` and the guardrail
+        suite monkeypatch this method.
         """
         return self._writes.open(kind)
 
@@ -525,9 +453,7 @@ class ResearcherProfile:
     def level(self) -> str:
         """Profile depth tier: ``"lite"`` / ``"full"`` / ``"deep"``.
 
-        Read from ``metadata.level`` only. Every profile carries ``level``
-        explicitly, so there is no config fallback and no "absent means full"
-        chain to disagree with.
+        Read from ``metadata.level`` only; there is no fallback.
         """
         return str(self.metadata.level)
 
@@ -535,11 +461,8 @@ class ResearcherProfile:
     def has_persona(self) -> bool:
         """Whether this profile can role-play as a synthesized persona.
 
-        True only for a ``full`` or ``deep`` profile that carries both a
-        ``soul`` and an ``expertise`` narrative; those two documents are what
-        the persona prompt is built from. A ``lite`` profile never synthesizes
-        them. Summaries and papers feed retrieval grounding only and do not
-        make a profile persona-ready.
+        True only for a ``full`` or ``deep`` profile with both a ``soul`` and an
+        ``expertise`` narrative, which the persona prompt is built from.
         """
         if self.level not in ("full", "deep"):
             return False
@@ -558,9 +481,7 @@ class ResearcherProfile:
     def trials(self) -> list[TrialRecord]:
         """Clinical trials from ``sources/trials.jsonld``; empty when absent.
 
-        The optional clinical extension. Empty is the normal answer: almost no
-        profile carries one, and a profile that carries trials but no papers is
-        just as complete as the reverse.
+        The optional clinical extension; empty is normal.
         """
         return self._cached("_trials", self._storage.load_trials)
 
@@ -581,21 +502,12 @@ class ResearcherProfile:
     # Capability managers
     # ------------------------------------------------------------------
     #
-    # Five sub-objects, one per capability, each built on first access. A
-    # backend may supply its own for the two that can be served remotely
-    # (``ArtifactStorage.persona`` / ``.index``); the other three are always
-    # local because they are pure functions of artifacts this profile already
-    # has, or of the derived caches under ``.cache/``.
+    # A backend may supply its own ``persona`` and ``index``; the other three
+    # are always local because they depend only on local artifacts and caches.
 
     @property
     def persona(self) -> Any:
-        """``prof.persona``: ask, review, innovate, riff, chat.
-
-        ``ApiArtifactStorage`` supplies an HTTP-backed manager that POSTs to a server
-        owning the model, the corpus and the refusal policy; every other
-        backend gets the local
-        :class:`researcher_profiles.profile.persona.PersonaManager`.
-        """
+        """``prof.persona``: ask, review, innovate, riff, chat."""
         if self._persona_mgr is None:
             supplied = self._storage.persona(self)
             if supplied is None:
@@ -698,19 +610,13 @@ class ResearcherProfile:
         return out
 
     def to_agent_seed(self) -> dict[str, Any]:
-        """Return the minimal dict an external agent runtime needs to seed
-        an agent row from this profile.
+        """Return the minimal dict an external agent runtime needs to seed an agent.
 
-        Intended for downstream tools that want to
-        ground a simulated agent in a real researcher's profile but do not
-        need the full ``to_dict()`` payload at seeding time. Includes only
-        identity fields plus the full expertise/soul markdown bodies and a
-        paper count.
+        Identity fields, the expertise/soul bodies, and a paper count. Key
+        agent rows on ``rid``.
         """
         return {
             "slug": self.slug,
-            # `rid` is the join key a downstream runtime should key its agent
-            # row on; `slug` is a display handle and `orcid` is derived.
             "rid": self.rid,
             "name": self.metadata.name,
             "level": self.level,
@@ -736,14 +642,9 @@ class ResearcherProfile:
     def build_manifest(self, *, write: bool = False) -> list[ArtifactRef]:
         """Generate the manifest from what the backend actually holds.
 
-        The backend answers with a directory walk for files, the
-        ``rp_artifacts`` rows for SQL, or the recorded manifest for a static
-        host, so there is no directory walk here.
-
-        With ``write=True`` the regenerated ``hasPart`` / ``subjectOf`` are
-        stored back through :meth:`save_profile`, which stamps
-        ``dateModified``: a manifest whose ``sha256`` entries moved is a real
-        content change and the vintage must follow it.
+        With ``write=True`` the result is stored through :meth:`save_profile`,
+        which stamps ``dateModified``: changed ``sha256`` entries are a real
+        content change.
         """
         parts, subjects = self._storage.build_manifest()
         if write:
@@ -757,10 +658,8 @@ class ResearcherProfile:
     # ------------------------------------------------------------------
     #
     # The only methods anything outside this module may call to persist. Each
-    # one validates, stamps where applicable, runs inside exactly one
-    # ``write_unit``, calls exactly one ``storage.save_*`` method, and updates
-    # the in-memory cache slot after the unit exits cleanly so the object
-    # matches what was persisted.
+    # runs in one ``write_unit``, calls one ``storage.save_*`` method, and
+    # updates the cache only after the unit exits cleanly.
 
     def _persist_artifact(self, kind: str, value: Any, save: Any, cache_name: str) -> None:
         """Persist one simple artifact and stage its cache for outer commit."""
@@ -773,22 +672,13 @@ class ResearcherProfile:
     def save_profile(self, doc: ProfileDocument | None = None) -> ProfileDocument:
         """Validate, stamp ``dateModified``, and persist the profile document.
 
-        The single write path for the profile document. ``doc`` defaults to
-        the current in-memory :attr:`metadata`.
+        ``doc`` defaults to the in-memory :attr:`metadata`.
 
-        The order matters and is fixed: dump -> stamp against what the store
-        already holds -> canonicalize -> re-validate -> persist. Re-validation
-        happens before the storage hook is called, so a document that would
-        fail to load never reaches the store and the in-memory profile is
-        untouched.
-
-        Stamping compares serialized dicts, not models: pydantic prunes
-        ``None`` and empty collections, and comparing an un-normalized input
-        against a normalized stored document would report a change on every
-        write (see :mod:`researcher_profiles.utils.date_modified`). Any
-        ``dateModified`` already sitting in the dumped document is ignored:
-        it was carried over from whatever was loaded, and honouring it would
-        freeze the stamp at whatever the first build wrote.
+        Order is fixed: dump, stamp against the stored document, canonicalize,
+        re-validate, persist. A document that would fail to load never reaches
+        the store. Stamping compares serialized dicts (see
+        :mod:`researcher_profiles.utils.date_modified`); any incoming
+        ``dateModified`` is ignored so the stamp cannot freeze.
 
         Returns the re-parsed :class:`ProfileDocument`.
         """
@@ -796,9 +686,8 @@ class ResearcherProfile:
         from ..utils.date_modified import stamp_date_modified
 
         candidate = self.metadata if doc is None else doc
-        # Registry-issued proofs are computed when served, never stored. The
-        # backends strip them too; doing it here keeps the returned (and
-        # cached) document identical to what was persisted.
+        # Registry-issued proofs are computed when served, never stored.
+        # Stripping here keeps the cached document identical to the stored one.
         data = strip_registry_issued_from_document(
             candidate.model_dump(mode="json"), where=self.locate("profile.jsonld")
         )
@@ -865,9 +754,7 @@ class ResearcherProfile:
     def save_citations(self, data: Any = UNSET) -> None:
         """Persist the citation graph; ``None`` deletes it.
 
-        Omitting ``data`` persists what is in memory. That is why the
-        default is the ``UNSET`` sentinel and not ``None``: ``None`` is a
-        meaningful value here.
+        Omitting ``data`` persists what is in memory.
         """
         value = self.citations if data is UNSET else data
         self._persist_artifact("citations", value, self._storage.save_citations, "_citations")
@@ -891,10 +778,7 @@ class ResearcherProfile:
     def save_build_state(self, state: BuildState | None = None) -> None:
         """Persist build state; ``None`` persists what is in memory.
 
-        Build state is separate from published content. A backend may serve
-        published content while having no build state at
-        all. That is exactly what ``ReadOnlyArtifactStorage.load_build_state``
-        models by returning an empty :class:`BuildState`.
+        Build state is not published content; a read-only backend has none.
         """
         value = self.build_state if state is None else state
         self._persist_artifact("build_state", value, self._storage.save_build_state, "_build_state")
@@ -902,9 +786,7 @@ class ResearcherProfile:
     def set_paper_contaminated(self, paper_id: str, contaminated: bool) -> bool:
         """Flag a paper contaminated. Returns True if the paper exists.
 
-        Contamination is build state, so this mutates
-        ``.build/<slug>/meta/build_state.json`` through :meth:`save_build_state`
-        and never touches the published record.
+        Contamination is build state; the published record is untouched.
         """
         if not any(p.paper_id == paper_id for p in self.papers):
             return False
@@ -919,8 +801,7 @@ class ResearcherProfile:
 
     def __repr__(self) -> str:
         papers_str = "?" if self._papers is UNSET else str(len(self._papers))
-        # Name the backend, then whatever identity is already cached: a repr
-        # must never trigger a load.
+        # A repr must never trigger a load.
         head = f"ResearcherProfile(key={self._storage.key!r}, slug={self._slug!r}"
         if self._metadata is UNSET:
             return f"{head}, papers={papers_str})"
@@ -942,8 +823,7 @@ class ResearcherProfile:
     def refresh(self) -> None:
         """Drop cached reads so the next access re-fetches.
 
-        Clears this profile's own lazy slots and asks the backend to drop any
-        caching of its own (``ApiArtifactStorage`` holds the combined detail payload).
+        Also asks the backend to drop its own caches.
         """
         self._metadata = UNSET
         self._build_state = UNSET

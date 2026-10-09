@@ -1,14 +1,6 @@
-/**
- * Pure TypeScript vector operations. No dependencies.
- *
- * cosine, rankAgainst, mmrDiversify, kmeans: mirroring the Python
- * implementations in registry.py.
- */
+/** Vector operations mirroring the Python implementations in registry.py. */
 
-/**
- * Cosine similarity between two unit vectors. Since both are normalized,
- * cosine = dot product.
- */
+/** Cosine similarity of two unit vectors (their dot product). */
 export function cosine(a: Float32Array, b: Float32Array): number {
   if (a.length !== b.length) {
     throw new Error(
@@ -28,10 +20,7 @@ export interface ScoredItem {
   score: number;
 }
 
-/**
- * Rank all items in a group against a query vector, returning the top-k
- * by cosine similarity.
- */
+/** The top-k items by cosine similarity to a query vector. */
 export function rankAgainst(
   query: Float32Array,
   vectors: Float32Array,
@@ -59,7 +48,7 @@ export function rankAgainst(
 
 /**
  * MMR (Maximal Marginal Relevance) diversification, mirroring
- * registry.diversify's MMR loop.
+ * registry.diversify.
  *
  * @param scored - Pre-ranked items with scores
  * @param vectors - All centroid vectors (flat Float32Array)
@@ -79,7 +68,6 @@ export function mmrDiversify(
   const selected: ScoredItem[] = [];
   const remaining = [...scored];
 
-  // Start with the highest-scored item
   selected.push(remaining.shift()!);
 
   while (selected.length < k && remaining.length > 0) {
@@ -93,7 +81,6 @@ export function mmrDiversify(
         (candidate.index + 1) * dim,
       );
 
-      // Max similarity to any already-selected item
       let maxSim = -Infinity;
       for (const sel of selected) {
         const selVec = vectors.subarray(sel.index * dim, (sel.index + 1) * dim);
@@ -121,8 +108,7 @@ export function mmrDiversify(
 // ---------------------------------------------------------------------------
 
 /**
- * k-means clustering with k-means++ initialization and a fixed seed for
- * reproducibility.
+ * k-means with k-means++ initialization and a fixed seed.
  *
  * @param vectors - Flat Float32Array of all vectors
  * @param dim - Vector dimensionality
@@ -142,7 +128,6 @@ export function kmeans(
 
   const actualK = k ?? Math.max(2, Math.round(Math.sqrt(n)));
   if (actualK >= n) {
-    // Every point is its own cluster
     return Array.from({ length: n }, (_, i) => ({
       cluster: i,
       members: [i],
@@ -150,14 +135,13 @@ export function kmeans(
     }));
   }
 
-  // Seeded RNG (simple LCG)
+  // Seeded LCG
   let rng = seed;
   function random(): number {
     rng = (rng * 1664525 + 1013904223) & 0x7fffffff;
     return rng / 0x7fffffff;
   }
 
-  // k-means++ initialization
   const centers = new Float32Array(actualK * dim);
   const firstIdx = Math.floor(random() * n);
   centers.set(vectors.subarray(firstIdx * dim, (firstIdx + 1) * dim));
@@ -179,7 +163,6 @@ export function kmeans(
       dists[i] = minDist;
     }
 
-    // Weighted random selection
     let total = 0;
     for (let i = 0; i < n; i++) total += dists[i];
     let threshold = random() * total;
@@ -203,7 +186,6 @@ export function kmeans(
   for (let iter = 0; iter < maxIter; iter++) {
     let changed = false;
 
-    // Assign each point to nearest center
     for (let i = 0; i < n; i++) {
       const vec = vectors.subarray(i * dim, (i + 1) * dim);
       let bestCluster = 0;
@@ -228,7 +210,6 @@ export function kmeans(
 
     if (!changed) break;
 
-    // Recompute centers
     const counts = new Int32Array(actualK);
     centers.fill(0);
     for (let i = 0; i < n; i++) {
@@ -248,7 +229,7 @@ export function kmeans(
     }
   }
 
-  // Build cluster result with exemplars (member closest to center)
+  // The exemplar is the member closest to its center.
   const clusters: ClusterAssignment[] = [];
   for (let c = 0; c < actualK; c++) {
     const members: number[] = [];
@@ -257,7 +238,6 @@ export function kmeans(
     }
     if (members.length === 0) continue;
 
-    // Find exemplar (closest to center)
     const center = centers.subarray(c * dim, (c + 1) * dim);
     let bestDist = Infinity;
     let exemplar = members[0];

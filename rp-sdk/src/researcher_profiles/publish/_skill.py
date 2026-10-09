@@ -1,8 +1,4 @@
-"""SKILL.md generator for the published static site.
-
-Produces a markdown file describing the site layout and how an LLM agent
-should navigate it. This is the agent's entry point into the published tree.
-"""
+"""SKILL.md generator: the agent's entry point into the published static site."""
 
 from typing import Any
 

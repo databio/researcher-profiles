@@ -27,10 +27,7 @@ from ._http import _server_base, _split_profile_url, auth_headers
 
 logger = logging.getLogger(__name__)
 
-#: Env var naming the local profiles root. Shared with anything that writes
-#: profiles into the cache, so a written profile and an installed one land in
-#: the same tree. Re-exported from :mod:`researcher_profiles.store.config`
-#: under this package's own name, not a second literal for the same setting.
+#: Env var naming the local profiles root (same setting as the store's).
 CACHE_ENV_VAR = PROFILES_ROOT_ENV_VAR
 
 #: Env var naming the default registry base URL(s), comma-separated.
@@ -58,10 +55,9 @@ def _fetch_profiles(
 ) -> list[dict]:
     """GET ``/api/v1/profiles`` from one server and return the parsed list.
 
-    Behind ``ResearcherProfile.list_remote``. Raises on any transport or HTTP
-    failure; ``PermissionError`` on 401, so a private registry is
-    distinguishable from an unreachable one. An injected ``client`` is used
-    as-is and never closed. It belongs to the caller.
+    Raises on any transport or HTTP failure; ``PermissionError`` on 401, so a
+    private registry is distinguishable from an unreachable one. An injected
+    ``client`` is never closed.
     """
     import httpx
 
@@ -113,10 +109,9 @@ def rank_against(
     JSON dicts); each match's ``evidence.matched_topics`` names the OpenAlex
     topics that moved its score.
 
-    Registry ranking is not profile-scoped, so this is a module-level function
-    (not an :class:`ApiArtifactStorage` method). POSTs to ``/api/v1/match`` and
-    returns the parsed ``matches`` list (plain dicts shaped like ``MatchResult``:
-    ``{slug, name, orcid, score, evidence{...}}``).
+    POSTs to ``/api/v1/match`` and returns the parsed ``matches`` list (plain
+    dicts shaped like ``MatchResult``: ``{slug, name, orcid, score,
+    evidence{...}}``).
     """
     import httpx
 
@@ -177,12 +172,10 @@ def list_registry(
 ) -> list[RegistryListing]:
     """Ask every configured registry what profiles it holds.
 
-    ``url`` is the comma-separated form `--url` and ``$RESEARCHER_PROFILES_REGISTRY_URL`` carry;
-    it is resolved through :func:`resolve_registries`, so an empty return list
-    means "no registry is configured" and nothing was attempted. One listing
-    comes back per named server, in order, each either carrying its profiles
-    or its failure text. A registry that is down does not abort the others
-    and does not raise.
+    ``url`` is comma-separated, as in ``$RESEARCHER_PROFILES_REGISTRY_URL``.
+    An empty return list means no registry is configured. One listing comes
+    back per server, in order. A registry that is down does not abort the
+    others and does not raise.
     """
     if token is None:
         token = os.environ.get("RESEARCHER_PROFILES_TOKEN") or None
@@ -191,8 +184,6 @@ def list_registry(
         base = _server_base(server)
         try:
             profiles = _fetch_profiles(base, token=token, timeout=timeout, client=client)
-        # Boundary: one remote registry. Anything it can fail with is data, not
-        # a crash, so it is reported on the listing rather than raised.
         except Exception as e:
             logger.debug("registry %s listing failed", base, exc_info=True)
             out.append(RegistryListing(base_url=base, error=str(e)))
@@ -209,9 +200,7 @@ def list_registry(
 def seek_profile(slug: str, root: Optional[str | os.PathLike] = None) -> Path:
     """Resolve a slug to its local profile directory.
 
-    Raises ``FileNotFoundError`` if the profile is not cached. Mirrors
-    ``refgenie seek`` / ``geniml bbclient seek`` so shell pipelines can do
-    ``$(rp seek <slug>)``.
+    Raises ``FileNotFoundError`` if the profile is not cached.
     """
     target = resolve_profiles_root(root) / slug
     if not (target / "profile.jsonld").is_file():
@@ -289,9 +278,8 @@ def _extract_and_swap(
 ) -> tuple[Optional[str], Optional[str], Path]:
     """Extract to a staging dir, check the profile loads, then atomic swap.
 
-    Returns ``(name, level, final_path)`` read from the staged profile itself.
-    The staging dir is removed whatever happens, so a bad archive never leaves
-    a half-written profile in the cache.
+    Returns ``(name, level, final_path)`` read from the staged profile. The
+    staging dir is always removed.
     """
     from ..api.upload import UploadError, extract_profile_archive
     from ..store.files import swap_profile_dir
@@ -328,11 +316,9 @@ def install_profile(
 ) -> dict:
     """Pull a profile from a registry and cache it in the local profiles root.
 
-    The inverse of :func:`push_profile`. Flow follows refgenie's ``pull``:
-    check the local cache first, fetch metadata before bytes, stream the
-    archive to a ``.part`` file while hashing, verify the server's digest,
-    then extract to a staging dir and atomically swap it into place. A failed
-    or interrupted transfer never leaves a half-written profile in the cache.
+    The inverse of :func:`push_profile`. The archive's digest is verified and
+    it is swapped into place atomically, so a failed or interrupted transfer
+    never leaves a half-written profile in the cache.
 
     Returns a summary dict with ``slug``, ``name``, ``level``, ``path``,
     ``status`` (``"installed"`` or ``"present"``), and ``archive_tier``: the
@@ -350,7 +336,6 @@ def install_profile(
     base_root = resolve_profiles_root(root)
     target = base_root / slug
 
-    # Cache-hit oracle is the filesystem, checked before any bytes move.
     if (target / "profile.jsonld").is_file() and not force:
         return {
             "slug": slug,

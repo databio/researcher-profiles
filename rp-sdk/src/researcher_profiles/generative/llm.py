@@ -1,15 +1,7 @@
-"""Thin LLM client adapter and the ``ask`` / ``review`` persona bodies.
+"""Thin LLM client adapter and the bodies of ``prof.persona.ask`` / ``.review``.
 
-This module wraps :mod:`anthropic` so the rest of the package never imports
-the raw SDK, and it defines the ``_ask`` / ``_review`` implementation
-functions that back ``prof.persona.ask`` / ``.review``. The manager object
-``ResearcherProfile.persona`` hands back is
-:class:`researcher_profiles.profile.persona.PersonaManager`, which imports
-these functions and calls them. Importing this module has no side effect on
-the profile class.
-
-The Anthropic SDK is imported lazily inside :class:`LLMClient` so that
-importing this module does not require ``anthropic`` to be installed.
+The rest of the package never imports :mod:`anthropic` directly, and it is
+imported lazily, so this module imports without it installed.
 """
 
 import json
@@ -24,11 +16,8 @@ DEFAULT_MAX_TOKENS = 4096
 REFUSAL_THRESHOLD = 0.4
 _MAX_HISTORY_CHARS = 12000
 
-# Hard upper bound for a single Anthropic call. Without this the SDK can
-# silently sit on a stalled connection for ~10 minutes (or
-# forever if the underlying socket is wedged), causing /ask and /review
-# requests to hang indefinitely. Override with
-# ``RESEARCHER_PROFILES_LLM_TIMEOUT`` (seconds).
+# Upper bound for one Anthropic call, so /ask and /review cannot hang on a
+# stalled connection. Override with ``RESEARCHER_PROFILES_LLM_TIMEOUT`` (seconds).
 DEFAULT_LLM_TIMEOUT_S = 90.0
 
 
@@ -42,7 +31,7 @@ def _llm_timeout() -> float:
     return DEFAULT_LLM_TIMEOUT_S
 
 
-# Pattern for extracting paper_id citations from model text, e.g. [foo2024bar].
+# paper_id citations in model text, e.g. [foo2024bar].
 _CITATION_PATTERN = re.compile(r"\[([a-z][a-z0-9_-]{2,})\]")
 
 
@@ -70,9 +59,8 @@ class LLMResponse:
 class LLMClient:
     """Minimal Anthropic adapter.
 
-    Callers pass ``system`` as a list of typed content blocks so they
-    can place ``cache_control`` themselves (this is required to cache
-    the per-profile persona prefix correctly).
+    ``system`` is a list of content blocks so callers place ``cache_control``
+    themselves, which caching the persona prefix requires.
     """
 
     def __init__(
@@ -81,13 +69,8 @@ class LLMClient:
         default_model: str = DEFAULT_MODEL,
         timeout: Optional[float] = None,
     ):
-        # Lazy import: anthropic is only needed when an LLMClient is
-        # actually instantiated.
         import anthropic
 
-        # Apply a finite request timeout so /ask /review can never hang
-        # forever on a stalled connection. The anthropic SDK accepts
-        # ``timeout`` directly on the constructor.
         self._client = anthropic.Anthropic(
             api_key=api_key,
             timeout=timeout if timeout is not None else _llm_timeout(),
@@ -112,9 +95,8 @@ class LLMClient:
             messages=messages,
         )
         if temperature is not None:
-            # anthropic>=1 dropped ``temperature`` from the create() signature
-            # (TypeError); the API still honours it on models before Opus 4.7,
-            # so send it as a raw body field. Works on 0.x too.
+            # anthropic>=1 rejects ``temperature`` in create(), but the API
+            # still honours it on models before Opus 4.7, so send it raw.
             kwargs["extra_body"] = {"temperature": temperature}
         if thinking is not None:
             kwargs["thinking"] = thinking
@@ -152,9 +134,7 @@ def _first_lines(s: str, max_chars: int = 500) -> str:
 def _render_evidence(chunks) -> tuple[str, list]:
     """Render search hits into a text block and a list of ``CitationRef``.
 
-    Returns ``(text, list[CitationRef])``. Persona-only chunks
-    (``source_type == "expertise"`` or ``"soul"``) are still included in
-    the text block (they aid grounding) but do not emit a ``CitationRef``.
+    Expertise and SOUL chunks go into the text but emit no ``CitationRef``.
     """
     from ..models.results import CitationRef
 
@@ -184,7 +164,6 @@ def _render_evidence(chunks) -> tuple[str, list]:
         CitationRef(paper_id=pid, relevance=score, span=span)
         for pid, (score, span) in by_id.items()
     ]
-    # Order: highest-score first.
     citation_refs.sort(key=lambda c: (-(c.relevance or 0.0), c.paper_id))
     return "\n".join(lines), citation_refs
 
@@ -194,9 +173,7 @@ def _log_usage(profile, *, method: str, resp: LLMResponse, **extra) -> None:
 
     directory = profile.directory
     if directory is None:
-        # A store with no directory has nowhere to log. Usage accounting must
-        # never fail a persona call: an ApiArtifactStorage-backed profile answers
-        # through a server that does its own logging.
+        # No directory, nowhere to log; usage logging must never fail a call.
         return
     log_path = build_logs_dir(directory) / "llm-usage.jsonl"
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -320,11 +297,8 @@ def _grounded(self, resp: LLMResponse) -> bool:
 def _source_type_kwargs(source_types: Optional[list[str]]) -> dict:
     """Retrieval kwargs for a caller limited to ``source_types``.
 
-    Empty for ``None``: a caller entitled to every source type queries exactly
-    the index an unfiltered call would, down to the call itself. The
-    restriction is applied at the query so private chunks cannot crowd out
-    the ones the caller may actually be shown, rather than being dropped after
-    the fact.
+    Empty for ``None``. The filter is applied at the query, not after, so
+    hidden chunks cannot crowd out the ones the caller may see.
     """
     if source_types is None:
         return {}
@@ -334,10 +308,8 @@ def _source_type_kwargs(source_types: Optional[list[str]]) -> dict:
 def _retrieval_errors() -> tuple[type[BaseException], ...]:
     """The index failures a persona verb answers ungrounded on.
 
-    Called from the ``except`` clause itself, not bound at module scope, so the
-    import happens only when a search has actually failed:
-    ``researcher_profiles.embeddings`` pulls numpy, and this module must import
-    on a machine that has the ``llm`` extra but not ``vectors``.
+    Imported only when a search has failed: ``researcher_profiles.embeddings``
+    pulls numpy, and this module must import with the ``llm`` extra alone.
     """
     from ..embeddings import IndexNotBuiltError, MissingEmbeddingBackendError
     from ..errors import CapabilityUnavailableError
@@ -367,10 +339,7 @@ def _ask(
     try:
         chunks = self.index.search(question, k=k, **_source_type_kwargs(source_types))
     except _retrieval_errors():
-        # ``CapabilityUnavailableError``: this backend has no local index, so
-        # answer ungrounded rather than refusing. An unbuilt index or a missing
-        # embedding backend degrades the same way: retrieval is grounding, not
-        # the answer.
+        # No usable index: answer ungrounded rather than refusing.
         chunks = []
     evidence_text, citation_refs = _render_evidence(chunks)
 
@@ -456,7 +425,7 @@ def _review(
     try:
         chunks = self.index.search(query, k=k, **_source_type_kwargs(source_types)) if query else []
     except _retrieval_errors():
-        # See ``_ask``: no index, or an unusable one, means ungrounded.
+        # See ``_ask``.
         chunks = []
     evidence_text, citation_refs = _render_evidence(chunks)
 

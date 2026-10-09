@@ -1,22 +1,4 @@
-"""The two read-only HTTP storage backends and their remote capability managers.
-
-:class:`ApiArtifactStorage`
-    One profile served by a live ``researcher_profiles.api`` server.
-    ``ResearcherProfile.from_api(...)`` builds one. The server owns the model,
-    the corpus and the embedding index, so ``prof.persona`` and ``prof.index``
-    are HTTP-backed here, through :class:`_RemotePersona` and
-    :class:`_RemoteIndex`.
-
-:class:`StaticArtifactStorage`
-    One profile published as a directory on a dumb static host (Cloudflare
-    Pages, S3, Apache). ``ResearcherProfile.from_url(...)`` builds one. One
-    lazy GET per artifact, and the manifest in ``profile.jsonld`` stands in for
-    the directory listing a static host does not have.
-
-Both are read-only: every writer is refused by
-:class:`~researcher_profiles.profile.storage.ReadOnlyArtifactStorage` with one
-message naming :func:`install_profile`.
-"""
+"""The two read-only HTTP storage backends and their remote capability managers."""
 
 import hashlib
 import json
@@ -80,8 +62,8 @@ def _empty_collection_envelope(content_url: str, about: Optional[str]) -> dict:
 class _RemoteIndex:
     """``prof.index`` for a profile served by a live API server.
 
-    ``search`` goes over ``POST /search``, which the server answers from the
-    index IT built. The rest need the sqlite handle itself and are refused.
+    Only ``search`` is served (``POST /search``). The rest need the local
+    sqlite handle and raise :class:`CapabilityUnavailableError`.
     """
 
     def __init__(self, storage: "ApiArtifactStorage"):
@@ -139,10 +121,8 @@ class _RemotePersona:
 
     Each verb POSTs one request; the server owns the model, the corpus and the
     refusal policy. Signatures are a strict subset of the local ones:
-    ``thinking`` and ``max_tokens`` have no field on ``AskRequest`` /
-    ``ReviewRequest`` / ``InnovateRequest`` / ``RiffRequest``, and forwarding
-    them would only move the lie one hop, since ``_APIModel`` sets
-    ``extra="allow"``.
+    ``thinking`` and ``max_tokens`` have no wire field, and the server models
+    set ``extra="allow"``, so forwarding them would be silently ignored.
     """
 
     def __init__(self, profile: ResearcherProfile, storage: "ApiArtifactStorage"):
@@ -286,9 +266,9 @@ class _RemotePersona:
 class ApiArtifactStorage(ReadOnlyArtifactStorage):
     """A profile served by a live ``researcher_profiles.api`` server.
 
-    Read-only: every writer is refused by :class:`ReadOnlyArtifactStorage`.
-    Reads come off the combined detail payload where the API has one, and off
-    the dedicated routes otherwise.
+    Built by ``ResearcherProfile.from_api(...)``. Reads come off the combined
+    detail payload where the API has one, and off the dedicated routes
+    otherwise.
     """
 
     def __init__(
@@ -406,9 +386,9 @@ class ApiArtifactStorage(ReadOnlyArtifactStorage):
     def load_document(self) -> ProfileDocument:
         """The served metadata with the manifest put back, as one document.
 
-        The record carries no manifest (it has its own route), and two
-        counts that are not document fields; both are reconciled here so the
-        document validates and ``build_manifest`` has something to answer.
+        The record carries no manifest (it has its own route) and two counts
+        that are not document fields. Both are fixed here so the document
+        validates.
         """
         fields = dict(self._detail().get("fields") or {})
         for key in ("paper_count", "summary_count"):
@@ -420,15 +400,13 @@ class ApiArtifactStorage(ReadOnlyArtifactStorage):
                 for e in files
                 if e.get("slot") == slot
             ]
-        # Server emits a tolerant dict; round-trip through ProfileDocument.
         return ProfileDocument.model_validate(fields)
 
     def content_hash(self) -> str:
         """``"sha256:<hex>"`` over the served document + soul.
 
-        A read, so it stays supported on a read-only view. Computed from the
-        combined detail payload rather than raw bytes, because the API serves a
-        document, not a file.
+        Computed from the parsed document, not raw bytes, because the API
+        serves a document, not a file.
         """
         d = self._detail()
         h = hashlib.sha256()
@@ -498,7 +476,6 @@ class ApiArtifactStorage(ReadOnlyArtifactStorage):
 
     def load_summaries(self) -> Mapping[str, str]:
         if self._paper_index_cache is None:
-            # Triggers a load + caches the paper index.
             self.load_papers()
         ids = [
             e["paper_id"]
@@ -512,9 +489,8 @@ class ApiArtifactStorage(ReadOnlyArtifactStorage):
     def artifact_text(self, content_url: str) -> Optional[str]:
         """Only what v1 serves: soul, expertise, and paper summaries.
 
-        Returns ``None`` otherwise. An invented empty body is worse than an
-        empty column, and the v1 API has no route that hands back an arbitrary
-        artifact's bytes.
+        Returns ``None`` otherwise, rather than an invented empty body. The v1
+        API has no route for an arbitrary artifact's bytes.
         """
         if content_url == SOUL_URL:
             return self.load_soul() or None
@@ -579,9 +555,7 @@ def _s3_to_https(url: str) -> str:
 class StaticArtifactStorage(ReadOnlyArtifactStorage):
     """A published profile directory on a dumb static host (Pages, S3, ...).
 
-    Unlike :class:`ApiArtifactStorage` (which talks to a live
-    ``researcher_profiles.api`` server), this fetches the published files
-    themselves (``profile.jsonld``, ``personality/*.md``, ``sources/*.jsonld``)
+    Built by ``ResearcherProfile.from_url(...)``. Fetches the published files
     with one lazy GET per artifact. Summaries are enumerated from the manifest
     in ``profile.jsonld``, since a static host has no directory listing.
 
@@ -670,10 +644,7 @@ class StaticArtifactStorage(ReadOnlyArtifactStorage):
     # Reads
 
     def content_hash(self) -> str:
-        """``"sha256:<hex>"`` over the fetched document + soul.
-
-        A read, so it stays supported on a read-only view.
-        """
+        """``"sha256:<hex>"`` over the fetched document + soul."""
         h = hashlib.sha256()
         raw = self._fetch("profile.jsonld")
         data = json.loads(raw) if raw is not None else {}
@@ -741,8 +712,6 @@ class StaticArtifactStorage(ReadOnlyArtifactStorage):
             raise ProfileLoadError(url, f"JSON parse error: {e}", e) from e
 
     def load_summaries(self) -> Mapping[str, str]:
-        # A static host has no directory listing, so enumerate from the
-        # manifest, which exists precisely for this.
         ids = sorted(
             p.paper_id
             for p in self.load_document().has_part

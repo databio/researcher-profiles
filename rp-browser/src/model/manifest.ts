@@ -85,29 +85,25 @@ export function manifestEntries(manifest: Manifest): ArtifactRef[] {
 export function normalizeBase(url: string): string {
   let u = url.trim();
 
-  // Strip trailing profile.jsonld
   if (u.endsWith("/profile.jsonld")) {
     u = u.slice(0, -"profile.jsonld".length);
   } else if (u.endsWith("/profile.jsonld/")) {
     u = u.slice(0, -"profile.jsonld/".length);
   }
 
-  // Force trailing slash
   if (!u.endsWith("/")) u += "/";
 
-  // Validate protocol
   const parsed = new URL(u);
   if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
     throw new Error(`Only http(s) URLs are supported, got ${parsed.protocol}`);
   }
 
-  // Block http in production (allow localhost in dev)
+  // Plain http to a non-local host is allowed but warned about.
   if (
     parsed.protocol === "http:" &&
     parsed.hostname !== "localhost" &&
     parsed.hostname !== "127.0.0.1"
   ) {
-    // Allow in dev, warn but don't block for now
     console.warn(`Non-HTTPS URL: ${u}. HTTPS is recommended for production.`);
   }
 
@@ -140,14 +136,8 @@ export interface ProfileFile {
   mediaType: string;
   bytes?: number | null;
   /**
-   * The tier declared on the manifest entry, when it declares one.
-   *
-   * Carried through so the ordinary browse path can show it: the screen that
-   * lists every file a profile contains can then say which of them are
-   * public. This is the declared tier, not the effective one: the manifest
-   * is tier-invariant (spec section 6) and does not carry the derivation
-   * rule's answer. The owner's Publication panel reads the server's
-   * `effective` for that; nothing recomputes it here.
+   * The tier declared on the manifest entry, not the effective one: the
+   * manifest is tier-invariant (spec section 6).
    */
   visibility?: string | null;
 }
@@ -235,10 +225,7 @@ export function fulltextUrl(
 
 const manifestCache = new Map<string, ResolvedProfile>();
 
-/**
- * Load a profile document from the given base URL. Returns a ResolvedProfile
- * with the parsed document and fetch outcome. Caches by normalized base URL.
- */
+/** Load a profile document from a base URL. Cached by normalized base URL. */
 export async function loadManifest(
   rawUrl: string,
 ): Promise<ResolvedProfile> {

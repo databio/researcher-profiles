@@ -505,16 +505,22 @@ nothing and `rp push` names what is in the way:
 
 ```console
 $ rp push profiles/jane-doe --url http://localhost:8109 --token rpa_...
-push refused: nothing was written.
+push refused [insufficient-access]: this key may not change every part this push touches
   needs Write on: summary
-Send only the files you may write (--only <file>), or ask the account holder to change this key's access on the Privacy page.
+  next: --only <file> to send only parts you may write, or have the account holder widen this key on the Privacy page
 ```
 
 A change no part covers (what the public sees, a field such as
-`provenance_note`) is listed on its own line: only a key with "Replace whole
-profiles" may make it. `rp push --only <file>` sends one file and keeps the
+`provenance_note`) is listed on its own `needs "Replace whole profiles" for:`
+line: only a key with that switch may make it. `rp push --only <file>` sends one file and keeps the
 rest, so a key with Write on `paper_summary` can update one summary. See
 [`rp agent whoami`](#agent) for the key's table.
+
+**Refusals.** Every refusal is one `push refused [<code>]: <what>` line, then any
+paths or parts involved, then a `next:` line with the flag or command to run.
+The codes are `would-remove`, `manifest-shrink`, `partial-copy`, `legacy-cache`,
+`mode-unsupported`, `mode-unknown`, and `insufficient-access`. In Python they
+are `PushRefused.code`, `.details`, and `.fix`.
 
 **Exit codes.** `0` ok · `1` the server could not be reached or would not
 answer, or refused the push part by part (`403 insufficient_access`) · `2` no server URL resolved, the directory is unreadable, the push
@@ -559,7 +565,7 @@ audience. Upload is a separate step: the folder needs no filtering.
 ```
 rp publish <profiles> --out DIR [--who {public,limited,private}] [--root DIR]
                       [--base-url URL] [--no-index] [--now ISO8601]
-                      [--dry-run] [--json]
+                      [--change-audience] [--dry-run] [--json]
 ```
 
 | Argument / flag | Default | Description |
@@ -570,6 +576,7 @@ rp publish <profiles> --out DIR [--who {public,limited,private}] [--root DIR]
 | `--base-url URL` | none | Base URL for canonical links, `sitemap.xml` and `robots.txt`. |
 | `--no-index` | off | Add `noindex` directives. |
 | `--now ISO8601` | now | Pin timestamps for deterministic output. |
+| `--change-audience` | off | Allow `--who` to be wider than the audience the folder was last published for (recorded in `.rp-publish.json`). Without it, widening is refused; narrowing is always allowed. |
 | `--dry-run` | off | Print, per profile, what ships and what is withheld and why, plus skipped profiles. Writes nothing. |
 | `--json` | off | Print the same as data. |
 

@@ -1075,7 +1075,7 @@ class TestServedLinksResolve:
     A consumer given a profile URL appends ``/profile.jsonld`` and resolves each
     relative ``contentUrl`` against where the document came from (spec 3.3, Base
     conformance rule 6). ``/api/v1/profiles/{slug}`` and its ``profile.jsonld``
-    answered 200 while every link resolved under them 404ed: the live Prosopia
+    answered 200 while every link resolved under them 404ed: a live hosted
     profile page showed "Failed to load works ... HTTP 404".
     """
 

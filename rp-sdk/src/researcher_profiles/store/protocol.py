@@ -1,15 +1,5 @@
-"""The store contract and its value types.
-
-:class:`ProfileStore` is the structural (``Protocol``) interface a backend
-implements: enumerate profiles, resolve a reference, create/delete one, hand
-out its bytes. :class:`VectorStore` is the optional *capability* protocol on
-top of it: a backend that can also serve a profile's vectors.
-:class:`IngestResult`, :class:`ProfileNotFoundError`, :class:`RetiredRidError`,
-:class:`UploadError` and
-:class:`DuplicateIdentityError` are the value and error types that cross that
-boundary. See the package docstring for why these are protocols and not base
-classes.
-"""
+"""The store contract (:class:`ProfileStore`, :class:`VectorStore`) and the
+value and error types that cross it."""
 
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -32,12 +22,8 @@ if TYPE_CHECKING:  # pragma: no cover
 class ProfileNotFoundError(ProfileError, KeyError):
     """No profile in the store answers to a given rid or slug.
 
-    Both a :class:`~researcher_profiles.profile.ProfileError` and a
-    ``KeyError``. The API layer's 404 path and every ``except KeyError`` around
-    a store lookup read "no such key" (which is exactly what this is), while a
-    management host wants to catch it alongside the package's other errors.
-    Making it one or the other would force every caller of the other kind to
-    grow a second ``except`` clause.
+    Both a ``ProfileError`` and a ``KeyError``, so callers can catch it either
+    way.
     """
 
     def __str__(self) -> str:
@@ -52,8 +38,7 @@ class RetiredRidError(ProfileWriteError):
     A retired rid or slug keeps resolving to its successor through an alias,
     so reusing it would silently hijack (or resurrect) that identity. A store
     that keeps aliases refuses such a write with this error. It is a
-    :class:`~researcher_profiles.errors.ProfileWriteError` on purpose: every
-    route that already maps a write error to 409 then does the right thing.
+    ``ProfileWriteError`` so routes map it to 409.
     """
 
     def __init__(
@@ -75,21 +60,16 @@ class RetiredRidError(ProfileWriteError):
 class UploadError(ValueError):
     """A staged profile directory is malformed, unsafe, or does not load.
 
-    Raised by the archive helpers in :mod:`researcher_profiles.api.upload` and
-    by :meth:`ProfileStore.commit_directory`. It lives here, not there, because
-    committing a staged directory is a *store* operation that both backends
-    perform and neither should have to import the HTTP layer to signal.
+    Defined here, not in ``api.upload``, so backends need not import the HTTP
+    layer to raise it.
     """
 
 
 class DuplicateIdentityError(ValueError):
     """Two profiles in one store claim the same ``rid``.
 
-    A store is the only place this can be detected, because it is the only
-    place that sees every profile at once. The filesystem backend is the only
-    one that can hit it: SQL makes it structurally impossible (``rid`` is the
-    primary key) and a published site's ``by-rid.json`` is a mapping that
-    cannot hold two entries under one key.
+    Only the filesystem backend can hit it: in SQL ``rid`` is the primary key,
+    and a site's ``by-rid.json`` cannot hold two entries under one key.
     """
 
 
@@ -102,8 +82,7 @@ class IngestResult:
     name: str
     level: str
     #: Whether a built embedding index is present afterwards. Always ``False``
-    #: on a store with no filesystem: the index is a ``.cache/embeddings.sqlite``
-    #: handle, which ``ArtifactStorage`` does not cover (see the module docstring).
+    #: on a store with no filesystem.
     indexed: bool
     #: Live files carried over rather than deleted, by class
     #: (``{"fulltext": 53, "index": 1}``); see ``upload.WITHHELD_CLASSES``.
@@ -113,8 +92,8 @@ class IngestResult:
     #: manifest did not list. Filled in by ``ingest_archive``; see
     #: ``upload._splice_kept_into_manifest``.
     spliced: int = 0
-    #: ``{role: count}`` over the manifest the store holds after the commit:
-    #: what a reader can now fetch. Filled in by ``ingest_archive``.
+    #: ``{role: count}`` over the manifest held after the commit. Filled in by
+    #: ``ingest_archive``.
     manifest_counts: dict[str, int] = field(default_factory=dict)
     #: Which ``upload.PushMode`` the ingest ran under, and so what happened to
     #: the live files the archive did not carry.
@@ -126,8 +105,7 @@ class ProfileStore(Protocol):
     """A set of profiles, whatever they are stored in.
 
     Every method takes ``ref``: a slug or a rid. Resolution is the store's job,
-    not the caller's. An HTTP route that had to know which namespace it was
-    handed would be re-implementing :meth:`resolve_slug` at every entry point.
+    not the caller's.
     """
 
     # identity of the store itself
@@ -136,8 +114,7 @@ class ProfileStore(Protocol):
     def location(self) -> str:
         """A human-readable locator for this store. Display only.
 
-        A directory path, a database URL. Never parse it or join to it. That is
-        the same rule :meth:`ResearcherProfile.locate` states one level down.
+        A directory path, a database URL. Never parse it or join to it.
         """
         ...
 
@@ -145,11 +122,8 @@ class ProfileStore(Protocol):
     def root(self) -> Optional[Path]:
         """The filesystem root when this store is a directory, else ``None``.
 
-        The one filesystem admission; see the module docstring. Vectors are no
-        longer among the things that need it: they have :class:`VectorStore`.
-        This list is the whole sanctioned set -- it is the single copy, and
-        ``store/__init__.py`` points here rather than restating it. What still
-        branches on ``root``, and nothing else may:
+        The one filesystem admission. This is the whole sanctioned set of
+        readers that branch on ``root``, and nothing else may:
 
         * ``<root>/.cache/graph.sqlite`` (the co-authorship graph), which has no
           interface yet. Read in ``api.deps``, which turns a ``None`` root into
@@ -184,24 +158,16 @@ class ProfileStore(Protocol):
     def rid_for(self, ref: str) -> str:
         """Map a slug or a rid to the rid. Raises :class:`ProfileNotFoundError`.
 
-        The mirror of :meth:`resolve_slug`. Both exist because the two are used
-        for different things: ``rid`` is the identity every cross-system
-        mapping joins on; ``slug`` is what a URL and a human say. A bare ORCID
-        resolves here too, because an ORCID rid *is* its ORCID
-        (``scholarcore.identity.orcid_of`` derives one from the other and
-        invents nothing).
+        ``rid`` is the identity cross-system mappings join on; ``slug`` is what
+        a URL says. A bare ORCID resolves too, because an ORCID rid is its ORCID.
         """
         ...
 
     def write_lookup_index(self) -> Optional[Path]:
         """Persist ``rid <-> slug`` so shell callers resolve without importing.
 
-        A shell caller resolving a rid to a directory reads this file, which is
-        what lets a rid work anywhere a slug does regardless of directory name.
-        Nothing writes it implicitly: a caller that owns a writable root calls
-        this when it wants the file fresh. Returns ``None`` on a store with no
-        directory to write into, which is not a degradation: such a store
-        answers the same question in process through :meth:`rid_for`.
+        Nothing writes it implicitly. Returns ``None`` on a store with no
+        directory; such a store answers through :meth:`rid_for` instead.
         """
         ...
 
@@ -213,8 +179,7 @@ class ProfileStore(Protocol):
         """Load a profile. Raises :class:`ProfileNotFoundError`.
 
         The returned profile carries every hook registered through
-        :meth:`add_pre_commit_hook`, so a write through it fires them whether it
-        came from an HTTP route, the CLI, or an out-of-process pipeline run.
+        :meth:`add_pre_commit_hook`, so any write through it fires them.
         """
         ...
 
@@ -258,23 +223,20 @@ class ProfileStore(Protocol):
         retired rid and slug keep resolving to the survivor. Chains are kept
         one hop. Pre-commit hooks see ``ctx.kind == "merge"``,
         ``ctx.rid == survivor_rid`` and ``ctx.retired_rid`` /
-        ``ctx.retired_slug``. Only a transactional (SQL) store implements it;
-        the others raise ``NotImplementedError``. Raises :class:`RetiredRidError`
-        when ``survivor_rid`` is itself a retired rid: a merge never makes a
-        retired rid live again.
+        ``ctx.retired_slug``. Only SQL implements it; the others raise
+        ``NotImplementedError``. Raises :class:`RetiredRidError` when
+        ``survivor_rid`` is itself retired.
         """
         ...
 
     def create(self, document: "ProfileDocument", *, slug: str) -> ResearcherProfile:
         """Create a new profile from a validated document. Returns it.
 
-        Runs in one write unit of kind ``"create"``, so a management host's
-        pre-commit hook can write its ownership row in the same transaction.
-        That closes the orphan-profile window between "the profile
-        exists" and "somebody owns it".
+        Runs in one write unit of kind ``"create"``, so a pre-commit hook can
+        write an ownership row in the same transaction (no orphan window).
 
-        Raises :class:`~researcher_profiles.profile.ProfileWriteError` if
-        ``slug`` or the document's rid is already taken. A store that keeps aliases raises :class:`RetiredRidError` for a retired rid or slug.
+        Raises ``ProfileWriteError`` if ``slug`` or the document's rid is taken,
+        and :class:`RetiredRidError` for a retired rid or slug.
         """
         ...
 
@@ -289,25 +251,18 @@ class ProfileStore(Protocol):
     ) -> ResearcherProfile:
         """Create a profile and all of its authored artifacts in one write unit.
 
-        The seam a management host publishes an approved candidate through.
-        :meth:`create` installs a document and nothing else, so a host
-        assembling a complete profile had to follow it with separate artifact
-        writes; between them a half-built profile is live and readable, and a
-        crash leaves one behind with no way to tell it from a finished one.
-        This installs the whole bundle instead, so the document, the persona
-        documents, every artifact in ``artifacts``, the ownership row a
-        pre-commit hook writes, and the derived digest all land together.
+        The document, persona documents, every artifact, the hook-written
+        ownership row and the derived digest land together, so no half-built
+        profile is ever readable.
 
         ``artifacts`` maps a manifest ``contentUrl`` to its text body; each key
-        must appear in the document's ``hasPart`` or ``subjectOf``, because an
-        artifact nothing declares is an artifact no consumer can find.
+        must appear in the document's ``hasPart`` or ``subjectOf``.
 
         Whether the unit is genuinely atomic is the backend's to say
         (``WriteContext.atomic``): SQL commits or rolls back, the filesystem
         cleans up after itself instead.
 
-        Raises :class:`~researcher_profiles.profile.ProfileWriteError` if
-        ``slug`` or the document's rid is already taken. A store that keeps aliases raises :class:`RetiredRidError` for a retired rid or slug.
+        Raises as :meth:`create` does.
         """
         ...
 
@@ -319,13 +274,8 @@ class ProfileStore(Protocol):
         artifacts (``sources/``, ``.cache/``) are left untouched: this writes
         the document, not the bundle.
 
-        This is the JSON upsert path: what ``PUT /api/v1/profiles/{slug}``
-        dispatches to when the request body is ``application/json`` rather
-        than a tarball. It writes identity + expertise + metadata; enrichment
-        (papers, embeddings) is added later by a push or a build.
-
-        Returns the profile, so the caller can read ``rid`` / ``name`` /
-        ``level`` for the response. A store that keeps aliases raises :class:`RetiredRidError` for a retired rid or slug.
+        Returns the profile. Raises :class:`RetiredRidError` for a retired rid
+        or slug.
         """
         ...
 
@@ -339,26 +289,21 @@ class ProfileStore(Protocol):
         """Make a fully-staged profile directory live in this store.
 
         ``staging`` is a complete profile directory (``profile.jsonld`` at its
-        root). The directory is the interchange format, not the storage
-        format: a tarball push, a URL import and ``rp db push`` all speak it.
-        Each backend decides what "live" means: an atomic rename for the
-        filesystem, a transaction for SQL.
+        root): the interchange format, not the storage format. "Live" is an
+        atomic rename for the filesystem, a transaction for SQL.
 
         ``build_missing_index`` asks for a best-effort embedding-index build
-        afterwards, for a host that wants an ingested profile immediately
-        rankable. A backend with no filesystem accepts it and ignores it.
+        afterwards; a backend with no filesystem ignores it.
 
-        Raises :class:`UploadError` if the staged directory does not load.
-        A store that keeps aliases raises :class:`RetiredRidError` for a retired rid or slug.
+        Raises :class:`UploadError` if the staged directory does not load, and
+        :class:`RetiredRidError` for a retired rid or slug.
         """
         ...
 
     def export_directory(self, ref: str, dest: Path) -> Path:
         """Materialize a profile as a directory at ``dest``. Returns ``dest``.
 
-        The inverse of :meth:`commit_directory`, and the way out of any store
-        for the capabilities that need a real directory (validation,
-        the embedding index).
+        The inverse of :meth:`commit_directory`.
         """
         ...
 
@@ -367,9 +312,8 @@ class ProfileStore(Protocol):
     def document_bytes(self, ref: str) -> bytes:
         """The canonical ``profile.jsonld`` bytes, exactly as persisted.
 
-        What a crawler fetching ``/profiles/{slug}/profile.jsonld`` receives has
-        to be the published document, byte for byte, or the ``conformsTo`` claim
-        is about a file nobody can retrieve.
+        Served byte for byte, so the ``conformsTo`` claim holds for the file a
+        crawler retrieves.
         """
         ...
 
@@ -377,10 +321,8 @@ class ProfileStore(Protocol):
         """``{contentUrl: stored size in bytes}`` for every body this store holds.
 
         A manifest row can outlive its body (a push withholds full text by
-        default), so "listed" is not "fetchable". The read routes ask this once
-        per request to tell a caller ``not_uploaded``, and to size a part whose
-        manifest entry carries no ``bytes``, without reading a single body. A
-        size is ``None`` when the store cannot say cheaply. Raises
+        default), so "listed" is not "fetchable". Reads no body. A size is
+        ``None`` when the store cannot say cheaply. Raises
         :class:`ProfileNotFoundError` when the profile is absent.
         """
         ...
@@ -389,17 +331,15 @@ class ProfileStore(Protocol):
         """One manifest artifact's bytes, addressed by its ``contentUrl``.
 
         Raises :class:`ProfileNotFoundError` when the profile or the artifact is
-        absent. Applies no privacy policy: the caller has already decided who
-        may read this (see ``api.routers.read.get_profile_artifact``).
+        absent. Applies no privacy policy; the caller must.
         """
         ...
 
     def content_hash(self, ref: str) -> str:
         """``"sha256:<hex>"`` over the canonical document and the SOUL text.
 
-        Store-maintained derived state, refreshed inside the write unit before
-        the pre-commit hooks run, so a hook reading it observes post-write
-        content. Identical across backends by construction; see
+        Refreshed inside the write unit before the pre-commit hooks run, so a
+        hook sees post-write content. Identical across backends; see
         :func:`researcher_profiles.store.db.content_hash_for`.
         """
         ...
@@ -409,33 +349,25 @@ class ProfileStore(Protocol):
     def add_pre_commit_hook(self, hook: WriteHook) -> None:
         """Register a callable to run inside every write, before commit.
 
-        Registration belongs here, on the store, and not on an HTTP app: a hook
-        registered on an app fires only for writes that went through a route
-        that remembered to fire it, so a background writer that bypasses the
-        routes would skip it. Applies to profiles handed out from now
-        on and to any already handed out, so registration order relative to a
-        first :meth:`get` does not matter.
+        Registered on the store, not an HTTP app, so writes that bypass the
+        routes still fire it. Applies to profiles already handed out too, so
+        order relative to a first :meth:`get` does not matter.
         """
         ...
 
     def add_post_commit_hook(self, hook: WriteHook) -> None:
         """Register a callable to run after a write commits successfully.
 
-        Same reach as :meth:`add_pre_commit_hook`. The difference is what the
-        hook may do: a pre-commit hook can still abort the write by raising; a
-        post-commit hook cannot, because the write already landed. Use this for
-        fire-and-forget notifications to something outside the store (for
-        example, pushing to an external search index). See
-        ``researcher_profiles.profile.ResearcherProfile.add_post_commit_hook``.
+        Same reach as :meth:`add_pre_commit_hook`, but it cannot abort the
+        write, which already landed. For fire-and-forget notifications.
         """
         ...
 
     def evict(self, ref: str) -> None:
         """Drop any cached view of ``ref`` so the next :meth:`get` reloads.
 
-        A no-op on a store that does not cache. Cache invalidation only:
-        dependent-state maintenance belongs on :meth:`add_pre_commit_hook`,
-        where it runs inside the write instead of after it.
+        A no-op on a store that does not cache. Cache invalidation only;
+        dependent state belongs in a pre-commit hook.
         """
         ...
 
@@ -444,56 +376,37 @@ class ProfileStore(Protocol):
 class VectorStore(ProfileStore, Protocol):
     """A store that can also hand out a profile's vectors.
 
-    All three SDK backends satisfy it today, out of three different materials
-    (a sqlite file, fetched bytes, SQL rows). It is still a *capability* and
-    deliberately not part of :class:`ProfileStore`, for two reasons that do not
-    depend on which backends happen to exist:
+    A capability, not part of :class:`ProfileStore`, for two reasons:
 
-    1. Not every backend has vectors to give. A store over a bare metadata
-       API, or one holding profiles that were never indexed, has none. Folding
-       these methods into the base contract would make such a backend one that
-       "implements" the store while raising on half of it; failing an
-       ``isinstance`` check is the honest answer.
-    2. The base contract must stay numpy-free. ``rp list`` over a 300-member
-       roster imports ``ProfileStore`` and must not pull the ``vectors`` extra;
-       a guardrail asserts exactly that. The array types here are under
-       ``TYPE_CHECKING`` for the same reason.
+    1. Not every backend has vectors to give; such a backend should fail a
+       capability check rather than raise on half its contract.
+    2. The base contract must stay numpy-free (a guardrail asserts it), which
+       is also why the array types are under ``TYPE_CHECKING``.
 
-    The check happens once, up front, so a composition root raises
-    :class:`~researcher_profiles.errors.CapabilityUnavailableError` with an
-    actionable message rather than letting every analytic discover the gap
-    separately and degrade into a different 503. It is *not*
-    ``isinstance(store, VectorStore)``: the one place that check lives,
-    :func:`researcher_profiles.store._analytics.require_vector_store`, is a
-    ``hasattr`` sweep over the five vector method names. This class is
-    ``@runtime_checkable``, but it also declares the three analytics accessors
-    below, and an ``isinstance`` would evaluate the very property that is doing
-    the checking.
+    Check for it with
+    :func:`researcher_profiles.store._analytics.require_vector_store`, a
+    ``hasattr`` sweep over the five vector methods, not ``isinstance``: an
+    ``isinstance`` would evaluate the analytics accessors below.
 
-    The three accessors at the bottom are the cross-profile analytics, reached
-    the way ``prof.cite`` / ``prof.topics`` are reached one level down. They
-    are supplied by a shared mixin
-    (:class:`researcher_profiles.store._analytics._AnalyticsAccessors`) rather
-    than reimplemented per backend, and each builds its manager lazily so this
-    module and the backends stay numpy-free at import time.
+    The accessors come from
+    :class:`researcher_profiles.store._analytics._AnalyticsAccessors` and build
+    their managers lazily to keep imports numpy-free.
     """
 
     @property
     def backend_spec(self) -> str | None:
         """The embedding model this store's vectors came out of, or ``None``.
 
-        Asked once at registry construction so a query can be embedded into the
-        same space without opening any profile's index. ``None`` when the store
-        holds no vectors, or when none of them records a backend.
+        ``None`` when the store holds no vectors, or none of them records a
+        backend.
         """
         ...
 
     def has_vector_index(self, ref: str) -> bool:
         """Whether ``ref`` has vectors this store can serve.
 
-        Cheap by contract: the ``/match`` dependency scans every profile in the
-        store with it to decide whether ranking is possible at all
-        (``api.deps.get_match_store``), so it must not fetch or parse a blob.
+        Cheap by contract (it is called for every profile in the store): it
+        must not fetch or parse a blob.
         """
         ...
 
@@ -510,9 +423,7 @@ class VectorStore(ProfileStore, Protocol):
         """One profile's L2-normalized centroid vector.
 
         Separate from :meth:`vector_index` because a store may hold it without
-        holding the chunks: a published site carries every profile's centroid
-        in one ``collection/embeddings/<backend>.bin``, which is one fetch for
-        the whole matrix instead of one per profile.
+        the chunks (a published site's ``collection/embeddings/<backend>.bin``).
         """
         ...
 
@@ -542,11 +453,7 @@ class VectorStore(ProfileStore, Protocol):
     def indexes(self) -> "IndexFleetManager":
         """``store.indexes``: building and reporting on every profile's index.
 
-        Narrower than the rest of :class:`VectorStore`: every method here opens
-        a profile's ``.cache/`` on disk, so on a store whose profiles have no
-        directory (SQL, HTTP) each one raises
-        :class:`~researcher_profiles.errors.CapabilityUnavailableError` from
-        ``ResearcherProfile.require_directory``. Implementing ``VectorStore`` is
-        not enough; export the profiles to a directory first.
+        Every method opens a profile's ``.cache/`` on disk, so on SQL or HTTP
+        each raises :class:`~researcher_profiles.errors.CapabilityUnavailableError`.
         """
         ...

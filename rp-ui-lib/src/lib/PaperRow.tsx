@@ -12,10 +12,8 @@ export type LoadSummary = (paperId: string) => Promise<string>;
 export type FullTextHref = (paperId: string) => string | null;
 
 /**
- * One paper, with small labeled links: "Summary" (when `summary_available`,
- * lazily invokes `loadSummary(paper_id)` and renders the markdown inline),
- * "Full text" (the profile's own copy, via `fullTextHref`), and "Publisher"
- * (the external `full_text_link`). Each shows only when its target exists.
+ * One paper, with "Summary" (lazy, via `loadSummary`), "Full text" (via
+ * `fullTextHref`), and "Publisher" links, each shown only when its target exists.
  */
 export function PaperRow({
   paper,

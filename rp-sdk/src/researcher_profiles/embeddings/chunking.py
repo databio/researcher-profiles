@@ -3,7 +3,6 @@
 import re
 from dataclasses import dataclass, field
 
-# Heading detection
 _H2_RE = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
 _H3_RE = re.compile(r"^###\s+(.+?)\s*$", re.MULTILINE)
 # Citation tags like [foo2024bar] or [foo2024bar, baz2025qux]. A paper id
@@ -18,10 +17,9 @@ _ABSTRACT_ONLY_RE = re.compile(r"\[abstract-only\]\s*", re.IGNORECASE)
 MAX_CHUNK_CHARS = 8000
 SECTION_SPLIT_THRESHOLD = 2000
 
-#: Chunk source types that represent a paper. ``lite`` profiles index paper
-#: abstracts; ``full``/``deep`` profiles index LLM-written paper summaries.
-#: Anything counting or citing "papers" must consider both, otherwise lite
-#: profiles silently report zero papers and zero paper evidence.
+#: Chunk source types that represent a paper: abstracts (``lite``) and
+#: summaries (``full``/``deep``). Anything counting papers must use both, or
+#: lite profiles report zero papers.
 PAPER_CHUNK_TYPES = ("paper_summary", "paper_abstract")
 
 
@@ -144,11 +142,9 @@ def chunk_soul(text: str) -> list[Chunk]:
 
 
 def chunk_summary(text: str, paper_id: str) -> list[Chunk]:
-    """Chunk a single paper summary.
+    """Chunk a single paper summary, paragraph-split when long.
 
-    Summaries are typically short; default is a whole-document chunk.
-    Longer ones get paragraph-split. Strip the ``[abstract-only]`` marker
-    from the embedded text but keep a meta flag.
+    The ``[abstract-only]`` marker is stripped and kept as a meta flag.
     """
     is_abstract_only = bool(_ABSTRACT_ONLY_RE.search(text))
     body = _ABSTRACT_ONLY_RE.sub("", text).strip()
@@ -175,13 +171,7 @@ def chunk_summary(text: str, paper_id: str) -> list[Chunk]:
 
 
 def chunk_abstract(text: str, paper_id: str) -> list[Chunk]:
-    """Chunk a single paper abstract for a ``lite`` profile index.
-
-    Produces ``source_type="paper_abstract"`` chunks. Abstracts are short,
-    so this reuses the ``chunk_summary`` paragraph-splitting logic. Unlike
-    summaries there is no ``[abstract-only]`` marker to strip. The input is
-    a raw abstract string straight from ``PaperRecord.abstract``.
-    """
+    """Chunk a single paper abstract for a ``lite`` profile index."""
     body = (text or "").strip()
     if not body:
         return []
@@ -205,12 +195,7 @@ def chunk_abstract(text: str, paper_id: str) -> list[Chunk]:
 
 
 def chunk_grant(title: str, abstract: str | None, grant_id: str) -> list[Chunk]:
-    """Chunk a single grant record for a ``deep`` profile index.
-
-    Produces ``source_type="grant"`` chunks from the grant's title plus
-    abstract (when present). Grants are short; the combined text is
-    paragraph-split like abstracts.
-    """
+    """Chunk a grant's title plus abstract for a ``deep`` profile index."""
     parts = [p for p in ((title or "").strip(), (abstract or "").strip()) if p]
     body = "\n\n".join(parts)
     if not body:
@@ -239,11 +224,7 @@ def chunk_cv(text: str) -> list[Chunk]:
 
 
 def chunk_web(text: str, page_id: str) -> list[Chunk]:
-    """Chunk one extracted web page (sources/web/<page>.md) for a ``deep`` index.
-
-    ``page_id`` is the page's filename stem. Pages are markdown-ish extracted
-    text; split on H2/H3 boundaries like other markdown docs, keyed per page.
-    """
+    """Chunk one web page (``sources/web/<page_id>.md``) for a ``deep`` index."""
     return _chunk_markdown_doc(text, "web", page_id)
 
 
@@ -304,7 +285,7 @@ def _web_page_ids(storage) -> list[str]:
     """Stems of ``sources/web/*.md`` the storage holds, sorted."""
     try:
         parts, subjects = storage.build_manifest()
-    # Boundary: a backend that cannot enumerate simply has no web pages here.
+    # A backend that cannot enumerate has no web pages.
     except Exception:
         return []
     ids = set()
@@ -325,10 +306,8 @@ def enumerate_source_chunks(
 ) -> list[Chunk]:
     """Every chunk a profile's index is built over, read through ``ArtifactStorage``.
 
-    The one enumeration both the indexer (``SqliteEmbeddingIndex``) and the
-    serve-time text recovery (``api._semantic.chunk_texts``) use, so a stored
-    vector row's ``(source_type, source_id, chunk_index)`` always names the
-    same piece of text on both sides.
+    The indexer and serve-time text recovery both use this, so a vector row's
+    ``(source_type, source_id, chunk_index)`` names the same text on both sides.
 
     ``source`` is a :class:`~researcher_profiles.profile.ResearcherProfile`
     (its storage, level and build state are used) or an ``ArtifactStorage``
@@ -340,9 +319,8 @@ def enumerate_source_chunks(
     and ``deep`` adds grants, the CV and web pages.
 
     ``corpus_only`` skips a summary whose paper is not in
-    ``sources/papers.jsonld`` (an orphan a builder keeps on disk until it
-    prunes it). Off by default: a profile from elsewhere may name its
-    summaries differently, and the format does not require them to match.
+    ``sources/papers.jsonld``. Off by default: the format does not require
+    summary names to match the corpus.
     """
     storage = getattr(source, "storage", source)
     if level is None:

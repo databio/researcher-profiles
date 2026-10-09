@@ -13,11 +13,9 @@ type Emit = (check: CheckResult) => void;
 // ---------------------------------------------------------------------------
 
 /**
- * The profile base (no trailing slash) for a URL the user pasted. Accepts
- * either the base or the manifest itself: the validator's URL box is shared
- * between the Profile and Compliance tabs, and the Profile tab accepts a
- * `.../profile.jsonld` URL, so without this the manifest probe became
- * `.../profile.jsonld/profile.jsonld` and 404ed.
+ * The profile base (no trailing slash) for a pasted URL. Accepts either the
+ * base or a `.../profile.jsonld` URL, since the URL box is shared with the
+ * Profile tab, which accepts both.
  */
 export function profileBaseOf(profileUrl: string): string {
   return profileUrl
@@ -108,10 +106,8 @@ export async function staticApiChecks(
       : "HEAD request on profile.jsonld failed.",
   });
 
-  // ETag: we can't read ETag cross-origin unless exposed, so this is
-  // best-effort; note as indeterminate if unreadable.
-  // Note: ETag is not a CORS-safelisted header, so cross-origin reads may
-  // fail. We check but don't hard-fail.
+  // ETag is not CORS-safelisted, so a cross-origin read is best-effort and
+  // never a hard failure.
   let hasEtag: boolean | "indeterminate" = "indeterminate";
   try {
     const res = await fetch(manifestUrl, { mode: "cors" });
@@ -181,9 +177,8 @@ export async function staticApiChecks(
   const indexUrl = `${base}/index.html`;
   const indexOutcome = await fetchJson<unknown>(indexUrl);
   if (indexOutcome.ok && typeof indexOutcome.value === "string") {
-    // It returned JSON-parseable string? That's odd. Skip.
+    // A JSON string body is not an HTML page; skip.
   } else {
-    // Try fetching as text to parse HTML
     try {
       const res = await fetch(indexUrl, { mode: "cors" });
       if (res.ok) {

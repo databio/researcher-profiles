@@ -79,7 +79,6 @@ def _load_cache(profile) -> dict[str, Any]:
 
 def _save_cache_at(p: Path, cache: dict[str, Any]) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
-    # numpy.savez can't handle plain strings as 0-d; wrap in arrays
     cleaned: dict[str, Any] = {}
     for k, v in cache.items():
         if isinstance(v, np.ndarray):
@@ -124,13 +123,7 @@ def _centroid_vec(db_path: Path, dim: int) -> np.ndarray:
 def index_centroid(db_path: Path, cache_path: Path) -> np.ndarray:
     """One sqlite index's centroid, read from (or written to) its npz cache.
 
-    Takes the two paths rather than a profile because the caller that matters
-    is :meth:`SqliteEmbeddingIndex.centroid
-    <researcher_profiles.embeddings.cache.SqliteEmbeddingIndex.centroid>`,
-    which is the profile-free half of the
-    :class:`~researcher_profiles.embeddings.protocol.VectorIndex` contract.
-    ``_profile_embedding_impl`` routes its ``"centroid"`` kind here, so there
-    is one implementation and one cache format, not two that can drift.
+    The single centroid implementation, shared by the index and the profile.
     """
     meta = read_index_meta_path(db_path)
     backend_name = meta.get("backend_name", "")
@@ -167,7 +160,6 @@ def _summary_abstract(profile) -> str | None:
     text = profile.summary
     if text:
         return text
-    # Synthesize via LLM
     from ..generative.llm import LLMClient
 
     joined = (profile.expertise or "")[:2000]
@@ -209,7 +201,6 @@ def _profile_embedding_impl(profile, kind: str = "centroid") -> np.ndarray:
     if backend_match and kind in cache:
         return np.asarray(cache[kind], dtype=np.float32)
 
-    # Recompute
     if not backend_match:
         cache = {"_backend_name": backend_name, "_dim": dim}
 
@@ -230,12 +221,8 @@ def _profile_embedding_impl(profile, kind: str = "centroid") -> np.ndarray:
 def recompute_centroid(profile) -> np.ndarray:
     """Drop the cached centroid and recompute it from the current index.
 
-    The feedback path for relevance marks: when an owner marks a paper
-    relevant, the caller appends the work, rebuilds the embedding index,
-    then calls this.
-    Recompute-from-index is preferred over incremental nudging. It is
-    deterministic (the same works always yield the same centroid) and needs
-    no drift bookkeeping.
+    Call after rebuilding the index. Recomputing (rather than nudging the old
+    vector) keeps the result deterministic.
     """
     cache = _load_cache(profile)
     if "centroid" in cache:

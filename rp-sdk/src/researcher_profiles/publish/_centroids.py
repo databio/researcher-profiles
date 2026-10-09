@@ -30,12 +30,10 @@ def _collect_centroid(
 ) -> None:
     """Append ``(slug, backend_spec, centroid, probe)`` when the profile is Searchable.
 
-    A profile is Searchable at ``viewer`` when it ships ``embeddings/index.json``
-    and that artifact's effective tier reaches ``viewer``. The centroid is the
-    mean of the rows in the flat files on disk, which are the profile's
-    ``public`` export, so a chunk the audience may not read never moves it. A
-    profile whose flat files are missing or unreadable is skipped with a
-    warning.
+    Searchable means ``embeddings/index.json`` ships and its effective tier
+    reaches ``viewer``. The centroid comes from the on-disk flat files (the
+    ``public`` export), so a chunk the audience may not read never moves it.
+    Missing or unreadable flat files are skipped with a warning.
     """
     index_json = prof_dir / "embeddings" / "index.json"
     if not index_json.is_file():
@@ -43,9 +41,7 @@ def _collect_centroid(
     tier = effective_tiers(prof.metadata).get("embeddings/index.json")
     if tier is None or not tier_allows(viewer, tier):
         return
-    # Imported here, not at module scope: ``..embeddings`` pulls numpy, and
-    # publishing a site of non-searchable profiles must not need the vectors
-    # extra. Past this point the profile is searchable, so it does.
+    # Lazy: ``..embeddings`` pulls numpy, which only searchable profiles need.
     from ..embeddings import IndexNotBuiltError
     from ..embeddings.flat import FlatEmbeddingIndex
 
@@ -70,7 +66,7 @@ def _write_collection_centroids(
     by backend, keep the majority, and warn+skip the minority. Rows are the
     slugs in blob order; the matrix is L2-normalized (``normalized: true``).
 
-    Returns metadata dict for the collection bundle, or None.
+    Returns metadata for the collection bundle, or None.
     """
     if not entries:
         return None
@@ -145,7 +141,6 @@ def _majority_backend_centroids(
     if not kept:
         return None
 
-    # Sort by slug for deterministic blob order.
     order = sorted(range(len(kept)), key=lambda i: kept[i][0])
     return majority, [kept[i] for i in order], [probes[i] for i in order]
 

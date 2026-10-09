@@ -1,12 +1,7 @@
 """``rp work``: the field-level verbs for one record in the works corpus.
 
-``rp profile`` edits the profile document and the SOUL; this is its counterpart
-one level down, for the bibliographic record of a single paper. A wrong DOI on
-one work used to need ``rp push``, which replaces the whole profile directory
-to fix one string.
-
-Like ``rp profile``, everything here talks to a remote server, so every import
-of the client machinery is deferred into the handler that needs it.
+Everything here talks to a remote server, so client imports are deferred into
+the handlers.
 """
 
 import argparse
@@ -67,23 +62,28 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
     _add_host(p_rm)
 
 
-def _parse_assignments(assignments: list[str]) -> dict:
-    """``key=value`` pairs to a patch dict, JSON-typed where the value parses.
+#: ``WorkPatch`` fields typed bool or int: the only ones a value is JSON-decoded
+#: for. Every other field is a string, so ``name=1984`` stays ``"1984"``.
+_JSON_FIELDS = frozenset({"datePublished", "is_corresponding"})
 
-    ``is_corresponding=true`` and ``datePublished=2023`` have to arrive as a
-    bool and an int or the record fails re-validation on the server, and
-    quoting every string would be the worse trade: a title with a colon in it
-    is not JSON and must stay the string the user typed.
+
+def _parse_assignments(assignments: list[str]) -> dict:
+    """``key=value`` pairs to a patch dict, JSON-typed only for bool/int fields.
+
+    A title with a colon in it is not JSON and must stay the string typed.
     """
     patch: dict = {}
     for item in assignments:
         key, sep, raw = item.partition("=")
         if not sep or not key:
             raise ValueError(f"not a key=value assignment: {item!r}")
-        try:
-            patch[key] = json.loads(raw)
-        except ValueError:
-            patch[key] = raw
+        if key in _JSON_FIELDS:
+            try:
+                patch[key] = json.loads(raw)
+                continue
+            except ValueError:
+                pass
+        patch[key] = raw
     return patch
 
 

@@ -1,24 +1,14 @@
 """``rp login``: a stored push credential for one registry.
 
-The scripted credential (``RESEARCHER_PROFILES_TOKEN``, an operator or
-``push`` key) is for scripts. A person pushing their own profile from a laptop
-gets one by logging in: ``rp login <server>`` runs the OAuth 2.0 Device
-Authorization Grant (RFC 8628; ``POST /api/auth/device``, approve in the
-browser, then poll ``POST /api/auth/token``), and the key that comes back as
-the ``access_token`` is stored here, in
+``rp login <server>`` runs the OAuth 2.0 Device Authorization Grant
+(RFC 8628) and stores the returned key in
 ``~/.config/researcher-profiles/credentials.json`` (mode 0600)::
 
     {"url": "https://profiles.example.org", "token": "rpk_...", "orcid": ..., "name": ...}
 
-Every remote command then resolves its token in this order (:func:`resolve_token`):
-an explicit ``--token``, then ``RESEARCHER_PROFILES_TOKEN``, then the stored
-login, but only for the server it was minted for. And
-``--url`` defaults to the stored login's URL (:func:`resolve_url`), which is
-what lets ``rp push path/to/profile`` work with no flags at all.
-
-Distinct from :mod:`researcher_profiles.cli.auth.agent`, which resolves ``rpa_`` AGENT
-keys (an account API key with a per-part access table) from ``credentials.toml``.
-This file holds a person's own ``push_own`` key.
+Scripts use ``RESEARCHER_PROFILES_TOKEN`` instead. This file holds a person's
+own ``push_own`` key; ``rpa_`` agent keys live in ``credentials.toml``
+(:mod:`researcher_profiles.cli.auth.agent`).
 """
 
 import json
@@ -156,19 +146,14 @@ def login(
 ) -> Login:
     """Run the device authorization grant (RFC 8628) against ``url``; return the key.
 
-    ``POST /api/auth/device`` opens a request (retried after ``Retry-After``
-    while the server answers ``429`` or ``503``; a ``404`` means the server
-    offers no command-line login and is not retried). The user code and the
-    verification URL (``verification_uri_complete`` when the server sends one,
-    else ``verification_uri``) are printed on ``out`` (stderr by default), and
-    the URL is opened in a browser when asked to. Then ``POST /api/auth/token``
-    is polled every ``interval`` seconds until the person approves in their
-    browser, until ``expires_in`` (or ``timeout``) runs out. ``slow_down``
-    (or a ``429``) adds 5 seconds to the interval for all later polls.
+    ``POST /api/auth/device`` opens a request (retried on ``429``/``503``).
+    The user code and verification URL are printed on ``out`` (stderr by
+    default). Then ``POST /api/auth/token`` is polled every ``interval``
+    seconds until approval or until ``expires_in`` (or ``timeout``) runs out.
+    ``slow_down`` (or a ``429``) adds 5 seconds to the interval.
 
-    Raises :class:`LoginError` when the server offers no command-line login
-    (``404``), the person refuses, the request expires, or anything else goes
-    wrong. The result is not stored; the caller decides (``rp login`` stores it).
+    Raises :class:`LoginError` on a ``404`` (no command-line login), a refusal,
+    expiry, or any other failure. The result is not stored.
     """
     import httpx
 

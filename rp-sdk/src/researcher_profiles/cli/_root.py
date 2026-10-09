@@ -1,10 +1,4 @@
-"""The `rp` root parser: the plugin hook, the verb-table merge, and ``main``.
-
-The group modules (``_corpus``, ``_store``, ...) each expose ``add_parsers`` and
-``COMMANDS``; this module owns only the root parser, the plugin hook, and the
-merge of those tables. The package ``__init__`` re-exports :func:`main`,
-:func:`build_parser` and :data:`CLI_PLUGIN_GROUP` from here.
-"""
+"""The `rp` root parser: the plugin hook, the verb-table merge, and ``main``."""
 
 import argparse
 import logging
@@ -30,20 +24,17 @@ logger = logging.getLogger(__name__)
 #: Entry-point group through which out-of-tree distributions add subcommands to
 #: ``rp``. Each entry point loads to a ``register(subparsers)`` callable that
 #: adds its parsers and marks each with a ``_plugin_handler`` default; ``main``
-#: dispatches to that handler after parsing. This is the one mechanism by which
-#: extra verbs re-enter ``rp`` without the SDK importing any out-of-tree code.
+#: dispatches to that handler after parsing.
 CLI_PLUGIN_GROUP = "researcher_profiles.cli_plugins"
 
 #: The SDK's own verb groups, in the order ``rp --help`` lists them. Plugins
-#: register between the two tuples, which is where the hook has always sat.
+#: register between the two tuples.
 _GROUPS_BEFORE_PLUGINS = (_corpus, _store, _format, _publish, _registry, _auth, _skill)
 _GROUPS_AFTER_PLUGINS = (_sign, _agent, _work)
 _GROUPS = _GROUPS_BEFORE_PLUGINS + _GROUPS_AFTER_PLUGINS
 
 #: The SDK's own verbs: one name -> one handler returning an exit code.
-#: ``sign`` and ``sign-verify`` share a handler because they share a document,
-#: a key path and a JWK Set. Plugin verbs are not here: they arrive carrying a
-#: ``_plugin_handler`` default and are dispatched before this table is read.
+#: Plugin verbs are not here; they carry a ``_plugin_handler`` default.
 _COMMANDS: dict[str, Callable[[argparse.Namespace], int]] = {
     name: handler for group in _GROUPS for name, handler in group.COMMANDS.items()
 }
@@ -58,8 +49,6 @@ def _load_cli_plugins(sub: "argparse._SubParsersAction") -> None:
     from importlib.metadata import entry_points
 
     for ep in entry_points(group=CLI_PLUGIN_GROUP):
-        # Boundary: out-of-tree code loaded by name. Anything it raises on
-        # import or registration is that plugin's problem, not the CLI's.
         try:
             register = ep.load()
             register(sub)
@@ -69,12 +58,7 @@ def _load_cli_plugins(sub: "argparse._SubParsersAction") -> None:
 
 
 def _version() -> str:
-    """The installed distribution version, resolved lazily.
-
-    ``importlib.metadata`` is imported here rather than at module scope because
-    ``rp --version`` must be fast and every *other* invocation must not pay for
-    it. See :class:`_VersionAction` for why ``action="version"`` will not do.
-    """
+    """The installed distribution version, resolved lazily (see :class:`_VersionAction`)."""
     from importlib.metadata import PackageNotFoundError, version
 
     try:
@@ -84,14 +68,10 @@ def _version() -> str:
 
 
 class _VersionAction(argparse.Action):
-    """``--version``, computed when asked and not one microsecond earlier.
+    """``--version``, computed only when asked.
 
-    argparse's built-in ``action="version"`` takes the version *string*, so the
-    dist lookup would run while the parser is being built, on every ``rp``
-    invocation, including the ones that never mention ``--version``. This
-    package goes to some trouble to keep the cold path cheap (see the deferred
-    imports in every handler); paying an ``importlib.metadata`` scan to answer
-    ``rp where`` would quietly undo part of that.
+    argparse's built-in ``action="version"`` takes the version string, so the
+    ``importlib.metadata`` lookup would run on every ``rp`` invocation.
     """
 
     def __init__(
@@ -141,16 +121,9 @@ Exit codes:
 def build_parser(*, load_plugins: bool = True) -> argparse.ArgumentParser:
     """Build the full ``rp`` parser, installed CLI plugins included.
 
-    Split out of :func:`main` so the parsing layer is inspectable without
-    dispatching: the registered verbs, their defaults, and their ``dest``
-    names are a public interface (agents read ``--help`` and copy a line), and
-    the only other way to see them was to run a command and catch
-    ``SystemExit``.
-
-    ``load_plugins=False`` builds the SDK's own verbs only, skipping the
-    ``researcher_profiles.cli_plugins`` entry-point group. That is how a caller
-    inspects the SDK's frozen verb surface without it depending on which other
-    distributions happen to be installed.
+    The registered verbs, their defaults, and their ``dest`` names are a
+    public interface. ``load_plugins=False`` builds the SDK's own verbs only,
+    independent of which other distributions are installed.
     """
     parser = argparse.ArgumentParser(
         prog="rp",
@@ -165,9 +138,6 @@ def build_parser(*, load_plugins: bool = True) -> argparse.ArgumentParser:
 
     for group in _GROUPS_BEFORE_PLUGINS:
         group.add_parsers(sub)
-    # Any verbs registered by installed ``researcher_profiles.cli_plugins``
-    # entry points, present exactly when those distributions are installed and
-    # absent otherwise. This package imports no plugin code at module scope.
     if load_plugins:
         _load_cli_plugins(sub)
     for group in _GROUPS_AFTER_PLUGINS:
@@ -179,17 +149,13 @@ def main(argv: list[str] | None = None) -> int:
     """Parse ``argv``, run one command, return its exit code."""
     args = build_parser().parse_args(argv)
 
-    # A plugin verb carries its own handler and is dispatched first: the plugin
-    # owns those names and this module must never learn them. Order matters:
-    # a plugin that shadows an SDK verb wins, as it did before.
+    # Plugin verbs are dispatched first, so a plugin that shadows an SDK verb wins.
     plugin_handler = getattr(args, "_plugin_handler", None)
     if plugin_handler is not None:
         return plugin_handler(args)
 
     handler = _COMMANDS.get(args.cmd)
     if handler is None:
-        # Unreachable: the subparser is `required=True` and argparse rejects an
-        # unknown verb with exit 2 long before this. Kept as the same answer the
-        # old chain's fallthrough gave.
+        # Unreachable: argparse rejects an unknown verb with exit 2 first.
         return EXIT_ERROR
     return handler(args)

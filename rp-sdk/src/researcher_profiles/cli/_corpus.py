@@ -1,9 +1,4 @@
-"""``rp index`` / ``export-embeddings`` / ``export`` / ``search`` / ``rank-works``.
-
-The verbs that read one profile's corpus: build its embedding index, write the
-servable flat form, render it as a knowledge-base blob, query it, and rank new
-candidate works against it.
-"""
+"""``rp index`` / ``export-embeddings`` / ``export`` / ``search`` / ``rank-works``: one profile's corpus."""
 
 import argparse
 import json
@@ -190,9 +185,7 @@ def _cmd_index(args: argparse.Namespace) -> int:
     try:
         report = build_index(profile, force=args.force, backend=args.backend)
     except ValueError as e:
-        # `--backend` is free text, so a typo lands here rather than in
-        # argparse. Name the accepted spellings: the error alone says what
-        # is wrong and not what to write instead.
+        # `--backend` is free text, so name the accepted spellings.
         print(f"rp index: {e}", file=sys.stderr)
         print(
             "A backend spec is 'kind:model', where kind is one of:\n"
@@ -337,11 +330,7 @@ def _cmd_search(args: argparse.Namespace) -> int:
 
 
 class _CliError(Exception):
-    """A message already written for stderr, plus the exit code to return.
-
-    Lets the ``rank-works`` phases fail from inside a helper without every one
-    of them returning ``list | int`` and every caller re-checking the type.
-    """
+    """A message for stderr plus the exit code, raised by the ``rank-works`` helpers."""
 
     def __init__(self, code: int, message: str, *hints: str) -> None:
         super().__init__(message)
@@ -352,9 +341,7 @@ class _CliError(Exception):
     def report(self) -> int:
         """Print the message and any hints to stderr, and return the exit code.
 
-        An empty message means the caller already wrote its own report (as
-        ``resolve_profile_arg`` does), so printing here would add a blank line
-        to a finished error.
+        An empty message means the caller already wrote its own report.
         """
         if self.message:
             print(self.message, file=sys.stderr)
@@ -435,9 +422,7 @@ def _works_from_openalex(args: argparse.Namespace, prof) -> list:
             )
     except ImportError as e:
         raise _CliError(EXIT_ERROR, f"rp rank-works: {e}") from e
-    # Boundary: a live third-party HTTP API. Anything it raises, including a
-    # transport error from whichever client is installed, is reported as a
-    # failed fetch rather than a traceback.
+    # A live third-party API: any failure is reported, not a traceback.
     except Exception as e:
         raise _CliError(EXIT_ERROR, f"rp rank-works: OpenAlex fetch failed: {e}") from e
 

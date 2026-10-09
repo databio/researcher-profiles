@@ -21,25 +21,10 @@ def build_store(
     1. ``database_url`` / ``profiles_dir`` passed explicitly
     2. ``$RESEARCHER_PROFILES_DATABASE_URL`` / ``$RESEARCHER_PROFILES_ROOT``
 
-    This is exactly one composition rule, shared by ``create_app``'s
-    env-driven default (:func:`researcher_profiles.api.app._build_default_app`)
-    and ``python -m researcher_profiles.api``, so the two can never disagree:
-    neither caller reads either environment variable itself, both just call
-    this (with, at most, a CLI flag as ``database_url``/``profiles_dir``) and
-    let it decide.
-
-    Deliberately does not fall back to :data:`~.config.DEFAULT_CACHE_DIR`
-    (contrast :func:`~.config.resolve_profiles_root`, which does, for the
-    CLI's local cache): a server silently pointed at a guessed directory is a
-    worse failure than a server that refuses to start, and unlike the CLI's
-    profiles root, nothing here has a "correct" guess. Raises ``ValueError``
-    when neither a database URL nor a profiles directory is configured by any
-    means.
-
-    Also the fail-loud guard for retired ``RP_*`` env var names
-    (:func:`researcher_profiles.env.check_retired_env_vars`): a caller that
-    still exports ``RP_DATABASE_URL`` would otherwise see it silently ignored
-    and this function fall through to "not configured" with no clue why.
+    Deliberately no fallback to :data:`~.config.DEFAULT_CACHE_DIR`: a server
+    pointed at a guessed directory is worse than one that refuses to start.
+    Raises ``ValueError`` when nothing is configured. Fails loudly on retired
+    env var names (:func:`researcher_profiles.env.check_retired_env_vars`).
     """
     check_retired_env_vars()
 

@@ -1,8 +1,8 @@
 import { describe, expect, it, beforeEach } from "vitest";
 import { useStore, type ProfileCard } from "../src/store";
 
-const BASE = "https://prosopia.databio.org/api/v1/profiles/sheffield-nathan/content/";
-const HOME = "https://prosopia.databio.org/api/v1/collection.json";
+const BASE = "https://profiles.example.org/api/v1/profiles/sheffield-nathan/content/";
+const HOME = "https://profiles.example.org/api/v1/collection.json";
 const SINGLE = `${BASE}profile.jsonld`;
 
 function card(over: Partial<ProfileCard>): ProfileCard {
@@ -82,6 +82,29 @@ describe("addCards dedup", () => {
     const { cards } = useStore.getState();
     expect(cards).toHaveLength(1);
     expect(cards[0].sourceUrl).toBe(SINGLE);
+  });
+});
+
+describe("builtin source priority", () => {
+  beforeEach(() => {
+    useStore.setState({
+      sources: [{ url: HOME, builtin: true } as never],
+      cards: [],
+      failures: [],
+      centroids: new Map(),
+    });
+  });
+
+  it("keeps the home card over a more complete user-added card", () => {
+    const homeCard = card({ sourceUrl: HOME, paperCount: 1 });
+    const userCard = card({ ...full, sourceUrl: "https://user.example.org/c.json" });
+    useStore.addCards([userCard]);
+    useStore.addCards([homeCard]);
+    expect(useStore.getState().cards[0].sourceUrl).toBe(HOME);
+    useStore.setState({ cards: [] });
+    useStore.addCards([homeCard]);
+    useStore.addCards([userCard]);
+    expect(useStore.getState().cards[0].sourceUrl).toBe(HOME);
   });
 });
 

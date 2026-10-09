@@ -1,16 +1,7 @@
 """Per-profile embedding-index maintenance and reporting across a store.
 
-Everything here is about the *embedding* indexes under each profile's
-``.cache/``, building them, and reporting on what is built. It is separate from
-the store's own ``rid <-> slug`` lookup index (``ProfileStore.rid_for`` and the
-``<root>/.cache/index.json`` it persists): two unrelated things share the word
-"index".
-
-Reached as ``store.indexes``. Named :class:`IndexFleetManager`, not
-``IndexManager``, because this manager operates over every profile in a
-store (a fleet) while :class:`researcher_profiles.profile.index.IndexManager`
-is one profile's own index. Two classes with the same name would leave an
-import site nothing to tell them apart.
+These are the *embedding* indexes under each profile's ``.cache/``, not the
+store's ``rid <-> slug`` lookup index.
 """
 
 import logging
@@ -30,13 +21,9 @@ logger = logging.getLogger(__name__)
 class IndexFleetManager:
     """``store.indexes``: build and report on every profile's index.
 
-    Directory-only, unlike the rest of the store's analytics. Every method
-    here reaches a profile's ``.cache/`` through ``require_directory``, so on a
-    store whose profiles have no directory (SQL, HTTP) :meth:`stats`,
-    :meth:`coverage` and :meth:`rebuild_all` all raise
-    :class:`~researcher_profiles.errors.CapabilityUnavailableError`, and
-    ``rebuild_all`` does so on the first profile rather than fail-softly
-    skipping it. Export to a directory first.
+    Directory-only: on a store whose profiles have no directory (SQL, HTTP)
+    every method raises
+    :class:`~researcher_profiles.errors.CapabilityUnavailableError`.
     """
 
     def __init__(self, store: "ProfileStore", rostered: "_RosterCache") -> None:
@@ -57,11 +44,7 @@ class IndexFleetManager:
         return {p.slug: self._index_for(p).stats() for p in self._rostered().profiles}
 
     def coverage(self) -> list[dict[str, Any]]:
-        """Per-profile index / topic / calibration status, slug-ordered.
-
-        The rendered form of :meth:`stats` plus the two derived caches that do
-        not live in the index file.
-        """
+        """Per-profile index / topic / calibration status, slug-ordered."""
         out = []
         for p in self._rostered().profiles:
             st = self._index_for(p).stats()
@@ -100,19 +83,16 @@ class IndexFleetManager:
         for p in self._rostered().profiles:
             try:
                 reports[p.slug] = build_index(p, force=force)
-            # Boundary: one profile's whole build, whose failure modes are every
-            # source reader plus every backend. Reported and skipped, never fatal.
+            # Any failure in one profile's build is reported and skipped.
             except Exception as e:
                 logger.warning("rebuild failed for %s: %s", p.slug, e)
                 reports[p.slug] = None
             drop_derived_caches(p.require_directory("the fleet index manager"))
-        # Every store-level memo derived from those indexes, plus the lookup
-        # file shell callers read. A rebuild does not change which profiles
-        # exist, so the roster itself is still current.
+        # The roster stays current: a rebuild does not change which profiles exist.
         store.centroids.invalidate()
         store.match.invalidate()
         store.write_lookup_index()
-        # Prime the centroid cache fresh so the next query does not pay for it.
+        # Prime the centroid cache.
         _ = store.centroids.matrix
         return reports
 

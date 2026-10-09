@@ -1,11 +1,7 @@
 """Cross-profile ranking: query -> ordered profiles, with evidence.
 
 The pipeline is centroid prefilter, per-profile chunk re-rank, calibration,
-then optional MMR diversification. Topic indexing and clustering live here too
-because both are ways of asking "which profiles go together", and both read the
-same centroid matrix ranking does.
-
-Reached as ``store.match``.
+then optional MMR diversification.
 """
 
 import json
@@ -48,8 +44,6 @@ def _profile_topic_codes(prof: ResearcherProfile) -> set[str]:
     try:
         entries = prof.metadata.research_interests
     except (OSError, ProfileError, ValidationError):
-        # An unreadable candidate must not break the ranking; it just offers
-        # no topics.
         return set()
     return {
         e.concept.code
@@ -72,12 +66,7 @@ class MatchManager:
 
     @property
     def topics_cache_path(self) -> Optional[Path]:
-        """``<root>/.cache/topics.json``, or ``None`` without a root.
-
-        A rendered view of :meth:`topics`, written for shell callers. The
-        in-memory index is built fresh either way, so a store with no directory
-        loses only the file.
-        """
+        """``<root>/.cache/topics.json`` (a view of :meth:`topics`), or ``None`` without a root."""
         from ..utils.paths import store_cache_dir
 
         d = store_cache_dir(self._store.root)
@@ -124,9 +113,7 @@ class MatchManager:
         declared -1 is dropped. The shared topics are reported in
         ``evidence.matched_topics``.
         """
-        # Up front, before any work: ranking is the capability, and a store
-        # that cannot serve vectors should say so in one error rather than
-        # produce an empty ranking that reads like "nobody matched".
+        # Fail loudly up front, not with an empty ranking that reads like "nobody matched".
         require_vector_store(self._store)
         if not self._rostered().profiles:
             return []
@@ -138,15 +125,11 @@ class MatchManager:
 
         vectors = self._store.centroids
         qvec = vectors.embed_query(text)
-        # The roster and the matrix together, so row i is still slugs[i] even
-        # if a write lands between the two reads.
         roster, matrix = vectors.snapshot()
         sims = matrix @ qvec  # cosine to all, (n,)
         slugs = roster.slugs
 
-        # One memo per rank() call. Topic labels repeat heavily across
-        # profiles, so embedding each one once turns prefilter*topics query
-        # embeddings into the handful of distinct labels the survivors share.
+        # Per-call memo: topic labels repeat heavily across profiles.
         label_vecs: dict[str, "np.ndarray"] = {}
 
         matches = [
@@ -222,11 +205,7 @@ class MatchManager:
         prefilter: int,
         k: int,
     ) -> list[int]:
-        """Matrix row indices that pass the filter, best-scoring first, capped.
-
-        A set membership test, not a scan per slug: this is the one step in
-        rank() that would otherwise grow quadratically with the corpus.
-        """
+        """Matrix row indices that pass the filter, best-scoring first, capped."""
         survivor_idx = [i for i, s in enumerate(roster.slugs) if s in candidate_slugs]
         survivor_idx.sort(key=lambda i: -float(sims[i]))
         return survivor_idx[: max(prefilter, k)]
@@ -241,9 +220,7 @@ class MatchManager:
     ) -> list[str]:
         """The profile's cached topic labels close enough to the query to be evidence.
 
-        ``label_vecs`` is the caller's memo of label -> unit vector, shared
-        across every profile in one rank() call. It is passed in rather than
-        held on the manager so it lives exactly as long as the query does.
+        ``label_vecs`` is the caller's per-query memo of label -> unit vector.
         """
         try:
             topics = prof.topics.get(method="cached")
@@ -265,9 +242,8 @@ class MatchManager:
             MissingEmbeddingBackendError,
             CapabilityUnavailableError,
         ):
-            # CapabilityUnavailableError: ``prof.topics`` reads the profile's
-            # ``.cache/topics.json``, which a remote profile does not have.
-            # Topic overlap is only supporting evidence for the score.
+            # A remote profile has no ``.cache/topics.json``; overlap is only
+            # supporting evidence.
             return []
 
     def _match_for(
@@ -285,9 +261,7 @@ class MatchManager:
         try:
             hits = self._store.vector_index(prof.slug).search(text, k=topk_chunks)
         except (IndexNotBuiltError, MissingEmbeddingBackendError):
-            # A profile with no vectors contributes no chunk evidence and keeps
-            # its centroid score. Not a capability failure: the store proved it
-            # serves vectors before ranking started (``require_vector_store``).
+            # No vectors: no chunk evidence, centroid score only.
             hits = []
         mean_chunk_score = float(np.mean([h.score for h in hits])) if hits else 0.0
         raw = 0.5 * centroid_score + 0.5 * mean_chunk_score
@@ -312,12 +286,9 @@ class MatchManager:
         """``raw`` mapped through the profile's calibration, or ``raw`` if that fails."""
         try:
             return normalize_score(raw, ensure_calibration(prof))
-        # Boundary: every failure mode of an on-disk calibration artifact, from
-        # any of the readers behind ensure_calibration.
         except Exception:
-            # Fail soft (a broken calibration must not 500 /match) but never
-            # silently: an uncalibrated raw score ranked against normalized
-            # peers is a corrupt ordering, not a degraded one.
+            # Fail soft (a broken calibration must not 500 /match) but loudly:
+            # a raw score ranked against normalized peers is a corrupt ordering.
             logger.warning(
                 "calibration failed for %s; falling back to an UNCALIBRATED "
                 "raw score (this profile is not comparable to normalized peers)",
@@ -339,9 +310,7 @@ class MatchManager:
         """Re-order by maximal marginal relevance: relevant but not redundant."""
         if not matches:
             return []
-        # Lazy: the MMR helper pulls numpy-adjacent machinery the plain
-        # ranking path must not pay for. See
-        # tests/test_guardrails.py::test_match_path_does_not_pull_sklearn.
+        # Lazy; see tests/test_guardrails.py::test_match_path_does_not_pull_sklearn.
         from ..embeddings.rank import mmr_indices
 
         roster, centroids = self._store.centroids.snapshot()
@@ -360,7 +329,6 @@ class MatchManager:
     def topics(self) -> dict[str, list[ResearcherProfile]]:
         """Topic label -> the profiles claiming it. Also written to disk."""
         cache_path = self.topics_cache_path
-        # Build fresh in-memory; we still write a JSON view to disk.
         out: dict[str, list[ResearcherProfile]] = {}
         for p in self._rostered().profiles:
             try:
@@ -406,8 +374,7 @@ class MatchManager:
         if k is None:
             k = max(2, int(math.sqrt(len(profiles))))
         k = max(1, min(k, len(profiles)))
-        # Lazy: scikit-learn is a heavy optional extra and the ranking path
-        # must stay free of it.
+        # Lazy: scikit-learn is a heavy optional extra.
         try:
             from sklearn.cluster import KMeans
         except ImportError as e:

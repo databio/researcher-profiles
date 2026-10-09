@@ -1,16 +1,14 @@
 """Find the passages inside one paper, or one profile, that answer a query.
 
-A quote or a fact check by whole-text read costs 14-33K tokens; a few
-passages cost 1-4K. This builds candidate passages from the sources the
-caller may read, ranks them twice (semantic over embedded chunks, BM25 over
-all of them), merges with reciprocal-rank fusion, and reports what ran.
+Candidates come from the sources the caller may read, ranked twice
+(semantic over embedded chunks, BM25 over all of them) and merged with
+reciprocal-rank fusion.
 
-- **Paper**: full text (keyword only: paragraphs merged into 400-1,200 char
-  windows, each keeping its start offset and section), summary and abstract
-  (hybrid over their embedded chunks).
-- **Profile**: SOUL, expertise and the CV / web / grant chunks this caller may
-  read (hybrid; a source with no stored vectors, which on the SQL store is
-  every private one, is searched by keyword only and the note says so).
+- **Paper**: full text (keyword only, in :func:`windows`), summary and
+  abstract (hybrid).
+- **Profile**: SOUL, expertise and the CV / web / grant chunks (hybrid; a
+  source with no stored vectors, which on the SQL store is every private one,
+  is keyword only and the note says so).
 
 Offsets are absolute indices into the stored text the text routes page over:
 ``sources/papers/{pid}.md`` for full text, the raw ``SOUL.md`` /
@@ -69,10 +67,8 @@ def _split_long(text: str, start: int, end: int) -> list[tuple[int, int]]:
 def windows(text: str) -> list[tuple[int, int]]:
     """Paragraphs merged into 400-1,200 char windows: ``[(start, end)]``.
 
-    A window grows paragraph by paragraph while it is under ``WINDOW_MIN``
-    and the next one still fits under ``WINDOW_MAX``. A single paragraph
-    over ``WINDOW_MAX`` is cut at word boundaries. Spans index ``text``
-    directly, so ``text[start:end]`` is the passage verbatim.
+    A paragraph over ``WINDOW_MAX`` is cut at word boundaries.
+    ``text[start:end]`` is the passage verbatim.
     """
     pieces: list[tuple[int, int]] = []
     for s, e in _paragraphs(text):

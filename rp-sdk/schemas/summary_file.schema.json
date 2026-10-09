@@ -1,6 +1,6 @@
 {
   "additionalProperties": false,
-  "description": "Frontmatter shape for sources/summaries/<paper_id>.summary.md.\n\nOn-disk file is markdown with a YAML frontmatter block. This model\nvalidates the frontmatter only - the body is plain markdown.",
+  "description": "Frontmatter shape for sources/summaries/<paper_id>.summary.md.\n\nValidates the YAML frontmatter only; the body is plain markdown.",
   "properties": {
     "paper_id": {
       "title": "Paper Id",

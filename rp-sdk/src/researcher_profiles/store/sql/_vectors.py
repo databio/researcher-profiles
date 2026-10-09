@@ -1,22 +1,12 @@
 """The SQL store's vectors: shredding an index into rows, and serving rows back.
 
-Two halves with one shape between them:
+**Shred** (:func:`shred_profile`): a profile's built index becomes one
+:class:`~researcher_profiles.store.db.ChunkVectorRow` per public chunk plus one
+:class:`~researcher_profiles.store.db.ProfileVectorRow` centroid.
 
-**Shred** (:func:`shred_profile`, the write path). Read a profile's built index
-and emit one :class:`~researcher_profiles.store.db.ChunkVectorRow` per public
-chunk plus one :class:`~researcher_profiles.store.db.ProfileVectorRow` holding
-the centroid. Two sources are accepted, in order: the build-local
-``.cache/embeddings.sqlite`` when the source profile is a directory (the one the
-centroid is defined over), and the published flat form otherwise, so a profile
-put here from an HTTP store or another SQL store keeps its vectors.
-
-**Serve** (:func:`flat_bytes`, :func:`centroid`, :func:`centroids_matrix`, the
-read path). Turn the rows back into the three published byte shapes and hand
-them to :class:`~researcher_profiles.embeddings.flat.FlatEmbeddingIndex`, the
-single read implementation of
-:class:`~researcher_profiles.embeddings.protocol.VectorIndex` behind all three
-backends: a sqlite file feeds it on the filesystem, HTTP bytes feed it
-remotely, and SQL rows feed it here.
+**Serve** (:func:`flat_bytes`, :func:`centroid`, :func:`centroids_matrix`):
+rows become the published byte shapes, read by
+:class:`~researcher_profiles.embeddings.flat.FlatEmbeddingIndex`.
 
 Privacy: the shredded rows are the *public* subset, filtered exactly as
 :func:`~researcher_profiles.embeddings.flat.write_flat_export` filters, because
@@ -24,9 +14,8 @@ embeddings are partially invertible (spec section 6). The centroid is computed
 over the whole index including private chunks, exactly as the published
 ``collection/embeddings/`` blob is: one averaged vector is not invertible.
 
-``numpy`` and ``sqlite_vec`` are imported inside functions, never at module
-scope, so importing the SQL store on a core-only install stays free of the
-vectors extra (``tests/test_guardrails.py::TestImportCost``).
+``numpy`` and ``sqlite_vec`` are imported inside functions so a core-only
+install can import the SQL store (``test_guardrails.py::TestImportCost``).
 """
 
 import hashlib
@@ -68,8 +57,7 @@ def shred_profile(rid: str, profile: "ResearcherProfile") -> list:
 
     Returns the :class:`ChunkVectorRow` list followed by the profile's
     :class:`ProfileVectorRow` centroid, or ``[]`` when the profile ships no
-    readable index. Never raises for a missing or broken index: a profile
-    without vectors is a profile the registry skips, not a failed ingest.
+    readable index. Never raises for a missing or broken index.
     """
     try:
         shredded = _from_sqlite(profile) or _from_flat(profile)
@@ -113,9 +101,8 @@ def shred_profile(rid: str, profile: "ResearcherProfile") -> list:
 def _from_sqlite(profile: "ResearcherProfile"):
     """Shred the build-local ``.cache/embeddings.sqlite``, or ``None``.
 
-    The preferred source: it is the index the centroid is *defined* over
-    (``profile_vec._centroid_vec``), so a centroid stored from here is the same
-    number the filesystem backend and the published collection blob report.
+    The preferred source: the index the centroid is defined over, so the
+    stored centroid matches every other backend.
     """
     directory = profile.directory
     if directory is None:
@@ -156,17 +143,12 @@ def _from_sqlite(profile: "ResearcherProfile"):
 def _from_flat(profile: "ResearcherProfile"):
     """Shred the published flat form off the profile's own storage, or ``None``.
 
-    The fallback for a profile that has no sqlite to shred: a downloaded one
-    (``embeddings/`` but no ``.cache/``), or one being copied out of another SQL
-    store. Lossy by construction, and honestly so: the flat form is already the
-    public subset and its centroid is the mean of the rows it kept, which is
-    the most the source itself knows.
+    Lossy: the flat form is the public subset, so its centroid is the mean of
+    public rows only.
 
-    Requires a storage backend whose ``artifact_bytes`` is byte-faithful, which
-    the directory and SQL backends are. The published-site client returns
-    ``artifact_text(...).encode()`` for every artifact, so a ``.bin`` fetched
-    through it is mangled and yields no rows; ingest such a corpus from a local
-    copy (``install_profile``) rather than straight off the wire.
+    Needs byte-faithful ``artifact_bytes`` (directory and SQL backends). The
+    published-site client mangles a ``.bin`` and yields no rows; ingest such
+    a corpus from a local copy (``install_profile``).
     """
     storage = profile.storage
     index_json = storage.artifact_bytes(FLAT_INDEX_URL)
@@ -233,14 +215,9 @@ def has_vectors(s: Session, rid: str) -> bool:
 def flat_bytes(s: Session, rid: str) -> Optional[tuple[bytes, bytes, bytes]]:
     """``(index_json, blob, chunks_json)`` for ``rid``, or ``None``.
 
-    The published flat form, rebuilt from the rows: the same three byte shapes
-    a static host serves and :meth:`FlatEmbeddingIndex.from_bytes` reads, so
-    the read side of this backend is code that already exists.
-
-    The stored ``embeddings/index.json`` artifact is the metadata base when
-    there is one, because it carries the probe vector that no column holds; the
-    numbers (``dim``, ``count``, ``rows``, ``sha256``) are always recomputed
-    from the rows, so the two cannot disagree.
+    The stored ``embeddings/index.json`` is the metadata base when present
+    (it carries the probe vector); ``dim``, ``count``, ``rows`` and ``sha256``
+    are always recomputed from the rows.
     """
     rows = chunk_rows(s, rid)
     if not rows:
@@ -315,10 +292,7 @@ def centroid(s: Session, rid: str) -> "np.ndarray | None":
 def centroids_matrix(s: Session) -> "tuple[list[str], np.ndarray] | None":
     """``(slugs, matrix)`` over every profile holding a centroid, or ``None``.
 
-    One ``SELECT`` of N rows for the whole roster, which is what
-    :class:`~researcher_profiles.store.db.ProfileVectorRow` exists for: the
-    relational twin of a published site's single stacked blob. Slug-ordered and
-    L2-normalized, per the protocol.
+    One ``SELECT`` for the whole roster. Slug-ordered and L2-normalized.
     """
     import numpy as np
 
@@ -351,8 +325,7 @@ def centroids_matrix(s: Session) -> "tuple[list[str], np.ndarray] | None":
 def backend_spec(s: Session) -> Optional[str]:
     """The embedding space this store's vectors live in, or ``None``.
 
-    First readable name, not a consensus: a store whose profiles disagree is
-    already broken, and this is the same answer the filesystem backend gives.
+    First readable name, not a consensus.
     """
     row = s.exec(
         select(ChunkVectorRow.backend_spec).where(ChunkVectorRow.backend_spec != "").limit(1)

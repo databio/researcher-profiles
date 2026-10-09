@@ -2,7 +2,7 @@
   "$defs": {
     "TrialRecord": {
       "additionalProperties": true,
-      "description": "A confirmed researcher-to-clinical-trial relationship.\n\nPart of the optional clinical extension (``docs/rp-spec/index.md``). Only\nconfirmed relationships belong here: a trial a discovery pass merely\nproposed is draft state in the host, not a claimed accomplishment. Hence\n``researcher_role`` is optional and stays absent when unknown; inventing a\nPI role to fill a required field would turn \"we do not know\" into a claim\nnobody made.\n\n``nct_id`` is validated against the ClinicalTrials.gov form because it is\nthe record's identity: without it there is nothing to check the claim\nagainst, and the ``@id`` is derived from it.",
+      "description": "A confirmed researcher-to-clinical-trial relationship.\n\nPart of the optional clinical extension (``docs/rp-spec/index.md``). Only\nconfirmed relationships belong here. ``researcher_role`` stays absent when\nunknown rather than claiming a role nobody stated. ``nct_id`` is the\nrecord's identity and its ``@id`` is derived from it.",
       "properties": {
         "@context": {
           "anyOf": [
@@ -189,7 +189,7 @@
     }
   },
   "additionalProperties": true,
-  "description": "Top-level model for ``sources/trials.jsonld`` (a ``Collection``).\n\nOptional, and absent from almost every profile. It exists so a clinical\nresearcher whose work is trials rather than papers has somewhere to put the\nrecord: an empty ``papers.jsonld`` alongside a populated trials collection\nis a complete profile, not a broken one.",
+  "description": "Top-level model for ``sources/trials.jsonld`` (a ``Collection``).\n\nOptional. An empty ``papers.jsonld`` alongside a populated trials\ncollection is a complete profile.",
   "properties": {
     "@context": {
       "anyOf": [

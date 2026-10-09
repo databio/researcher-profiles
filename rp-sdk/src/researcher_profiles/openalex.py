@@ -1,36 +1,9 @@
-"""OpenAlex record parsing plus a narrow candidate-fetch client.
+"""OpenAlex record parsing plus narrow fetch helpers.
 
-The parsing half is PURE: no HTTP, no pagination, no dedupe, and no
-``paper_id`` policy. It imports only the standard library and ``PaperRecord``
-from ``.schema``, so any tool that needs OpenAlex records in the profile shape
-can share these functions instead of reimplementing abstract de-inversion and
-raw-work-record extraction.
-
-Corpus-building fetch clients and the ``paper_id`` computation stay with their
-callers. What lives here beyond parsing is one narrow query client,
-:func:`fetch_new_works` ("new works since <date> relevant to a profile"), the
-candidate source for ranking works against a profile. Every fetch takes an
+The parsing functions are pure: no HTTP, no pagination, no dedupe, and no
+``paper_id`` policy (``paper_id`` is the caller's job). Every fetch takes an
 :class:`~researcher_profiles.openalex_client.OpenAlexClient` as its first
-argument; that client is the only code that talks HTTP to OpenAlex and the
-only holder of the API key. This module never imports ``httpx``, so importing
-it stays core-cheap.
-
-Public API:
-    decode_abstract_inverted_index(idx) -> str: the abstract de-inversion
-    parse_work(raw) -> PaperRecord | None: raw work -> PaperRecord
-    to_work_dict(raw) -> dict: {..., coauthors} lite shape
-    to_normalized_dict(raw) -> dict: {..., authors} lite shape
-    profile_query_terms(profile) -> dict: {topics, seed_work_ids, source}
-    paper_key_phrases(papers) -> list[str]: shared phrases in titles/summaries
-    work_topic_ids(raw) -> list[str]: a raw work's topic ids, primary first
-    topic_prevalence(papers) -> list[ResearchInterest]: inferred topic interests
-    topic_score(work_topics, interests) -> float | None: interest boost / exclude
-    topic_matches(work_topics, interests) -> list[str]: topics that raised a work
-    fetch_new_works(client, ...) -> list[PaperRecord]: query OpenAlex for candidates
-    fetch_work(client, id) -> PaperRecord | None: point lookup of one work
-    fetch_author_works(client, orcid) -> list[PaperRecord]: works credited to an ORCID
-    search_work_by_title(client, title) -> PaperRecord | None: top title-search hit
-    match_papers(papers, works) -> [(paper, work)]: pair records by title
+argument. This module never imports ``httpx``, so importing it stays cheap.
 """
 
 import logging
@@ -56,9 +29,6 @@ _abstract_logger = logging.getLogger("researcher_profiles.openalex.abstract_deco
 # Pure function: decode_abstract_inverted_index
 # ---------------------------------------------------------------------------
 
-#: The OpenAlex ``abstract_inverted_index`` maps word -> list of 0-based
-#: positions. This function reconstructs the abstract string from that mapping.
-
 
 def decode_abstract_inverted_index(
     idx: dict[str, list[int]] | None,
@@ -70,25 +40,17 @@ def decode_abstract_inverted_index(
 
         {"Despite": [0], "decades": [1], "of": [2, 20, 38], ...}
 
-    Algorithm:
-    1. If ``idx`` is None or empty -> return ``""`` (no exception raised).
-    2. Build a flat list of ``(position, word)`` pairs from all entries.
-    3. Sort by position ascending.
-    4. Detect duplicate positions: if two words claim the same position, log a
-       warning and keep the first occurrence (stable-sort order).
-    5. Detect gaps: if positions are not contiguous from 0 to max(pos), fill
-       each missing position with a single space (log at DEBUG level).
-    6. Join the resolved words with single spaces.
-    7. Strip leading/trailing whitespace; collapse repeated internal whitespace.
+    A position claimed by two words keeps the first (sorted by word) and logs
+    a warning. Gaps are skipped. Whitespace is collapsed.
 
     Returns:
-        The reconstructed abstract string, or ``""`` on any structural failure.
+        The reconstructed abstract string, or ``""`` when ``idx`` is empty or
+        malformed. Never raises.
     """
     if not idx:
         return ""
 
     try:
-        # Build (pos, word) pairs
         pairs: list[tuple[int, str]] = []
         for word, positions in idx.items():
             for pos in positions:
@@ -97,12 +59,10 @@ def decode_abstract_inverted_index(
         if not pairs:
             return ""
 
-        # Sort by position; use word as tie-breaker for determinism
         pairs.sort(key=lambda p: (p[0], p[1]))
 
         max_pos = pairs[-1][0]
 
-        # Deduplicate: build position -> word map (first occurrence wins)
         pos_to_word: dict[int, str] = {}
         for pos, word in pairs:
             if pos in pos_to_word:
@@ -115,7 +75,6 @@ def decode_abstract_inverted_index(
             else:
                 pos_to_word[pos] = word
 
-        # Build word list, filling gaps with spaces
         tokens: list[str] = []
         for i in range(max_pos + 1):
             if i in pos_to_word:
@@ -127,9 +86,7 @@ def decode_abstract_inverted_index(
                 )
                 tokens.append(" ")
 
-        # Join and clean up
         abstract = " ".join(tokens)
-        # Collapse any runs of whitespace (gap spaces + join spaces)
         abstract = re.sub(r"\s+", " ", abstract)
         return abstract.strip()
 
@@ -217,17 +174,8 @@ def work_topic_ids(raw: dict) -> list[str]:
 def parse_work(raw: dict) -> PaperRecord | None:
     """Parse a raw OpenAlex work dict into a :class:`PaperRecord`.
 
-    Extracts the fields a profile needs: title/year (with a
-    guard), first-author last name, journal (``primary_location`` then
-    ``host_venue``), preferred ``pdf_url``, bare ``doi``, ``pmid`` (from
-    ``ids``), ``pmcid`` (from ``locations``), ``cited_by_count``, lowercased
-    ``type``, the de-inverted ``abstract``, and ``topics`` (the bare topic ids
-    of ``primary_topic`` and ``topics``, primary first, each once).
-
-    This function does not compute ``paper_id``. That is ID policy, not
-    OpenAlex parsing, so ``paper_id`` is left ``None`` for the caller to fill.
-    ``cited_by_count``, ``pmid`` and ``pmcid`` are carried as extra fields
-    (``PaperRecord`` allows extras).
+    ``paper_id`` is left ``None`` for the caller to fill. ``cited_by_count``,
+    ``pmid`` and ``pmcid`` are carried as extra fields.
 
     Returns:
         A ``PaperRecord`` (``status="pending"``), or ``None`` when the work has
@@ -250,7 +198,6 @@ def parse_work(raw: dict) -> PaperRecord | None:
         type=(raw.get("type") or "").lower() or None,
         topics=work_topic_ids(raw),
         status="pending",
-        # Extra fields (PaperRecord allows extras).
         pmid=_extract_pmid(raw),
         pmcid=_extract_pmcid(raw),
         cited_by_count=int(raw.get("cited_by_count") or 0),
@@ -281,8 +228,8 @@ def topic_prevalence(
     """The corpus's most common OpenAlex topics as inferred interests.
 
     Each paper counts once per topic, whether the topic is its primary topic,
-    a secondary one, or both (RADAR's ``distinct_paper_prevalence``, not its
-    double-counting ``aggregate_topic_filters``). ``share`` is the fraction of
+    a secondary one, or both (a distinct-paper prevalence, not the
+    double-counting sum over topic slots). ``share`` is the fraction of
     the papers that carry topic data at all, so a paper OpenAlex never tagged
     neither helps nor hurts a topic.
 
@@ -485,19 +432,12 @@ def _lite_dict(raw: dict, *, author_key: str) -> dict:
 
 
 def to_work_dict(raw: dict) -> dict:
-    """The ``{title, abstract, year, doi, openalex_id, coauthors}`` lite shape.
-
-    ``doi`` is the bare DOI (no ``https://doi.org/`` prefix). ``abstract`` is
-    ``None`` (not ``""``) when absent. This adapter maps the empty de-inversion
-    result to ``None`` so an absent abstract is distinguishable from an empty one.
-    """
+    """The ``{title, abstract, year, doi, openalex_id, coauthors}`` lite shape."""
     return _lite_dict(raw, author_key="coauthors")
 
 
 def to_normalized_dict(raw: dict) -> dict:
-    """The single-work-match shape: identical to :func:`to_work_dict` but with
-    ``authors`` in place of ``coauthors`` (the citation checker keys off author
-    names)."""
+    """Same as :func:`to_work_dict` but with ``authors`` in place of ``coauthors``."""
     return _lite_dict(raw, author_key="authors")
 
 
@@ -515,14 +455,9 @@ _MAX_CITES_SEEDS = 100
 
 #: OpenAlex ``type`` values that are not scholarly narrative outputs: bare
 #: software/code dumps, catch-all deposits, review reports, grant records, etc.
-#: These pollute the candidate stream (on this corpus ``software`` alone is
-#: ~half the raw fetch: warp/GATK-style code deposits on Zenodo). ``dataset``
-#: is not excluded: OpenAlex types some genuine method deposits as
-#: datasets (e.g. the region-centric chromatin/methylation R framework), so
-#: dropping the whole type would drop real hits too. ``book`` is excluded: its
-#: members here are self-published "X for Bioinformatics" volumes, not papers.
-#: The filter is a type gate only; a deposit mis-typed as ``article``/``book-
-#: chapter`` still slips through and must be caught downstream.
+#: ``dataset`` is kept: OpenAlex types some genuine method papers as datasets.
+#: ``book`` is dropped: in practice these are self-published volumes, not
+#: papers. A deposit mis-typed as ``article`` still slips through.
 DEFAULT_EXCLUDE_TYPES = frozenset(
     {"software", "other", "paratext", "libguides", "grant", "peer-review", "book"}
 )
@@ -760,17 +695,10 @@ def _topic_filters(topics: list[str]) -> list[str]:
 def fetch_work(client: "OpenAlexClient", openalex_id: str) -> PaperRecord | None:
     """Fetch a single OpenAlex work by id and parse it into a ``PaperRecord``.
 
-    Accepts either a bare id (``"W2741809807"``) or a full OpenAlex URL
-    (``"https://openalex.org/W2741809807"``); only the trailing id segment is
-    used. A singleton lookup costs nothing against the daily budget. Returns
-    the parsed :class:`PaperRecord`, or ``None`` when the work is missing (an
-    :class:`OpenAlexHTTPError`, e.g. 404) or unusable (``parse_work`` returns ``None`` for a work with no
-    title/year).
-
-    Unlike :func:`fetch_new_works`, this is a point lookup for callers that
-    hold only a work id and need the full record, abstract included, and a
-    transport failure is reported as ``None`` rather than raised. A budget
-    (429) or key (401) error still raises.
+    Accepts a bare id or a full OpenAlex URL. A singleton lookup costs nothing
+    against the daily budget. Returns ``None`` when the work is missing (any
+    :class:`OpenAlexHTTPError`, e.g. 404) or has no title/year. A budget (429)
+    or key (401) error still raises.
     """
     wid = str(openalex_id).strip().rsplit("/", 1)[-1]
     if not wid:
@@ -821,8 +749,7 @@ def fetch_new_works(
     ``cites_works`` (which seed ids it references).
 
     A failure on any page (an ``OpenAlexError``) propagates and discards the
-    works already collected, unlike :func:`fetch_work`, which returns ``None``
-    instead.
+    works already collected.
     """
     if exclude_types is None:
         exclude_types = DEFAULT_EXCLUDE_TYPES
@@ -842,12 +769,7 @@ def fetch_new_works(
 
 
 def _tag_found_by(rec: PaperRecord, kind: str, raw: dict, seeds: set[str]) -> None:
-    """Record which query found a work (extra fields; ``PaperRecord`` allows them).
-
-    ``found_by`` lists the query kinds (``topic``, ``text``, ``cites``) in the
-    order they found it. For ``cites``, ``cites_works`` lists which of the
-    profile's own works (bare ids) it references.
-    """
+    """Set ``found_by`` and ``cites_works`` (see :func:`fetch_new_works`)."""
     found = list(getattr(rec, "found_by", None) or [])
     if kind not in found:
         found.append(kind)

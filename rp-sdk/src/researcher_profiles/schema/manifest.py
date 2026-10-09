@@ -1,22 +1,12 @@
 """Generate the ``profile.jsonld`` manifest by walking a profile directory.
 
-Without a manifest, an agent landing on a published directory would have to
-guess at ``personality/SOUL.md``, ``sources/summaries/*.md``,
-``.cache/embeddings.sqlite``. The manifest enumerates what a profile contains:
-every artifact gets one typed entry with a name, an encoding format, a role,
-and a **relative** ``contentUrl``.
+Every artifact gets one typed entry with a name, an encoding format, a role,
+and a **relative** ``contentUrl``, so a published profile stays portable
+across servers.
 
-Relative is the whole point: a profile is a directory of static files that must
-stay portable across servers. An absolute URL would bind a published profile to
-the host that happened to build it.
-
-What is not in the manifest: the build-session bookkeeping
-(``build_state.json`` and its kin) and the append-only usage logs beside it.
-Both sit in the build root (``.build/<slug>/``), outside the content tree. From the
-profile-adjacent ``.cache/`` directory only the embedding index is listed; the
-other derived caches (the cluster-method ``topics.json``, ``calibration.json``,
-…) are regenerable and never part of the record. LLM-labeled topics are not a
-cache and are listed, as ``personality/topics.json``.
+Build bookkeeping lives outside the content tree and is never listed. From
+``.cache/`` only the embedding index is listed; the other derived caches are
+regenerable and not part of the record.
 """
 
 import hashlib
@@ -41,10 +31,8 @@ PUBLISHED_CACHE = ("embeddings.sqlite",)
 _SUMMARY_SUFFIX = ".summary.md"
 
 
-#: Encoding formats whose bodies are TEXT. Everything else is binary, and a
-#: store may legitimately hold a binary artifact's manifest entry without its
-#: bytes (``ProfileStore.put(..., include_binary=True)`` is opt-in because
-#: ``.cache/embeddings.sqlite`` runs to tens of megabytes).
+#: Encoding formats whose bodies are text. A store may hold a binary
+#: artifact's manifest entry without its bytes.
 TEXT_FORMATS: frozenset[str] = frozenset(
     {
         "text/markdown",
@@ -57,12 +45,7 @@ TEXT_FORMATS: frozenset[str] = frozenset(
 
 
 def is_text_artifact(encoding_format: str | None, content_url: str) -> bool:
-    """Whether an artifact's body is text. The one definition of that question.
-
-    The SQL backend asks it to pick which column a body lands in, and any
-    other caller must get the same answer, so the list of media types lives
-    here and nowhere else.
-    """
+    """Whether an artifact's body is text. The one definition of that question."""
     if encoding_format in TEXT_FORMATS:
         return True
     if encoding_format:
@@ -79,8 +62,7 @@ def _part(
     type_: str = "DigitalDocument",
     paper_id: str | None = None,
 ) -> ArtifactRef:
-    # The ArtifactRef model applies the role's default tier (cv/web/full-text ->
-    # private) when `visibility` is not passed, so it is omitted here.
+    # `visibility` is omitted so ArtifactRef applies the role's default tier.
     return ArtifactRef(
         type_=type_,
         name=name,
@@ -127,8 +109,7 @@ class _DirSpec:
 _SUBJECT_SPECS: tuple[_FileSpec, ...] = (
     _FileSpec("personality/SOUL.md", "SOUL", "soul", MARKDOWN),
     _FileSpec("personality/expertise.md", "Expertise", "expertise", MARKDOWN),
-    # Optional clinical extension: trial operations and site capability prose,
-    # the clinical counterpart of expertise.md.
+    # Optional clinical extension.
     _FileSpec(
         "personality/clinical_expertise.md",
         "Clinical expertise",
@@ -138,10 +119,7 @@ _SUBJECT_SPECS: tuple[_FileSpec, ...] = (
     _FileSpec("personality/topics.json", "Research topics", "topics", JSON),
 )
 
-#: The roles that live in ``subjectOf`` rather than ``hasPart``. Derived from
-#: the specs above so the two cannot drift: anything that has to place a
-#: manifest entry in a slot (an ``--only`` push projecting the server's
-#: manifest, an ingest splicing a kept entry back) asks here.
+#: The roles that live in ``subjectOf`` rather than ``hasPart``.
 SUBJECT_ROLES: frozenset[str] = frozenset(spec.role for spec in _SUBJECT_SPECS)
 
 #: The record and its sources, carried in ``hasPart``.
@@ -163,9 +141,8 @@ _DIR_SPECS: tuple[_DirSpec, ...] = (
     _DirSpec("sources/web", ".md", "web", "Web page: ", False),
 )
 
-#: Flat servable embeddings (public artifacts). Kept out of ``_PART_SPECS``
-#: because the manifest lists it after the directory scans, and that order is
-#: part of the published bytes.
+#: Flat servable embeddings. Separate from ``_PART_SPECS`` because they are
+#: listed after the directory scans, and that order is part of the published bytes.
 _INDEX_SPECS: tuple[_FileSpec, ...] = (
     _FileSpec(
         "embeddings/index.json",
@@ -215,9 +192,7 @@ def _dir_parts(root: Path, spec: _DirSpec) -> list[ArtifactRef]:
 
 
 def _cache_parts(root: Path) -> list[ArtifactRef]:
-    """The derived sqlite index (tier private): reachable by an authorized
-    consumer, excluded from a public sync. Profile-adjacent under ``.cache/``.
-    """
+    """The derived sqlite index under ``.cache/`` (tier private)."""
     return [
         _part(
             f"{CACHE_DIRNAME}/{name}",
@@ -252,9 +227,8 @@ def _recorded_digests(root: Path) -> dict[tuple[str, str], str]:
 def _carry_digest(part: ArtifactRef, recorded: dict[tuple[str, str], str]) -> ArtifactRef:
     """Keep a recorded ``inputs_digest`` only while the file is byte-identical.
 
-    A file whose bytes changed since the digest was stamped was edited by
-    something other than the generator, so it no longer gets to claim the
-    digest: it reads as edited, never as current.
+    A file whose bytes changed was edited outside the generator, so it reads
+    as edited, never as current.
     """
     if part.sha256:
         part.inputs_digest = recorded.get((part.content_url, part.sha256))

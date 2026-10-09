@@ -1,9 +1,7 @@
 """Per-profile score calibration against a fixed background query set.
 
-Used by :class:`~researcher_profiles.analytics.match.MatchManager`
-(``store.match``) to z-score raw match scores so that absolute rankings are
-comparable across profiles that have very different vector-space
-neighborhoods.
+Z-scores raw match scores so rankings are comparable across profiles with very
+different vector-space neighborhoods.
 """
 
 import json
@@ -66,7 +64,6 @@ def _score_for_query(profile, text: str) -> float:
         centroid_score = 0.0
     else:
         centroid_score = float(qvec @ (centroid / cn))
-    # Top-3 chunks via profile.search
     chunk_score = 0.0
     try:
         hits = profile.index.search(text, k=3)

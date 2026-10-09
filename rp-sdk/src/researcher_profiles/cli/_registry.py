@@ -20,12 +20,8 @@ from ._shared import (
     add_subcommand,
 )
 
-# Not imported from ``..client.REGISTRY_ENV_VAR``: that package pulls in numpy
-# at import time (``embeddings.flat``), and this module is imported eagerly to
-# build the ``rp`` parser for every invocation, including ones (``rp where``)
-# that must stay numpy-free. Literal here, lazily imported (with the real
-# value) inside ``_registry_target`` below, same split the module already
-# used before this rename.
+# A literal, not ``..client.REGISTRY_ENV_VAR``: importing ``client`` pulls in
+# numpy, and this module is imported to build the parser on every invocation.
 _REGISTRY_URL_ENV_VAR_NAME = "RESEARCHER_PROFILES_REGISTRY_URL"
 _REGISTRY_URL_HELP = (
     f"Registry base URL(s), comma-separated (default: {_REGISTRY_URL_ENV_VAR_NAME}, "
@@ -211,9 +207,7 @@ def _cmd_list(args: argparse.Namespace) -> int:
     else:
         print(f"no profiles installed in {root}")
     if not slugs:
-        # An empty cache is almost always the wrong root rather than an
-        # empty registry, so say which root and where it came from, on
-        # stderr, so `rp list --json` stays a clean JSON document.
+        # An empty cache is usually the wrong root, so name it (on stderr).
         _no_such_profile(
             root=root,
             explicit=args.root,
@@ -254,8 +248,7 @@ def _cmd_listr(args: argparse.Namespace) -> int:
         reached += 1
         for entry in listing.profiles:
             if args.as_json:
-                # Which server answered is data too: two registries can hold
-                # the same slug, and the human form loses that.
+                # Two registries can hold the same slug.
                 records.append({"registry": listing.base_url, **entry})
                 continue
             print(
@@ -265,9 +258,7 @@ def _cmd_listr(args: argparse.Namespace) -> int:
     if args.as_json:
         print(json.dumps(records, indent=2, default=str))
     if not reached:
-        # Every named registry failed. Returning 0 with an empty list would
-        # read to a caller checking $? exactly like "the registry is empty",
-        # which is the one thing it is not.
+        # Every registry failed: exit non-zero so it never reads as "empty".
         return EXIT_ERROR
     return EXIT_OK
 

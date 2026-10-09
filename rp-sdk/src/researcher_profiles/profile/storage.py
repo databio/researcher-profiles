@@ -1,17 +1,12 @@
 """``ArtifactStorage``: where one profile's artifacts live.
 
-Two interfaces, of different sizes:
+:class:`researcher_profiles.store.ProfileStore` is a set of profiles;
+:class:`ArtifactStorage` is one profile's backing: its artifacts, the derived
+digest, the raw bodies, the manifest, and the transaction. The profile owns
+identity, caching, validation and stamping; a storage owns I/O, serialization
+and the transaction.
 
-* :class:`researcher_profiles.store.ProfileStore` is a set of profiles:
-  enumerate them, resolve a reference to one, hand out its bytes.
-* :class:`ArtifactStorage`, here, is one profile's backing: the eight
-  artifacts, the derived digest, the raw bodies, the manifest, the transaction.
-
-A backend implements this class. It does not subclass ``ResearcherProfile``.
-The profile owns identity, caching, validation, stamping and cache
-bookkeeping; a storage owns I/O, serialization and the transaction.
-
-Four implementations ship in the SDK:
+Implementations:
 
 =================================  =====================================  =========
 Storage                            Backing                                Extra
@@ -22,9 +17,8 @@ Storage                            Backing                                Extra
 ``client.StaticArtifactStorage``   a published directory on a dumb host   ``[llm]``
 =================================  =====================================  =========
 
-It is an abstract base rather than a ``Protocol`` so it can hold the code two
-backends share (the read-only refusal, the no-op transaction methods) and so an
-incomplete backend fails at construction instead of at first use.
+It is an abstract base rather than a ``Protocol`` so it can hold shared code
+and so an incomplete backend fails at construction, not at first use.
 """
 
 import abc
@@ -70,11 +64,9 @@ CITATIONS_URL = "sources/citations.json"
 def persistable_document(document: dict, *, where: str = "") -> dict:
     """``document`` fit to write as ``profile.jsonld``: registry-issued proofs dropped.
 
-    The filesystem backend's one strip point: :meth:`DirectoryArtifactStorage.save_document`
-    and the directory store's staged-directory commit both call it, so no
-    filesystem write path can store an ``orcid_login`` proof (see
-    :data:`~researcher_profiles.schema.REGISTRY_ISSUED_PROOF_KINDS`). A document
-    with none comes back unchanged.
+    Every filesystem write path calls this, so none can store an
+    ``orcid_login`` proof (see
+    :data:`~researcher_profiles.schema.REGISTRY_ISSUED_PROOF_KINDS`).
     """
     from ..schema import strip_registry_issued_from_document
 
@@ -86,8 +78,7 @@ class LazySummaries(Mapping[str, str]):
 
     ``keys`` is snapshotted (sorted) at construction; ``fetch(key)`` is called
     at most once per key, on first access, and the body cached. Unknown keys
-    raise :class:`KeyError` without calling ``fetch``. Shared by the
-    filesystem, HTTP, and SQL backends, which differ only in ``fetch``.
+    raise :class:`KeyError` without calling ``fetch``.
     """
 
     def __init__(self, keys: Iterable[str], fetch: Callable[[str], str]):
@@ -115,12 +106,9 @@ class LazySummaries(Mapping[str, str]):
 
 
 class NoLocalIndex:
-    """Every index operation refused with one message.
+    """Every index operation refused with one message naming the remedy.
 
-    The mirror of :class:`ReadOnlyArtifactStorage` for the other half of the
-    policy: the storage writers are refused there, the local-index
-    capabilities here. Both say the same thing: get a local directory and
-    work on that.
+    The index counterpart of :class:`ReadOnlyArtifactStorage`.
     """
 
     def __init__(self, remedy: str, *, what: str = "the embedding index"):
@@ -173,11 +161,9 @@ class ArtifactStorage(abc.ABC):
     @property
     @abc.abstractmethod
     def rid_hint(self) -> str | None:
-        """The rid when the backend knows it without reading a document.
+        """The rid when the backend knows it without reading a document, else ``None``.
 
-        SQL knows it (it is the row key), so a write unit can name the profile
-        while its document is being replaced. Everyone else returns ``None``
-        and the profile falls back to ``metadata.rid``.
+        Lets a write unit name the profile while its document is being replaced.
         """
 
     @property
@@ -185,10 +171,8 @@ class ArtifactStorage(abc.ABC):
     def directory(self) -> Path | None:
         """The filesystem directory backing this profile, or ``None``.
 
-        This is the one filesystem admission, mirroring ``ProfileStore.root``
-        one level up: the serve-time caches under ``.cache/`` (embeddings.sqlite,
-        topics.json, calibration.json, profile_vec.npz, coverage.json) are
-        not covered by ``ArtifactStorage``. Nothing else may branch on it.
+        Only the serve-time caches under ``.cache/``, which ``ArtifactStorage``
+        does not cover, may branch on it.
         """
 
     @abc.abstractmethod
@@ -205,9 +189,9 @@ class ArtifactStorage(abc.ABC):
     def load_persisted_document(self) -> dict[str, Any]:
         """The serialized document currently stored; ``{}`` when absent/unreadable.
 
-        The ``dateModified`` comparison basis. Swallows where
-        :meth:`load_document` raises: a predecessor we cannot read is no
-        predecessor.
+        The ``dateModified`` comparison basis. Swallows errors where
+        :meth:`load_document` raises: an unreadable predecessor is no
+        predecessor, so the next write gets stamped.
         """
 
     @abc.abstractmethod
@@ -251,11 +235,7 @@ class ArtifactStorage(abc.ABC):
     ) -> None:
         """Persist one arbitrary manifest artifact's text body.
 
-        The generic writer behind the named ones. A host installing a complete
-        approved bundle in one write unit needs to write artifacts the SDK has
-        no ``save_*`` for (an interview digest, a clinical narrative), and
-        without this it would have to reach into a backend's private method,
-        which is a second write path with none of the manifest bookkeeping.
+        For artifacts with no named ``save_*`` writer.
 
         ``role``/``name``/``encoding_format``/``manifest_slot`` describe the
         manifest entry. A backend that derives its manifest by walking a
@@ -263,13 +243,7 @@ class ArtifactStorage(abc.ABC):
         """
 
     def load_trials(self) -> list[TrialRecord]:
-        """Read ``sources/trials.jsonld``; empty when absent.
-
-        Concrete, not abstract, and built on :meth:`artifact_text`: the
-        optional clinical collection is a plain JSON-LD body, so every backend
-        that can hand out an artifact's bytes can serve it, and none of them
-        needs its own copy of the parse.
-        """
+        """Read ``sources/trials.jsonld``; empty when absent."""
         raw = self.artifact_text(TRIALS_URL)
         if raw is None:
             return []
@@ -296,8 +270,7 @@ class ArtifactStorage(abc.ABC):
     def _collection_about(self) -> str | None:
         """The ``@id`` a collection envelope points ``about`` at, if readable.
 
-        A profile whose document cannot be read yet (mid-create) still gets a
-        well-formed collection; ``about`` is a back-link, not identity.
+        ``None`` mid-create; ``about`` is a back-link, not identity.
         """
         try:
             return self.load_document().id_
@@ -332,8 +305,8 @@ class ArtifactStorage(abc.ABC):
     def content_hash(self) -> str:
         """``sha256:<hex>`` over canonical document + NUL + soul.
 
-        Derived, so there is no writer. The filesystem and HTTP backends
-        recompute; SQL reads its column, refreshed by :meth:`refresh_derived`.
+        That is exactly the surface a patch can touch, so it is a correct
+        staleness signal. Derived, so there is no writer.
         """
 
     # Raw bodies
@@ -343,9 +316,8 @@ class ArtifactStorage(abc.ABC):
         """One manifest artifact's body as text, verbatim, or ``None``.
 
         Verbatim matters: ``read_bytes().decode()``, never ``read_text()``.
-        Three papers in the reference corpus carry lone ``\\r`` inside
-        extracted PDF text, and universal-newline translation silently edits
-        them, which a byte-equality check between backends catches.
+        Extracted PDF text can carry lone ``\\r``, and universal-newline
+        translation would silently edit it.
         """
 
     @abc.abstractmethod
@@ -359,10 +331,7 @@ class ArtifactStorage(abc.ABC):
 
     @abc.abstractmethod
     def build_manifest(self) -> tuple[list[ArtifactRef], list[ArtifactRef]]:
-        """Generate ``(hasPart, subjectOf)`` from what the backend holds.
-
-        A directory walk for files; the ``rp_artifacts`` rows for SQL.
-        """
+        """Generate ``(hasPart, subjectOf)`` from what the backend holds."""
 
     # Transaction
 
@@ -373,9 +342,8 @@ class ArtifactStorage(abc.ABC):
     def refresh_derived(self, ctx: WriteContext) -> None:
         """Refresh store-maintained derived state, inside the write unit.
 
-        Runs after the artifact write and before the pre-commit hooks, so a
-        hook reading :meth:`content_hash` observes the new content. A no-op for
-        a backend that recomputes the digest on read.
+        Runs before the pre-commit hooks, so a hook reading
+        :meth:`content_hash` sees the new content.
         """
 
     def commit(self, ctx: WriteContext) -> None:
@@ -391,12 +359,7 @@ class ArtifactStorage(abc.ABC):
     # Capability overrides
 
     def persona(self, profile: "ResearcherProfile") -> Any | None:  # noqa: ARG002
-        """A backend-supplied persona manager, or ``None`` for the local one.
-
-        ``ApiArtifactStorage`` returns an HTTP-backed one; everyone else returns
-        ``None`` and the profile builds
-        ``profile.persona.PersonaManager``.
-        """
+        """A backend-supplied persona manager, or ``None`` for the local one."""
         return None
 
     def index(self, profile: "ResearcherProfile") -> Any | None:  # noqa: ARG002
@@ -407,13 +370,8 @@ class ArtifactStorage(abc.ABC):
 class ReadOnlyArtifactStorage(ArtifactStorage):
     """Every writer refused with one message. Reads stay fully supported.
 
-    A published profile served over HTTP is a read-only view. Without this
-    class an HTTP profile would need a synthetic ``self.path`` as an identity
-    token, and ``set_soul`` on one of them would try to ``mkdir`` at the
-    filesystem root and silently write there. Here it raises instead.
-
-    :meth:`new_write_context` raises rather than returning, so a registered
-    pre-commit hook never observes a write that cannot happen.
+    :meth:`new_write_context` raises, so a pre-commit hook never observes a
+    write that cannot happen.
     """
 
     def _writes_unsupported(self, what: str) -> NoReturn:
@@ -480,12 +438,7 @@ class ReadOnlyArtifactStorage(ArtifactStorage):
 
 
 class DirectoryArtifactStorage(ArtifactStorage):
-    """A profile directory. The reference backend.
-
-    Everything that touches the directory lives here: the ``_p()`` joiner, the
-    summaries directory listing, the ``BuildState`` sidecar, and the verbatim artifact-body reads that
-    ``SqlProfileStore.put`` needs.
-    """
+    """A profile directory. The reference backend."""
 
     def __init__(self, path: str | os.PathLike):
         p = Path(path).expanduser().resolve()
@@ -520,36 +473,19 @@ class DirectoryArtifactStorage(ArtifactStorage):
         return str(self._root.joinpath(*parts))
 
     def _p(self, *parts: str) -> Path:
-        """Join a relative artifact name onto this profile's directory.
-
-        Backend-internal. To name an artifact for a human, use :meth:`locate`.
-        """
+        """Join a relative artifact name onto this profile's directory."""
         return self._root.joinpath(*parts)
 
     # The profile document
 
     def load_persisted_document(self) -> dict[str, Any]:
-        """The serialized document on disk; ``{}`` when absent or unreadable.
-
-        The comparison basis for ``dateModified``, not a load path. It
-        returns ``{}`` rather than raising because an unreadable predecessor
-        must be treated as no predecessor: a document we cannot compare
-        against is a document we cannot claim is unchanged, so the next write
-        is a content change and gets stamped.
-
-        This is why it is not built on :meth:`load_document`, and vice versa:
-        the two have opposite error semantics.
-        """
+        """The serialized document on disk; ``{}`` when absent or unreadable."""
         from ..utils.date_modified import read_published_document
 
         return read_published_document(self._root)
 
     def load_document(self) -> ProfileDocument:
-        """Read and validate ``profile.jsonld``.
-
-        ``profile.jsonld`` is the only document shape read; a missing file
-        fails with a message naming it.
-        """
+        """Read and validate ``profile.jsonld``."""
         path = self._p("profile.jsonld")
         try:
             raw = path.read_text(encoding="utf-8")
@@ -565,13 +501,7 @@ class DirectoryArtifactStorage(ArtifactStorage):
             raise ProfileLoadError(path, f"schema error: {e}", e) from e
 
     def save_document(self, data: Mapping[str, Any]) -> None:
-        """Persist the profile document.
-
-        ``data`` is the already stamped and validated serialized dict:
-        ``save_profile`` does the dumping, stamping, canonicalizing and
-        re-validating before this is ever called, so a document that would
-        fail to load never reaches the store.
-        """
+        """Persist the already stamped and validated profile document."""
         path = self._p("profile.jsonld")
         data = persistable_document(dict(data), where=str(path))
         try:
@@ -580,17 +510,10 @@ class DirectoryArtifactStorage(ArtifactStorage):
             raise ProfileWriteError(path, f"could not write profile.jsonld: {e}", e) from e
 
     def content_hash(self) -> str:
-        """``"sha256:<hex>"`` over this profile's canonical content.
+        """Recomputed on every call.
 
-        Spans two artifacts, NUL-separated: the canonical ``profile.jsonld``
-        bytes and the SOUL text. That is exactly the surface a patch can
-        touch, which is what makes the digest a correct staleness signal, and
-        why a soul-only write must refresh it too.
-
-        Derived, so there is no writer: this backend recomputes on every call.
-        A failure to read the SOUL propagates rather than being swallowed: a
-        digest that silently covered only half its surface would report a
-        changed profile as fresh forever.
+        A SOUL read failure propagates: a digest over half its surface would
+        report a changed profile as fresh forever.
         """
         h = hashlib.sha256()
         h.update(canonical_dumps(self.load_persisted_document()).encode("utf-8"))
@@ -667,11 +590,7 @@ class DirectoryArtifactStorage(ArtifactStorage):
             raise ProfileWriteError(path, f"could not write papers.jsonld: {e}", e) from e
 
     def load_grants(self) -> list[GrantRecord]:
-        """Read ``sources/grants.jsonld``.
-
-        Returns an empty list when the file is absent. Any level may carry
-        one, but only profiles with a configured grants source do.
-        """
+        """Read ``sources/grants.jsonld``; empty when absent."""
         path = self._p("sources", "grants.jsonld")
         if not path.is_file():
             return []
@@ -708,10 +627,8 @@ class DirectoryArtifactStorage(ArtifactStorage):
     ) -> None:
         """Write one artifact body into the directory.
 
-        The manifest describing it is regenerated by walking the tree
-        (:func:`schema.manifest.build_manifest`), so the descriptive arguments
-        have nothing to record here; on a backend that stores manifest rows
-        they do.
+        The manifest comes from a directory walk, so the descriptive
+        arguments are unused here.
         """
         parts = content_url.split("/")
         if content_url.startswith("/") or any(p in ("", ".", "..") for p in parts):
@@ -742,12 +659,7 @@ class DirectoryArtifactStorage(ArtifactStorage):
             raise ProfileLoadError(path, f"JSON parse error: {e}", e) from e
 
     def save_citations(self, data: Any) -> None:
-        """Write ``sources/citations.json``; ``None`` deletes it.
-
-        Citations legitimately absent is a state :meth:`load_citations`
-        already models by returning ``None``, so ``None`` here is a delete
-        rather than a JSON ``null``.
-        """
+        """Write ``sources/citations.json``; ``None`` deletes it."""
         path = self._p("sources", "citations.json")
         try:
             if data is None:
@@ -784,7 +696,7 @@ class DirectoryArtifactStorage(ArtifactStorage):
 
     def _summary_path(self, paper_id: str) -> Path:
         """The file a paper id names, refusing ids that would leave the
-        summaries directory. This is the one place an id becomes a filename."""
+        summaries directory."""
         if not paper_id or paper_id in {".", ".."} or "/" in paper_id or "\\" in paper_id:
             raise ProfileWriteError(
                 self._p("sources", "summaries"),
@@ -812,10 +724,7 @@ class DirectoryArtifactStorage(ArtifactStorage):
     # Build state
 
     def load_build_state(self) -> BuildState:
-        """Read ``.build/<slug>/meta/build_state.json``; empty when absent.
-
-        Absent is normal: a published profile carries no build state.
-        """
+        """Read ``.build/<slug>/meta/build_state.json``; empty when absent."""
         return BuildState.load(self._root)
 
     def save_build_state(self, state: BuildState) -> None:
@@ -832,15 +741,7 @@ class DirectoryArtifactStorage(ArtifactStorage):
     # Raw bodies
 
     def artifact_text(self, content_url: str) -> str | None:
-        """One artifact's body as text, verbatim.
-
-        ``read_bytes().decode()``, not ``read_text()``: the latter opens in
-        text mode with universal newlines, which rewrites every lone ``\\r``
-        and every ``\\r\\n`` to ``\\n``. Three papers in the reference corpus
-        carry lone ``\\r`` inside extracted PDF text, so a text-mode read
-        silently edits them. A store that normalizes line endings is not
-        holding the document it was given.
-        """
+        """One artifact's body as text, verbatim (see the base class)."""
         f = self._root / content_url
         if not f.is_file():
             return None

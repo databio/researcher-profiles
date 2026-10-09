@@ -1,21 +1,10 @@
 """``.build/<slug>/meta/build_state.json``, build bookkeeping, never published.
 
-An optional sidecar a build tool may keep. Everything a build needs to
-remember but nobody should read as part of the researcher's record lives here:
-per-paper download/verify/reject state, a ledger of completed build phases,
-and the deep-level *inputs* (a CV path, website URLs, a grants source) that
-produced the published result.
-
-Two rules define this file:
-
-1. It is not part of the published profile: ``build_profile_archive`` never
-   ships it, the manifest in ``profile.jsonld`` never lists it, and a profile
-   published as static files legitimately has none. ``BuildState.load`` returns
-   an empty state when the file is absent.
-2. It keeps its own private integer ``schema_version``. The published
-   artifacts use a resolvable ``conformsTo`` IRI rather than an integer counter
-   precisely because they are published; this file is build-local, so a plain
-   counter is the right tool and carries no external promise.
+An optional sidecar a build tool may keep: per-paper download/verify/reject
+state, a ledger of completed build phases, and the deep-level inputs (a CV
+path, website URLs, a grants source). It is never published or listed in the
+manifest, so it uses a private integer ``schema_version`` rather than a
+``conformsTo`` IRI.
 """
 
 import json
@@ -51,12 +40,8 @@ GrantsSource = Literal["mygrants", "manual", "none"]
 
 
 class _Sidecar(BaseModel):
-    # ``validate_assignment`` closes a write/read asymmetry. Pydantic v2 does
-    # not validate on ``setattr`` by default, so every caller that mutates a
-    # loaded sidecar attribute-by-attribute could persist a value that
-    # the next ``BuildState.load`` then rejects. With it, an invalid status
-    # raises at the write site, where the offending code is, instead of at the
-    # next load, where it is not.
+    # ``validate_assignment`` makes an invalid value raise at the ``setattr``
+    # site instead of at the next ``BuildState.load``.
     model_config = ConfigDict(
         extra="allow",
         populate_by_name=True,
@@ -79,12 +64,8 @@ class PaperBuildState(_Sidecar):
 class BuildInputs(_Sidecar):
     """The supplied private resources that define a ``deep`` build.
 
-    ``lite``/``full`` need only a name + rid (everything else comes from public
-    APIs); ``deep``'s value comes precisely from what a human supplies here. A
-    deep build with none of them configured must fail its precondition. These
-    are build *inputs*: what the profile publishes is the *result* (manifest
-    entries for ``sources/cv.md`` / ``sources/web/*.md``, and the person's URLs
-    as ``sameAs``).
+    A deep build with none of them configured must fail its precondition.
+    These are inputs; the profile publishes only the results.
     """
 
     grants_source: GrantsSource | None = None
@@ -97,8 +78,8 @@ class BuildInputs(_Sidecar):
 
     #: Search hints for the identity-resolution step, such as ``department``,
     #: ``title``, ``affiliation_aliases``, or ``institution_id``. A department
-    #: and a title supplied by an operator are BUILD INPUTS, not published
-    #: claims about a person, so they ride here and never in ``profile.jsonld``.
+    #: and title supplied by an operator are build inputs, not published claims
+    #: about a person, so they never go in ``profile.jsonld``.
     resolve_hints: dict[str, Any] = {}
 
 
@@ -144,10 +125,7 @@ class BuildState(_Sidecar):
 
     @classmethod
     def path_for(cls, profile_dir: str | Path) -> Path:
-        # Build state is build-session bookkeeping: it lives in the build root
-        # (``$RESEARCHER_PROFILES_ROOT/.build/<slug>/meta/build_state.json``), not in
-        # the published content directory. ``BUILD_STATE_PATH`` is the
-        # ("meta", "build_state.json") tail; the build root supplies the head.
+        # Lives in the build root, not the published content directory.
         from .utils.paths import build_dir_for
 
         return build_dir_for(profile_dir).joinpath(*BUILD_STATE_PATH)
@@ -174,8 +152,7 @@ class BuildState(_Sidecar):
 
 
 #: The per-paper keys that belong to the build, not to ``PaperRecord``.
-#: Derived from the model so it cannot drift; ``tests/test_profile.py``
-#: asserts a published paper record contains none of them.
+#: A published paper record contains none of them.
 BUILD_STATE_PAPER_FIELDS: frozenset[str] = frozenset(PaperBuildState.model_fields)
 
 

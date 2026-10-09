@@ -1,14 +1,5 @@
 """JSON-LD primitives: the context IRI, canonical serialization, model base.
 
-This module is the single definition site for everything the on-disk JSON-LD
-format needs that is not a domain model:
-
-- :data:`CONTEXT_URL`: the hosted, versioned ``@context`` IRI.
-- :data:`PROFILE_FORMAT_IRI`: the ``conformsTo`` value (the format gate).
-- :data:`KEY_ORDER` / :data:`PAPER_KEY_ORDER`: canonical key ordering.
-- :func:`canonical_dumps`: the only writer of ``.jsonld`` bytes in this package.
-- :class:`JsonLdModel`: the shared Pydantic base for every JSON-LD document.
-
 Nothing here performs I/O against the network.
 """
 
@@ -23,10 +14,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_serializer
 def context_document_text() -> str | None:
     """Return the bundled JSON-LD ``@context`` document text, or ``None``.
 
-    The single canonical copy lives inside the package at
-    ``researcher_profiles/context/v1.jsonld``: package data in every install
-    layout (wheel, sdist, editable), so a pure ``pip install`` can self-host
-    the context when publishing a site.
+    Shipped as package data (``researcher_profiles/context/v1.jsonld``), so a
+    plain ``pip install`` can self-host the context when publishing a site.
     """
     try:
         res = resources.files("researcher_profiles").joinpath("context").joinpath("v1.jsonld")
@@ -41,20 +30,10 @@ def context_document_text() -> str | None:
 #:
 #: Published documents reference it as their ``@context``, and the vocabulary
 #: namespace is this IRI plus ``#`` (so ``rp:rid`` expands to
-#: ``…/context/v1.jsonld#rid``). The bytes are served from a domain the format's
-#: maintainers control; the canonical copy in this repo is
-#: ``context/v1.jsonld``.
+#: ``…/context/v1.jsonld#rid``).
 #:
-#: The runtime never fetches this. Loading and validating a profile is a pure
-#: local operation against the Pydantic models in ``schema/``; this IRI is an
-#: identifier and a documentation pointer, not a runtime dependency. No module
-#: on the profile load path may import ``httpx``/``urllib`` to dereference it
-#: (``tests/test_guardrails.py`` asserts this).
-#:
-#: ``profiles.databio.org`` is a domain we control, chosen over an unregistered
-#: ``w3id.org`` path (which 404s until a redirect PR is merged, so it is not a
-#: legitimate identifier yet). A w3id redirect to this URL may be added later as
-#: a vendor-neutral permanent identifier; that is a superset, not a blocker.
+#: The runtime never fetches this: it is an identifier, not a dependency. No
+#: module on the profile load path may dereference it.
 #:
 #: See ``researcher_profiles/context/README.md`` for the hosting arrangement
 #: and freeze policy.
@@ -62,11 +41,8 @@ CONTEXT_URL = "https://profiles.databio.org/context/v1.jsonld"
 
 #: The value every conforming published document carries in ``conformsTo``.
 #:
-#: The same IRI as :data:`CONTEXT_URL` today, but a DISTINCT constant: the
-#: vocabulary and the document profile are different things and may diverge at
-#: v2 (e.g. a v2 format that still references the v1 vocabulary). This replaces
-#: the integer ``schema_version: 2`` gate. An integer counter with no external
-#: meaning cannot serve a published standard.
+#: The same IRI as :data:`CONTEXT_URL`, but a distinct constant: the vocabulary
+#: and the document profile may diverge in a later version.
 PROFILE_FORMAT_IRI = "https://profiles.databio.org/context/v1.jsonld"
 
 #: Canonical top-level key order for ``profile.jsonld``. Keys not listed sort
@@ -173,9 +149,7 @@ PART_KEY_ORDER: tuple[str, ...] = (
     "inputsDigest",
 )
 
-# One merged rank map. ``canonical_dumps`` walks untyped dicts, so a single
-# ordering table is what it can actually apply; the per-document tuples above
-# remain the documented contract for each artifact.
+# One merged rank map, because ``canonical_dumps`` walks untyped dicts.
 _RANK: dict[str, int] = {
     key: i
     for i, key in enumerate(
@@ -208,10 +182,8 @@ def canonical_dumps(obj: Any) -> str:
 
     Stable key order + fixed 2-space indentation + no ASCII escaping + a
     trailing newline, so a version-controlled profile diffs cleanly and
-    re-serializing an unchanged document is a byte-level no-op.
-
-    This is the only writer of ``.jsonld`` bytes in the codebase. Callers
-    outside this package import it rather than reimplementing the ordering.
+    re-serializing an unchanged document is a byte-level no-op. The only
+    writer of ``.jsonld`` bytes in the codebase.
     """
     return json.dumps(canonicalize(obj), indent=2, ensure_ascii=False) + "\n"
 
@@ -233,11 +205,8 @@ def write_jsonld(path: str | Path, model: Any) -> Path:
 def _prune(data: dict[str, Any]) -> dict[str, Any]:
     """Drop ``None`` and empty-collection values from a serialized node.
 
-    A JSON-LD node states what is known. ``"journal": null`` is not a weaker
-    claim than an absent key, and ``"critiques": []`` is not a weaker claim
-    than no ``critiques``. Both are noise that bloats every published document
-    and every diff. Consumers must treat an absent key and an empty one
-    identically (see the baseline-required / extras-allowed posture).
+    Null and empty values are noise in every document and diff. Consumers must
+    treat an absent key and an empty one identically.
     """
     return {
         k: v
@@ -249,24 +218,14 @@ def _prune(data: dict[str, Any]) -> dict[str, Any]:
 class JsonLdModel(BaseModel):
     """Shared base for every model that serializes to a JSON-LD node object.
 
-    ``extra="allow"`` because conformance means the
-    baseline fields are present and well-formed, and additional keys are
-    permitted and preserved. Published documents keep
-    ``additionalProperties: true``; consumers must ignore unknown keys rather
-    than treat them as validation failures.
+    ``extra="allow"``: conformance means the baseline fields are present and
+    well formed; additional keys are preserved, and consumers must ignore
+    unknown keys. Only the ``@``-keywords and a few camelCase JSON-LD terms
+    carry aliases.
 
-    Only the ``@``-keywords and the handful of camelCase JSON-LD terms carry
-    aliases. Every other field has one name in both worlds, so
-    ``serialize_by_alias`` cannot reshuffle unrelated fields.
-
-    Pruning (:func:`_prune`) is a property of every JSON-LD node in this
-    format, not of any one document, so it lives here and every subclass gets
-    it. A subclass that needs to reshape a node overrides :meth:`_jsonld_node`
-    and never the serializer: that keeps the prune step last and, with it,
-    key order fixed. A ``super()``-calling override would prune before the
-    subclass re-assigned a key, moving that key to the end of the object,
-    invisible on disk (``canonical_dumps`` re-sorts) but visible in
-    ``model_dump_json()``, which is the API surface.
+    Every node is pruned (:func:`_prune`). A subclass that reshapes a node
+    overrides :meth:`_jsonld_node`, never the serializer, so pruning stays
+    last and key order stays fixed in ``model_dump_json()``.
     """
 
     model_config = ConfigDict(

@@ -1,9 +1,8 @@
 """Pydantic models for the published researcher-profiles standard.
 
-These types describe the static artifacts that ``rp render`` and ``rp site``
-emit: manifests, embedding indices, collection bundles, cluster documents, and
-topic indices. They are distinct from the on-disk *source* models in
-``schema/`` and the HTTP *wire* models in ``models/api.py``.
+The static artifacts ``rp render`` and ``rp site`` emit beyond the profile
+document itself: embedding indices, profile lists, collections, and topic
+indices.
 """
 
 from typing import Literal
@@ -26,13 +25,6 @@ class ArtifactLink(_PublishedModel):
     media_type: str
     bytes: int | None = None
     sha256: str | None = None
-
-
-# NOTE: ``PublishedManifest`` and ``PublishedPapers`` were removed in the
-# "publishable by construction" collapse. There is no separate published
-# document shape any more: ``profile.jsonld`` is the ``schema:Person`` record
-# (``ProfileDocument``) everywhere, and its manifest is ``hasPart``/``subjectOf``
-# (``ArtifactRef``). See docs/rp-spec/.
 
 
 # ---------------------------------------------------------------------------

@@ -38,8 +38,7 @@ logger = logging.getLogger(__name__)
 def _missing_ancestors(path: Path) -> list[Path]:
     """The directories in ``path``'s own chain that do not exist yet, outermost first.
 
-    Used to undo a ``mkdir(parents=True)``: only the directories this call would
-    actually create are candidates for removal on failure.
+    Used to undo a ``mkdir(parents=True)`` on failure.
     """
     missing: list[Path] = []
     p = path
@@ -53,22 +52,15 @@ def _missing_ancestors(path: Path) -> list[Path]:
 class _SiteStage:
     """Collect the collection files off to one side, then move them into ``out``.
 
-    :func:`build_site` does not own the whole output directory. The per-profile
-    folders under ``profiles/`` are written by :func:`publish_collection` and
-    ``app/`` comes from the explorer build, so a whole-directory swap would
-    destroy them. The commit granularity here is
-    therefore a single file: each staged file is moved onto its destination with
-    :func:`os.replace`, which is atomic per path on POSIX. Nothing under ``out``
-    that the build did not write is read, moved, or removed, not even the
-    directories the build shares with other producers (``collection/``,
-    ``.well-known/``), which are created if absent and otherwise left alone.
+    :func:`build_site` does not own all of ``out`` (``profiles/`` and ``app/``
+    belong to others), so commits are per file via :func:`os.replace`, atomic
+    per path on POSIX. Nothing the build did not write is read, moved, or
+    removed.
 
-    The staging tree is created *inside* ``out`` so every move is a
-    same-filesystem rename rather than a copy. Because all content is written
-    during staging, a build that raises has touched no destination at all. If a
-    move itself fails, the destinations already replaced are restored from
-    backups taken immediately before each one, so ``commit`` is all-or-nothing
-    too.
+    Staging lives inside ``out`` so moves are same-filesystem renames. A build
+    that raises touches no destination; a failed move restores the
+    destinations already replaced from per-file backups, so ``commit`` is
+    all-or-nothing.
     """
 
     def __init__(self, out: Path) -> None:
@@ -125,10 +117,8 @@ class _SiteStage:
     def _back_up(self, rel: str, dest: Path) -> Path | None:
         """Snapshot an existing ``dest`` so a later failure can put it back.
 
-        Returns ``None`` when there is nothing at ``dest``. Rolling that path
-        back means deleting what we put there. A hardlink is preferred because it
-        copies no bytes and leaves ``dest`` in place while it is taken; a
-        filesystem that refuses one falls back to a byte copy.
+        ``None`` when there is nothing at ``dest`` (rollback then deletes it).
+        Prefers a hardlink, falling back to a byte copy.
         """
         if not os.path.lexists(dest):
             return None
@@ -172,29 +162,18 @@ def build_site(
 ) -> SiteResult:
     """Write the collection files describing a set of profiles into ``out_dir``.
 
-    These are the documents about the collection. They belong to no single
-    profile: the index, the researcher-id map, the agent skill, the hosting
-    configs, the sitemap, and the JSON-LD ``@context`` copy. Each profile's own
-    ``profile.jsonld`` is read to build the index and ``by-rid`` map.
+    The index, the researcher-id map, the agent skill, the hosting configs,
+    the sitemap, and the JSON-LD ``@context`` copy. Profile folders are not
+    copied.
 
-    ``viewer`` is the audience. A profile whose own ``visibility`` the viewer
-    may not see is left out of every file (reported in
-    :attr:`SiteResult.skipped`), and every summary is projected to ``viewer``.
-    Any audience other than ``public`` also gets ``noindex`` pages and a
-    disallow-all ``robots.txt``: a non-public mirror must never be crawled.
+    A profile whose ``visibility`` the viewer may not see is left out of every
+    file (reported in :attr:`SiteResult.skipped`), and every summary is
+    projected to ``viewer``. A non-``public`` audience gets ``noindex`` pages
+    and a disallow-all ``robots.txt``: a non-public mirror must never be
+    crawled.
 
-    This does not copy profile folders; :func:`publish_collection` does, and
-    calls this for the collection files.
-
-    The write is atomic in this sense: every file is built into a staging
-    directory first and only moved into ``out`` once the whole build has
-    succeeded, so if this function raises, ``out`` is exactly as it was before
-    the call. A live site is never left half-updated. The move itself is a
-    per-path :func:`os.replace`, so a reader that opens one collection file mid
-    commit always sees a complete file, though not necessarily one from the same
-    build as its neighbour. Only the files listed above are touched: sibling
-    trees this function does not own (``profiles/``, ``app/``) are never read or
-    removed, and neither are files it does not write in directories it shares.
+    Staged, then committed per file (see :class:`_SiteStage`); if this raises,
+    ``out`` is as it was.
     """
     root = Path(profiles_root).expanduser().resolve()
     out = Path(out_dir).expanduser().resolve()
@@ -203,9 +182,7 @@ def build_site(
 
     timestamp = now_iso(now)
     result = SiteResult(out_dir=out)
-    # Staging lives inside ``out`` so the moves are same-filesystem renames. If
-    # the build fails and ``out`` did not exist beforehand, the directories this
-    # call created come back out again.
+    # On failure, remove the directories this call created.
     created = _missing_ancestors(out)
     out.mkdir(parents=True, exist_ok=True)
     stage = _SiteStage(out)
@@ -248,17 +225,15 @@ def _build_into(
 ) -> None:
     """Stage every collection file. Raising here leaves ``out`` untouched.
 
-    ``centroids`` is ``{slug: (backend_spec, centroid, probe)}`` for each
-    profile whose embeddings ship to ``viewer``, computed from the rows that
-    actually ship (:func:`publish_collection` passes it). Without it, each
-    profile's centroid is read from its own flat files (:func:`_collect_centroid`).
+    ``centroids`` is ``{slug: (backend_spec, centroid, probe)}`` computed from
+    the rows that ship to ``viewer``. Without it, each profile's centroid is
+    read from its own flat files.
     """
     no_index = no_index or viewer != "public"
     profile_summaries: list[dict[str, Any]] = []
     by_rid: dict[str, str] = {}
     slugs: list[str] = []
-    #: (slug, backend_spec, centroid_vector, probe) for every profile with a
-    #: served flat index: the raw material for the collection centroid blob.
+    #: (slug, backend_spec, centroid_vector, probe) per profile with a served flat index.
     centroid_entries: list[tuple[str, str, Any, dict | None]] = []
 
     dirs: dict[str, Path] = {}
@@ -330,10 +305,7 @@ def _build_into(
     )
 
     # ---- JSON-LD context copy -----------------------------------------
-    # Self-host the @context every published document references, so the
-    # PUBLISHED_CONTEXT_URL resolves to real bytes instead of a 404. The bytes
-    # come from the wheel-bundled copy on a pip install, or the repo-root copy
-    # in a source checkout (see jsonld.context_document_text).
+    # Self-host the @context so PUBLISHED_CONTEXT_URL resolves.
     from ..schema.jsonld import context_document_text
 
     context_text = context_document_text()

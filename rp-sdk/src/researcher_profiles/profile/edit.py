@@ -1,55 +1,19 @@
 """``prof.edit``: the owner edit surface and the policy behind it.
 
-The push primitive (``PUT /profiles/{slug}``) replaces a whole profile directory
-from a tarball, the right shape for a build tool, the wrong shape for a
-human tweaking their name in a form. The *interactive* edit surface is
-``prof.edit.patch_metadata`` / ``prof.edit.set_soul`` /
-``prof.edit.set_visibility``, exposed by :class:`EditManager`. The manager
-coordinates those related owner mutations; persistence still goes through the
-profile's ``ArtifactStorage``.
+An owner may edit every content field of the profile document, including
+every field the build AI writes, so they can correct what a model guessed
+without a rebuild. Only :data:`LOCKED_METADATA_FIELDS` is off limits.
+``personality/expertise.md`` cites paper ids, so no edit route reaches it.
 
-What stays policy and shared: the editable field sets, the structured-field
-coercion, :class:`EditError`, and :func:`select_parts` (the one visibility
-selector, used by both the canonical edit path and a host's patch layer, so
-the two cannot disagree about what a patch addresses).
+Every mutation applies the patch to a copy and round-trips it through
+:class:`~researcher_profiles.schema.ProfileDocument` before anything is
+persisted, so a rejected patch never reaches the store.
 
-What an owner may edit is every content field of the profile document,
-including every field the build AI writes (``career_stage``, ``critiques``,
-``collaborators``, and the rest): an owner can always correct what a model
-guessed about them, without paying for a rebuild. Only a short list is locked
-(:data:`LOCKED_METADATA_FIELDS`): identity and proof, facts code computes from
-the corpus (``paper_stats``, ``anchor``, ...), the file manifest, format
-markers and bookkeeping, and visibility, which has its own route. The
-bibliographic fields of one work are a separate surface
-(:data:`EDITABLE_WORK_FIELDS`). ``personality/expertise.md`` is an artifact,
-not a document field: it cites paper ids, so no edit route reaches it even
-though ``save_expertise`` exists.
-
-Structured fields (``training``, ``career``, ``career_stage``,
-``research_outputs``, ...) arrive here as plain dicts and are validated by the
-same round-trip through :class:`~researcher_profiles.schema.ProfileDocument`
-as every other field, so a malformed entry is a 400 and nothing is persisted.
-
-Every mutation:
-
-1. loads the current document,
-2. applies the patch to a copy,
-3. re-validates by round-tripping the copy through
-   :class:`~researcher_profiles.schema.ProfileDocument` (so provenance
-   invariants, rid rules, and schema constraints are enforced exactly as on
-   load), and only then
-4. persists the canonical bytes.
-
-Steps 3 and 4 happen inside ``save_profile``, which validates before it calls
-its storage backend, so a rejected patch never reaches the store and
-raises :class:`EditError`.
-
-One distinction that must not be blurred: a bad patch is the caller's fault and
-becomes an :class:`EditError` (HTTP 400); a failing pre-commit hook is the
-server's fault and propagates as
-:class:`~researcher_profiles.errors.WriteHookError` (HTTP 500). That is why the
-methods catch :class:`~researcher_profiles.errors.ProfileWriteError` only, and
-never bare ``Exception``.
+A bad patch is the caller's fault and becomes an :class:`EditError` (HTTP
+400); a failing pre-commit hook is the server's fault and propagates as
+:class:`~researcher_profiles.errors.WriteHookError` (HTTP 500). That is why
+the methods catch :class:`~researcher_profiles.errors.ProfileWriteError`
+only, never bare ``Exception``.
 """
 
 import hashlib
@@ -89,16 +53,12 @@ class EditError(ProfileError):
 class WorkNotFoundError(EditError):
     """No work in this profile carries the requested ``paper_id``.
 
-    A subclass rather than a message, because the edit routes owe the caller
-    a 404 here and a 400 for every other bad work edit: "you named a paper
-    that is not in this corpus" and "you sent a field you may not set" are
-    different mistakes and a caller retries them differently.
+    A subclass so the edit routes can answer 404 here and 400 for every other
+    bad work edit.
     """
 
 
-#: The fields no owner edit may touch. Everything else in the profile
-#: document is editable, including every field the build AI writes: an
-#: owner can always correct what a model guessed about them.
+#: The fields no owner edit may touch.
 LOCKED_METADATA_FIELDS: frozenset[str] = frozenset(
     {
         # identity and proof: who the profile is about
@@ -142,12 +102,8 @@ EDITABLE_METADATA_FIELDS: frozenset[str] = (
     frozenset(ProfileDocument.model_fields) - LOCKED_METADATA_FIELDS
 )
 
-#: The fields of one work an owner may patch through the interactive edit
-#: surface. Bibliographic facts a person can see are wrong on their own record:
-#: a missing DOI, a citation string that names the wrong journal, a full-text
-#: link that rotted. ``paper_id`` is not here because it is the selector, and
-#: neither are the pipeline-derived counts (``cited_by_count``,
-#: ``author_index``, ``total_authors``), which come from the corpus build.
+#: The fields of one work an owner may patch: bibliographic facts. Not
+#: ``paper_id`` (the selector) or the counts the corpus build derives.
 EDITABLE_WORK_FIELDS: frozenset[str] = frozenset(
     {
         "doi",
@@ -165,15 +121,9 @@ EDITABLE_WORK_FIELDS: frozenset[str] = frozenset(
     }
 )
 
-#: Editable fields whose values are objects, not scalars or string lists.
-#: A patch delivers them as plain dicts (that is what JSON is), and
-#: ``model_copy`` does not validate, so they are parsed into their schema models
-#: here. This is not a second set of rules. It is the same
-#: :class:`~researcher_profiles.schema.Training` /
-#: :class:`~researcher_profiles.schema.CareerEntry` the document round-trip
-#: would apply, only applied early enough that the copied document is
-#: well-typed and the failure is a 400 naming the offending entry rather than a
-#: serializer warning about a dict where a model was expected.
+#: Editable list fields whose items are objects. A patch delivers plain dicts
+#: and ``model_copy`` does not validate, so they are parsed here, early enough
+#: that a failure is a 400 naming the offending entry.
 STRUCTURED_METADATA_FIELDS: dict[str, type[BaseModel]] = {
     "training": Training,
     "career": CareerEntry,
@@ -236,8 +186,8 @@ def _coerce_structured(patch: dict[str, Any]) -> dict[str, Any]:
 def _declare_text_interests(doc: ProfileDocument, patch: dict[str, Any]) -> dict[str, Any]:
     """Turn a patch of the plain interest lists into declared typed entries.
 
-    The plain lists are a projection of ``research_interests``, so a patch to
-    them is recorded where the projection reads from. For each patched list
+    The plain lists are a projection of ``research_interests``, so a patch is
+    recorded there. For each patched list
     (``interests`` is +0.5, ``not_interests`` is -0.5):
 
     - a label that names a coded concept already projected into the same list
@@ -255,9 +205,8 @@ def _declare_text_interests(doc: ProfileDocument, patch: dict[str, Any]) -> dict
     now = datetime.now(timezone.utc).replace(microsecond=0)
     base = list(patch.get("research_interests", doc.research_interests))
     if not base:
-        # A profile that predates typed interests: its plain lists are the
-        # builder's, so they become the same entries a build now writes, and
-        # the list this patch does not touch survives.
+        # No typed interests yet: convert the plain lists so the list this
+        # patch does not touch survives.
         base = interests_from_text(
             doc.interests, doc.not_interests, generator="llm", method="inferred", asserted_at=now
         )
@@ -316,10 +265,8 @@ def paper_version(record: PaperRecord) -> str:
     """First 16 hex of sha256 over the canonical JSON of one work (64 bits).
 
     The concurrency token for one work. A work edit does not move the
-    profile's ``content_hash`` (that digest spans the document and the SOUL),
-    so without this two editors fixing the same paper overwrite each other
-    silently. Computed from the record as served, so any change to the record
-    changes it.
+    profile's ``content_hash``, so without this two editors fixing the same
+    paper overwrite each other silently.
     """
     data = record.model_dump(mode="json", by_alias=True, exclude_none=True)
     return hashlib.sha256(canonical_dumps(data).encode("utf-8")).hexdigest()[:16]
@@ -338,10 +285,8 @@ def select_parts(entry: dict[str, Any], parts: list[ArtifactRef]) -> list[Artifa
 
     One selector per entry, in precedence order ``content_url`` -> ``paper_id``
     -> ``role``. A ``role`` selector matches every part with that role, not
-    the first hit: "hide my paper summaries" must hide all sixty-three, not
-    one. This is the one selector, shared by the canonical edit path and a
-    host's patch layer, so the two cannot disagree about what a patch
-    addresses.
+    the first hit. Shared by the edit path and a host's patch layer so the
+    two cannot disagree.
     """
     out: list[ArtifactRef] = []
     for p in parts:
@@ -403,16 +348,9 @@ class EditManager:
     def patch_work(self, paper_id: str, patch: dict[str, Any]) -> PaperRecord:
         """Patch one record in ``sources/papers.jsonld`` and persist the corpus.
 
-        The granular counterpart of :meth:`patch_metadata` for works: a wrong
-        DOI on one paper is a one-field fix, and the only transport it had was
-        a whole-profile push. Only the fields present are applied, and only
-        those in :data:`EDITABLE_WORK_FIELDS`.
-
-        The patched record is round-tripped through :class:`PaperRecord` before
-        anything is written, so a bad value is an :class:`EditError` (a 400)
-        rather than a corrupt ``papers.jsonld``. List order is preserved: the
-        corpus order is the published reading order and a patch is not a
-        reordering.
+        Only fields in :data:`EDITABLE_WORK_FIELDS` are accepted. A bad value
+        raises :class:`EditError` before anything is written. Corpus order is
+        preserved.
         """
         if not isinstance(patch, dict):
             raise EditError("work patch must be an object")
@@ -427,10 +365,7 @@ class EditManager:
         index = _find_work(papers, paper_id)
         if not patch:
             return papers[index]
-        # Merge into the serialized record rather than ``model_copy``: the patch
-        # speaks the on-disk names (``datePublished``, not ``year``), and
-        # ``model_copy`` assigns attributes without validating, so a bad value
-        # would reach the serializer instead of this ``EditError``.
+        # The patch uses on-disk names, and ``model_copy`` does not validate.
         merged = {**papers[index].model_dump(by_alias=True), **patch}
         try:
             updated = PaperRecord.model_validate(merged)
@@ -470,11 +405,8 @@ class EditManager:
     def _save_works(self, papers: list[PaperRecord]) -> None:
         """Persist the corpus, then restamp the manifest entry describing it.
 
-        ``save_papers`` writes the file and nothing else, so the manifest's
-        ``bytes``/``sha256`` for ``sources/papers.jsonld`` would go on
-        describing the pre-edit bytes. ``build_manifest(write=True)`` is the
-        one helper that restamps them, and it persists through ``save_profile``,
-        which moves ``dateModified`` with the content.
+        Otherwise the manifest's ``bytes``/``sha256`` would describe the
+        pre-edit file.
         """
         try:
             self._profile.save_papers(papers)
@@ -491,11 +423,9 @@ class EditManager:
     ) -> tuple[ProfileDocument, int]:
         """Set the profile-level, per-artifact, and per-section privacy tiers.
 
-        Sections are the inline fields of the document (summary, focus,
-        methods, the clinical block). They belong here rather than on the
-        metadata patch because a tier is a privacy decision: this is the one
-        surface that knows about the host ceiling, and a second way to set a
-        tier is a second privacy implementation.
+        Sections are the inline fields of the document. Tiers are set only
+        here, never through the metadata patch, so there is one privacy
+        implementation.
         """
         valid_tiers = {"public", "limited", "private"}
 
@@ -512,9 +442,7 @@ class EditManager:
         doc = self._profile.metadata
         update: dict[str, Any] = {}
         changed = 0
-        # The manifest copies are built lazily: an artifacts patch needs them,
-        # and so does a `soul` section entry (which re-tiers the SOUL artifact),
-        # so whichever runs first materializes them and the other reuses them.
+        # Manifest copies, built on first use by an artifact or `soul` entry.
         new_has_part: list[ArtifactRef] | None = None
         new_subject_of: list[ArtifactRef] | None = None
 
@@ -551,10 +479,8 @@ class EditManager:
                 if declared.get(parsed.section) != parsed.visibility:
                     changed += 1
                 declared[parsed.section] = parsed.visibility
-                # SOUL is an artifact, not an inline field, so the section tier
-                # governs personality/SOUL.md only if it reaches the manifest.
-                # Re-tier every `soul` part to the same tier so this one row is
-                # the single owner-facing knob and the file follows it.
+                # SOUL is an artifact, so the section tier must reach the
+                # manifest: re-tier every `soul` part to match.
                 if parsed.section == "soul":
                     _retier({"role": "soul", "visibility": parsed.visibility}, parsed.visibility)
             update["section_visibility"] = [

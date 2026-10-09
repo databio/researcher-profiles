@@ -1,14 +1,11 @@
 """The host seams, one field per seam, kept on ``app.state.hooks``.
 
 Every seam but the first takes a :class:`~researcher_profiles.api.caller.Caller`,
-never a ``Request``, so a service function can run them with no HTTP in the
-way (a host's MCP server calls the same functions the routes do). A bare
-rp-sdk server leaves them at their defaults:
+never a ``Request``, so service functions can run them without HTTP.
 
 ``caller_resolver(request) -> Caller``
-    The HTTP adapter's one job: who is this request. Default:
-    :func:`researcher_profiles.api.deps.default_caller_resolver` (operator
-    token, else a consumer identity, else anonymous).
+    Who is this request. Default:
+    :func:`researcher_profiles.api.deps.default_caller_resolver`.
 ``viewer_resolver(caller, slug | None) -> ViewerTier``
     The most permissive tier this caller may be shown for that profile.
     Default: :func:`researcher_profiles.api.deps.resolve_viewer_tier`.
@@ -17,15 +14,18 @@ rp-sdk server leaves them at their defaults:
 ``edit_gate(caller, profile, *, read_ok=False, ref) -> None``
     May this caller edit this profile at all (``read_ok``: or read its owner
     tooling, the visibility report). ``ref`` is how the caller named the
-    profile, for a refusal that must not disclose its resolved slug. Raises
-    ``Unauthenticated``, ``Forbidden`` or ``NotFound``. ``None``: the operator credential (or open mode, no token
-    configured) edits, nobody else.
+    profile, so a refusal never discloses its resolved slug. Raises
+    ``Unauthenticated``, ``Forbidden`` or ``NotFound``. ``None``: only the
+    operator credential (or open mode) edits. A missing profile is
+    ``NotFound`` before the gate runs, so the gate must answer ``NotFound``
+    to an unauthenticated caller for any profile it may not see
+    (``Unauthenticated`` only where the profile is visible anyway), or the
+    refusal discloses a held-back profile.
 ``write_scope(caller, profile, action, detail) -> None``
     May this caller make this specific write. Raises ``InsufficientScope`` or
     ``Forbidden``. ``None``: every write the edit gate admitted is allowed.
 ``record_edit(caller, profile, action, fields, content_hash) -> None``
-    Called by every edit function after its write commits; where a host
-    writes its audit row.
+    Called after every edit commits; where a host writes its audit row.
 ``registry_proofs(rid) -> list[Proof]``
     The registry-issued proofs to attach to a served document.
 ``store_for(caller, store) -> ProfileStore``

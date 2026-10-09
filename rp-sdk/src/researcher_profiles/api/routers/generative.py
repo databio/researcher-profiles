@@ -1,14 +1,12 @@
-"""The persona endpoints, gated by the ``persona`` consumer scope.
+"""The persona endpoints (LLM answers in one profile's voice), gated by the ``persona`` scope.
 
-``ask``, ``review``, ``innovate`` and ``riff`` all put a question to an LLM in
-the voice of one profile, and all four degrade the same way when no persona is
-available.
+All four answer 409 when no persona is available.
 """
 
 import logging
 from typing import Any
 
-from fastapi import Depends, HTTPException, Request
+from fastapi import Depends, HTTPException
 
 from ...models.api import (
     AskRequest,
@@ -22,23 +20,11 @@ from ...models.api import (
     RiffRequest,
 )
 from ...models.results import GenerativeParseError, PersonaUnavailableError
-from ...privacy import (
-    ViewerTier,
-)
-from ...store import ProfileStore
 from .._limits import PERSONA_K_CAP, clamp
-from .._projection import (
-    _allowed_source_types,
-    _gate_profile,
-)
-from ..deps import (
-    get_caller,
-    get_profile,
-    get_service,
-    get_store,
-    get_viewer_tier,
-    require_scope,
-)
+from .._projection import _allowed_source_types
+from ..caller import Caller
+from ..deps import get_read_caller, get_service, require_scope
+from ..service import Service
 from ._routers import router
 
 logger = logging.getLogger(__name__)
@@ -82,12 +68,10 @@ def _llm_response(text_obj: Any, k_applied: int) -> LLMTextResponse:
 def ask_profile(
     slug: str,
     body: AskRequest,
-    request: Request,
-    store: ProfileStore = Depends(get_store),
-    viewer: ViewerTier = Depends(get_viewer_tier),
+    service: Service = Depends(get_service),
+    caller: Caller = Depends(get_read_caller),
 ) -> LLMTextResponse:
-    prof = get_profile(slug, store)
-    _gate_profile(get_service(request), get_caller(request), prof, viewer, slug)
+    _store, prof, viewer = service.read(caller, slug)
     k = clamp(body.k, 5, PERSONA_K_CAP)
     try:
         resp = prof.persona.ask(
@@ -116,12 +100,10 @@ def ask_profile(
 def review_profile(
     slug: str,
     body: ReviewRequest,
-    request: Request,
-    store: ProfileStore = Depends(get_store),
-    viewer: ViewerTier = Depends(get_viewer_tier),
+    service: Service = Depends(get_service),
+    caller: Caller = Depends(get_read_caller),
 ) -> LLMTextResponse:
-    prof = get_profile(slug, store)
-    _gate_profile(get_service(request), get_caller(request), prof, viewer, slug)
+    _store, prof, viewer = service.read(caller, slug)
     k = clamp(body.k, 5, PERSONA_K_CAP)
     try:
         resp = prof.persona.review(
@@ -150,12 +132,10 @@ def review_profile(
 def innovate_profile(
     slug: str,
     body: InnovateRequest,
-    request: Request,
-    store: ProfileStore = Depends(get_store),
-    viewer: ViewerTier = Depends(get_viewer_tier),
+    service: Service = Depends(get_service),
+    caller: Caller = Depends(get_read_caller),
 ) -> IdeaList:
-    prof = get_profile(slug, store)
-    _gate_profile(get_service(request), get_caller(request), prof, viewer, slug)
+    _store, prof, viewer = service.read(caller, slug)
     k = clamp(body.k, 12, PERSONA_K_CAP)
     try:
         ideas = prof.persona.innovate(
@@ -196,12 +176,10 @@ def innovate_profile(
 def riff_profile(
     slug: str,
     body: RiffRequest,
-    request: Request,
-    store: ProfileStore = Depends(get_store),
-    viewer: ViewerTier = Depends(get_viewer_tier),
+    service: Service = Depends(get_service),
+    caller: Caller = Depends(get_read_caller),
 ) -> RiffList:
-    prof = get_profile(slug, store)
-    _gate_profile(get_service(request), get_caller(request), prof, viewer, slug)
+    _store, prof, viewer = service.read(caller, slug)
     k = clamp(body.k, 4, PERSONA_K_CAP)
     try:
         riffs = prof.persona.riff(
@@ -224,9 +202,3 @@ def riff_profile(
         items=[RiffPayload(angle=r.angle, text=r.text, related_work=r.related_work) for r in riffs],
         k_applied=k,
     )
-
-
-# Streaming upgrade path (deferred):
-# - Add /api/v1/profiles/{slug}/ask/stream returning text/event-stream
-#   via sse-starlette EventSourceResponse, and a matching async generator
-#   on the client.

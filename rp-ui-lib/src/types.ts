@@ -39,10 +39,8 @@ export interface ResearcherProfileWireContract {
 /**
  * One artifact's tier, and why: the read side of the visibility API.
  *
- * Every field is computed by ``privacy.explain_tiers``; nothing here is a
- * restatement of the rule in prose. ``visible_to`` and the report's ``counts``
- * come from ``privacy.tier_allows``, so an interface renders a consequence
- * ("a stranger can see 0 of 63 items") instead of teaching a tier lattice.
+ * Computed by ``privacy.explain_tiers``; ``visible_to`` comes from
+ * ``privacy.tier_allows``.
  */
 export interface ArtifactTier {
   content_url: string;
@@ -79,9 +77,7 @@ export interface FileList {
 /**
  * One paper as the static publisher and ``rp-ui-lib`` list it.
  *
- * Not an HTTP response model any more: ``GET /profiles/{slug}/papers``
- * answers with :class:`PaperPage`. Kept because the static ``papers`` view
- * and the generated ``rp-ui-lib`` types are built from it.
+ * The HTTP read is :class:`PaperPage`.
  */
 export interface PaperEntry {
   authors?: string[] | null;
@@ -209,11 +205,8 @@ export interface PassageRequest {
 /**
  * The whole-profile display shape: metadata, both narratives, the manifest.
  *
- * Not an HTTP response model any more: ``GET /profiles/{slug}`` answers with
- * :class:`ProfileRecord`. This is the shape the static publisher writes
- * (``payloads.profile_detail_dict``), the shape ``rp-ui-lib`` renders (its
- * ``types.ts`` is generated from it), and the in-memory shape a host's
- * overlay and lens compositing work on.
+ * The shape the static publisher writes and ``rp-ui-lib`` renders. The HTTP
+ * read is :class:`ProfileRecord`.
  */
 export interface ProfileDetail {
   content_hash?: string | null;
@@ -232,13 +225,8 @@ export interface ProfileDetail {
  * Wire shape of ``profile.jsonld``-derived metadata.
  *
  * Mirrors the on-disk :class:`~researcher_profiles.schema.ProfileDocument`
- * but uses ``extra="allow"`` so arbitrary keys round-trip cleanly between
- * server and client. This is not JSON-LD: the wire contract and
- * the on-disk format evolve independently, and a client that wants the
- * published bytes fetches ``/profiles/{slug}/profile.jsonld`` instead.
- *
- * The derived ``orcid`` field is gone: ``rid`` is the join key and
- * ``orcid_of(rid)`` is one call away.
+ * but allows extra keys and is not JSON-LD. For the published bytes, fetch
+ * ``/profiles/{slug}/profile.jsonld``.
  */
 export interface ProfileMetadataPayload {
   affiliation?: string | null;
@@ -318,6 +306,7 @@ export interface ProfileRecord {
 }
 export interface ProfileSummary {
   affiliation?: string | null;
+  clinical?: boolean;
   contaminated_count?: number;
   field?: string | null;
   fulltext_pct?: number;
@@ -332,10 +321,8 @@ export interface ProfileSummary {
 /**
  * One inline section's declared tier.
  *
- * Sections travel on the visibility patch rather than the metadata patch
- * because a tier is a privacy decision, not a display field: the one surface
- * that knows about host floors and the full-text lock has to be the one that
- * sets them.
+ * Set through the visibility patch, not the metadata patch, because only
+ * that surface knows about host floors and the full-text lock.
  */
 export interface SectionTier {
   section: string;
@@ -343,14 +330,10 @@ export interface SectionTier {
   [k: string]: unknown;
 }
 /**
- * One inline section's tiers, and who they let in: the read side of the
- * section mechanism.
+ * One inline section's tiers, and who they let in.
  *
- * A section has both a tier the owner *declared* and a tier that actually
- * *governs* after the profile default folds in, and an editor has to show
- * both: the control sits on ``declared``, the "resolves to" badge on
- * ``effective``. The old report collapsed the two into one ``{section: tier}``
- * map, so an owner could not tell what they set from what it became.
+ * ``declared`` is what the owner set; ``effective`` is what governs after
+ * the profile default folds in.
  */
 export interface SectionTierReport {
   declared: string;

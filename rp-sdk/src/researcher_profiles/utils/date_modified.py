@@ -3,11 +3,9 @@
 The consumer contract reads it as *when the profile document was last
 regenerated* (``docs/rp-spec/index.md`` §3.1, ``docs/rp-spec/static-api.md``
 §9) and feeds it to the staleness
-disclosure a persona must deliver. That makes it a claim about the document's
-**content**, not about the machinery that produced it. A build time, or
-``datetime.now()`` at serialization time, would make an untouched profile
-announce "last updated today", which converts a useful vintage into a
-confident lie (databio/researcher-profiles#1).
+disclosure a persona must deliver. So it is a claim about the document's
+**content**: a build time would make an untouched profile announce "last
+updated today" (databio/researcher-profiles#1).
 
 So the trigger is the content itself: :func:`stamp_date_modified` compares the
 document about to be written against the one already on disk, ignoring
@@ -27,14 +25,9 @@ Comparison is on the *serialized* document, so a caller must apply this after
 collections, and comparing an un-normalized input dict against a normalized
 file would report a change on every write.
 
-This module does not consult ``SOURCE_DATE_EPOCH``. Every
-*build* stamp in the package does, through
-:func:`researcher_profiles.utils.clock.now_iso`. But ``dateModified`` is a claim
-about content, and a pinned epoch could only make that claim false. The wall
-clock it does use, :func:`researcher_profiles.utils.clock.utc_now_iso`, is defined
-next to ``now_iso`` so the split between the two is visible in one place.
-
-Pure stdlib: a policy function plus one disk read.
+This module does not consult ``SOURCE_DATE_EPOCH``: a pinned epoch could only
+make a content claim false. It uses
+:func:`researcher_profiles.utils.clock.utc_now_iso`.
 """
 
 import json
@@ -64,9 +57,7 @@ PROFILE_FILE = "profile.jsonld"
 def _published_content(doc: Any) -> dict[str, Any]:
     """Everything a consumer reads except the stamp itself.
 
-    ``dateModified`` is excluded because it is the *answer*: including it
-    would make every stamped document differ from its unstamped predecessor
-    and the field would advance on every write, which is the bug.
+    ``dateModified`` is excluded, or it would advance on every write.
 
     Nothing else is excluded. Manifest ``bytes``/``sha256`` entries look
     volatile but are not: they move only when an artifact's bytes move, and
@@ -80,9 +71,7 @@ def _published_content(doc: Any) -> dict[str, Any]:
 def content_changed(new_doc: Any, previous_doc: Any) -> bool:
     """Whether ``new_doc`` says anything different from ``previous_doc``.
 
-    Key order is not content (both operands are compared as mappings), so a
-    change to the canonical key order in ``researcher_profiles.schema.jsonld`` does
-    not fraudulently advance every profile's vintage.
+    Key order is not content: both operands are compared as mappings.
     """
     return _published_content(new_doc) != _published_content(previous_doc)
 
@@ -105,14 +94,10 @@ def stamp_date_modified(
         Leave the field absent. We do not know when this content was written
         and the spec forbids guessing.
 
-    Any ``dateModified`` already present in ``new_doc`` is treated as carried
-    over from the document that was loaded, never as an authoritative value:
-    a caller typically loads ``profile.jsonld``, mutates a few keys and saves
-    it back, so honouring the incoming value would freeze the stamp at whatever
-    the first write produced.
+    Any ``dateModified`` already in ``new_doc`` is ignored as a leftover from
+    the loaded document; honouring it would freeze the stamp.
 
-    ``now`` accepts a datetime (injected by tests, so no test has to sleep) or
-    a pre-formatted string.
+    ``now`` accepts a datetime or a pre-formatted string.
     """
     out = dict(new_doc)
     if content_changed(new_doc, previous_doc):

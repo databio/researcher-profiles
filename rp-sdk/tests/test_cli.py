@@ -795,7 +795,7 @@ class _StubServer:
         self.manifest = manifest
         self.capabilities = capabilities
         self.summary = summary
-        #: A 403 body the PUT answers with (inside ``detail``), as Prosopia does.
+        #: A 403 body the PUT answers with (inside ``detail``), as a host does.
         self.refuse = refuse
         self.puts: list[tuple[str, bytes]] = []
 
@@ -902,8 +902,9 @@ class TestPushPreflight:
 
         err = capsys.readouterr().err
         assert stub.puts == []
-        assert "removed (1):" in err and "sources/web/gone.md" in err
-        assert "--force" in err
+        assert "push refused [would-remove]: 1 server file(s)" in err
+        assert "sources/web/gone.md" in err
+        assert "--merge" in err and "--force" in err
         assert "Traceback" not in err
 
     def test_a_dry_run_reports_removals_instead_of_refusing(self, server, jane_doe_dir, capsys):
@@ -947,7 +948,7 @@ class TestPushPreflight:
         assert main(argv) == 2
 
         assert stub.puts == []
-        assert "--prune" in capsys.readouterr().err
+        assert "--prune conflicts with --only/--merge" in capsys.readouterr().err
 
     def test_a_merge_dry_run_names_the_mode_and_removes_nothing(self, server, jane_doe_dir, capsys):
         server([{"contentUrl": "sources/web/keep.md", "role": "web", "sha256": "abc"}])
@@ -968,6 +969,7 @@ class TestPushPreflight:
 
         err = capsys.readouterr().err
         assert stub.puts == []
+        assert "push refused [legacy-cache]: 1 file(s)" in err
         assert "cache/embeddings.sqlite" in err
         assert "rp manifest --write" in err
 
@@ -992,8 +994,9 @@ class TestPushPreflight:
 
         err = capsys.readouterr().err
         assert stub.puts == []
+        assert "push refused [partial-copy]: 1 manifest entry(ies)" in err
         assert "sources/papers/ghost.md" in err
-        assert "rp where" in err
+        assert "rp where" in err and "--only" in err
         assert "Traceback" not in err
 
     def test_push_only_takes_the_manifest_from_the_server(self, server, jane_doe_dir, capsys):
@@ -1059,7 +1062,8 @@ class TestPushPreflight:
         assert main(["push", str(jane_doe_dir), "--url", "http://x"]) == 2
         err = capsys.readouterr().err
         assert stub.puts == []
-        assert "push refused:" in err
+        assert "push refused [would-remove]: 2 server file(s)" in err
+        assert "manifest 3 -> " in err
 
     def test_a_server_that_splices_reports_respliced_not_removed(
         self, server, jane_doe_dir, capsys
@@ -1092,7 +1096,7 @@ class TestPushPreflight:
 
         err = capsys.readouterr().err
         assert stub.puts == []
-        assert "push modes" in err
+        assert "push refused [mode-unknown]:" in err and "mode=merge" in err
         # The default mode is what such a server does anyway, so it still works.
         assert main(["push", str(jane_doe_dir), "--url", "http://x"]) == 0
         assert len(stub.puts) == 1
@@ -1115,10 +1119,10 @@ class TestPushPreflight:
 
         err = capsys.readouterr().err
         assert len(stub.puts) == 1
-        assert "push refused: nothing was written." in err
+        assert "push refused [insufficient-access]:" in err
         assert "needs Write on: summary" in err
-        assert "provenance_note" in err and "Replace whole profiles" in err
-        assert "--only" in err
+        assert '"Replace whole profiles" for: provenance_note' in err
+        assert "next: --only <file>" in err
         assert "Traceback" not in err
 
     def test_a_part_refusal_under_only_blames_the_document(self, server, jane_doe_dir, capsys):
@@ -1200,7 +1204,7 @@ class TestErrorHandling:
         assert "Traceback" not in capsys.readouterr().err
 
 
-#: What Prosopia's ``GET /api/manage/agent/whoami`` answers, trimmed.
+#: What a host's ``GET /api/manage/agent/whoami`` answers, trimmed.
 WHOAMI = {
     "principal": {"kind": "consumer", "label": "summary bot", "handle": "agent_1a2b3c"},
     "owner": {"orcid": "0000-0002-1825-0097", "name": "Jane Doe"},
@@ -1450,3 +1454,18 @@ class TestPluginSeam:
 
         monkeypatch.setattr("importlib.metadata.entry_points", lambda **kw: [_Boom()])
         assert main(cases.argv(["list", "--root", "{empty}"])) == 0
+
+
+def test_work_assignments_only_decode_typed_fields():
+    from researcher_profiles.cli._work import _parse_assignments
+
+    got = _parse_assignments(
+        ["name=1984", "title=NaN", "datePublished=2023", "is_corresponding=true", "summary=null"]
+    )
+    assert got == {
+        "name": "1984",
+        "title": "NaN",
+        "datePublished": 2023,
+        "is_corresponding": True,
+        "summary": "null",
+    }

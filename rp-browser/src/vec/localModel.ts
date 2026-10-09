@@ -19,9 +19,7 @@ export type ProgressCallback = (progress: ModelLoadProgress) => void;
 let pipeline: any = null;
 let loading: Promise<void> | null = null;
 
-/**
- * Ensure the embedding model is loaded. Reports progress for the first load.
- */
+/** Ensure the embedding model is loaded, reporting progress on first load. */
 export async function ensureModel(
   onProgress?: ProgressCallback,
 ): Promise<void> {
@@ -32,13 +30,11 @@ export async function ensureModel(
     onProgress?.({ status: "loading", progress: 0 });
 
     try {
-      // Dynamic import so the model code is only loaded when needed
       const { pipeline: createPipeline, env } = await import(
         "@huggingface/transformers"
       );
 
-      // Self-host configuration. Paths hang off BASE_URL, not "./", so they
-      // resolve the same from any route and any bundle location.
+      // Paths hang off BASE_URL, not "./", so they resolve from any route.
       const base = import.meta.env.BASE_URL;
       const allowRemote = import.meta.env.VITE_RP_ALLOW_REMOTE_MODELS === "1";
       env.allowRemoteModels = allowRemote;
@@ -46,8 +42,7 @@ export async function ensureModel(
         env.allowLocalModels = true;
         env.localModelPath = `${base}models/`;
       }
-      // onnxruntime-web .wasm/.mjs files copied to /ort/ by vite.config.ts.
-      // Without this, ORT fetches them from a CDN.
+      // ORT runtime files copied to /ort/ by vite.config.ts; otherwise ORT uses a CDN.
       const wasm = env.backends.onnx.wasm;
       if (wasm) wasm.wasmPaths = `${base}ort/`;
 
@@ -79,9 +74,8 @@ export async function ensureModel(
 }
 
 /**
- * Embed a query string using the local model.
- * Uses mean pooling and L2 normalization, matching what sentence-transformers'
- * all-MiniLM-L6-v2 produces.
+ * Embed a query with mean pooling and L2 normalization, matching
+ * sentence-transformers' all-MiniLM-L6-v2.
  */
 export async function embedQuery(text: string): Promise<Float32Array> {
   await ensureModel();

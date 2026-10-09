@@ -65,9 +65,7 @@ export async function fetchJson<T>(url: string): Promise<FetchOutcome<T>> {
     const contentType = res.headers.get("Content-Type");
 
     if (!res.ok) {
-      // 401/403 get their own state (a private registry, not a
-      // publishing defect). Split them out of the generic "http" bucket
-      // so every consumer can render them differently.
+      // 401/403 mean a private registry, not a publishing defect.
       if (res.status === 401 || res.status === 403) {
         return {
           ok: false,
@@ -123,8 +121,7 @@ export async function fetchJson<T>(url: string): Promise<FetchOutcome<T>> {
   } catch (err) {
     clearTimeout(timer);
 
-    // Two-probe CORS detection: re-probe with no-cors to distinguish CORS
-    // from network failure.
+    // Two-probe CORS detection (see module docstring).
     try {
       const probeController = new AbortController();
       const probeTimer = setTimeout(() => probeController.abort(), 5000);
@@ -134,8 +131,6 @@ export async function fetchJson<T>(url: string): Promise<FetchOutcome<T>> {
         signal: probeController.signal,
       });
       clearTimeout(probeTimer);
-      // no-cors probe resolved (opaque response, status 0): origin is
-      // reachable but CORS headers are missing or wrong.
       void probe;
       return {
         ok: false,
@@ -148,7 +143,6 @@ export async function fetchJson<T>(url: string): Promise<FetchOutcome<T>> {
           "two-probe test (cors fetch rejected, no-cors probe succeeded).",
       };
     } catch {
-      // Both cors and no-cors failed: genuine network/DNS/TLS/offline issue.
       return {
         ok: false,
         kind: "network",

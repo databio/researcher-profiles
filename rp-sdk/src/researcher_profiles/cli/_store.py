@@ -289,9 +289,7 @@ _DB_HANDLERS: dict[str, Callable[..., int]] = {
 def _cmd_db(args: argparse.Namespace) -> int:
     """Handle the ``db`` verb group (the SQL profile store).
 
-    Every branch prints which database it acted on. A store command whose
-    output does not name its store is one config file away from a confident
-    report about the wrong database.
+    Every branch prints which database it acted on.
     """
     from ..store.config import DatabaseUrlNotConfigured, resolve_database_url
 

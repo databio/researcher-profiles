@@ -1,16 +1,8 @@
-"""The on-disk sqlite-vec index file: connect, schema, meta, vector codec.
+"""Low-level operations on ``<profile>/.cache/embeddings.sqlite``.
 
-One place for every low-level operation on ``<profile>/.cache/embeddings.sqlite``.
-:mod:`store` builds and searches it, :mod:`flat` exports and rebuilds it,
-:mod:`profile_vec` and :mod:`researcher_profiles.profile.topics` read vectors out of it.
-Before this module, they each had their own copy of the extension-load dance
-and the ``index_meta`` read, with four different answers for "the table is not
-there".
-
-Import-cheap by contract: ``sqlite_vec`` and ``numpy`` are optional-extra
-dependencies and are imported inside function bodies, never at module scope, so
-``researcher_profiles.embeddings.cache`` stays importable on a core-only install
-(see ``tests/test_guardrails.py::TestImportCost``).
+``sqlite_vec`` and ``numpy`` are optional extras, imported only inside
+functions, so this stays importable on a core-only install
+(``tests/test_guardrails.py::TestImportCost``).
 """
 
 import sqlite3
@@ -34,11 +26,7 @@ class IndexNotBuiltError(RuntimeError):
 
 
 def connect_vec(db_path: str | Path, *, create_parents: bool = False) -> sqlite3.Connection:
-    """Open ``db_path`` with the sqlite-vec extension loaded.
-
-    ``create_parents=True`` is the build path (``store``/``flat`` writing a new
-    index); the read paths leave it False and pre-check existence themselves.
-    """
+    """Open ``db_path`` with the sqlite-vec extension loaded."""
     try:
         import sqlite_vec
     except ImportError as e:
@@ -102,11 +90,7 @@ def ensure_schema(conn: sqlite3.Connection, dim: int) -> None:
 
 
 def read_index_meta(conn: sqlite3.Connection) -> dict[str, str]:
-    """Tolerant read: ``{}`` when the ``index_meta`` table does not exist.
-
-    For a caller that already holds a connection and has already decided the
-    index exists (the build path, the flat exporter).
-    """
+    """Tolerant read: ``{}`` when the ``index_meta`` table does not exist."""
     try:
         rows = conn.execute("SELECT key, value FROM index_meta").fetchall()
     except sqlite3.OperationalError:
@@ -117,10 +101,8 @@ def read_index_meta(conn: sqlite3.Connection) -> dict[str, str]:
 def read_index_meta_path(db_path: str | Path) -> dict[str, str]:
     """Strict read: ``IndexNotBuiltError`` when there is no readable index.
 
-    Raises when the file is absent or has no ``index_meta`` table. An existing
-    but empty table yields ``{}``. "built but unpopulated" is the caller's
-    problem, not this function's. Uses a plain connection: ``index_meta`` is an
-    ordinary table and reading it must not require the extension.
+    An existing but empty table yields ``{}``. Uses a plain connection, so
+    reading meta does not require the extension.
     """
     db_path = Path(db_path)
     if not db_path.exists():

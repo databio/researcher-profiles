@@ -1,13 +1,9 @@
 """Bounded reads of long text: sections and pages.
 
-A paper's full text has a 14K-token median and a quarter run past 25K, which
-is more than many clients accept in one response. A read here returns the
-whole text up to :data:`~._limits.TEXT_CHUNK` characters, and above that the
-first chunk with ``has_more`` and the offset to continue from. ``section=``
-reads one heading's span without offset arithmetic.
-
-Offsets are Python string indices into the stored text. The server always
-computes ``next_offset``, so a caller never has to.
+Full texts often exceed what clients accept in one response, so a read
+returns at most :data:`~._limits.TEXT_CHUNK` characters plus ``has_more`` and
+the offset to continue from. Offsets are Python string indices into the
+stored text.
 """
 
 from __future__ import annotations
@@ -77,14 +73,12 @@ def page_text(
     ``offset`` is always an index into the whole text, so an offset from a
     passage or a ``next_offset`` works with or without ``section``. With a
     section, the page starts at ``max(offset, section start)`` and never runs
-    past the section's end. The page is at most
-    ``clamp(max_chars, TEXT_CHUNK, TEXT_MAX_CHARS_CAP)`` chars; a page that is
-    cut ends at the last blank line in its final 2,000 chars, so it does not
-    stop mid-paragraph when it can help it. ``total_chars`` is the length of
-    the section, or of the whole text.
+    past the section's end. A cut page ends at the last blank line in its
+    final 2,000 chars when there is one. ``total_chars`` is the length of the
+    section, or of the whole text.
 
     An unknown section raises :class:`ValueError` whose ``args[1]`` lists the
-    valid names; the route maps it to a 400 ``unknown_section``.
+    valid names.
     """
     sections = sections_of(text)
     start_bound, end_bound = 0, len(text)

@@ -15,10 +15,8 @@ from .jsonld import JsonLdModel
 
 logger = logging.getLogger(__name__)
 
-#: Proof ``kind`` values this reference implementation understands. An open
-#: set: a consumer must ignore a proof whose ``kind`` it does not recognize
-#: (the same posture as an unknown manifest ``role``), so an unrecognized kind
-#: is tolerated, not rejected.
+#: Proof ``kind`` values this implementation understands. An open set: a
+#: consumer ignores a proof whose ``kind`` it does not recognize.
 KNOWN_PROOF_KINDS: frozenset[str] = frozenset(
     {
         "orcid_roundtrip",  # the ORCID record's website list points back here
@@ -35,11 +33,8 @@ KNOWN_PROOF_KINDS: frozenset[str] = frozenset(
 #: origin it fetched the document from.
 REGISTRY_ISSUED_PROOF_KINDS: frozenset[str] = frozenset({"orcid_login"})
 
-#: The members each known kind requires, by their serialized (JSON) names.
-#: One table feeds both the Python validator (:meth:`Proof._check_kind_requirements`)
-#: and the exported JSON Schema (an ``allOf`` of ``if kind == ... then
-#: required``), so the two cannot drift. Format checks (URL, ORCID, date) stay
-#: Python-only.
+#: The members each known kind requires, by JSON name. Feeds both the Python
+#: validator and the exported JSON Schema. Format checks stay Python-only.
 _KIND_REQUIREMENTS: dict[str, tuple[str, ...]] = {
     "key_signature": ("verificationMethod", "alg", "signatureValue"),
     "domain_wellknown": ("issuer", "challenge"),
@@ -64,11 +59,9 @@ def strip_registry_issued_proofs(proofs: list) -> list:
 def strip_registry_issued_from_document(document: dict, *, where: str = "") -> dict:
     """Return ``document`` (a serialized profile dict) fit to persist.
 
-    Drops every registry-issued proof from its ``proof`` list. When nothing is
-    dropped the very same dict comes back, so a verbatim payload stays
-    verbatim; otherwise a shallow copy with the filtered list. Logs once at
-    INFO when something was dropped. The one helper every store backend calls
-    before it persists a document.
+    Drops every registry-issued proof. When nothing is dropped the same dict
+    comes back, so a verbatim payload stays verbatim; otherwise a shallow copy.
+    Every store backend calls this before it persists a document.
     """
     if not isinstance(document, dict):
         return document
@@ -108,23 +101,17 @@ class Proof(JsonLdModel):
     consumer picks its own trust threshold over the proofs whose ``kind`` it
     understands.
 
-    ``extra="allow"`` (inherited from :class:`JsonLdModel`) matters here:
-    different kinds carry different members, and future kinds add members
-    this version does not model. Unknown members are preserved, never
-    rejected.
+    Members this version does not model are preserved, never rejected.
     """
 
-    # Pydantic merges this with the inherited JsonLdModel config (extra="allow" stays).
     model_config = ConfigDict(json_schema_extra=_proof_schema_extra)
 
     #: What is asserted / how to check it. See :data:`KNOWN_PROOF_KINDS`.
     kind: str
     #: Who vouches: an ORCID IRI, a domain, a key id/URL, an institution IRI.
     issuer: str | None = None
-    #: When this proof was last confirmed (ISO-8601). Per-proof; the top-level
-    #: ``verifiedAt`` is retained as the ``orcid_roundtrip`` proof's timestamp.
-    #: For ``orcid_login`` it is when the registry last confirmed the ORCID
-    #: sign-in (required there).
+    #: When this proof was last confirmed (ISO-8601). Required for
+    #: ``orcid_login``.
     verified_at: str | None = Field(default=None, alias="verifiedAt")
 
     # --- key_signature members -----------------------------------------
@@ -153,11 +140,7 @@ class Proof(JsonLdModel):
 
     @model_validator(mode="after")
     def _check_kind_requirements(self) -> "Proof":
-        """Enforce the members each *known* kind needs; tolerate unknown kinds.
-
-        An unrecognized ``kind`` is not rejected: a future proof
-        type must round-trip through an older validator untouched.
-        """
+        """Enforce the members each known kind needs; unknown kinds round-trip untouched."""
         members = _KIND_REQUIREMENTS.get(self.kind)
         if members is None:
             return self

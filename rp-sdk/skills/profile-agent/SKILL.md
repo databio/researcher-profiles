@@ -19,12 +19,14 @@ their agent.
 
 ### The credentials file
 
-Settings shows this block once, when the key is made:
+A host shows a block like this once, when the key is made. The host name
+(`example` here) is your own label; set `default` to the host you want `rp`
+to use when you pass no `--host`.
 
 ```toml
-default = "prosopia"
+default = "example"
 
-[hosts.prosopia]
+[hosts.example]
 url = "https://profiles.example.org"
 key = "rpa_..."
 profile = "jane-doe"

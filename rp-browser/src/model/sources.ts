@@ -16,16 +16,13 @@ import { useStore, type ProfileCard, type FailedFetch } from "../store";
 /** Concurrency cap for fan-out fetches. */
 const CONCURRENCY = 6;
 
-/**
- * Ingest a source URL: sniff its kind, fetch profiles, and update the store.
- */
+/** Sniff a source URL's kind, fetch its profiles, and update the store. */
 export async function ingestSource(sourceUrl: string): Promise<void> {
   const outcome = await fetchJson<unknown>(sourceUrl);
 
   if (!outcome.ok) {
-    // A 401/403 means this is a private registry, not a publishing defect.
-    // Give it its own status and keep it out of Diagnostics (which is the
-    // "something is broken about how this was published" surface).
+    // A 401/403 is a private registry, not a publishing defect, so it stays
+    // out of Diagnostics.
     if (outcome.kind === "unauthorized" || outcome.kind === "forbidden") {
       useStore.updateSource(sourceUrl, {
         status: "unauthorized",
@@ -43,9 +40,7 @@ export async function ingestSource(sourceUrl: string): Promise<void> {
 
   const data = outcome.value;
 
-  // Sniff the document kind
   if (Array.isArray(data)) {
-    // Profile list document: array of base URLs
     useStore.updateSource(sourceUrl, { kind: "list" });
     await ingestList(sourceUrl, data as string[]);
   } else if (
@@ -53,7 +48,6 @@ export async function ingestSource(sourceUrl: string): Promise<void> {
     data !== null &&
     "cards" in data
   ) {
-    // Collection bundle
     useStore.updateSource(sourceUrl, { kind: "registry" });
     await ingestRegistry(sourceUrl, data as CollectionBundleShape);
   } else if (
@@ -61,7 +55,6 @@ export async function ingestSource(sourceUrl: string): Promise<void> {
     data !== null &&
     ("hasPart" in data || "subjectOf" in data)
   ) {
-    // Single profile document (schema:Person with a hasPart/subjectOf manifest)
     useStore.updateSource(sourceUrl, { kind: "profile" });
     await ingestSingleManifest(sourceUrl, data as ManifestShape);
   } else {
@@ -148,7 +141,6 @@ async function ingestRegistry(
     backendSpec: bundle.backend_spec,
   });
 
-  // Load centroids via the embedding_index artifact for proper blob parsing.
   if (bundle.backend_spec && bundle.artifacts) {
     const indexArtifact = bundle.artifacts.find(
       (a) => a.rel === "embedding_index",
@@ -168,7 +160,6 @@ async function ingestRegistry(
         try {
           const { parseCentroidBlob } = await import("../vec/blob");
           const parsed = parseCentroidBlob(binOutcome.value, idx.count, idx.dim);
-          // Map rows (slugs) to card base URLs.
           const slugToBase = new Map(cards.map((c) => [c.slug, c.base]));
           const order = idx.rows.map((slug) => slugToBase.get(String(slug)) ?? String(slug));
           useStore.setCentroids(
@@ -188,17 +179,13 @@ async function ingestRegistry(
 
 /**
  * Plain-list slow path: fan out over base URLs with a concurrency cap,
- * building cards from each manifest. Render progressively.
- *
- * Before fanning out, tries `collection.jsonld` relative to sourceUrl: if the
- * site publishes a collection bundle, one fetch replaces N and the Inventory
- * columns come alive.
+ * rendering progressively. Tries `collection.jsonld` next to the list first,
+ * since one bundle fetch replaces N manifest fetches.
  */
 async function ingestList(
   sourceUrl: string,
   urls: string[],
 ): Promise<void> {
-  // Try collection bundle first: one fetch replaces N.
   try {
     const registryUrl = new URL("collection.jsonld", sourceUrl).href;
     const registryOutcome = await fetchJson<unknown>(registryUrl);
@@ -218,7 +205,6 @@ async function ingestList(
   let loaded = 0;
   let failed = 0;
 
-  // Process in batches of CONCURRENCY
   for (let i = 0; i < urls.length; i += CONCURRENCY) {
     const batch = urls.slice(i, i + CONCURRENCY);
     const results = await Promise.allSettled(
@@ -255,7 +241,6 @@ async function ingestList(
       }),
     );
 
-    // Update progress
     useStore.updateSource(sourceUrl, {
       profileCount: loaded,
       status: "loading",
@@ -270,17 +255,12 @@ async function ingestList(
   });
 }
 
-/**
- * Single manifest: add one card.
- */
 async function ingestSingleManifest(
   sourceUrl: string,
   data: ManifestShape,
 ): Promise<void> {
-  // Derive the base from the absolute URL we actually fetched, not from the
-  // manifest's `@id`: published profiles carry a relative `@id`
-  // (e.g. "profiles/doe-jane/"), and `new URL()` throws on a bare
-  // relative string. The list path does the same override via loadManifest.
+  // Use the fetched URL, not `@id`: published profiles carry a relative `@id`
+  // and `new URL()` throws on a bare relative string.
   const base = normalizeBase(sourceUrl);
   const card: ProfileCard = {
     slug: data.rid || base,

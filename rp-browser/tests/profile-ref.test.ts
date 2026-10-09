@@ -2,8 +2,8 @@ import { describe, it, expect } from "vitest";
 import { resolveProfileRef } from "../src/router";
 import type { ProfileCard, SourceEntry } from "../src/store";
 
-const HOME = "https://prosopia.databio.org/api/v1/collection.json";
-const BASE = "https://prosopia.databio.org/api/v1/profiles/sheffield-nathan/content/";
+const HOME = "https://profiles.example.org/api/v1/collection.json";
+const BASE = "https://profiles.example.org/api/v1/profiles/sheffield-nathan/content/";
 
 function card(slug: string, base: string, sourceUrl = HOME): ProfileCard {
   return {

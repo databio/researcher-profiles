@@ -1,19 +1,15 @@
 """Exit codes, parser helpers, and the error reports every verb group reuses.
 
-This is the leaf of the ``cli`` package: it imports nothing from its siblings,
-so every group module can depend on it without a cycle. Only ``argparse``,
-``json``, ``sys`` and ``pathlib`` are imported at module scope here, because
-building the parser must not pay for anything heavier (see
-``tests/test_guardrails.py``).
+The leaf of the ``cli`` package: it imports nothing from its siblings, and
+only stdlib modules at module scope, so building the parser stays cheap.
 """
 
 import argparse
 import sys
 from pathlib import Path
 
-#: The exit-code table, named once so the epilogs and the returns cannot drift.
-#: ``EXIT_VALIDATION`` is the schema-conformance answer (``rp validate``): "the
-#: artifact is wrong", as distinct from "the command was wrong" (2).
+#: The exit-code table. ``EXIT_VALIDATION`` means "the artifact is wrong", as
+#: distinct from "the command was wrong" (2).
 EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_USAGE = 2
@@ -26,20 +22,12 @@ _TOKEN_HELP = (
 _CREDENTIALS_HINT = "~/.config/researcher-profiles/credentials.json"
 
 #: A concrete slug and a concrete ORCID, used throughout the examples.
-#: Copy-pasteable shapes beat `<placeholder>`: an agent that has never seen a
-#: rid cannot tell from `<rid>` that an ORCID is accepted where a directory name
-#: is, and that ambiguity is exactly what `rp where` exists for.
 _EG_SLUG = "voss-elena"
 _EG_ORCID = "0000-0002-1825-0097"
 
 
 def _epilog(*examples: str, extra: str = "") -> str:
-    """An ``Examples:`` block, optionally followed by more prose.
-
-    Examples come before the flag list because that is the order a reader (human
-    or not) actually uses them in: the first question is "what does an
-    invocation of this look like", and the flag table only answers the second.
-    """
+    """An ``Examples:`` block, optionally followed by more prose."""
     body = "Examples:\n" + "\n".join(f"  {line}" for line in examples) + "\n"
     return f"{body}\n{extra}" if extra else body
 
@@ -49,10 +37,8 @@ def add_subcommand(
 ) -> argparse.ArgumentParser:
     """Register one subcommand with a description and worked examples.
 
-    ``help`` and ``description`` are the same one-liner: the first
-    appears in ``rp --help``'s command table, the second at the top of ``rp
-    <cmd> --help``, and a reader who saw one and then the other should not have
-    to reconcile two different sentences about the same command.
+    ``help`` (in ``rp --help``) and ``description`` (in ``rp <cmd> --help``)
+    are the same one-liner.
     """
     return sub.add_parser(
         name,
@@ -64,13 +50,7 @@ def add_subcommand(
 
 
 def add_json(parser: argparse.ArgumentParser, help_text: str) -> None:
-    """Register the one ``--json`` this tool has: ``store_true`` -> ``as_json``.
-
-    Every command registers ``--json`` through this helper so the flag always
-    lands on ``as_json``; a caller reading ``args.as_json`` never gets a silent
-    ``False`` because one subcommand chose a different dest. Only the sentence
-    saying what the JSON *is* varies per command, so that is the one parameter.
-    """
+    """Register ``--json`` as ``store_true`` on dest ``as_json``, for every command alike."""
     parser.add_argument("--json", action="store_true", dest="as_json", help=help_text)
 
 
@@ -85,11 +65,7 @@ def _add_token(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_url(parser: argparse.ArgumentParser, help_text: str) -> None:
-    """Register ``--url``: the server or registry base URL to act against.
-
-    The sentence saying which default applies varies per command, so that is
-    the one parameter.
-    """
+    """Register ``--url``: the server or registry base URL to act against."""
     parser.add_argument("--url", default=None, help=help_text)
 
 
@@ -120,16 +96,8 @@ def profile_dir_for_ref(ref: str, root: str | None) -> Path | None:
 def resolve_profile_arg(verb: str, ref: str, root: str | None = None) -> Path | None:
     """A ``profile`` positional -> a directory, from a path, a rid, or a slug.
 
-    ``rp install`` writes to ``$RESEARCHER_PROFILES_ROOT/<slug>/`` and prints the slug,
-    so a slug is the handle a caller has in hand when the next command runs.
-    Reading the positional as a path only would make the one handle the tool
-    just printed the one handle that does not work.
-
-    The rule is the same one ``_resolve_profile_jsonld`` uses: a path that
-    exists means itself, and only a name that is nothing on disk is looked up
-    in the cache. So a local directory is never shadowed by a same-named entry
-    in the cache, and a directory that exists but holds no profile still
-    reaches the verb, which has a better sentence about it than this does.
+    Same rule as ``_resolve_profile_jsonld``: a path that exists means itself,
+    so a local directory is never shadowed by a same-named cache entry.
 
     ``None`` when nothing matches, after writing the standard "not in this
     cache" report to stderr; the caller returns ``EXIT_USAGE``.
@@ -160,15 +128,9 @@ def resolve_profile_arg(verb: str, ref: str, root: str | None = None) -> Path | 
 def _announce_resolution(ref: str, resolved: Path, root: str | None) -> None:
     """Name the directory a slug or rid resolved to, on stderr, on success.
 
-    Until this existed, the resolved root was printed only on the *failure*
-    path: `validate`, `manifest --write`, `push --dry-run` and `push` could all
-    run happily against a stale copy under a root nobody remembered setting,
-    and none of them ever said which directory they had read. stderr, so a
-    `--json` stdout stays machine-parseable.
-
-    A slug that also exists under another root in the resolution order gets a
-    warning as well. It stays a warning: `--root` is the override, and a second
-    copy is legal, just rarely intended.
+    So a command never silently reads a stale copy under a forgotten root.
+    stderr keeps a `--json` stdout parseable. A slug that also exists under
+    another root gets a warning: a second copy is legal, just rarely intended.
     """
     from ..store.config import candidate_roots, root_source
 
@@ -187,28 +149,16 @@ def _announce_resolution(ref: str, resolved: Path, root: str | None) -> None:
 
 
 def _next_steps(*pairs: tuple[str, str]) -> str:
-    """A ``Next:`` block of runnable commands, each with its reason.
-
-    The commands carry values the caller typed, so their widths vary and
-    hand-aligned comments come out ragged. Aligning here keeps the block
-    scannable no matter what the slug was.
-    """
+    """A ``Next:`` block of runnable commands, each with its reason, aligned."""
     width = max(len(cmd) for cmd, _ in pairs)
     body = "\n".join(f"  {cmd:<{width}}   # {why}" for cmd, why in pairs)
     return f"Next:\n{body}"
 
 
 def root_resolution_note(root: Path, *, explicit: str | None = None) -> str:
-    """The "where did that directory come from" paragraph, written once.
+    """The "where did that directory come from" paragraph for a not-found error.
 
-    Every command that reads the cache resolves it through the same three-step
-    order, so a "not found" that does not name the directory it looked in, and
-    how that directory was chosen, sends the reader hunting for a setting they
-    may not know exists. This is the second half of every such error.
-
-    When ``--root`` was passed there is nothing to explain, so the order is
-    omitted: repeating it would be telling somebody who typed the path where
-    the path came from.
+    The resolution order is omitted when ``--root`` was passed.
     """
     if explicit:
         return f"Looked in: {root} (from --root)"
@@ -229,13 +179,9 @@ def _no_such_profile(
 ) -> None:
     """The whole "that is not in this cache" report, on stderr.
 
-    Four commands answer the same question badly in four places: name what was
-    typed, name the directory searched, say how that directory was chosen, and
-    offer a runnable way out. Only the first and last vary per command, so
-    those are the parameters. Prints nothing to stdout, so `--json` stays a
-    clean document, and returns nothing. The exit code stays the caller's,
-    because the same "not found" is usage error for `where`/`seek`, a
-    non-`done` state for `status`, and not an error at all for `list`.
+    Names what was typed, the directory searched and how it was chosen, and a
+    runnable way out. Prints nothing to stdout. The exit code is the caller's,
+    since "not found" means different things per command.
     """
     for line in lines:
         print(line, file=sys.stderr)
@@ -246,12 +192,9 @@ def _no_such_profile(
 def _resolve_profile_jsonld(arg: str, root: str | None = None) -> tuple[Path, Path]:
     """Return ``(profile_jsonld_path, profile_dir)`` from a dir, a file, a rid or a slug.
 
-    A path on disk answers first, so a local directory or an explicit
-    ``.../profile.jsonld`` always means itself. Only when the argument names
-    nothing on disk is it looked up in the cache, which is where ``rp install``
-    leaves a profile under its slug. An unresolvable argument comes back as the
-    path it looked like, so the caller's "no profile.jsonld at ..." error names
-    what the user typed.
+    A path on disk answers first; only a name that is nothing on disk is
+    looked up in the cache. An unresolvable argument comes back as the path it
+    looked like, so the caller's error names what the user typed.
     """
     p = Path(arg).expanduser()
     if p.is_dir():
@@ -265,11 +208,7 @@ def _resolve_profile_jsonld(arg: str, root: str | None = None) -> tuple[Path, Pa
 
 
 def _remote_target(url_flag: str | None, token_flag: str | None) -> tuple[str | None, str | None]:
-    """``(url, token)`` for a remote command: flags, then env, then the stored login.
-
-    Lives here rather than in a verb group because ``rp push`` and ``rp whoami``
-    are in different groups and must resolve a server the same way.
-    """
+    """``(url, token)`` for a remote command: flags, then env, then the stored login."""
     from .auth.credentials import resolve_token, resolve_url
 
     url = resolve_url(url_flag)

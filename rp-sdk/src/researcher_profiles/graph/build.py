@@ -1,15 +1,6 @@
 """Derive a :class:`ProfileGraph` from a set of loaded profiles.
 
-``build_graph`` is a pure function of the works corpora and profile metadata:
-it walks every profile's author lists, affiliation/career/training histories,
-and emits nodes and edges. No I/O beyond reading the profiles it is handed.
-
-The one subtlety is scope: a coauthor edge is emitted only when at least one
-endpoint is a **profiled** person. Two external names that merely co-occur on a
-paper produce no edge. Nothing queries an external-to-external relation, and
-materializing every such pair would let one large author list dominate the
-store. Every edge the graph answers questions about is therefore incident to a
-profile.
+``build_graph`` is a pure function of the profiles it is handed.
 """
 
 import hashlib
@@ -49,9 +40,7 @@ def _better_conf(a: str, b: str) -> str:
 
 
 def load_profiles(root: str | os.PathLike) -> list[ResearcherProfile]:
-    """Load every profile under ``root``, the same directory walk the registry
-    uses, but with no embedding/centroid machinery (the graph needs neither).
-    """
+    """Load every profile under ``root``, without the embedding machinery."""
     root_path = Path(root).expanduser().resolve()
     if not root_path.is_dir():
         raise FileNotFoundError(f"graph root does not exist: {root_path}")
@@ -69,8 +58,7 @@ def load_profiles(root: str | os.PathLike) -> list[ResearcherProfile]:
 
 
 def _profile_institutions(prof: ResearcherProfile) -> list[InstitutionRef]:
-    """The institution history of a profiled person, from affiliation + career +
-    training. Each ref carries a join key (ROR when known, else folded name)."""
+    """The institution history of a profiled person, from affiliation + career + training."""
     out: list[InstitutionRef] = []
     md = prof.metadata
     aff = normalize_institution(affiliation_id=md.affiliation_id, name=md.affiliation)
@@ -101,10 +89,7 @@ def _spans_overlap(
 ) -> Optional[bool]:
     """Did two people's tenures at one institution overlap in time?
 
-    ``True``/``False`` when at least one span on each side carries a year;
-    ``None`` when neither side has any year information (e.g. two current
-    affiliations with no dates), so the caller reports "unknown" rather than
-    guessing overlap from thin air.
+    ``None`` (unknown) unless both sides carry at least one year.
     """
 
     def has_year(spans: list[tuple[Optional[int], Optional[int]]]) -> bool:
@@ -157,11 +142,7 @@ def _ensure_external(nodes: dict[str, PersonNode], key: str, name: Optional[str]
 
 
 def _note_external(externals: dict[str, Optional[str]], key: str, name: Optional[str]) -> None:
-    """Record an external endpoint in first-seen order, upgrading a blank name.
-
-    The edge builders collect these instead of mutating the node map, which is
-    what keeps them pure. ``build_graph`` folds the result into the nodes.
-    """
+    """Record an external endpoint in first-seen order, upgrading a blank name."""
     if key not in externals:
         externals[key] = name
     elif not externals[key] and name:
@@ -359,9 +340,7 @@ def _shared_institution_edges(
 def _advised_edges(
     profiles: list[ResearcherProfile], name_index: NameIndex
 ) -> tuple[dict[tuple[str, str], GraphEdge], dict[str, Optional[str]]]:
-    """Advised edges (directed advisee -> advisor) from ``training[].advisor``,
-    plus the external advisors they reference.
-    """
+    """Advised edges (advisee -> advisor) from ``training[].advisor``, plus external advisors."""
     advised: dict[tuple[str, str], GraphEdge] = {}
     externals: dict[str, Optional[str]] = {}
     for p in profiles:
@@ -427,9 +406,8 @@ def build_graph(profiles: Iterable[ResearcherProfile]):
 def _source_hash(profiles: list[ResearcherProfile]) -> str:
     """A coarse fingerprint of the input corpus, enough to notice a change.
 
-    A failure to read a corpus propagates. This hash is the graph cache's
-    freshness key, so swallowing the error would let a stale graph be served
-    as fresh.
+    Read errors propagate: this is the cache's freshness key, so swallowing
+    one would serve a stale graph as fresh.
     """
     h = hashlib.sha256()
     for p in sorted(profiles, key=lambda x: x.rid):

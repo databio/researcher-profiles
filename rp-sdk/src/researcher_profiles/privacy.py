@@ -7,9 +7,7 @@ projects the profile for one viewer tier at the moment it leaves.
 
 The single authority is :func:`effective_tiers`: the effective tier of an
 artifact is the most restrictive of the profile default, the artifact's own
-tier, and the tiers of everything it was derived from. Everything calls it:
-the static export, the embedding-chunk exporter, the validator. There is no
-second implementation.
+tier, and the tiers of everything it was derived from.
 """
 
 from dataclasses import dataclass, field
@@ -38,10 +36,7 @@ SECTION_FIELDS: dict[str, tuple[str, ...]] = {
     "focus": ("subfields", "interests", "not_interests", "research_interests"),
     "methods": ("methodological_commitments",),
     #: SOUL is an artifact, not an inline field, so it governs no document
-    #: keys: the tier reaches ``personality/SOUL.md`` through the manifest.
-    #: It is listed anyway so :func:`section_tiers` reports a row for it and an
-    #: owner-facing privacy control can offer SOUL beside the other sections
-    #: instead of silently omitting the one section they most expect to see.
+    #: keys. Listed so :func:`section_tiers` reports a row for it.
     "soul": (),
     "clinical": ("therapeutic_areas",),
     "site_capabilities": ("site_capabilities",),
@@ -51,10 +46,8 @@ SECTION_FIELDS: dict[str, tuple[str, ...]] = {
 }
 
 #: Map an embedding chunk's ``source_type`` to the manifest ``role`` whose
-#: default tier governs it. For every source the two names coincide today; the
-#: map is written explicitly so the chunk -> role -> tier derivation is
-#: auditable rather than incidental. ``cv``/``web``/``grant`` resolve to
-#: ``private`` by :data:`schema.ROLE_DEFAULT_VISIBILITY`; the rest are public.
+#: default tier governs it. Explicit so the chunk -> role -> tier derivation
+#: is auditable.
 CHUNK_SOURCE_TYPE_ROLE: dict[str, str] = {
     "soul": "soul",
     "expertise": "expertise",
@@ -67,18 +60,15 @@ CHUNK_SOURCE_TYPE_ROLE: dict[str, str] = {
 
 #: Directory prefixes (relative to the profile content root) that no export
 #: ships at any tier: profile-adjacent serve-time caches and local key
-#: material. ``.cache/`` holds derived caches (``embeddings.sqlite``,
-#: ``topics.json``, ...) that are regenerable and never part of the published
-#: record. Build-session bookkeeping is not a concern here: it lives in the
-#: build root outside the content tree entirely.
+#: material. ``.cache/`` holds regenerable derived caches that are never part
+#: of the published record.
 ALWAYS_PRIVATE_PREFIXES: tuple[str, ...] = (".cache/", ".keys/")
 
 
 def tier_allows(viewer: ViewerTier, artifact: Visibility) -> bool:
     """True when a viewer entitled to ``viewer`` may see ``artifact``.
 
-    The one place two tiers are compared. Every route, host, and template
-    calls this rather than re-deriving the rule.
+    The one place two tiers are compared.
     """
     return _VISIBILITY_ORDER.index(artifact) <= _VISIBILITY_ORDER.index(viewer)
 
@@ -89,10 +79,9 @@ def narrow_viewer(*viewers: ViewerTier) -> ViewerTier:
     Not :func:`~researcher_profiles.schema.most_restrictive`, which is the rule
     for artifacts. The two read the tier scale in opposite directions: on an
     artifact a higher tier means fewer people may see it, on a viewer a higher
-    tier means they may see more. Capping a viewer therefore takes the minimum,
-    and using the artifact rule here would have handed an owner previewing as a
-    stranger their own unrestricted view, the exact lie a preview exists to
-    prevent.
+    tier means they may see more. Capping a viewer therefore takes the minimum.
+    The artifact rule would show an owner previewing as a stranger their own
+    unrestricted view.
     """
     rank = min(_VISIBILITY_ORDER.index(v) for v in viewers)
     return _VISIBILITY_ORDER[rank]
@@ -110,11 +99,9 @@ def section_tiers(profile: ProfileDocument) -> dict[str, Visibility]:
 def project_document(profile: ProfileDocument, viewer: ViewerTier) -> ProfileDocument:
     """Remove inline fields whose section tier exceeds ``viewer``.
 
-    The whole-document counterpart of :func:`effective_tiers`: that one decides
-    which *files* a viewer may fetch, this one decides which *fields inside the
-    document* they may read. Both are called from the shared payload
-    projection, so an inline section held back over HTTP is held back in the
-    published site, the archive and the export too.
+    The field-level counterpart of :func:`effective_tiers`, which decides
+    which *files* a viewer may fetch. Every egress uses both, so a section
+    held back over HTTP is held back everywhere.
     """
     tiers = section_tiers(profile)
     projected = profile.model_copy(deep=True)
@@ -168,12 +155,7 @@ def _stamp_access_rights(profile: ProfileDocument) -> None:
 
 @dataclass(frozen=True)
 class TierExplanation:
-    """Why one artifact resolves to the tier it does.
-
-    The decision and its explanation are one computation (see
-    :func:`explain_tiers`), so the sentence an owner reads can never describe a
-    rule other than the one that ran.
-    """
+    """Why one artifact resolves to the tier it does (see :func:`explain_tiers`)."""
 
     content_url: str
     role: str | None = None
@@ -186,23 +168,16 @@ class TierExplanation:
     #: Concrete causes that held the artifact above its declared tier: the
     #: specific source, not a restatement of the rule.
     raised_by: list[str] = field(default_factory=list)
-    #: ``derivedFrom`` entries that name no artifact in this manifest. A
-    #: dependency nobody can resolve is not a dependency at ``public``: it is a
-    #: hole in the derivation graph, reported by :func:`derivation_errors` and
-    #: by ``rp validate``.
+    #: ``derivedFrom`` entries that name no artifact in this manifest. Not
+    #: treated as ``public``: reported by :func:`derivation_errors`.
     unresolved: list[str] = field(default_factory=list)
 
 
 class DerivationCycleError(ValueError):
     """``derivedFrom`` forms a cycle, so no artifact in it has a tier.
 
-    The derivation rule is defined over a DAG: an artifact is at least as
-    private as everything it came from. A cycle makes that rule
-    self-referential, and guessing a tier for a document whose own declaration
-    is incoherent is exactly the silent widening privacy projection exists to
-    prevent. Raised rather than swallowed: every caller
-    (the static export, the manifest read, the preview) would otherwise
-    publish a tier nothing supports.
+    The derivation rule is defined over a DAG. Guessing a tier for a cycle
+    could silently widen access, so this is raised, never swallowed.
     """
 
 
@@ -230,19 +205,14 @@ def explain_tiers(profile: ProfileDocument) -> dict[str, TierExplanation]:
     depth-first walk, and a cycle raises :class:`DerivationCycleError` rather
     than settling on whichever tier the walk happened to reach first.
 
-    Alongside each decision this records which of those causes is holding the
-    artifact where it is, so an interface can name the cause on the row rather
-    than explaining the rule in prose, plus any ``derivedFrom`` entry that
-    resolved to nothing.
+    Each result also records the causes holding the artifact at its tier and
+    any ``derivedFrom`` entry that resolved to nothing. The decision and its
+    explanation are one computation, so they cannot disagree.
     """
     parts, by_paper, by_role = _derivation_graph(profile)
     default = profile.visibility
 
-    #: contentUrl -> effective tier, filled in as the walk returns.
     memo: dict[str, Visibility] = {}
-    #: Causes and unresolved references per artifact, recorded by the same
-    #: walk that decides the tier, so the sentence and the decision are one
-    #: computation.
     notes: dict[str, tuple[list[tuple[Visibility, str]], list[str]]] = {}
 
     def resolve(part, visiting: tuple[str, ...]) -> Visibility:
@@ -256,13 +226,10 @@ def explain_tiers(profile: ProfileDocument) -> dict[str, TierExplanation]:
                 "derived from itself, directly or through a chain."
             )
 
-        # The role default is a *default*, not a floor: it is written onto the
-        # artifact's own ``visibility`` at load (ArtifactRef._apply_role_tier)
-        # only when the owner did not declare one. So it is already folded into
-        # ``part.visibility`` below when it applies, and an explicit declaration
-        # wins. It is deliberately NOT re-added as a cause here, which would
-        # re-floor a declared tier and make role-defaulted artifacts
-        # (paper_fulltext, cv, web, grant, ...) unraisable by their owner.
+        # The role default is a default, not a floor: ArtifactRef already wrote
+        # it into ``part.visibility`` when the owner declared none. Adding it as
+        # a cause here would stop an owner from loosening a role-defaulted
+        # artifact.
         causes: list[tuple[Visibility, str]] = []
         unresolved: list[str] = []
         causes.append((default, f"the profile default ({default})"))
@@ -326,11 +293,7 @@ def derivation_errors(profile: ProfileDocument) -> list[str]:
 
 
 def effective_tiers(profile: ProfileDocument) -> dict[str, Visibility]:
-    """Return ``{contentUrl: effective_tier}`` for every manifest artifact.
-
-    A thin projection of :func:`explain_tiers`. The two cannot disagree because
-    there is only one of them.
-    """
+    """``{contentUrl: effective_tier}`` for every manifest artifact (from :func:`explain_tiers`)."""
     return {k: v.effective for k, v in explain_tiers(profile).items()}
 
 
@@ -357,16 +320,9 @@ def chunk_source_tiers(
 ) -> dict[tuple[str, str], Visibility]:
     """Effective tier for each ``(source_type, source_id)`` chunk source.
 
-    A chunk is derived from a source document, so its effective privacy tier is
-    that of its source: the general derivation rule, not a special-cased
-    allowlist. This resolves each chunk source with the same primitives
-    :func:`effective_tiers` uses: the profile-level default floored with the
-    role default for the source type
-    (:func:`schema.role_default_visibility`). ``cv``/``web``/``grant`` chunks
-    come back ``private``; ``expertise``/``soul``/``paper_summary``/
-    ``paper_abstract`` come back ``public`` (unless the whole profile is held
-    back by its default). The embedding exporter drops every key whose tier
-    exceeds its audience via :func:`tier_allows`.
+    A chunk takes the tier of its source: the profile default floored with
+    the role default for the source type
+    (:func:`schema.role_default_visibility`).
 
     ``profile`` may be ``None`` (an unloadable ``profile.jsonld``), in which
     case the profile default is treated as ``public`` and only the role

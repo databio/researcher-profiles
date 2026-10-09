@@ -1,11 +1,8 @@
 """``FilesystemProfileStore``: profiles as directories under one root.
 
-Core-only: nothing here imports FastAPI, SQLModel, or anything outside the base
-install. The one deferred import is the tar/staging machinery in
-:mod:`researcher_profiles.api.upload`, pulled in inside
-:meth:`FilesystemProfileStore.commit_directory` because reaching it at module
-scope would execute ``researcher_profiles.api.__init__`` and drag FastAPI onto
-the core import path.
+Core-only: nothing here imports FastAPI or SQLModel. ``api.upload`` is imported
+inside :meth:`FilesystemProfileStore.commit_directory` because importing it at
+module scope would pull FastAPI onto the core import path.
 """
 
 import json
@@ -38,10 +35,8 @@ logger = logging.getLogger(__name__)
 
 __all__ = ["FilesystemProfileStore", "swap_profile_dir"]
 
-#: The ``"rid"`` member of profile.jsonld. A text scan, not a JSON parse: this
-#: runs over every profile in the root to answer "which directory is this
-#: rid?", and a published profile.jsonld may inline the whole works list, so
-#: parsing 30 of them to read one scalar is not worth it.
+#: The ``"rid"`` member of profile.jsonld. A text scan, not a JSON parse: it runs
+#: over every profile in the root, and a document may inline the works list.
 _RID_LINE_RE = re.compile(r'"rid"\s*:\s*"([^"]+)"')
 
 
@@ -59,11 +54,7 @@ def swap_profile_dir(root: Path, slug: str, staging_dir: Path) -> Path:
 
     The old directory (if any) is renamed aside first and removed only after the
     new one is in place; on failure the old directory is restored. Returns the
-    final profile path.
-
-    This is the filesystem backend's whole answer to atomicity, and it is a
-    rename, not a transaction: it covers the directory swap and nothing else.
-    A SQL store replaces it with a real transaction.
+    final profile path. Covers the directory swap only; it is not a transaction.
     """
     target = root / slug
     backup = root / f".old-{slug}-{uuid.uuid4().hex}"
@@ -84,10 +75,9 @@ def swap_profile_dir(root: Path, slug: str, staging_dir: Path) -> Path:
 def _strip_staged_document(staging: Path) -> None:
     """Drop registry-issued proofs from a staged ``profile.jsonld`` before it goes live.
 
-    A pushed or ingested directory is swapped in whole, so its document never
-    passes :meth:`DirectoryArtifactStorage.save_document`; this is the same
-    strip, applied to the staged file. Untouched when there is nothing to
-    drop, so the pushed bytes stay verbatim.
+    A staged directory never passes ``save_document``, so it needs its own
+    strip. Untouched when there is nothing to drop, so pushed bytes stay
+    verbatim.
     """
     from ..profile.storage import persistable_document
     from ..schema.jsonld import canonical_dumps
@@ -106,8 +96,7 @@ class FilesystemProfileStore(_HookedStore, _AnalyticsAccessors):
     """Profiles as directories under one root, with a small LRU over the
     loaded :class:`~researcher_profiles.profile.ResearcherProfile` objects.
 
-    Eviction is a no-op beyond dropping the reference. The sqlite handles are
-    GC'd along with the index objects on the profile.
+    Eviction only drops the reference; sqlite handles are GC'd with the index.
     """
 
     def __init__(self, root: str | os.PathLike, capacity: int = 32):
@@ -117,12 +106,8 @@ class FilesystemProfileStore(_HookedStore, _AnalyticsAccessors):
         self._rid_map_cache: dict[str, str] | None = None
         self._rid_map_stamp: tuple | None = None
         #: slug -> the profile's open vector index. Separate from the profile
-        #: LRU: an index is expensive to reopen (a sqlite handle, or a whole
-        #: blob parsed into a matrix) and ranking touches every survivor of
-        #: every query.
+        #: LRU because an index is expensive to reopen.
         self._vector_indexes: dict[str, "VectorIndex"] = {}
-        # Pre/post-commit hooks live on the store, not on the app; see
-        # ``_HookedStore``. Already-cached profiles are reached via the LRU.
         self._init_hooks()
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
@@ -136,7 +121,7 @@ class FilesystemProfileStore(_HookedStore, _AnalyticsAccessors):
 
     @property
     def root(self) -> Path:
-        """The profiles root. This backend is a directory, so never ``None``."""
+        """The profiles root. Never ``None``."""
         return self._root
 
     # --- hooks --------------------------------------------------------------
@@ -147,11 +132,8 @@ class FilesystemProfileStore(_HookedStore, _AnalyticsAccessors):
     def evict(self, ref: str) -> None:
         """Drop a cached profile so the next ``get`` reloads from disk.
 
-        Bumps the write generation too. ``evict`` is what the API layer calls
-        after every write, including one that arrived by a path this store
-        never saw (an extracted archive swapped in over its directory), so
-        treating it as "something changed" is what keeps the analytics honest
-        without making that caller import them.
+        Bumps the write generation too: the API layer calls it after writes
+        this store never saw (an archive swapped in over its directory).
         """
         self._bump_generation()
         self._cache.pop(ref, None)
@@ -181,9 +163,7 @@ class FilesystemProfileStore(_HookedStore, _AnalyticsAccessors):
     def resolve_slug(self, ref: str) -> str:
         """Map a profile reference to a directory name.
 
-        ``ref`` is either the directory name itself or a ``rid`` (a canonical
-        ORCID or a ``local:`` id). Directory-first, because that is the common
-        case and a directory name can never be mistaken for a rid.
+        Directory name first; a directory name can never be mistaken for a rid.
         """
         if (self._root / ref / "profile.jsonld").is_file():
             return ref
@@ -196,12 +176,7 @@ class FilesystemProfileStore(_HookedStore, _AnalyticsAccessors):
         return mapped
 
     def rid_for(self, ref: str) -> str:
-        """Map a slug or a rid to the rid. Raises :class:`ProfileNotFoundError`.
-
-        A bare ORCID resolves here without any extra indexing: an ORCID rid
-        *is* its ORCID (``scholarcore.identity.orcid_of`` derives one from the
-        other and invents nothing), so it is already a key of the rid map.
-        """
+        """See :meth:`~.protocol.ProfileStore.rid_for`."""
         slug = self.resolve_slug(ref)
         for rid, mapped in self._rid_map().items():
             if mapped == slug:
@@ -211,11 +186,7 @@ class FilesystemProfileStore(_HookedStore, _AnalyticsAccessors):
         )
 
     def path_for(self, ref: str) -> Path:
-        """The absolute profile directory for a slug or a rid.
-
-        Numpy-free, which is the point: ``rp where`` is a path lookup and used
-        to import the whole vector stack to do it.
-        """
+        """The absolute profile directory for a slug or a rid. Numpy-free."""
         return self._root / self.resolve_slug(ref)
 
     def exists(self, ref: str) -> bool:
@@ -252,13 +223,7 @@ class FilesystemProfileStore(_HookedStore, _AnalyticsAccessors):
         raise NotImplementedError("merge needs the SQL store")
 
     def write_lookup_index(self) -> Optional[Path]:
-        """Persist ``rid <-> slug`` into ``<root>/.cache/index.json``.
-
-        A shell caller resolving a rid to a directory reads this, which is what
-        lets a rid work anywhere a slug does, regardless of directory name.
-        Nothing writes it implicitly: a caller that owns a writable root calls
-        this when it wants the file fresh.
-        """
+        """Persist ``rid <-> slug`` into ``<root>/.cache/index.json``."""
         from ..utils.clock import now_iso
         from ..utils.paths import store_cache_dir
 
@@ -292,20 +257,12 @@ class FilesystemProfileStore(_HookedStore, _AnalyticsAccessors):
     def _rid_map(self) -> dict[str, str]:
         """``rid -> directory name``, rebuilt when the root changes.
 
-        Prefers ``<root>/.cache/index.json`` (written by
-        :meth:`write_lookup_index`). Falls back to a text scan of each
-        ``profile.jsonld``: that file is a cache, and a rid lookup must not
-        depend on whether some other code path happened to refresh it first.
+        Prefers ``<root>/.cache/index.json``, but only when it names exactly
+        the profiles on disk (a stale index would hide a new profile's rid);
+        else a text scan of each ``profile.jsonld``.
 
-        This is also where a duplicate identity is caught, because it is the
-        only place that sees every profile's rid at once. Two directories
-        claiming one rid is a corrupt root, not a near miss: silently keeping
-        the first would make which profile a rid resolves to depend on
-        directory ordering.
-
-        The index is used only when it names exactly the profiles on disk. A
-        stale-but-non-empty index is worse than no index: it would silently
-        hide a newly built profile's rid while still looking usable.
+        Raises :class:`DuplicateIdentityError` when two directories claim one
+        rid, rather than letting directory order pick the winner.
         """
         stamp = self._root_stamp()
         if self._rid_map_cache is not None and self._rid_map_stamp == stamp:
@@ -368,11 +325,8 @@ class FilesystemProfileStore(_HookedStore, _AnalyticsAccessors):
     def create(self, document: ProfileDocument, *, slug: str) -> ResearcherProfile:
         """Create ``<root>/<slug>/`` and persist ``document`` into it.
 
-        One write unit of kind ``"create"``, so a host's pre-commit hook lands
-        its own state in the same logical write. On the filesystem that unit is
-        not atomic (``ctx.atomic`` is ``False``). A raising hook leaves the
-        directory behind, which is why this backend removes it explicitly rather
-        than pretending a rename undid anything.
+        The write unit is not atomic here (``ctx.atomic`` is ``False``), so a
+        raising hook's directory is removed explicitly.
         """
         target = self._root / slug
         if target.exists() or self.exists(document.rid):
@@ -384,11 +338,8 @@ class FilesystemProfileStore(_HookedStore, _AnalyticsAccessors):
         target.mkdir(parents=True)
         try:
             prof = ResearcherProfile.from_files(target)
-            # Seed the in-memory document before opening the unit so
-            # ``WriteContext.rid`` is populated: the context is frozen, and a
-            # create hook whose whole job is to write an ownership row keyed on
-            # the rid cannot be handed an empty one. ``save_profile`` below is
-            # still what persists, and reassigns this to the reparsed document.
+            # Seed the in-memory document so the frozen ``WriteContext.rid`` is
+            # populated for create hooks. ``save_profile`` still persists.
             prof._metadata = document
             self._thread_hooks(prof)
             with prof.write_unit("create"):
@@ -411,11 +362,7 @@ class FilesystemProfileStore(_HookedStore, _AnalyticsAccessors):
     ) -> ResearcherProfile:
         """Create ``<root>/<slug>/`` with its document and every artifact.
 
-        One nested write unit of kind ``"create"``, exactly as :meth:`create`.
-        On this backend that unit is not atomic (``ctx.atomic`` is ``False``),
-        so a failure part-way is undone the only way a directory can be: the
-        whole directory comes back out, which is also what :meth:`create`
-        already does.
+        Not atomic here; a failure part-way removes the whole directory.
         """
         target = self._root / slug
         if target.exists() or self.exists(document.rid):
@@ -433,8 +380,7 @@ class FilesystemProfileStore(_HookedStore, _AnalyticsAccessors):
         target.mkdir(parents=True)
         try:
             prof = ResearcherProfile.from_files(target)
-            # See ``create``: seed the in-memory document so a create hook
-            # keyed on the rid is not handed an empty one.
+            # See ``create``.
             prof._metadata = document
             self._thread_hooks(prof)
             with prof.write_unit("create"):
@@ -461,18 +407,11 @@ class FilesystemProfileStore(_HookedStore, _AnalyticsAccessors):
         return self._admit(slug, prof)
 
     def put_document(self, slug: str, document: ProfileDocument) -> ResearcherProfile:
-        """Create-or-replace a profile's canonical document only.
-
-        If the profile exists, runs an ``"edit"`` write unit; if new, runs a
-        ``"create"`` unit so a host's pre-commit hook can write ownership. The
-        write uses the profile's :meth:`save_profile` so ``dateModified`` is
-        stamped correctly and hooks fire.
-        """
+        """See :meth:`~.protocol.ProfileStore.put_document`."""
         target = self._root / slug
         is_create = not target.exists()
 
         if is_create:
-            # Check that the rid is not already taken by another slug
             if self.exists(document.rid):
                 raise ProfileWriteError(
                     str(target),
@@ -493,9 +432,7 @@ class FilesystemProfileStore(_HookedStore, _AnalyticsAccessors):
             self._bump_generation()
             return self._admit(slug, prof)
 
-        # Profile exists: edit path
         prof = self.get(slug)
-        # Validate rid consistency: the document's rid must match the existing
         existing_rid = prof.rid
         if document.rid != existing_rid:
             raise ProfileWriteError(
@@ -520,14 +457,9 @@ class FilesystemProfileStore(_HookedStore, _AnalyticsAccessors):
     ) -> IngestResult:
         """Validate a staged directory loads, then atomically swap it live.
 
-        ``build_missing_index`` is off by default because the operator push
-        (``PUT /api/v1/profiles/{slug}``) ships its own index and a rebuild
-        there is wasted minutes; a host ingesting on a person's behalf, who
-        wants their profile rankable immediately, turns it on. When it is on and
-        ``.cache/embeddings.sqlite`` is absent, a best-effort build runs
-        afterwards: a core-only install or a build failure leaves the profile
-        committed but unindexed rather than raising. The profile is hosted,
-        but not yet in ``/match``.
+        With ``build_missing_index`` and no ``.cache/embeddings.sqlite``, a
+        best-effort build runs afterwards; failure leaves the profile committed
+        but unindexed rather than raising.
         """
         _strip_staged_document(Path(staging))
         try:
@@ -553,21 +485,14 @@ class FilesystemProfileStore(_HookedStore, _AnalyticsAccessors):
             from ..embeddings import build_index
 
             build_index(profile_dir)
-        # Boundary: the whole embedding stack, including whatever a third-party
-        # encoder backend raises. A missing extra, an absent backend, or a build
-        # error all leave the profile committed but unindexed, never unhosted.
+        # Boundary: anything the embedding stack raises leaves the profile
+        # committed but unindexed.
         except Exception:
             logger.warning("post-ingest index build failed for %s", profile_dir, exc_info=True)
         return (cache_dir(profile_dir) / "embeddings.sqlite").is_file()
 
     def export_directory(self, ref: str, dest: Path) -> Path:
-        """Copy a profile directory to ``dest``. Build state is not copied.
-
-        The build root is a sibling tree outside the content root, so a copy of
-        the content directory is the published record and nothing else. That
-        is the same thing ``SqlProfileStore.export_directory`` produces
-        without ``with_build``.
-        """
+        """Copy a profile directory to ``dest``. Build state is not copied."""
         slug = self.resolve_slug(ref)
         out = Path(dest).expanduser()
         out.mkdir(parents=True, exist_ok=True)
@@ -608,9 +533,7 @@ class FilesystemProfileStore(_HookedStore, _AnalyticsAccessors):
     def artifact_bytes(self, ref: str, content_url: str) -> bytes:
         """Read one artifact, refusing anything that escapes the profile dir.
 
-        The traversal check is here rather than at the call site, so every
-        caller inherits it. A store that can be talked into reading
-        ``../../etc/passwd`` has a bug in the store, not in one route.
+        The traversal check lives in the store so every caller inherits it.
         """
         slug = self.resolve_slug(ref)
         profile_root = (self._root / slug).resolve()
@@ -625,11 +548,7 @@ class FilesystemProfileStore(_HookedStore, _AnalyticsAccessors):
             ) from e
 
     def content_hash(self, ref: str) -> str:
-        """Recomputed per call: this backend stores no digest column.
-
-        Same two-artifact, NUL-separated surface every backend reports; see
-        :meth:`researcher_profiles.profile.ResearcherProfile.content_hash`.
-        """
+        """Recomputed per call: this backend stores no digest column."""
         return self.get(ref).content_hash()
 
     # --- vectors (the ``VectorStore`` capability) ----------------------------
@@ -639,10 +558,7 @@ class FilesystemProfileStore(_HookedStore, _AnalyticsAccessors):
         """The first readable backend name across the root, sqlite or flat.
 
         First, not a consensus: a root whose profiles disagree is already
-        broken (cosine across models is meaningless), and this is the same
-        answer the registry has always taken. The published flat form is
-        checked too, so a directory holding only downloaded profiles still
-        reports a space.
+        broken (cosine across models is meaningless).
         """
         from ..embeddings.cache import index_backend_name
 
@@ -685,13 +601,8 @@ class FilesystemProfileStore(_HookedStore, _AnalyticsAccessors):
     def vector_index(self, ref: str) -> "VectorIndex":
         """The profile's vectors: the build-local sqlite, else the served flat form.
 
-        sqlite first because it is the richer index: it carries every chunk,
-        including the private ones the public export drops, and its hits
-        carry text. A directory that only holds a published profile (no
-        ``.cache/``) still ranks, at the public subset, through the flat form.
-
-        The imports are inside the method. This module is on the core import
-        path and both readers pull numpy.
+        sqlite first because it carries every chunk (including private ones)
+        and text. Imports are deferred because both readers pull numpy.
         """
         slug = self.resolve_slug(ref)
         cached = self._vector_indexes.get(slug)
@@ -724,9 +635,7 @@ class FilesystemProfileStore(_HookedStore, _AnalyticsAccessors):
     def centroids_matrix(self) -> "tuple[list[str], np.ndarray] | None":
         """``None``: a directory holds no stacked matrix, only per-profile vectors.
 
-        ``<root>/.cache/centroids.npz`` is not it. That file is the memo
-        ``store.centroids`` keeps of its own computed matrix; returning it here
-        would make the manager read its own cache back through the store and
-        call the result authoritative.
+        ``<root>/.cache/centroids.npz`` is ``store.centroids``'s own memo, not
+        an authoritative matrix.
         """
         return None

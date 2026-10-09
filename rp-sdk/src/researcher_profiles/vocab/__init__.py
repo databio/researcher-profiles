@@ -1,11 +1,11 @@
 """Pinned copies of the interest vocabularies: OpenAlex topics and MeSH.
 
 A stored ``ResearchInterest`` concept is ``{system, code, display, version}``.
-For a code to mean the same thing in every tool that reads it (rp-builder,
-Prosopia, RADAR), every tool resolves it against the same snapshot, and that
-snapshot is this package's data:
+For a code to mean the same thing in every tool that reads it, every tool
+resolves it against the same snapshot, and that snapshot is this package's
+data:
 
-- ``openalex_topics.json``: the OpenAlex topic list (``T…`` ids, with
+- ``openalex_topics.json.gz``: the OpenAlex topic list (``T…`` ids, with
   subfield, field and domain). OpenAlex publishes no release number, so the
   release is the snapshot date of this copy (``2026-09``).
 - ``mesh_descriptors.json.gz``: MeSH descriptors (``D…`` ids, preferred
@@ -14,8 +14,7 @@ snapshot is this package's data:
 ``version`` on a concept is always the release of the copy it was looked up
 in, never a term's own update date or a retrieval date.
 
-Both files load lazily and once: importing this module reads nothing, so the
-release constants are module attributes resolved on first access (PEP 562).
+Both files load lazily and once; importing this module reads nothing.
 ``rp vocab refresh`` rewrites the files (see :mod:`.refresh`).
 """
 
@@ -36,7 +35,7 @@ OPENALEX_SYSTEM = "https://openalex.org/topics"
 #: The system URI for MeSH descriptors. MeSH's own term IRIs use ``http``.
 MESH_SYSTEM = "http://id.nlm.nih.gov/mesh"
 
-OPENALEX_FILE = "openalex_topics.json"
+OPENALEX_FILE = "openalex_topics.json.gz"
 MESH_FILE = "mesh_descriptors.json.gz"
 
 __all__ = [
@@ -61,7 +60,7 @@ def _read(name: str) -> bytes:
 @lru_cache(maxsize=1)
 def load_openalex_topics() -> dict[str, Any]:
     """``{"release", "system", "topics": [{id, display_name, subfield, field, domain}]}``."""
-    return json.loads(_read(OPENALEX_FILE))
+    return json.loads(gzip.decompress(_read(OPENALEX_FILE)))
 
 
 @lru_cache(maxsize=1)

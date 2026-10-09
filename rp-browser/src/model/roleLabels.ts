@@ -1,12 +1,6 @@
 /**
- * Human labels for the well-known manifest roles.
- *
- * Lives in `model/` rather than beside one panel because two screens name
- * the same roles: the Files list a visitor browses and the Publication panel an
- * owner sets tiers in. A second copy of this map is a screen that calls the
- * same artifact "Paper full text" in one place and `paper_fulltext` in the
- * other, which reads as two different things to the person deciding whether to
- * publish it.
+ * Human labels for the well-known manifest roles. Shared so every screen names
+ * a role the same way; keep one copy.
  */
 export const ROLE_LABELS: Record<string, string> = {
   profile: "Profile document",

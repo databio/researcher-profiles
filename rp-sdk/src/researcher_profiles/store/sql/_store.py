@@ -53,12 +53,6 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
     store owns no per-profile state: every operation opens its own session, and
     the :class:`SqlArtifactStorage` behind a profile handed out by :meth:`get` opens
     its own for each read and each write unit.
-
-    An in-memory SQLite URL (``sqlite://`` / ``sqlite:///:memory:``) gets
-    ``StaticPool``: an in-memory database is private per connection, and the
-    default per-thread pool would let this store and the threadpool serving
-    HTTP requests over it silently see two different empty databases.
-    ``StaticPool`` keeps the one connection that holds the data.
     """
 
     def __init__(self, engine_or_url: Any):
@@ -69,11 +63,9 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
             if engine_or_url.startswith("sqlite"):
                 kwargs["connect_args"] = {"check_same_thread": False}
                 if _is_memory_sqlite(engine_or_url):
-                    # An in-memory SQLite database is private per connection,
-                    # and the default pool hands out a connection per thread,
-                    # so a store and the threadpool serving HTTP requests over
-                    # it would silently see two different empty databases.
-                    # StaticPool keeps the one connection that holds the data.
+                    # An in-memory database is private per connection, and the
+                    # default pool gives each thread its own, so threads would
+                    # see different empty databases. StaticPool shares one.
                     from sqlalchemy.pool import StaticPool
 
                     kwargs["poolclass"] = StaticPool
@@ -82,11 +74,8 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
         else:
             self.engine = engine_or_url
             self.url = str(getattr(engine_or_url, "url", engine_or_url))
-        # Pre/post-commit hooks live on the store, not on the app; see
-        # ``_HookedStore``. ``_live`` holds the profiles already handed out,
-        # weakly, so a hook registered after a ``get()`` still reaches them
-        # without the store keeping anything alive: this store hands out a
-        # fresh object per call and caches nothing.
+        # Profiles already handed out, held weakly so a later hook reaches
+        # them without the store keeping anything alive.
         self._live: "weakref.WeakSet[ResearcherProfile]" = weakref.WeakSet()
         self._init_hooks()
 
@@ -102,19 +91,7 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
 
     @property
     def root(self) -> None:
-        """Always ``None``: this store is not a directory.
-
-        One feature still branches on this, and only one: the profile graph,
-        whose ``graph.sqlite`` is a regenerable handle ``ArtifactStorage`` does
-        not cover and that has no interface of its own. It degrades with a 503
-        rather than reaching for a synthetic path.
-
-        Vectors used to be on that list. They are not any more: they live in
-        ``rp_chunk_vectors`` / ``rp_profile_vectors`` and this store serves
-        them itself as a :class:`~researcher_profiles.store.VectorStore`, so
-        ranking a database-backed deployment no longer exports anything to
-        disk first. See :mod:`researcher_profiles.store.sql._vectors`.
-        """
+        """Always ``None``: this store is not a directory."""
         return None
 
     # --- hooks --------------------------------------------------------------
@@ -130,11 +107,7 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
     def evict(self, ref: str) -> None:  # noqa: ARG002 - protocol signature
         """Bump the write generation. There are no cached rows to drop.
 
-        This store caches nothing of its own, but ``evict`` is the protocol's
-        "drop any view that could still be pre-write", and the analytics on
-        this store hold exactly such a view. The API layer calls it after every
-        write, so bumping here is what keeps ``/match`` current without that
-        caller importing anything vector-shaped.
+        The analytics hold a view that could be pre-write; the bump drops it.
         """
         self._bump_generation()
 
@@ -154,11 +127,8 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
     def rid_for(self, ref: str) -> str:
         """The rid of the profile ``ref`` names. ``ref`` may be a rid or a slug.
 
-        Rid wins, mirroring ``rp where`` accepting a slug or an ORCID. A bare
-        ORCID needs no separate lookup: an ORCID rid *is* its ORCID, so it is
-        already the primary key being queried. Raises
-        :class:`ProfileNotFoundError` naming both lookups that were tried, so
-        "not found" never leaves a caller guessing which namespace was searched.
+        Rid wins, then slug, then an alias. Raises
+        :class:`ProfileNotFoundError` naming both lookups that were tried.
         """
         with self.session() as s:
             if s.get(ProfileRow, ref) is not None:
@@ -179,8 +149,7 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
         """The successor rid of a retired rid or slug ``ref``, or ``None``.
 
         Only consulted after the live lookups miss, so a live profile always
-        beats an alias. Chains are one hop by construction (``merge_into``
-        re-points them), so this is one indexed lookup, never a walk.
+        beats an alias. Chains are one hop, so this is one lookup.
         """
         alias = s.get(RidAliasRow, ref)
         if alias is None:
@@ -191,10 +160,8 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
     def _refuse_retired(s: Session, rid: str, slug: Optional[str]) -> None:
         """Raise :class:`RetiredRidError` if a write would reuse a retired rid or slug.
 
-        A retired rid or slug resolves to its successor through an alias, so a
-        write that made it live again would hijack that identity. Rid and slug
-        are checked in their own namespaces (not via :meth:`_alias_successor`,
-        which falls through from one to the other).
+        Rid and slug are checked in their own namespaces (not via
+        :meth:`_alias_successor`, which falls through from one to the other).
         """
         alias = s.get(RidAliasRow, rid)
         if alias is not None and s.get(ProfileRow, rid) is None:
@@ -208,10 +175,7 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
                 raise RetiredRidError(slug, alias.successor_rid, rid=rid, slug=slug)
 
     def successor_of(self, ref: str) -> Optional[str]:
-        """The live rid a retired rid or slug now resolves to, or ``None``.
-
-        ``None`` for a live profile and for a ref nothing has ever retired.
-        """
+        """See :meth:`~researcher_profiles.store.ProfileStore.successor_of`."""
         with self.session() as s:
             if s.get(ProfileRow, ref) is not None:
                 return None
@@ -220,17 +184,13 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
             return self._alias_successor(s, ref)
 
     def alias_slugs(self) -> set[str]:
-        """Every retired slug. They stay reserved: slug allocation treats them as taken."""
+        """Every retired slug."""
         with self.session() as s:
             rows = s.exec(select(RidAliasRow.old_slug).where(RidAliasRow.old_slug.is_not(None)))
             return {r for r in rows.all() if r}
 
     def rids_with_email(self, email: str) -> list[str]:
-        """rids of every profile whose top-level document ``email`` equals ``email``.
-
-        Ignores case and outer whitespace, sorted. Reads stored documents only
-        (the ``rp_profiles.email`` projection).
-        """
+        """Reads the ``rp_profiles.email`` projection."""
         needle = (email or "").strip().lower()
         if not needle:
             return []
@@ -251,33 +211,18 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
         return True
 
     def resolve_slug(self, ref: str) -> str:
-        """Map a slug or a rid to the slug.
-
-        The mirror of :meth:`rid_for`, which answers with the rid. Both exist
-        because the two are used for different things: ``rid`` is the join key
-        every row is written under; ``slug`` is what a URL and a human say.
-        """
+        """Map a slug or a rid to the slug."""
         rid = self.rid_for(ref)
         with self.session() as s:
             row = s.get(ProfileRow, rid)
         return row.slug if row is not None else rid
 
     def write_lookup_index(self) -> None:
-        """``None``: there is no directory to write a lookup file into.
-
-        Not a degradation. The file exists so a *shell* caller can resolve a
-        rid without importing the package; a database has :meth:`rid_for`,
-        which is one indexed query and always current.
-        """
+        """``None``: no directory. :meth:`rid_for` answers the same question."""
         return None
 
     def list_slugs(self) -> list[str]:
-        """Every profile's display handle, sorted. One column, not one row each.
-
-        A projection query: a management host calls this to render
-        a list page, and loading every ``document`` blob to read one string off
-        each is how a store gets a reputation for being slow.
-        """
+        """Every profile's display handle, sorted. Selects one column only."""
         with self.session() as s:
             return list(s.exec(select(ProfileRow.slug).order_by(ProfileRow.slug)).all())
 
@@ -305,23 +250,15 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
     ) -> str:
         """Write ``profile`` into the store, in one transaction. Returns its rid.
 
-        Takes **any** ``ResearcherProfile``: a directory, a static or remote
-        published one, or one belonging to another store. Upserts on ``rid``
-        and replaces every child row (delete, then insert) rather than diffing:
-        a profile is small, a diff has more ways to be wrong than to be right,
-        and "the rows equal the source" is the only invariant worth having.
+        Takes any ``ResearcherProfile``. Upserts on ``rid`` and replaces every
+        child row rather than diffing, so the rows always equal the source.
 
-        Artifacts come from the profile's recorded manifest
-        (:meth:`ResearcherProfile.manifest`) when it has one, falling back to
-        walking the directory. The recorded manifest is preferred because it is
-        what the published document actually claims; regenerating it here
-        would silently rewrite a published record during an ingest.
+        Artifacts come from the profile's recorded manifest when it has one
+        (see :meth:`_manifest_of`), else from walking the directory.
 
-        ``include_binary`` opts into storing binary bodies (a published
-        ``.bin`` or an image); without it a binary artifact keeps its manifest
-        row and loses only its bytes. It does not gate vectors: those are
-        shredded into ``rp_chunk_vectors`` / ``rp_profile_vectors`` on every
-        put, because a queryable vector is not a file body.
+        ``include_binary`` opts into storing binary bodies; without it a binary
+        artifact keeps its manifest row and loses only its bytes. Vectors are
+        shredded on every put regardless.
 
         Raises :class:`RetiredRidError` when the rid or slug was retired by a
         merge; that covers :meth:`commit_directory` and :meth:`import_directory`.
@@ -344,8 +281,7 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
     ) -> str:
         """Replace ``profile``'s rows on ``s``. Flushes, never commits. Returns the rid.
 
-        The body of :meth:`put`, shared with :meth:`merge_into` so a merge writes
-        the survivor exactly the way an ingest would, inside its own write unit.
+        Shared by :meth:`put` and :meth:`merge_into`.
         """
         meta = profile.metadata
         rid = meta.rid
@@ -363,13 +299,9 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
             s.flush()
 
         s.add(ProfileRow.from_document(meta, slug=handle, document=document, soul=soul))
-        # Flush the parent BEFORE any child. SQLAlchemy orders a flush by
-        # mapper dependencies, which come from `relationship()` declarations,
-        # and these tables carry FK *columns* with no relationships, so
-        # the unit of work is free to emit `INSERT INTO rp_artifacts` first
-        # and have the FK rejected. Postgres FKs are not deferrable, so this
-        # is a real failure there (and anywhere SQLite's foreign_keys pragma
-        # is on, which a management host turns on), not a test artifact.
+        # Flush the parent BEFORE any child. These tables have FK columns but no
+        # `relationship()`, so SQLAlchemy may otherwise insert children first,
+        # and Postgres FKs are not deferrable.
         s.flush()
 
         for ordinal, paper in enumerate(profile.papers):
@@ -400,8 +332,7 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
                 )
             )
 
-        # Vectors: shredded into queryable rows, never stored as a blob.
-        # This is what makes the store a ``VectorStore``; see ``_vectors``.
+        # Vectors: shredded into queryable rows; see ``_vectors``.
         for row in _vectors.shred_profile(rid, profile):
             s.add(row)
         s.flush()
@@ -420,24 +351,13 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
     ) -> IngestResult:
         """Make a fully-staged profile directory live in this store.
 
-        One transaction, which is what replaces the filesystem backend's
-        rename-aside-and-swap: there is no window in which the profile half
-        exists, so a host's pre-commit hook granting ownership commits with it
-        or not at all.
+        One transaction, so a pre-commit hook's ownership row commits with the
+        profile or not at all.
 
-        When the staged profile carries a built embedding index
-        (``.cache/embeddings.sqlite``), its public chunks are shredded into
-        ``rp_chunk_vectors`` and its centroid into ``rp_profile_vectors``, and
-        ``indexed=True`` is reported; ``/match`` then queries those rows
-        directly, with no directory and no runtime embedding backend needed to
-        serve them.
-
-        ``build_missing_index`` builds one in the staging directory first,
-        exactly as the filesystem backend does and for the same reason: ingest
-        is now the only moment a vector can enter this store, so a profile
-        staged without an index would otherwise be hosted and permanently
-        unrankable. Best-effort: a core-only install or a build failure leaves
-        the profile committed but unindexed, never unhosted.
+        A staged ``.cache/embeddings.sqlite`` is shredded into vector rows and
+        reported as ``indexed=True``. Ingest is the only moment a vector can
+        enter this store, so ``build_missing_index`` builds one first
+        (best-effort; failure leaves the profile committed but unindexed).
         """
         try:
             staged = ResearcherProfile.from_files(staging)
@@ -464,15 +384,9 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
     ) -> IngestResult:
         """Retire one profile into another, in ONE write unit.
 
-        ``staging`` is the complete survivor directory (the merged content the
-        caller assembled). In one transaction this commits it at
-        ``survivor_rid`` (create or replace), deletes the retired profile,
-        records ``rp_rid_aliases(retired rid, retired slug -> survivor)`` and
-        re-points every alias whose successor was the retired rid, so chains
-        stay one hop. Pre-commit hooks fire with ``ctx.kind == "merge"``,
-        ``ctx.rid == survivor_rid`` and ``ctx.retired_rid`` / ``ctx.retired_slug``
-        set, on the unit's own session, so a host can re-key its own rows in
-        the same transaction.
+        See :meth:`~researcher_profiles.store.ProfileStore.merge_into`. Hooks
+        run on the unit's own session, so a host can re-key its rows in the
+        same transaction.
 
         When the survivor keeps the retired profile's slug (a rid conversion),
         the alias covers the old rid only: the slug still names a live profile.
@@ -574,14 +488,13 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
 
     @staticmethod
     def _try_build_index(staging: Path) -> bool:
-        """Build the staged directory's index. The filesystem backend's twin."""
+        """Build the staged directory's index, best-effort."""
         try:
             from ...embeddings import build_index
 
             build_index(staging)
-        # Boundary: the whole embedding stack, including whatever a third-party
-        # encoder backend raises. A missing extra, an absent backend, or a build
-        # error all leave the profile committed but unindexed, never unhosted.
+        # Boundary: anything the embedding stack raises leaves the profile
+        # committed but unindexed.
         except Exception:
             logger.warning("post-ingest index build failed for %s", staging, exc_info=True)
         return (cache_dir(staging) / "embeddings.sqlite").is_file()
@@ -593,14 +506,7 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
         index there, shreds the result back into ``rp_chunk_vectors`` /
         ``rp_profile_vectors``, and cleans up. Best-effort: returns ``True``
         on success, ``False`` when the embedding stack is unavailable or the
-        build fails for any reason — a caller should log the outcome, never
-        raise on it.
-
-        This is the SQL-backed counterpart of the filesystem's
-        ``prof.index.build()`` + ``recompute_centroid()`` path: both update a
-        profile's vectors after its papers change, but only one needs to go
-        through an export round-trip because vectors enter this store through
-        rows, not a file.
+        build fails for any reason. Never raises.
         """
         import shutil
         import tempfile
@@ -642,12 +548,8 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
         """Create a new profile from a validated document, in one write unit.
 
         The row is inserted bare and then written through
-        :meth:`ResearcherProfile.save_profile`, so the create takes exactly the
-        same validate -> stamp -> canonicalize -> persist path every other write
-        takes. A management host's pre-commit hook therefore sees
-        ``kind="create"`` with a live session and can write its ownership row in
-        the same transaction, closing the window where a profile exists that
-        nobody owns.
+        :meth:`ResearcherProfile.save_profile`, so it takes the same path as
+        every other write.
         """
         rid = document.rid
         with self.session() as s:
@@ -682,13 +584,7 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
         soul: str | None = None,
         artifacts: dict[str, str] | None = None,
     ) -> ResearcherProfile:
-        """Create a document and its authored persona artifacts atomically.
-
-        This is the management-host seam for an approved onboarding candidate:
-        nested public writers join the one outer SQL write unit, so ownership,
-        document, artifacts, derived hash, and pre-commit hooks either all land
-        or all roll back.
-        """
+        """Create a document and its authored artifacts in one transaction."""
         rid = document.rid
         with self.session() as s:
             self._refuse_retired(s, rid, slug)
@@ -735,19 +631,12 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
         return prof
 
     def put_document(self, slug: str, document: ProfileDocument) -> ResearcherProfile:
-        """Create-or-replace a profile's canonical document only.
-
-        If the profile exists, runs an ``"edit"`` write unit via
-        :meth:`save_profile`; if new, runs a ``"create"`` unit. The write uses
-        the profile's :meth:`save_profile` so ``dateModified`` is stamped
-        correctly and hooks fire.
-        """
+        """See :meth:`~researcher_profiles.store.ProfileStore.put_document`."""
         with self.session() as s:
             self._refuse_retired(s, document.rid, slug)
         is_create = not self.exists(slug)
 
         if is_create:
-            # Check that the rid is not already taken by another slug
             if self.exists(document.rid):
                 raise ProfileWriteError(
                     self.url,
@@ -756,7 +645,6 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
                 )
             return self.create(document, slug=slug)
 
-        # Profile exists: edit path
         prof = self.get(slug)
         existing_rid = prof.rid
         if document.rid != existing_rid:
@@ -772,13 +660,10 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
     def _manifest_of(profile: ResearcherProfile) -> list[tuple[str, ArtifactRef, int]]:
         """``(manifest_slot, part, ordinal)`` for every artifact of ``profile``.
 
-        The recorded manifest wins when there is one, which makes it the real
-        index: a file sitting in a source directory that the manifest does not
-        list gets no row and is silently not persisted. That is a legitimate
-        rule (the published document claims the manifest, and regenerating it
-        during an ingest would rewrite a published record), and it is also how
-        a partial ``profile.jsonld`` once deleted 53 artifacts. So when the
-        source is a directory, count what the manifest leaves out and say so.
+        The recorded manifest wins when there is one: it is what the published
+        document claims, and regenerating it would rewrite a published record.
+        A file it does not list is not persisted, so for a directory source the
+        omissions are logged.
         """
         meta = profile.metadata
         recorded = [*meta.has_part, *meta.subject_of]
@@ -796,12 +681,7 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
 
     @staticmethod
     def _warn_unlisted(profile: ResearcherProfile, recorded_urls: set[str]) -> None:
-        """Log the files the source directory holds that the manifest omits.
-
-        A cheap sentinel for the next bug of this class. Directory sources
-        only: any other backend has no "files that are there but unlisted"
-        to compare against.
-        """
+        """Log the files the source directory holds that the manifest omits."""
         root = getattr(profile.storage, "_root", None)
         if root is None:
             return
@@ -833,10 +713,7 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
     ) -> ArtifactRow:
         """One ``rp_artifacts`` row, with its body read off the source backend.
 
-        ``bodies`` is the source profile's own storage, so each backend answers
-        for its own bytes: a directory reads the file verbatim, another SQL
-        store reads the row, a static host fetches the URL, and a live API
-        returns ``None`` for anything v1 does not serve. An absent body keeps
+        ``bodies`` is the source profile's own storage. An absent body keeps
         the manifest row and loses only its bytes.
         """
         if part.content_url in RENDERED_URLS:
@@ -862,11 +739,9 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
     # --- identity ------------------------------------------------------------
 
     def rename(self, rid: str, new_slug: str) -> None:
-        """Change a profile's display handle. one update; no child row moves.
+        """Change a profile's display handle. One update; no child row moves.
 
-        This is the whole payoff of keying on ``rid``: a rename is not a data
-        migration. The unique constraint on ``slug`` still applies: a store
-        cannot hold two profiles under one handle.
+        The unique constraint on ``slug`` still applies.
         """
         with self.session() as s:
             row = s.get(ProfileRow, rid)
@@ -909,9 +784,7 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
     def manifest_from_rows(self, ref: str) -> tuple[list[ArtifactRef], list[ArtifactRef]]:
         """``(hasPart, subjectOf)`` from ``rp_artifacts``.
 
-        The DB twin of :func:`researcher_profiles.manifest.build_manifest`.
-        That one walks a directory and this one reads the rows; both answer
-        the same question, what a profile contains.
+        The row-based twin of ``build_manifest``.
         """
         rid = self.rid_for(ref)
         with self.session() as s:
@@ -921,29 +794,18 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
         return parts, subjects
 
     # --- vectors (the ``VectorStore`` capability) ----------------------------
-    #
-    # Four queries over two tables. No blob is unpacked, no directory is
-    # exported, and no embedding backend runs here: the store serves the
-    # vectors it stored, and the caller embeds its own query. See
-    # :mod:`._vectors` for how the rows got there.
 
     @property
     def backend_spec(self) -> str | None:
         """The embedding space this store's vectors live in, or ``None``.
 
-        One row off ``rp_chunk_vectors``. Asked once at registry construction,
-        so it must not open anything.
+        One row off ``rp_chunk_vectors``.
         """
         with self.session() as s:
             return _vectors.backend_spec(s)
 
     def has_vector_index(self, ref: str) -> bool:
-        """Whether ``ref`` has chunk vectors. One row, by contract cheap.
-
-        The ``/match`` dependency scans every profile in the store with it to
-        decide whether ranking is possible at all, so it is a ``LIMIT 1`` and
-        never a fetch.
-        """
+        """Whether ``ref`` has chunk vectors. A ``LIMIT 1``, never a fetch."""
         try:
             rid = self.rid_for(ref)
         except ProfileNotFoundError:
@@ -954,11 +816,9 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
     def vector_index(self, ref: str) -> "VectorIndex":
         """The profile's chunk-level index, built from its rows.
 
-        The rows are serialized into the three published byte shapes and read
-        back by :class:`~researcher_profiles.embeddings.flat.FlatEmbeddingIndex`,
-        which is the single read implementation behind all three backends. The
-        alternative, a fourth index class that happens to hold SQL rows, would
-        be a fourth place for cosine to be subtly different.
+        The rows are serialized into the published byte shapes and read back by
+        :class:`~researcher_profiles.embeddings.flat.FlatEmbeddingIndex`, the
+        single read implementation behind all backends.
         """
         rid = self.rid_for(ref)
         with self.session() as s:
@@ -978,12 +838,9 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
     def centroid(self, ref: str) -> "np.ndarray":
         """The profile's stored centroid: one row, already normalized.
 
-        Not derived from :meth:`vector_index`. The centroid is computed at
-        ingest over the *whole* index, private chunks included (one averaged
-        vector is not invertible, spec section 6), exactly as the published
-        ``collection/embeddings/`` blob is, while the chunk rows are the public
-        subset. Recomputing it from the chunk rows would quietly answer a
-        different question.
+        Not derived from :meth:`vector_index`: the centroid covers the whole
+        index, private chunks included (one averaged vector is not invertible,
+        spec section 6), while the chunk rows are the public subset.
         """
         rid = self.rid_for(ref)
         with self.session() as s:
@@ -993,12 +850,7 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
         return vec
 
     def centroids_matrix(self) -> "tuple[list[str], np.ndarray] | None":
-        """The whole roster's centroids in one ``SELECT``, or ``None``.
-
-        This is the payoff of storing profile vectors in their own table:
-        ranking N profiles costs one query rather than N index reads, the same
-        way a published site's single stacked blob costs one fetch.
-        """
+        """The whole roster's centroids in one ``SELECT``, or ``None``."""
         with self.session() as s:
             return _vectors.centroids_matrix(s)
 
@@ -1013,18 +865,12 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
         ``envelope``, so the collection metadata (``about``, ``dateModified``,
         ``@context``) survives the round trip.
 
-        Vectors are written as the published flat form
-        (``embeddings/index.json`` + ``<backend>.bin`` + ``<backend>.chunks.json``)
-        regenerated from ``rp_chunk_vectors``, after the artifact bodies and
-        overwriting whatever they wrote, so the declared ``count`` and
-        ``sha256`` always describe the blob beside them. No
-        ``.cache/embeddings.sqlite`` is reconstituted: nothing needs one, since
-        the filesystem backend reads the flat form when there is no sqlite, and
-        this store answers ``/match`` from its rows without exporting at all.
+        Vectors are written as the published flat form, regenerated from the
+        rows (see :meth:`_write_flat_export`). No ``.cache/embeddings.sqlite``
+        is reconstituted.
 
-        Build state is written only when ``with_build=True``, and then into the
-        build root beside the directory, never inside it. See
-        :class:`researcher_profiles.store.db.BuildStateRow`.
+        Build state is written only when ``with_build=True``, into the build
+        root beside the directory, never inside it.
         """
         rid = self.rid_for(ref)
         out = Path(dest).expanduser()
@@ -1034,9 +880,8 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
             row = s.get(ProfileRow, rid)
             if row is None:  # pragma: no cover - resolve() already proved it
                 raise ProfileNotFoundError(rid)
-            # ``newline=""`` throughout: writing in text mode with the default
-            # translates ``\n`` to ``os.linesep``, which would make an export
-            # platform-dependent and would undo the verbatim storage above.
+            # ``newline=""`` throughout, so ``\n`` is never translated and the
+            # export stays verbatim on every platform.
             (out / "profile.jsonld").write_text(
                 canonical_dumps(row.document or {}), encoding="utf-8", newline=""
             )
@@ -1065,11 +910,9 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
     def _write_flat_export(s: Session, rid: str, out: Path) -> None:
         """Write ``embeddings/`` from the vector rows. No-op without any.
 
-        The rows are the authority for what the exported flat form says, not
-        the ``embeddings/index.json`` artifact body: that body was written by
-        whichever machine built the profile and its ``sha256`` describes a blob
-        this export does not necessarily have. Regenerating both together is
-        the only way the pair cannot disagree.
+        The rows are the authority, not the ``embeddings/index.json`` artifact
+        body, whose ``sha256`` may describe a different blob. Regenerating both
+        together keeps the pair consistent.
         """
         payload = _vectors.flat_bytes(s, rid)
         if payload is None:
@@ -1087,14 +930,10 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
     def document_bytes(self, ref: str) -> bytes:
         """The canonical ``profile.jsonld`` bytes for ``ref``.
 
-        Serialized on demand from the stored ``document`` rather than kept in a
-        second ``document_bytes`` column.
-        :func:`researcher_profiles.schema.jsonld.canonical_dumps` is the package's only
-        writer of ``.jsonld`` bytes and is a pure function of the mapping (one
-        fixed key order, one fixed formatting), so these bytes are *the* bytes
-        ``save_profile`` persisted and ``export_directory`` writes. A byte
-        column would be a second representation of the same fact, and two
-        representations of one fact drift.
+        Serialized on demand from the stored ``document``.
+        :func:`researcher_profiles.schema.jsonld.canonical_dumps` is a pure
+        function of the mapping, so these are the bytes ``save_profile``
+        persisted.
         """
         rid = self.rid_for(ref)
         with self.session() as s:
@@ -1136,11 +975,8 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
     def artifact_bytes(self, ref: str, content_url: str) -> bytes:
         """One manifest artifact's bytes.
 
-        There is no traversal check because there is no path: ``content_url`` is
-        a key in ``rp_artifacts``, and a key that is not there is a 404 rather
-        than a walk up the filesystem. A ``rendered`` collection is regenerated
-        from ``rp_papers`` / ``rp_grants`` on the way out, exactly as it is for
-        :meth:`export_directory`.
+        No traversal check is needed: ``content_url`` is a row key, not a path.
+        A ``rendered`` collection is regenerated from the tables.
         """
         rid = self.rid_for(ref)
         with self.session() as s:
@@ -1170,13 +1006,7 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
         )
 
     def content_hash(self, ref: str) -> str:
-        """The stored ``content_hash`` column: derived state, not a recompute.
-
-        Refreshed inside the write unit before the pre-commit hooks run, so a
-        hook reading it observes post-write content. Spans the canonical
-        document and the SOUL text, NUL-separated, identically to every other
-        backend.
-        """
+        """The stored ``content_hash`` column, not a recompute."""
         rid = self.rid_for(ref)
         with self.session() as s:
             row = s.get(ProfileRow, rid)

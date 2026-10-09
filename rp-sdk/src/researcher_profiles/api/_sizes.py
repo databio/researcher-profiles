@@ -3,13 +3,12 @@
 A row or a record says, for each deeper part (a paper's summary and full
 text, the narrative, the works file), whether *this caller* can fetch it and
 how big it is. "Available" means a route will hand it over: the viewer's tier
-reaches it (the same :func:`~._projection.artifact_visible` rule the content
-route applies) and the store holds its body. Advertising a part the caller
-then gets a 404 for teaches them the profile is broken rather than private.
+reaches it (:func:`~._projection.artifact_visible`) and the store holds its
+body. Advertising a part that then 404s would make the profile look broken
+rather than private.
 
-Sizes come from the manifest's ``bytes`` field, and "the store holds it" from
-one :meth:`ProfileStore.held_artifacts` call per request, so building the sizes
-for 100 rows reads no bodies at all.
+Sizes come from the manifest's ``bytes`` field plus one
+:meth:`ProfileStore.held_artifacts` call, so no bodies are read.
 """
 
 from __future__ import annotations
@@ -76,10 +75,8 @@ class SizeIndex:
             else:
                 n = part.bytes if part.bytes is not None else (held or {}).get(url)
                 self._sizes[url] = _available(n)
-        # The narrative may be held but unlisted (a profile created empty and
-        # written since, before its manifest was rebuilt). An unlisted artifact
-        # inherits the profile and role defaults (``artifact_visible``), and
-        # the content routes serve it on that rule, so its size must too.
+        # The narrative may be held but not yet in the manifest. The content
+        # routes serve it on the default tier rule, so its size must show too.
         for url, role, body in (
             (SOUL_URL, "soul", lambda: prof.soul),
             (EXPERTISE_URL, "expertise", lambda: prof.expertise),

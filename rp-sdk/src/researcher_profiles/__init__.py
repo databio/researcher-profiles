@@ -34,10 +34,6 @@ from .models.results import (
     Topic,
 )
 from .profile import ResearcherProfile
-
-# The knowledge-base export surface. Eager, not guarded: it is core-only
-# (stdlib + pydantic + sibling core modules), so there is no extra to fail on
-# and no reason for a consumer to discover it through a lazy attribute.
 from .profile.export import (
     EXPORT_VERSION,
     ExportError,
@@ -75,11 +71,7 @@ from .schema import (
 )
 from .schema.jsonld import CONTEXT_URL, PROFILE_FORMAT_IRI, canonical_dumps
 
-# The store interface. ``ProfileStore`` (the protocol), ``FilesystemProfileStore``
-# and ``IngestResult`` are core. The filesystem backend needs no extra.
-#
-# ``SqlArtifactStorage`` / ``SqlProfileStore`` are absent from this list:
-# see ``_LAZY`` and ``__getattr__`` below.
+# The SQL store classes need an extra, so they live in ``_LAZY`` below.
 from .store import (
     FilesystemProfileStore,
     IngestResult,
@@ -88,12 +80,6 @@ from .store import (
     UploadError,
     build_store,
 )
-
-# The settings that come *before* a store exists: which cache root, which
-# database URL, and the two environment variables that name them. A consumer
-# that has to reach into ``researcher_profiles.store.config`` to answer "where
-# is the cache" is using a private path for a public question. Core-only
-# (os + pathlib), so eager costs nothing measurable.
 from .store.config import (
     DATABASE_URL_ENV_VAR,
     DEFAULT_CACHE_DIR,
@@ -103,26 +89,15 @@ from .store.config import (
     resolve_database_url,
     resolve_profiles_root,
 )
-
-# The cache-layout names that go with them. ``utils.paths`` is already loaded
-# eagerly by the modules above, so this adds no import at all.
 from .utils.paths import CACHE_DIRNAME, STORE_CACHE_DIRNAME, cache_dir
 
-# The rule for this file: core -- stdlib + pydantic + scholarcore -- is
-# imported eagerly, right here. Anything behind an optional extra goes in
-# ``_LAZY`` below, never into an eager (or try/except-guarded) import.
+# Rule for this file: core (stdlib + pydantic + scholarcore) is imported
+# eagerly above. Anything behind an optional extra goes in ``_LAZY``, never
+# into an eager or try/except-guarded import, so ``import researcher_profiles``
+# never pays for an extra it does not use.
 
 #: Public name -> (submodule, extra). Imported on first access and cached into
 #: globals(); a missing extra raises an ImportError that names it.
-#:
-#: Everything here sits behind an optional tier (anthropic, httpx, numpy,
-#: SQLAlchemy). Importing any of them eagerly, guarded or not, would make every
-#: ``import researcher_profiles`` pay that cost on a machine that has the extra,
-#: and a guard only covers absence. The SDK is public and kept
-#: dependency-light, so a consumer that only wants PaperRecord /
-#: ProfileDocument / the wire models never triggers one of these imports. The
-#: capability managers behind ``prof.persona``, ``prof.index`` and friends build
-#: themselves lazily too, so nothing here is needed for them to work.
 _LAZY: dict[str, tuple[str, str]] = {
     "DEFAULT_MODEL": (".generative.llm", "llm"),
     "LLMClient": (".generative.llm", "llm"),
@@ -140,17 +115,9 @@ _LAZY: dict[str, tuple[str, str]] = {
 def __getattr__(name: str):
     """PEP 562 hook: ``__version__`` and the lazy optional names.
 
-    ``__version__`` is resolved from installed distribution metadata on first
-    access and cached, so ``pyproject.toml`` stays the single declaration; the
-    ``importlib.metadata`` import lives in the function body rather than at
-    module scope because the core import must stay cheap (see
-    ``tests/test_guardrails.py``), the same reason ``cli._version`` defers it.
-
-    A name in :data:`_LAZY` is imported here, on first access, and cached into
-    ``globals()`` so the cost is paid once. When its extra is not installed the
-    import fails and the ImportError raised names the extra to install, so a
-    core install that does ``from researcher_profiles import LLMClient`` fails
-    loudly with an actionable message instead of handing back ``None``.
+    ``__version__`` comes from installed package metadata, imported here
+    rather than at module scope to keep the core import cheap. A missing extra
+    raises an ImportError naming it, never returns ``None``.
     """
     if name == "__version__":
         from importlib.metadata import PackageNotFoundError, version

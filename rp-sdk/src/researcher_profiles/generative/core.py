@@ -1,12 +1,7 @@
-"""Generative persona verbs: ``innovate`` and ``riff``.
+"""Generative persona verbs behind ``prof.persona.innovate`` and ``.riff``.
 
-The bodies live here; :class:`researcher_profiles.profile.persona.PersonaManager`
-imports and calls them, so ``prof.persona.innovate(...)`` is the caller-facing
-name.
-
-These methods reuse the shared :class:`~researcher_profiles.generative.llm.LLMClient`,
-the persona builder, and the JSONL usage logger, so the persona prompt
-prefix is cache-shared with ``.ask`` / ``.review``.
+They share the persona prompt prefix with ``.ask`` / ``.review``, so the
+prompt cache is shared too.
 """
 
 import json
@@ -29,7 +24,6 @@ _JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 def _extract_json(text: str) -> Any:
     """Parse a JSON object from ``text``, tolerating prose around it."""
-    # Strip ```json ... ``` fences if present.
     fence = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
     if fence:
         return json.loads(fence.group(1))
@@ -91,7 +85,6 @@ def _generate_json(
             )
             return result
         except (json.JSONDecodeError, ValueError, AttributeError, TypeError):
-            # Append the bad output and a corrective turn, retry once.
             messages = messages + [
                 {"role": "assistant", "content": resp.text},
                 {
@@ -104,7 +97,6 @@ def _generate_json(
                 },
             ]
 
-    # Both attempts failed.
     if last_resp is not None:
         _log_usage(
             self,
@@ -131,16 +123,14 @@ def _innovate(
 ) -> list[Idea]:
     """Propose ``n`` novel research directions in ``topic`` AS this researcher.
 
-    Returns a list of :class:`Idea` dataclasses. Retries once on a JSON
-    parse failure, then raises :class:`GenerativeParseError`.
+    Retries once on a JSON parse failure, then raises :class:`GenerativeParseError`.
     """
     if not self.has_persona:
         raise PersonaUnavailableError(self.slug)
     try:
         chunks = self.index.search(topic, k=k, **_source_type_kwargs(source_types))
     except _retrieval_errors():
-        # No index on this backend (``CapabilityUnavailableError``), or an
-        # unusable one: generate ungrounded rather than refusing.
+        # No usable index: generate ungrounded rather than refusing.
         chunks = []
     evidence_text, citation_refs = _render_evidence(chunks)
     source_ids = [c.paper_id for c in citation_refs]
@@ -214,15 +204,14 @@ def _riff(
 ) -> list[Riff]:
     """Generate ``n`` divergent riffs on ``seed`` AS this researcher.
 
-    Returns a list of :class:`Riff` dataclasses. Retries once on a JSON
-    parse failure, then raises :class:`GenerativeParseError`.
+    Retries once on a JSON parse failure, then raises :class:`GenerativeParseError`.
     """
     if not self.has_persona:
         raise PersonaUnavailableError(self.slug)
     try:
         chunks = self.index.search(seed, k=k, **_source_type_kwargs(source_types))
     except _retrieval_errors():
-        # See ``_innovate``: retrieval here is flavor, not the answer.
+        # See ``_innovate``.
         chunks = []
     evidence_text, citation_refs = _render_evidence(chunks)
     source_ids = [c.paper_id for c in citation_refs]

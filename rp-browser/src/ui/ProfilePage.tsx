@@ -135,8 +135,6 @@ export function ProfilePage({ url: urlProp, activeTab, onTabChange }: ProfilePag
     [url],
   );
 
-  // The profile's own full-text copy of a paper (role `paper_fulltext`), when
-  // the manifest lists one; the row hides the link otherwise.
   const fullTextHref = useCallback(
     (paperId: string) => (resolved ? fulltextUrl(resolved.manifest, paperId) : null),
     [resolved],
@@ -145,9 +143,7 @@ export function ProfilePage({ url: urlProp, activeTab, onTabChange }: ProfilePag
   const tabs = useMemo(() => {
     if (!detail) return [] as { id: TabId; label: string }[];
     const t: { id: TabId; label: string }[] = [{ id: "overview", label: "Overview" }];
-    // The content tabs always render, empty or not: a profile that has no
-    // expertise/soul/papers yet still shows the tab (with an empty state) so
-    // the structure is legible rather than silently missing.
+    // Content tabs always render, empty or not, so the structure stays legible.
     t.push({ id: "expertise", label: "Expertise" });
     t.push({ id: "soul", label: "Research Identity" });
     t.push({ id: "papers", label: `Publications (${papers.length})` });
@@ -158,9 +154,8 @@ export function ProfilePage({ url: urlProp, activeTab, onTabChange }: ProfilePag
   }, [detail, papers.length, extraTabs]);
 
   /**
-   * The tab actually displayed. The content tabs always exist, but owner-only
-   * extra tabs are still data-dependent, so a linked-to segment can be absent --
-   * default to overview rather than rewriting the URL, mirroring meTabOf/adminTabOf.
+   * The tab actually displayed. A linked extra tab can be absent, so fall back
+   * to overview without rewriting the URL.
    */
   const resolvedActive = useMemo(
     () => (tabs.some((t) => t.id === requestedTab) ? requestedTab : "overview"),

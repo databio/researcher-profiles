@@ -1,14 +1,4 @@
-"""Dependency injection helpers for the API.
-
-The auth hooks (bearer token, owner verifier, consumer scopes) and the two
-lookups every route starts from: the app's :class:`ProfileStore` and one
-profile out of it.
-
-The store itself is not defined here. It is
-:class:`researcher_profiles.store.FilesystemProfileStore`, one implementation
-of :class:`researcher_profiles.store.ProfileStore` among several, and this
-module only fetches whichever one the app was built with.
-"""
+"""FastAPI dependencies: auth gates, the caller, the viewer tier, and the store."""
 
 import logging
 import os
@@ -17,33 +7,15 @@ from typing import Optional
 
 from fastapi import Depends, Header, HTTPException, Query, Request
 
-from ..privacy import ViewerTier, narrow_viewer
-from ..profile import ResearcherProfile
+from ..privacy import ViewerTier
 from ..schema import Visibility
-from ..store import ProfileNotFoundError, ProfileStore
+from ..store import ProfileStore
 from .caller import Caller
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Dependencies used by routes
-# ---------------------------------------------------------------------------
-
-
 #: Methods that never get a per-caller view: they write, and a view is read-only.
 _WRITE_METHODS = frozenset({"PUT", "PATCH", "DELETE"})
-
-#: ``app.state`` slots that held the request-shaped hooks before ``app.state.hooks``.
-#: A host that still sets one would fail silently (its hook never runs), so
-#: :func:`get_caller` refuses to run while one is present. Remove once every
-#: host is on ``app.state.hooks``.
-_RETIRED_HOOK_SLOTS = (
-    "owner_verifier",
-    "write_scope_verifier",
-    "viewer_resolver",
-    "profile_tier_floor",
-    "registry_proofs",
-)
 
 
 def get_service(request: Request):
@@ -51,26 +23,11 @@ def get_service(request: Request):
     return request.app.state.service
 
 
-def _check_retired_slots(request: Request) -> None:
-    state = request.app.state
-    for name in _RETIRED_HOOK_SLOTS:
-        if getattr(state, name, None) is not None:
-            raise RuntimeError(
-                f"app.state.{name} is no longer read: set app.state.hooks.{name} "
-                "to a caller-shaped callable instead (see researcher_profiles.api.hooks)"
-            )
-
-
 def get_caller(request: Request) -> Caller:
-    """FastAPI dependency: this request's :class:`Caller`, built once per request.
-
-    Built by ``app.state.hooks.caller_resolver`` and memoized on
-    ``request.state.caller``.
-    """
+    """This request's :class:`Caller`, built by ``hooks.caller_resolver`` and memoized."""
     cached = getattr(request.state, "caller", None)
     if cached is not None:
         return cached
-    _check_retired_slots(request)
     caller = request.app.state.hooks.caller_resolver(request)
     request.state.caller = caller
     return caller
@@ -89,10 +46,8 @@ def _is_edit_route(request: Request) -> bool:
 def get_store(request: Request) -> ProfileStore:
     """The store this request reads: the caller's view on a read, the store on a write.
 
-    A ``PUT``, ``PATCH`` or ``DELETE``, and every route on ``edit_router``, get
-    the store itself: writes never go through a view. Every other route gets
-    ``service.store_for(caller)``, which is the store itself unless a host
-    installed ``hooks.store_for``.
+    Writes and every ``edit_router`` route get the store itself, since a view
+    is read-only.
     """
     service = request.app.state.service
     if request.method in _WRITE_METHODS or _is_edit_route(request):
@@ -104,12 +59,7 @@ def require_token(
     request: Request,
     authorization: Optional[str] = Header(None),
 ) -> None:
-    """Bearer-token gate.
-
-    The expected token is read from ``app.state.token`` (set by
-    ``create_app``). If unset/empty, the server is in open mode and
-    we allow the request through.
-    """
+    """Bearer-token gate against ``app.state.token``; no token set means open mode."""
     expected = getattr(request.app.state, "token", None)
     if not expected:
         return
@@ -122,39 +72,28 @@ def require_token(
 
 @dataclass(frozen=True)
 class ConsumerIdentity:
-    """The resolved identity of a calling consumer (an application).
+    """The identity a ``consumer_verifier`` returns for a calling application.
 
-    This is the return contract of a ``consumer_verifier``: rp-sdk carries it on
-    ``request.state.consumer`` without knowing anything about how a host resolves
-    a credential to it. ``is_operator`` marks the operator/superuser short-circuit
-    (holding every scope); a real consumer key resolves to ``is_operator=False``
-    with the concrete scopes minted for it.
+    ``is_operator`` holds every scope; a real consumer key has
+    ``is_operator=False`` and the scopes minted for it.
     """
 
     id: str
     name: str
     scopes: frozenset[str] = field(default_factory=frozenset)
     is_operator: bool = False
-    #: The most permissive privacy tier this consumer may be shown. Minted per
-    #: key by the host, so a lab integration reads ``limited`` content without
-    #: the whole registry being open. Defaults to ``public``: a key that never
-    #: said otherwise gets the narrowest reading.
+    #: The widest tier this consumer may be shown, minted per key. Defaults to
+    #: the narrowest, ``public``.
     tier: Visibility = "public"
 
 
 def require_scope(scope: str):
     """Build a dependency enforcing that the caller may use capability ``scope``.
 
-    This is the consumer-axis hook, parallel to ``hooks.edit_gate``. A host
-    (a management host) installs ``app.state.consumer_verifier``: a callable
-    ``(request, scope) -> ConsumerIdentity`` that resolves the inbound credential
-    to a consumer identity for ``scope``, raising ``HTTPException(401)`` for a
-    missing/unknown/revoked credential and ``HTTPException(403)`` for a known
-    consumer that lacks ``scope``.
-
-    When no verifier is installed (bare rp-sdk), there is no consumer concept, so
-    the dependency falls back to the operator bearer token: the single-token
-    semantics are identical to gating the endpoint with ``require_token``.
+    A host installs ``app.state.consumer_verifier``, a callable
+    ``(request, scope) -> ConsumerIdentity`` that raises ``HTTPException(401)``
+    for a bad credential and ``HTTPException(403)`` for a consumer lacking
+    ``scope``. With no verifier this is :func:`require_token`.
     """
 
     def dep(
@@ -163,8 +102,6 @@ def require_scope(scope: str):
     ) -> None:
         verifier = getattr(request.app.state, "consumer_verifier", None)
         if verifier is None:
-            # Bare rp-sdk: no consumer layer. Preserve today's single-token
-            # semantics exactly: operator token (or open dev mode).
             require_token(request, authorization)
             return
         identity = verifier(request, scope)
@@ -173,8 +110,7 @@ def require_scope(scope: str):
     return dep
 
 
-#: How ``?as=`` names a viewer, in the words a person uses rather than tier
-#: tokens. A cap, never a widening; see :func:`get_viewer_tier`.
+#: ``?as=`` viewer names to tiers. A cap, never a widening.
 PREVIEW_VIEWERS: dict[str, ViewerTier] = {
     "anonymous": "public",
     "lab": "limited",
@@ -188,31 +124,16 @@ def _client_ip(request: Request) -> Optional[str]:
 
 
 def default_caller_resolver(request: Request) -> Caller:
-    """The bare-SDK caller: a consumer identity, else the operator token, else anonymous.
+    """The default caller: a consumer identity, else the operator token, else anonymous.
 
-    Evaluated in order, short-circuiting on the first hit:
-
-    1. a consumer identity already resolved onto ``request.state.consumer``
-       by :func:`require_scope`, or, when a ``consumer_verifier`` is installed
-       and a bearer is presented, the identity it resolves for ``read``;
-    2. a valid operator bearer token: the operator, reading ``private``;
-    3. otherwise anonymous (``public``): anonymous callers and open dev mode
-       alike.
-
-    Rule 3 covers open dev mode. A server with no token configured lets every
-    request through the auth gates, and resolving that to ``private`` would
-    mean a developer's laptop silently served the tier nothing else does. A
-    missing credential is not a permissive credential.
-
-    A host replaces this wholesale via ``app.state.hooks.caller_resolver``.
+    Open dev mode (no token configured) resolves to anonymous, not
+    ``private``: a missing credential is not a permissive credential.
     """
     consumer = getattr(request.state, "consumer", None)
     if consumer is None:
         verifier = getattr(request.app.state, "consumer_verifier", None)
         if verifier is not None and (request.headers.get("authorization") or ""):
-            # Boundary: a host-installed verifier. A credential it rejects is
-            # not an error, but a verifier that broke is, and this is the
-            # authorization fallthrough where that difference disappears.
+            # Boundary: a verifier that broke is logged, then treated as anonymous.
             try:
                 consumer = verifier(request, "read")
             except Exception:
@@ -236,13 +157,9 @@ def default_caller_resolver(request: Request) -> Caller:
 
 
 def resolve_viewer_tier(caller: Caller, slug: str | None) -> ViewerTier:
-    """The bare-SDK default: the most permissive tier this caller may be shown.
+    """The default viewer tier: the widest tier this caller may be shown.
 
-    ``private`` for the operator, the tier minted on a consumer's key, else
-    the caller's own baseline tier. ``slug`` is unused here: bare rp-sdk has
-    no per-profile grants. A host that has them (an owner reads their own
-    held-back profile whole) answers from its roles in its own
-    ``hooks.viewer_resolver``.
+    ``slug`` is unused: the bare SDK has no per-profile grants.
     """
     del slug
     if caller.is_operator:
@@ -250,23 +167,6 @@ def resolve_viewer_tier(caller: Caller, slug: str | None) -> ViewerTier:
     if caller.consumer is not None:
         return getattr(caller.consumer, "tier", "public") or "public"
     return caller.tier or "public"
-
-
-def viewer_tier_for(request: Request, slug: str | None) -> ViewerTier:
-    """This caller's viewer tier for one profile, preview cap applied.
-
-    The viewer tier is a function of the caller *and* the profile: an owner is
-    entitled to their own held-back profile and to nothing else. A route that
-    walks many profiles (the profile listing, ``/match``) therefore asks this
-    per profile rather than resolving one tier for the whole request, or an
-    owner's own ``limited`` profile would vanish from a list that then showed
-    it happily at its own URL.
-    """
-    tier: ViewerTier = request.app.state.service.viewer(get_caller(request), slug)
-    cap = getattr(request.state, "viewer_cap", None)
-    if cap is not None:
-        tier = narrow_viewer(tier, cap)
-    return tier
 
 
 def get_viewer_tier(
@@ -277,20 +177,15 @@ def get_viewer_tier(
         description="Preview as another viewer: anonymous | lab | owner. a cap, never a widening.",
     ),
 ) -> ViewerTier:
-    """FastAPI dependency: this request's viewer tier, preview cap applied.
+    """This request's viewer tier, with the ``?as=`` preview cap applied.
 
-    ``slug`` is read from the route's path params rather than declared as an
-    argument, so a route without one does not grow a phantom ``?slug=`` query
-    parameter it would then have to ignore.
+    ``slug`` comes from path params, so routes without one get no phantom
+    ``?slug=`` query parameter.
 
-    ``?as=`` is composed with :func:`~researcher_profiles.privacy.narrow_viewer`,
-    which can only narrow, so it needs no authorization of its own and is safe
-    to accept from anyone. That is also what makes a preview honest: "what a
-    stranger sees" is this same handler and this same projection with the
-    viewer tier lowered, never a second implementation that can drift.
-
-    An unrecognized ``?as=`` is a 400. Ignoring it would silently show an owner
-    their own view while they believed they were looking at a stranger's.
+    ``?as=`` can only narrow, so it needs no authorization, and a preview runs
+    the same handler and projection as the real view. An unknown ``?as=`` is a
+    400: ignoring it would show an owner their own view while they believed
+    they saw a stranger's.
     """
     request.state.viewer_cap = None
     if as_ is not None:
@@ -301,22 +196,18 @@ def get_viewer_tier(
                 detail=f"unknown viewer {as_!r} (anonymous | lab | owner)",
             )
         request.state.viewer_cap = requested
-    resolved = viewer_tier_for(request, request.path_params.get("slug"))
-    # Stashed so the response stamp (see ``create_app``) can report the tier a
-    # response was projected through without every handler remembering to. On a
-    # route that walks many profiles this is the caller's baseline tier; the
-    # listing itself is computed per profile by ``viewer_tier_for``.
+    caller = get_caller(request)
+    if request.state.viewer_cap is not None:
+        caller = replace(caller, viewer_cap=request.state.viewer_cap)
+    resolved = request.app.state.service.viewer(caller, request.path_params.get("slug"))
+    # Read by the response stamp. On multi-profile routes this is the caller's
+    # baseline tier; listings are filtered per profile.
     request.state.viewer_tier = resolved
     return resolved
 
 
 def get_read_caller(request: Request, viewer: ViewerTier = Depends(get_viewer_tier)) -> Caller:
-    """FastAPI dependency: this request's caller with its ``?as=`` preview cap on it.
-
-    What a read route hands a service function, so the function's own tier
-    resolution is the preview the caller asked for. Depends on
-    :func:`get_viewer_tier`, which validates ``?as=`` and stamps the tier.
-    """
+    """This request's caller with its ``?as=`` preview cap, for read routes."""
     del viewer
     caller = get_caller(request)
     cap = getattr(request.state, "viewer_cap", None)
@@ -327,60 +218,21 @@ def get_read_caller(request: Request, viewer: ViewerTier = Depends(get_viewer_ti
 class TierFloor:
     """A host-imposed ceiling on one profile, and the sentence explaining it.
 
-    The decision and its explanation travel together, so an interface never
-    shows a reason that does not match the rule that ran.
-
-    ``tier=None`` is "no opinion": the document's own declaration is the whole
-    story. ``reason`` is meaningful only alongside a tier.
+    They travel together so a shown reason always matches the rule that ran.
+    ``tier=None`` means no opinion; ``reason`` is meaningful only with a tier.
     """
 
     tier: Visibility | None = None
     reason: str | None = None
 
 
-def get_profile_tier_floor(request: Request, prof, slug: str | None = None) -> TierFloor:
-    """The host's floor for this profile, and why: never ``None``.
-
-    ``app.state.hooks.profile_tier_floor`` is how a host says "regardless of
-    what this document declares, it may not go above X *here*". A management
-    host pins a profile whose owner has not published it. The hook must return
-    a :class:`TierFloor`; it owns both the decision and its wording. Bare
-    rp-sdk's default returns an empty ``TierFloor()``: a profile's own
-    declaration governs.
-    """
-    return request.app.state.service.floor(get_caller(request), prof, slug)
-
-
-def get_profile(ref: str, store: ProfileStore) -> ResearcherProfile:
-    """Resolve a slug or a rid to a profile, or raise 404."""
-    try:
-        return store.get(ref)
-    except (ProfileNotFoundError, KeyError) as e:
-        raise HTTPException(status_code=404, detail=f"profile {ref!r} not found") from e
-
-
 def get_match_store(request: Request):
     """The app's store, proved able to rank, for ``/api/v1/match``.
 
-    Ranking is embedding-backed, so it requires the ``vectors``/``st`` extras
-    and built per-profile indexes. Each way that can be missing is a 503 rather
-    than a 500, so callers degrade gracefully:
-
-    1. The analytics package will not import at all (a core-only install).
-    2. The store cannot serve vectors
-       (:class:`~researcher_profiles.store.VectorStore`).
-    3. Profiles exist but not one of them is indexed, so every ranking would
-       come back empty and read like "nobody matched".
-
-    Nothing is cached on ``app.state``: the managers cache on the store, which
-    already lives at ``app.state.store``, and they drop their snapshot whenever
-    the store's write generation moves. That is what replaced the registry
-    object this dependency used to build and the write path used to
-    null out.
-
-    Construction writes nothing, so the ``rid <-> slug`` lookup index is
-    refreshed here explicitly: the server owns a writable root and is the
-    natural place to keep that file current for shell callers.
+    Raises a 503, not a 500, when the extras are missing, the store cannot
+    serve vectors, or profiles exist but none is indexed (an empty ranking
+    would read as "nobody matched"). Also refreshes the ``rid <-> slug``
+    lookup index for shell callers.
     """
     try:
         from ..store._analytics import require_vector_store
@@ -399,8 +251,7 @@ def get_match_store(request: Request):
         from ..errors import CapabilityUnavailableError
 
         vstore = require_vector_store(store)
-        # Touching the accessor is what actually imports the analytics: they
-        # are lazy on the store precisely so ``rp list`` never pays for them.
+        # Touching the accessor imports the lazy analytics.
         _ = vstore.match
     except CapabilityUnavailableError as e:
         raise HTTPException(status_code=503, detail=f"matching unavailable: {e}") from e
@@ -424,9 +275,6 @@ def get_match_store(request: Request):
             detail=f"matching unavailable: the profiles store could not be read: {e}",
         ) from e
 
-    # Profiles exist and not one is indexed: an empty ranking here would be
-    # indistinguishable from "nobody matched". A deployment whose profiles were
-    # ingested without a built index lands here, and this is what tells it so.
     if slugs and not indexed:
         raise HTTPException(
             status_code=503,
@@ -436,7 +284,6 @@ def get_match_store(request: Request):
             ),
         )
 
-    # Nothing writes the lookup file implicitly; refresh it ourselves.
     store.write_lookup_index()
     return vstore
 
@@ -444,17 +291,9 @@ def get_match_store(request: Request):
 def materialize_store_to_tempdir(request: Request, store: ProfileStore):
     """Export every profile from a rootless store to a temp directory.
 
-    One caller: :func:`get_graph`. The graph is the last feature that still
-    needs a directory, because ``graph.sqlite`` is a regenerable handle
-    ``ArtifactStorage`` does not cover and that has no interface of its own.
-    The export carries no embeddings; the graph needs none.
-
-    The temp directory is kept alive on ``service.registry_tempdir`` and
-    reused across requests; ``Service.invalidate`` drops it so the next
-    graph build reflects the write.
-
-    Export failures stay per-profile: one malformed row should not cost the
-    whole graph.
+    The graph needs a directory. The temp dir is cached on
+    ``service.registry_tempdir`` until ``Service.invalidate`` drops it.
+    Export failures are per profile, so one bad row does not cost the graph.
     """
     import tempfile
     from pathlib import Path
@@ -481,16 +320,9 @@ def materialize_store_to_tempdir(request: Request, store: ProfileStore):
 
 
 def get_graph(request: Request):
-    """Lazily build (and cache) the profile graph over the app's store.
+    """Lazily build and cache the profile graph on ``service.graph``.
 
-    Returns ``service.graph`` when present, else
-    ``ProfileGraph.from_store`` (which loads ``<root>/.cache/graph.sqlite`` or builds
-    and persists it), caching the result on ``service.graph``. Unlike
-    ranking, the graph needs no heavy ML deps (it is pure bibliometric
-    transformation), so its 503 degradation is rare, reached only if the store
-    itself is unreadable.
-
-    For SQL-backed stores, uses the same temp directory ``get_graph`` caches.
+    Raises a 503 only if the store is unreadable.
     """
     service = request.app.state.service
     graph = service.graph
@@ -508,7 +340,6 @@ def get_graph(request: Request):
     store = request.app.state.store
     root = store.root
 
-    # SQL-backed store: use materialized temp directory
     if root is None:
         root = materialize_store_to_tempdir(request, store)
 

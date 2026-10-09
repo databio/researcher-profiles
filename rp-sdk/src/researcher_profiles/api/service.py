@@ -15,26 +15,45 @@ import logging
 from contextlib import nullcontext
 from typing import Any, Literal, Optional
 
-from ..errors import Conflict, Invalid, NotFound, Unauthenticated
-from ..models.api import EditResult, PaperPage, TextSection
+from ..errors import Conflict, Forbidden, Invalid, NotFound, Unauthenticated
+from ..models.api import (
+    ArtifactTier,
+    EditResult,
+    FileList,
+    PaperPage,
+    ProfileSummary,
+    SectionTierReport,
+    SummaryBatch,
+    TextSection,
+    VisibilityReport,
+)
 from ..privacy import (
+    SECTION_FIELDS,
     ViewerTier,
     effective_tiers,
     explain_tiers,
     narrow_viewer,
     profile_visible,
+    section_tiers,
     tier_allows,
 )
 from ..profile.edit import EditError, WorkNotFoundError, paper_version
-from ..schema import PaperRecord
+from ..schema import PaperRecord, most_restrictive
 from ..store import ProfileNotFoundError, ProfileStore
 from ..utils.paths import STORE_CACHE_DIRNAME
 from ._cursor import decode_cursor, encode_cursor
 from ._limits import BATCH_IDS_CAP, PAPERS_LIMIT, clamp
 from ._passages import paper_passages, profile_passages
-from ._projection import _content_hash, artifact_visible
+from ._projection import (
+    _content_hash,
+    _is_hard_floor,
+    _profile_summary,
+    artifact_visible,
+    served_document_bytes,
+    withheld,
+)
 from ._records import paper_record_view, paper_row, profile_record, summary_text
-from ._sizes import EXPERTISE_URL, PAPERS_URL, SOUL_URL, SizeIndex, text_url
+from ._sizes import EXPERTISE_URL, PAPERS_URL, SOUL_URL, SizeIndex, summary_url, text_url
 from ._text import page_text, sections_of
 from .caller import Caller
 from .deps import TierFloor
@@ -101,23 +120,15 @@ class Service:
     def invalidate(self, slug: str) -> None:
         """Drop every cache that could still reflect the pre-edit profile.
 
-        The cached profile object and the store's on-disk ``.cache`` memos
-        (centroids/topics/graph): the exact set a tarball push invalidates.
-        ``store.evict`` also bumps the store's write generation, which is the
-        whole in-process invalidation for ranking.
-
-        **Cache invalidation only.** Dependent-state maintenance belongs on
-        the write hooks (``store.add_pre_commit_hook``), which run inside the
-        write. Failures here stay swallowed: a stale-cache rebuild is cheap and
-        re-eviction is idempotent.
+        Covers the cached profile, the graph, and the on-disk ``.cache`` memos
+        (the same set a tarball push drops). ``store.evict`` also bumps the
+        store's write generation, which invalidates ranking. Cache only:
+        dependent state belongs on the write hooks. Failures are swallowed
+        because a rebuild is cheap and re-eviction is idempotent.
         """
         store = self.store
         store.evict(slug)
-        # The derived graph follows the same rule: drop the snapshot so the
-        # next graph query rebuilds over the new corpus.
         self.graph = None
-        # A rootless store materializes into a temp directory the graph build
-        # reuses; drop it so the next build re-exports the live corpus.
         tempdir = self.registry_tempdir
         if tempdir is not None:
             cleanup = getattr(tempdir, "cleanup", None)
@@ -130,9 +141,7 @@ class Service:
         root = store.root
         if root is None:
             return
-        # Names defined by ``CentroidManager.cache_path``,
-        # ``MatchManager.topics_cache_path`` and ``graph.cache.graph_db_path``;
-        # literal here because this path must work without importing them.
+        # Literal names so this works without importing the analytics modules.
         for cache_name in ("centroids.npz", "topics.json", "graph.sqlite"):
             fp = root / STORE_CACHE_DIRNAME / cache_name
             if fp.exists():
@@ -144,34 +153,45 @@ class Service:
     # -- the one entry point every read starts from -------------------------
 
     def load_visible(self, caller: Caller, ref: str) -> tuple[Any, ViewerTier]:
-        """``(profile, viewer tier)`` for a profile this caller may see, else ``NotFound``.
-
-        The profile comes from the caller's view of the store; a profile the
-        caller may not see is the same ``NotFound`` as one that does not exist.
-        """
-        _store, prof, viewer = self._read(caller, ref)
+        """``(profile, viewer tier)`` for a profile this caller may see, else ``NotFound``."""
+        _store, prof, viewer = self.read(caller, ref)
         return prof, viewer
 
-    def _read(self, caller: Caller, ref: str) -> tuple[ProfileStore, Any, ViewerTier]:
+    def read(self, caller: Caller, ref: str) -> tuple[ProfileStore, Any, ViewerTier]:
         """:meth:`load_visible`, plus the store view the profile came from."""
         store = self.store_for(caller)
         try:
             prof = store.get(ref)
         except (ProfileNotFoundError, KeyError) as e:
             raise profile_missing(ref) from e
-        viewer = self.viewer(caller, ref)
-        floor = self.floor(caller, prof, ref)
-        if not profile_visible(prof.metadata, viewer, floor=floor.tier):
+        ok, viewer = self.visible(caller, prof, ref)
+        if not ok:
             raise profile_missing(ref)
         return store, prof, viewer
+
+    def visible(
+        self, caller: Caller, prof: Any, slug: Optional[str] = None
+    ) -> tuple[bool, ViewerTier]:
+        """``(may this caller be told about prof, their tier for it)``: the profile gate.
+
+        The tier is resolved per profile (a grant is held on one profile, not
+        on the rest), so a walk over many profiles asks this for each one.
+        Fail-closed: an object that cannot answer for its own tier is hidden.
+        """
+        md = getattr(prof, "metadata", None)
+        if md is None:
+            return False, "public"
+        slug = slug if slug is not None else getattr(prof, "slug", None)
+        viewer = self.viewer(caller, slug)
+        return profile_visible(md, viewer, floor=self.floor(caller, prof, slug).tier), viewer
 
 
 # ---------------------------------------------------------------------------
 # Reads
 #
-# Every read starts from ``Service._read`` (``load_visible``): the caller's
-# view of the store, the profile gate, the viewer tier. A profile or a part
-# this caller may not see is the same ``NotFound`` as one that does not exist.
+# Every read starts from ``Service.read``. A profile or a part this caller may
+# not see is the same ``NotFound`` as one that does not exist, so a refusal
+# never confirms that something hidden exists.
 # ---------------------------------------------------------------------------
 
 View = Literal["record", "full"]
@@ -233,7 +253,7 @@ def get_profile(service: Service, caller: Caller, ref: str, *, view: View = "rec
     bodies. A field this caller may not see is ``null`` and named in
     ``withheld``.
     """
-    store, prof, viewer = service._read(caller, ref)
+    store, prof, viewer = service.read(caller, ref)
     return profile_record(
         prof, viewer, view=view, proofs=service.proofs(prof.metadata.rid), store=store
     )
@@ -242,13 +262,127 @@ def get_profile(service: Service, caller: Caller, ref: str, *, view: View = "rec
 def works_visible(service: Service, caller: Caller, ref: str) -> tuple[Any, ViewerTier]:
     """``(profile, viewer tier)`` when this caller may read the profile's works list.
 
-    The works artifact (``sources/papers.jsonld``) has its own tier; a caller
-    who may see the profile but not its works gets the profile's ``NotFound``.
+    The works artifact has its own tier; a caller below it gets the profile's
+    ``NotFound``.
     """
     prof, viewer = service.load_visible(caller, ref)
     if not _works_visible(prof, viewer):
         raise profile_missing(ref)
     return prof, viewer
+
+
+def list_profiles(service: Service, caller: Caller) -> list[ProfileSummary]:
+    """Every profile this caller may see, summarized. The one listing walk.
+
+    A profile that fails to load or summarize is logged and counted, never
+    mistaken for a private one; the listing still answers for the rest.
+    """
+    store = service.store_for(caller)
+    out: list[ProfileSummary] = []
+    failed = 0
+    for slug in store.list_slugs():
+        try:
+            prof = store.get(slug)
+        # Boundary: one profile's load; the listing still answers for the rest.
+        except Exception:
+            failed += 1
+            logger.exception("could not load profile %s", slug)
+            continue
+        try:
+            ok, viewer = service.visible(caller, prof, slug)
+            if ok:
+                out.append(_profile_summary(prof, viewer))
+        # Boundary: one profile's summary projection; the listing still answers.
+        except Exception:
+            failed += 1
+            logger.exception("could not summarize profile %s", slug)
+    if failed:
+        logger.warning("listing omitted %d profile(s) that failed to load", failed)
+    return out
+
+
+def list_files(service: Service, caller: Caller, ref: str) -> FileList:
+    """The manifest, each entry labeled with its effective tier and slot, plus ``withheld``."""
+    _store, prof, viewer = service.read(caller, ref)
+    explain = explain_tiers(prof.metadata)
+    files = []
+    for slot, parts in (
+        ("hasPart", prof.metadata.has_part),
+        ("subjectOf", prof.metadata.subject_of),
+    ):
+        for part in parts:
+            entry = part.model_dump(mode="json")
+            detail = explain.get(part.content_url)
+            entry["effective_visibility"] = (
+                detail.effective if detail is not None else part.visibility
+            )
+            entry["slot"] = slot
+            files.append(entry)
+    return FileList(files=files, withheld=withheld(explain, viewer))
+
+
+def get_summaries(service: Service, caller: Caller, ref: str, ids: str) -> SummaryBatch:
+    """Up to 20 generated summaries, each gated on its own tier; the rest say why not."""
+    store, prof, viewer = service.read(caller, ref)
+    wanted = split_ids(ids)
+    taken, rest = wanted[:BATCH_IDS_CAP], wanted[BATCH_IDS_CAP:]
+    sizes = SizeIndex(prof, viewer, store, store.resolve_slug(ref))
+    summaries = prof.summaries
+    out: dict[str, str] = {}
+    unavailable: dict[str, str] = {}
+    for pid in taken:
+        size = sizes.of(summary_url(pid))
+        if size.available and pid in summaries:
+            out[pid] = summaries[pid]
+        else:
+            unavailable[pid] = size.reason or "none"
+    return SummaryBatch(
+        summaries=out, unavailable=unavailable, limit_applied=len(taken), not_processed=rest
+    )
+
+
+def _document(service: Service, store: ProfileStore, prof: Any, viewer: ViewerTier, ref: str):
+    try:
+        return served_document_bytes(service, store, prof, viewer, store.resolve_slug(ref))
+    except (ProfileNotFoundError, KeyError) as e:
+        raise profile_missing(ref) from e
+
+
+def get_document(service: Service, caller: Caller, ref: str) -> tuple[bytes, Any, ViewerTier]:
+    """``(profile.jsonld bytes, profile, viewer tier)``: the served document (see ``served_document_bytes``)."""
+    store, prof, viewer = service.read(caller, ref)
+    return _document(service, store, prof, viewer, ref), prof, viewer
+
+
+def get_artifact(
+    service: Service, caller: Caller, ref: str, artifact: str
+) -> tuple[bytes, Optional[str], Any, ViewerTier, Optional[str]]:
+    """One manifest artifact: ``(bytes, media type, profile, viewer tier, effective tier)``.
+
+    ``profile.jsonld`` is the served document (effective tier ``None``). The
+    hard floors (``.cache/``, ``.keys/``) are ``Forbidden`` for everyone.
+    """
+    store, prof, viewer = service.read(caller, ref)
+    resolved = store.resolve_slug(ref)
+    if artifact == "profile.jsonld":
+        return _document(service, store, prof, viewer, resolved), None, prof, viewer, None
+    effective = effective_tiers(prof.metadata)
+    unknown = NotFound(f"artifact {artifact!r} is not a manifest artifact of {resolved!r}")
+    part = next((p for p in prof.manifest() if p.content_url == artifact), None)
+    if artifact not in effective or part is None:
+        raise unknown
+    if _is_hard_floor(artifact):
+        raise Forbidden("build-local derived state is not a servable artifact")
+    if not tier_allows(viewer, effective[artifact]):
+        raise unknown
+    try:
+        data = store.artifact_bytes(resolved, artifact)
+    except (ProfileNotFoundError, KeyError) as e:
+        raise NotFound(
+            f"artifact {artifact!r} is listed in the manifest of {resolved!r} "
+            "but its content was not uploaded to this registry"
+        ) from e
+    return data, part.encoding_format, prof, viewer, effective[artifact]
 
 
 def list_papers(
@@ -271,7 +405,7 @@ def list_papers(
     reads those rows only, in that order. A cursor made under other filters is
     ``Invalid(code="cursor_mismatch")``.
     """
-    store, prof, viewer = service._read(caller, ref)
+    store, prof, viewer = service.read(caller, ref)
     if not _works_visible(prof, viewer):
         raise profile_missing(ref)
     sizes = SizeIndex(prof, viewer, store, store.resolve_slug(ref))
@@ -370,12 +504,11 @@ def list_papers(
 
 
 def get_paper(service: Service, caller: Caller, ref: str, paper_id: str, *, view: View = "record"):
-    """One paper: its fields, its summary inline, its sizes, its version (a :class:`PaperRecordView`).
+    """One paper: fields, inline summary, sizes, version (a :class:`PaperRecordView`).
 
-    Gated like the works list. A paper that is not there, or that this caller
-    may not see, is ``NotFound``.
+    Gated like the works list.
     """
-    store, prof, viewer = service._read(caller, ref)
+    store, prof, viewer = service.read(caller, ref)
     if not _works_visible(prof, viewer):
         raise profile_missing(ref)
     record = _find_paper(prof, paper_id, ref)
@@ -403,11 +536,10 @@ def read_paper_text(
 ):
     """A paper's full text, bounded (a :class:`TextPage`).
 
-    Gated like its content route: a full text this caller may not read is the
-    same ``NotFound`` as one that does not exist. An unknown ``section`` is
+    Gated on the text artifact's own tier. An unknown ``section`` is
     ``Invalid(code="unknown_section")`` with the valid names.
     """
-    store, prof, viewer = service._read(caller, ref)
+    store, prof, viewer = service.read(caller, ref)
     url = text_url(paper_id)
     effective = effective_tiers(prof.metadata)
     if url not in effective or not tier_allows(viewer, effective[url]):
@@ -434,7 +566,7 @@ def read_profile_text(
     ``# Expertise`` sections; with one, that artifact's stored text alone. The
     page carries ``content_hash``, so an edit needs no second read.
     """
-    store, prof, viewer = service._read(caller, ref)
+    store, prof, viewer = service.read(caller, ref)
     explain = explain_tiers(prof.metadata)
     md = prof.metadata
     bodies = {
@@ -484,10 +616,9 @@ def find_paper_passages(
 ):
     """The passages of one paper that best answer ``query`` (a :class:`PassageList`).
 
-    Gated like the works list; a paper this caller cannot see is the same
-    ``NotFound`` as one that does not exist.
+    Gated like the works list.
     """
-    store, prof, viewer = service._read(caller, ref)
+    store, prof, viewer = service.read(caller, ref)
     if not _works_visible(prof, viewer):
         raise profile_missing(ref)
     record = next((p for p in prof.papers if p.paper_id == paper_id), None)
@@ -503,7 +634,7 @@ def find_profile_passages(
 
     Only sources this caller may read are searched.
     """
-    store, prof, viewer = service._read(caller, ref)
+    store, prof, viewer = service.read(caller, ref)
     return profile_passages(store, prof, viewer, query, k)
 
 
@@ -517,11 +648,22 @@ def find_profile_passages(
 # ---------------------------------------------------------------------------
 
 
-def _load_for_edit(service: Service, ref: str):
+def _load_for_edit(service: Service, caller: Caller, ref: str, *, read_ok: bool = False):
+    """The stored profile, once the edit gate (``require_edit``) has admitted this caller.
+
+    With no host gate the credential is checked before the lookup, so a caller
+    who may not edit gets the same ``Unauthenticated`` whether or not ``ref``
+    exists: a 404 for one and a 401 for the other would disclose a held-back
+    profile.
+    """
+    if service.hooks.edit_gate is None and not (caller.is_operator or service.open_mode):
+        raise Unauthenticated("invalid or missing bearer token")
     try:
-        return service.store.get(ref)
+        prof = service.store.get(ref)
     except (ProfileNotFoundError, KeyError) as e:
         raise profile_missing(ref) from e
+    require_edit(service, caller, prof, read_ok=read_ok, ref=ref)
+    return prof
 
 
 def require_edit(
@@ -536,9 +678,10 @@ def require_edit(
 
     ``hooks.edit_gate(caller, prof, read_ok=..., ref=...)`` when a host
     installed one; it raises ``Unauthenticated``, ``Forbidden`` or
-    ``NotFound``. ``ref`` is the caller's own input, for a refusal that must
-    not name the resolved slug; a gate's ``NotFound`` is re-said for it too. Without a gate, the operator credential
-    edits (and anyone in open mode); everyone else is ``Unauthenticated``.
+    ``NotFound``. ``ref`` is the caller's own input, so a refusal (a gate's
+    ``NotFound`` included) never names the resolved slug. Without a gate, the
+    operator credential edits (and anyone in open mode); everyone else is
+    ``Unauthenticated``.
     """
     gate = service.hooks.edit_gate
     if gate is not None:
@@ -630,8 +773,7 @@ def edit_metadata(
     produce an invalid document is ``Invalid`` and changes nothing.
     """
     store = service.store
-    prof = _load_for_edit(service, ref)
-    require_edit(service, caller, prof, ref=ref)
+    prof = _load_for_edit(service, caller, ref)
     patch = dict(patch)
     # Neither is a metadata field: ``slug`` is the address and renaming is not
     # an edit; ``base_hash`` is the concurrency token.
@@ -684,8 +826,7 @@ def edit_work(
 ) -> EditResult:
     """Patch owner-editable fields of one work. A stale ``base_version`` is a ``Conflict``."""
     store = service.store
-    prof = _load_for_edit(service, ref)
-    require_edit(service, caller, prof, ref=ref)
+    prof = _load_for_edit(service, caller, ref)
     patch = dict(patch)
     patch.pop("base_version", None)
     _check_base_version(_work(prof, paper_id), base_version)
@@ -715,8 +856,7 @@ def add_work(service: Service, caller: Caller, ref: str, record: dict) -> EditRe
     CLI; the never-overwrite rule is this function's.
     """
     store = service.store
-    prof = _load_for_edit(service, ref)
-    require_edit(service, caller, prof, ref=ref)
+    prof = _load_for_edit(service, caller, ref)
     paper_id = str(record.get("paper_id") or "").strip() if isinstance(record, dict) else ""
     if not paper_id:
         raise Invalid("a work record needs a paper_id")
@@ -750,8 +890,7 @@ def remove_work(
 ) -> EditResult:
     """Remove one work. A stale ``base_version`` is a ``Conflict`` and the work stays."""
     store = service.store
-    prof = _load_for_edit(service, ref)
-    require_edit(service, caller, prof, ref=ref)
+    prof = _load_for_edit(service, caller, ref)
     _check_base_version(_work(prof, paper_id), base_version)
     _write_scope(service, caller, prof, "works", {"paper_id": paper_id, "fields": []})
     try:
@@ -782,8 +921,7 @@ def set_visibility(
 ) -> EditResult:
     """Set the profile-level default tier and/or per-artifact and per-section tiers."""
     store = service.store
-    prof = _load_for_edit(service, ref)
-    require_edit(service, caller, prof, ref=ref)
+    prof = _load_for_edit(service, caller, ref)
     artifacts = list(artifacts or [])
     sections = list(sections or [])
     _check_base_hash(store, store.resolve_slug(ref), base_hash)
@@ -827,22 +965,101 @@ def set_visibility(
     )
 
 
+def get_visibility(service: Service, caller: Caller, ref: str) -> VisibilityReport:
+    """What is published, to whom, and why: the read side of :func:`set_visibility`.
+
+    Owner tooling: the edit gate with ``read_ok`` (a caller who may read the
+    profile whole is admitted too). Every row is a projection of
+    ``privacy.explain_tiers`` and ``privacy.tier_allows``.
+    """
+    store = service.store
+    prof = _load_for_edit(service, caller, ref, read_ok=True)
+    resolved = store.resolve_slug(ref)
+    explain = explain_tiers(prof.metadata)
+    floor = service.floor(caller, prof, ref)
+
+    viewers: dict[str, ViewerTier] = {"anonymous": "public", "lab": "limited", "you": "private"}
+    counts = dict.fromkeys(viewers, 0)
+    artifacts: list[ArtifactTier] = []
+    for entry in explain.values():
+        floored = _is_hard_floor(entry.content_url)
+        visible_to = []
+        for label, tier in viewers.items():
+            if not floored and tier_allows(tier, entry.effective):
+                visible_to.append(label)
+                counts[label] += 1
+        artifacts.append(
+            ArtifactTier(
+                content_url=entry.content_url,
+                role=entry.role,
+                name=entry.name,
+                paper_id=entry.paper_id,
+                declared=entry.declared,
+                effective=entry.effective,
+                raised_by=list(entry.raised_by),
+                visible_to=visible_to,
+            )
+        )
+    artifacts.sort(key=lambda a: a.content_url)
+
+    # One row per inline section, in SECTION_FIELDS order, with the declared
+    # and the governing tier. ``soul`` governs no inline field: it reaches
+    # personality/SOUL.md through the manifest, so its ``declared`` folds in
+    # the soul artifact's own declared tier.
+    section_effective = section_tiers(prof.metadata)
+    declared_map = {x.section: x.visibility for x in prof.metadata.section_visibility}
+    soul_declared = [e.declared for e in explain.values() if e.role == "soul"]
+    sections: list[SectionTierReport] = []
+    for section in SECTION_FIELDS:
+        declared = declared_map.get(section, "public")
+        if section == "soul":
+            declared = most_restrictive(declared, *soul_declared)
+        effective = section_effective[section]
+        sections.append(
+            SectionTierReport(
+                section=section,
+                declared=declared,
+                effective=effective,
+                visible_to=[
+                    label for label, tier in viewers.items() if tier_allows(tier, effective)
+                ],
+            )
+        )
+
+    return VisibilityReport(
+        slug=resolved,
+        rid=getattr(prof, "rid", None),
+        profile_visibility=prof.metadata.visibility,
+        profile_floor=floor.tier,
+        profile_floor_reason=floor.reason if floor.tier else None,
+        artifacts=artifacts,
+        sections=sections,
+        counts=counts,
+    )
+
+
 __all__ = [
     "Service",
     "add_work",
     "edit_metadata",
     "edit_work",
-    "remove_work",
-    "require_edit",
-    "set_visibility",
     "find_paper_passages",
     "find_profile_passages",
+    "get_artifact",
+    "get_document",
     "get_paper",
     "get_profile",
+    "get_summaries",
+    "get_visibility",
+    "list_files",
     "list_papers",
+    "list_profiles",
     "profile_missing",
     "read_paper_text",
     "read_profile_text",
+    "remove_work",
+    "require_edit",
+    "set_visibility",
     "split_ids",
     "works_visible",
 ]

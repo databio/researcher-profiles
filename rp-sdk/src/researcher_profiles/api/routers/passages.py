@@ -1,10 +1,7 @@
 """Passages: the parts of one paper, or one profile, that answer a query.
 
-On ``public_router``, not behind the ``match`` scope, for three reasons: they
-search inside one profile the caller can already read; every snippet they
-return is text the caller can already fetch through the content, summary and
-text routes; and they never rank one profile against another. Cross-profile
-matching stays on the ``match`` scope.
+Not behind the ``match`` scope: they search one readable profile, return only
+text the caller could already fetch, and never rank profiles against each other.
 """
 
 from fastapi import Depends
@@ -31,9 +28,8 @@ def find_paper_passages(
 ) -> PassageList:
     """The passages of one paper (full text, summary, abstract) that best answer ``query``.
 
-    Gated like the paper list: the profile gate, then the works artifact
-    (``sources/papers.jsonld``); a paper this caller cannot see is the same
-    404 as one that does not exist. Full text is searched by keyword only and
+    Gated like the paper list; a hidden paper is the same 404 as a missing one.
+    Full text is searched by keyword only and
     only when this caller may read it; ``searched`` and ``note`` say so.
     ``k`` defaults to 3 and is clamped to 10.
     """

@@ -1,9 +1,4 @@
-"""The format verbs: ``schema``, ``vocab``, ``validate``, ``manifest``, ``where``, ``mint-local-id``.
-
-These are the commands that answer questions about the on-disk contract rather
-than about a corpus or a server: what the schema is, whether a directory passes
-it, what its manifest says, and which directory an identifier resolves to.
-"""
+"""The format verbs: ``schema``, ``vocab``, ``validate``, ``manifest``, ``where``, ``mint-local-id``."""
 
 import argparse
 import json
@@ -203,8 +198,6 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         print(json.dumps(report_to_dict(report), indent=2))
     else:
         print(format_text_report(report))
-    # Exit 0 on ok, EXIT_VALIDATION on a conformance violation: the code
-    # that says "the artifact is wrong" rather than "the command was".
     # Undeclared-terms-only is a pass with a warning banner.
     if report.ok:
         has_undeclared = any(a.undeclared for a in report.artifacts)
@@ -267,9 +260,7 @@ def _cmd_manifest(args: argparse.Namespace) -> int:
         for entry in entries:
             print(f"{entry.role or '-':<16} {entry.content_url}")
     if drift["missing"] or drift["stale"]:
-        # Always to stderr, including under --json: drift is a diagnosis
-        # about the document, and mixing it into stdout would break `rp
-        # manifest --json | jq`.
+        # Always stderr, so `rp manifest --json | jq` keeps working.
         for m in drift["missing"]:
             print(f"MISSING from manifest: {m}", file=sys.stderr)
         for m in drift["stale"]:
@@ -286,20 +277,16 @@ def _cmd_manifest(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-#: Longest list of dropped manifest entries printed before summarizing. Same
-#: reasoning as the push report's cap: past twenty, ``--json`` is the answer.
+#: Longest list of dropped manifest entries printed before summarizing.
 _DROPPED_CAP = 20
 
 
 def _write_manifest(args: argparse.Namespace, prof, root: Path) -> int:
     """``rp manifest --write``: diff first, then write, and never drop silently.
 
-    Regenerating a manifest from a directory walk is only safe when the
-    directory is the whole profile. Run in a partial copy it is the
-    destructive step: it rewrote 141 entries down to 88, reported "wrote 88
-    manifest entries", and the next push deleted the difference. So the diff
-    is computed before anything is written, dropped entries are named, and a
-    drop needs ``--force``.
+    Regenerating from a directory walk is only safe when the directory is the
+    whole profile; in a partial copy it drops entries that the next push then
+    deletes. So dropped entries are named, and a drop needs ``--force``.
     """
     before = [e.content_url for e in prof.manifest()]
     parts, subjects = prof.storage.build_manifest()
@@ -366,13 +353,8 @@ def _cmd_where(args: argparse.Namespace) -> int:
             raise FileNotFoundError(f"profiles root does not exist: {root_path}")
         path = FilesystemProfileStore(root_path).path_for(args.ref)
     except (FileNotFoundError, ProfileNotFoundError, ValueError) as e:
-        # Name the ref, the directory searched, and how that directory was
-        # chosen. "not found: KeyError('x')" is true and useless: the usual
-        # cause is a cache resolved from a setting the caller forgot about.
         lines = [f"rp where: nothing matches {args.ref!r}"]
-        # A bare KeyError stringifies to the ref already printed above; only the
-        # cases that say something new (a missing root, an unreadable
-        # index) earn a second line.
+        # A bare KeyError just repeats the ref; only new detail gets a line.
         detail = str(e).strip("'\"")
         if detail and detail != args.ref:
             lines.append(f"  {e}")

@@ -2,8 +2,7 @@
 :class:`ProfileDocument` carries but that are not documents in their own right,
 plus :class:`ArtifactRef`, the manifest entry.
 
-Training and CareerEntry are the two exceptions: they come from scholarcore and
-are re-exported by the package, not defined here.
+Training and CareerEntry come from scholarcore.
 """
 
 from collections.abc import Iterable
@@ -19,18 +18,12 @@ from .jsonld import JsonLdModel
 class ResearchOutput(JsonLdModel):
     """The base type for every research output a researcher produces.
 
-    An entry in the ``researchOutputs`` list (``rp:researchOutput``) is a
-    ``ResearchOutput`` directly: software, a dataset, a protocol, a reagent, or
-    another non-paper output. Papers are not stored here — they live in
-    ``sources/papers.jsonld`` — but :class:`~.PaperRecord` is a *specialization*
-    of this class, and future output kinds (grants, abstracts, presentations,
-    patents, standards) are expected to specialize it too, adding their own
-    type-specific fields on top of this shared core.
+    An entry in the ``researchOutputs`` list (``rp:researchOutput``): software,
+    a dataset, a protocol, a reagent, or another non-paper output. Papers live
+    in ``sources/papers.jsonld``; :class:`~.PaperRecord` specializes this class.
 
-    It is a :class:`~.JsonLdModel`, not a plain nested value object, because a
-    research output is a citable thing with an identity: a DOI, a repository
-    URL, a grant number. ``@id`` and ``@type`` are therefore available on every
-    output; both are optional, and a generic output needs neither.
+    A research output is a citable thing, so it may carry an optional ``@id``
+    and ``@type``.
 
     ``type`` is free text, not a closed enum. The recommended vocabulary is
     ``software``, ``dataset``, ``protocol``, ``reagent``, ``model``, ``grant``,
@@ -77,14 +70,10 @@ class CareerStage(_Base):
     """Date-anchored career-stage and eligibility facts (``rp:careerStage``).
 
     Stores anchor facts, not verdicts. Eligibility (NIH ESI, K99, NSF CAREER,
-    ...) is always evaluated relative to an application due date, so the
-    profile never records "is_esi: true". It records the dated facts an
-    evaluator applies a NOFO's rule to at evaluation time. ``as_of`` is when
-    the facts were assessed (distinct from the profile build date). ``None``
-    and ``"unknown"`` are legal everywhere so an evaluator can say "can't
-    determine" instead of guessing. ``sources_checked`` disambiguates the
-    nulls: a null fact whose source category was checked is an established
-    absence; a null fact whose category was never checked is unknown.
+    ...) depends on an application due date, so the profile records the dated
+    facts an evaluator applies a rule to, never "is_esi: true". ``None`` and
+    ``"unknown"`` are legal everywhere so an evaluator can say "can't
+    determine" instead of guessing.
 
     Out of scope (use ``notes`` or ask the human): citizenship /
     visa status, postdoc research-months accounting, ESI extensions.
@@ -192,8 +181,7 @@ class CareerStage(_Base):
 class Identifier(JsonLdModel):
     """A ``schema:PropertyValue`` identifier node.
 
-    Used for the identifiers that are not the profile's ``@id``: OpenAlex,
-    Scopus, and whatever an older ``external_ids`` block carried.
+    For identifiers other than the profile's ``@id``, such as OpenAlex or Scopus.
     """
 
     type_: str | None = Field(default="PropertyValue", alias="@type")
@@ -227,8 +215,6 @@ class InterestConcept(JsonLdModel):
 
     The field names follow FHIR ``Coding`` (``system``, ``code``,
     ``display``, ``version``), so a Coding view is a rename, not a mapping.
-    This is a separate type from :class:`ConceptReference`, which stays the
-    shape of ``therapeutic_areas``.
     """
 
     system: str | None = None
@@ -249,8 +235,7 @@ class InterestConcept(JsonLdModel):
         return self
 
     def _jsonld_node(self, data: dict[str, Any]) -> dict[str, Any]:
-        # ``unmapped`` is a claim only when true; ``false`` on every coded
-        # concept would be noise.
+        # ``unmapped`` is written only when true.
         if not data.get("unmapped"):
             data.pop("unmapped", None)
         return data
@@ -300,7 +285,7 @@ class ResearchInterest(JsonLdModel):
     concept: InterestConcept
     weight: float | None = Field(default=None, ge=-1, le=1)
     method: InterestMethod
-    #: What produced the entry: ``user``, ``llm``, ``prosopia-wizard``,
+    #: What produced the entry: ``user``, ``llm``, ``profile-wizard``,
     #: ``openalex-topics@2026-09``, ...
     generator: str = Field(min_length=1)
     asserted_at: datetime = Field(alias="assertedAt")
@@ -344,8 +329,6 @@ def interests_from_text(
 ) -> list[ResearchInterest]:
     """Text-only entries for two free-text lists (+0.5 and -0.5).
 
-    The one conversion every builder uses, so an LLM's ``interests`` /
-    ``not_interests`` become the same typed entries whichever tool wrote them.
     Blank and repeated labels (case-insensitive) are dropped.
     """
     at = asserted_at or datetime.now(timezone.utc).replace(microsecond=0)
@@ -412,13 +395,10 @@ def project_interests(entries: Iterable[ResearchInterest]) -> tuple[list[str], l
 class SectionVisibility(JsonLdModel):
     """A declared privacy tier for one inline section of the document.
 
-    Artifacts carry their own tier on an :class:`ArtifactRef`; the fields
-    *inside* ``profile.jsonld`` had nowhere to carry one, so a private summary
-    or a private methods list rode out in a public document however carefully
-    the files were excluded. The section names are a closed set on purpose:
-    :data:`researcher_profiles.privacy.SECTION_FIELDS` maps each to the exact
-    fields it governs, and a section nothing maps to would be a tier that
-    silently protects nothing.
+    The tier for fields inside ``profile.jsonld``, as :class:`ArtifactRef`
+    carries one for files. The section names are a closed set so that every
+    section maps to the fields it governs; an unmapped section would protect
+    nothing.
     """
 
     section: Literal[
@@ -452,9 +432,7 @@ class SiteInfrastructure(_Base):
 class SiteCapabilities(_Base):
     """A clinical site's capacity to host trials (``rp:siteCapabilities``).
 
-    Typed rather than a free dict so the owner editor can round-trip it and
-    the privacy projection can drop it as one section. See the optional
-    clinical extension in ``docs/rp-spec/index.md``.
+    See the optional clinical extension in ``docs/rp-spec/index.md``.
     """
 
     patient_populations: list[str] = []
@@ -468,8 +446,7 @@ class ArtifactRef(JsonLdModel):
     """One manifest entry: a typed link to one artifact (file) inside the profile.
 
     ``contentUrl`` is always a relative path, so a profile stays portable
-    across servers. Copying the directory to a different host cannot break a
-    single link.
+    across servers.
     """
 
     type_: str | None = Field(default="DigitalDocument", alias="@type")
@@ -478,21 +455,16 @@ class ArtifactRef(JsonLdModel):
     content_url: str = Field(alias="contentUrl")
     role: str | None = None
     paper_id: str | None = Field(default=None, alias="paperId")
-    #: Size and digest, so a consumer can budget/verify a fetch. Populated at
-    #: write time.
+    #: Size and digest, so a consumer can budget or verify a fetch.
     bytes: int | None = None
     sha256: str | None = None
-    #: Provenance for a GENERATED artifact: a digest of the inputs it was made
-    #: from (see the builder's fingerprints). Kept only while the file's
-    #: ``sha256`` is unchanged, so a hand-edited file carries none and reads as
-    #: edited rather than as current or stale.
+    #: For a generated artifact, a digest of the inputs it was made from. Kept
+    #: only while ``sha256`` is unchanged, so a hand-edited file carries none.
     inputs_digest: str | None = Field(default=None, alias="inputsDigest")
-    #: This artifact's declared privacy tier. When not explicitly set it
-    #: defaults to the role default (:func:`role_default_visibility`); e.g. a
-    #: ``cv``/``web``/``paper_fulltext`` artifact defaults to ``private``.
-    #: Every role's tier is fully choosable by the owner; the default is a
-    #: default, not a floor. The *effective* tier also folds in
-    #: ``derived_from``; see :func:`researcher_profiles.privacy.effective_tiers`.
+    #: This artifact's declared privacy tier. Unset, it takes the role default
+    #: (:func:`role_default_visibility`), which is a default, not a floor. The
+    #: effective tier also folds in ``derived_from``; see
+    #: :func:`researcher_profiles.privacy.effective_tiers`.
     visibility: Visibility = "public"
     #: Roles or paper_ids this artifact was derived from. Its effective tier is
     #: the most restrictive of its own and its sources'.
@@ -501,16 +473,14 @@ class ArtifactRef(JsonLdModel):
     @model_validator(mode="before")
     @classmethod
     def _drop_access_rights(cls, data: Any) -> Any:
-        # ``accessRights`` is derived at serve time from the effective tier
-        # (:func:`researcher_profiles.privacy.project_document`). A copy read
-        # back in is stale by construction, so it is never kept or stored.
+        # ``accessRights`` is derived at serve time, so a copy read back in is
+        # dropped, never stored.
         if isinstance(data, dict) and ACCESS_RIGHTS_KEY in data:
             data = {k: v for k, v in data.items() if k != ACCESS_RIGHTS_KEY}
         return data
 
     @model_validator(mode="after")
     def _apply_role_tier(self) -> "ArtifactRef":
-        # When the tier was not stated, inherit the role default.
         if "visibility" not in self.model_fields_set:
             self.visibility = role_default_visibility(self.role)
         return self

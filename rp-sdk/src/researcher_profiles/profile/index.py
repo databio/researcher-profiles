@@ -1,11 +1,7 @@
 """``prof.index``: the per-profile embedding index.
 
-Defines :class:`IndexManager`, the object ``ResearcherProfile.index`` hands
-back (``prof.index.build()`` / ``.search()`` / ``.search_similar()`` /
-``.embedding()``). Distinct from
-:class:`researcher_profiles.analytics.indexes.IndexFleetManager`, which
-operates over every profile in a store; this manager is one profile's own
-index. Importing this module has no side effect on the profile class.
+For every profile in a store, see
+:class:`researcher_profiles.analytics.indexes.IndexFleetManager`.
 """
 
 from ..embeddings import _index_root

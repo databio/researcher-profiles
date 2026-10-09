@@ -27,9 +27,7 @@ export interface TierInfo {
 /** The one backend_spec the local model can reproduce. */
 const LOCAL_BACKEND = "st:all-MiniLM-L6-v2";
 
-/**
- * Determine the search capability tier for a comparison group.
- */
+/** The search capability tier for a comparison group. */
 export function resolveTier(group: ComparisonGroup): TierInfo {
   if (!group.backendSpec || !group.hasCentroids) {
     return {
@@ -61,7 +59,7 @@ export function resolveTier(group: ComparisonGroup): TierInfo {
         probeVerdict: probe.verdict,
       };
     }
-    // Probe not yet run: report as pending, don't assume compatibility.
+    // Probe not yet run: never assume compatibility.
     return {
       tier: 2,
       reason: "Probe test not yet run. Run a search to verify local model compatibility.",
@@ -70,7 +68,6 @@ export function resolveTier(group: ComparisonGroup): TierInfo {
     };
   }
 
-  // Non-local backend: can use vectors for similarity but not free-text
   return {
     tier: 2,
     reason: `Backend ${group.backendSpec} cannot be reproduced locally. Free-text search unavailable; "similar to this profile" and browsing features work.`,

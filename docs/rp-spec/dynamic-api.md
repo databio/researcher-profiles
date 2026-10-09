@@ -280,8 +280,49 @@ visible to all read endpoints.
 - The staged profile must load successfully before the swap
 - Maximum archive size: 50 MB (configurable)
 
-By default, `sources/papers/` (full paper text) is stripped on ingest. The
-server may be configured to accept it.
+**Full text policy.** Accepting paper full text (`sources/papers/`) is a
+server policy. A server that does not accept it MUST drop every
+`sources/papers/` member of an incoming archive before staging, whatever the
+client sent. Dropping incoming full text does not delete full text the server
+already holds: what happens to live files the archive omits is governed by
+`mode` (below). Full text the server keeps that way is its own copy, already
+admitted under its policy.
+
+**Query parameter `mode`:** what happens to the files the server already
+holds for this profile that the archive does not carry. Values:
+
+| `mode` | Live files the archive omits |
+|---|---|
+| `replace` (default) | Deleted, except for a *withheld class* the archive carried no member of: that whole class is kept. |
+| `merge` | Kept, all of them. A file the archive carries always overwrites the live copy. |
+| `prune` | Deleted, all of them. The archive is the whole profile. |
+
+The withheld classes are files a client may legitimately leave out of a push:
+
+- `fulltext`: everything under `sources/papers/`;
+- `index`: the search index, `.cache/embeddings.sqlite`.
+
+Under `replace`, one member of a class anywhere in the archive makes the
+archive authoritative for that whole class, and the live files of that class
+it omits are deleted. A class counts as carried when the client sent it, even
+if the server's full text policy then dropped it. So a default push of a
+normal build, which leaves out full text, keeps the server's full text and,
+when it ships no index, the server's index. Deleting them takes `prune`.
+`merge` is how a client sends one or two files without restating the rest.
+
+When the profile does not exist yet, there is nothing to keep and every mode
+behaves the same. Any other `mode` value is a `400`. `mode` applies to archive
+uploads only.
+
+**Manifest splicing.** A kept file is reachable only if the manifest
+(`hasPart` / `subjectOf` in `profile.jsonld`) lists it. Under `replace` and
+`merge`, for every kept file that the incoming manifest does not list but the
+live manifest does, the server MUST add the live manifest entry to the
+committed document, in the same slot (`hasPart` or `subjectOf`) it had. The
+incoming entries keep their order; spliced entries follow, sorted by
+`contentUrl`. A server that does this advertises the `manifest_splice` feature
+(see [GET /capabilities](#get-capabilities)). Under `prune` nothing is kept, so
+nothing is spliced and the incoming manifest stands alone.
 
 **Response 200:**
 
@@ -292,6 +333,13 @@ server may be configured to accept it.
 | `name` | string | From the uploaded `profile.jsonld` |
 | `level` | string | Profile depth tier |
 | `indexed` | boolean | Whether the upload included a search index (always `false` for a JSON body) |
+| `kept` | object | Live files carried over rather than deleted, as `{class: count}` (e.g. `{"fulltext": 53, "index": 1}`). Classes are the withheld classes, plus `other` for unclassed files kept under `merge`. Empty for a new profile, under `prune`, or when nothing was kept |
+| `spliced` | integer | Manifest entries the server added back for kept files (see Manifest splicing). Nonzero means the uploaded `profile.jsonld` was not the whole index |
+| `manifest_counts` | object | `{role: count}` over the manifest the server holds after the commit (`other` for entries with no role): what the profile now contains, not what the upload offered |
+| `mode` | string | The `mode` the upload ran under |
+
+The last four fields describe archive uploads; a JSON upload returns their
+defaults.
 
 **Status codes:** `200`, `400` (validation failure), `401`, `403` (see
 below), `413` (size cap exceeded).
@@ -317,7 +365,7 @@ target profile exists, the caller may write it, and the caller's table holds
   `needs_replace` included, and MUST change nothing.
 
 To change one file without restating the rest, the caller sends only that file
-with `?mode=merge`. The document still travels, so its sections must match the
+with `?mode=merge` (see `mode` above). The document still travels, so its sections must match the
 server's. A caller that may write nothing of the target gets
 [`insufficient_scope`](authentication.md#insufficient-scope) for `push`, the
 same answer whether or not the profile exists.
@@ -346,10 +394,32 @@ missing `rid` without minting, or a minting conflict), `401`, `403`, `409`
 a valid profile document). The part-by-part rule above applies to a JSON
 upload too; a file it does not carry keeps the bytes it has.
 
+### GET /capabilities
+
+What this server accepts, for a client to check before it writes.
+Unauthenticated: it says nothing about any profile.
+
+**Response 200:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `version` | string | API version served, e.g. `v1` |
+| `push_modes` | array of string | The `mode` values `PUT /profiles/{slug}` accepts, e.g. `["replace", "merge", "prune"]` |
+| `features` | array of string | Named push behaviours a client can require. `manifest_splice`: the server splices kept files back into the manifest as described above |
+
+A server that implements `mode` MUST serve this endpoint and list the modes it
+accepts. A client SHOULD read it before a push that asks for `merge` or
+`prune`, and SHOULD refuse to push when that mode is not listed, or when the
+endpoint is missing (`404`) or lists no modes: an older server ignores `mode`
+and runs a `replace`, answering `200` with a smaller profile. A plain
+`replace` needs no check, since it is what such a server does anyway.
+
 ### GET /profiles/{slug}/archive
 
 Download a profile as a gzipped tar archive, projected through the caller's
-privacy tier. Full text is never included in the download regardless of caller.
+privacy tier. Paper full text is an ordinary artifact governed by its
+effective tier: it is included for a caller entitled to that tier and withheld
+from one who is not. Build-local files (`.cache/`, `.keys/`) are never included.
 
 ---
 

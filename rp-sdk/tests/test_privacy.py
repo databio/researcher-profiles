@@ -65,10 +65,19 @@ def _profile(**parts) -> ProfileDocument:
 # ---------------------------------------------------------------------------
 
 
-def test_tier_order_is_public_limited_private():
-    assert most_restrictive("public", "limited") == "limited"
-    assert most_restrictive("limited", "private") == "private"
-    assert most_restrictive("public", "limited", "private") == "private"
+@pytest.mark.parametrize(
+    "tiers, expected",
+    [
+        (("public", "limited"), "limited"),
+        (("public", "private"), "private"),
+        (("limited", "private"), "private"),
+        (("public", "limited", "private"), "private"),
+        ((), "public"),
+        ((None, "public"), "public"),
+    ],
+)
+def test_tier_order_is_public_limited_private(tiers, expected):
+    assert most_restrictive(*tiers) == expected
 
 
 @pytest.mark.parametrize(("old", "new"), [("internal", "limited"), ("restricted", "private")])
@@ -102,14 +111,6 @@ def test_context_expands_visibility_to_tier_iris():
     assert eu + "NON_PUBLIC" in matches["rp:Private"]
 
 
-def test_most_restrictive_order():
-    assert most_restrictive("public", "limited") == "limited"
-    assert most_restrictive("public", "private") == "private"
-    assert most_restrictive("limited", "private") == "private"
-    assert most_restrictive() == "public"
-    assert most_restrictive(None, "public") == "public"
-
-
 @pytest.mark.parametrize(
     "content_url, role, declared, expected",
     [
@@ -140,37 +141,32 @@ def test_part_ref_visibility(content_url, role, declared, expected):
     assert ArtifactRef.model_validate(data).visibility == expected
 
 
-def test_derivation_takes_most_restrictive_of_sources():
-    prof = _profile(
-        hasPart=[
-            {"contentUrl": "sources/cv.md", "role": "cv"},  # private
-            {
-                "contentUrl": "derived.json",
-                "role": "custom",
-                "derivedFrom": ["cv"],
-            },  # inherits private from cv
-        ]
-    )
-    eff = privacy.effective_tiers(prof)
-    assert eff["sources/cv.md"] == "private"
-    assert eff["derived.json"] == "private"
-
-
-def test_profile_default_holds_a_whole_profile_back():
-    prof = _profile(
-        visibility="limited",
-        hasPart=[{"contentUrl": "sources/papers.jsonld", "role": "works"}],
-    )
-    # A public artifact is floored by the profile default.
-    assert privacy.effective_tiers(prof)["sources/papers.jsonld"] == "limited"
-
-
 # ---------------------------------------------------------------------------
 # The two surfaces must agree: a static export and the live API
 # ---------------------------------------------------------------------------
 
 
-def test_static_deploy_and_anonymous_http_publish_the_same_set(tmp_path, make_api_client):
+@pytest.fixture
+def built_profile_dir(tmp_path):
+    """A manifest-built profile (cv, web, both indexes, one paper full text)
+    alone under a ``profiles/`` root."""
+    from .factories import ADA, build_profile_dir
+
+    pdir = build_profile_dir(
+        tmp_path / "profiles" / "drift-check",
+        rid=ADA,
+        cv=True,
+        web=True,
+        index="both",
+        manifest=True,
+    )
+    (pdir / "sources" / "papers").mkdir(parents=True, exist_ok=True)
+    (pdir / "sources" / "papers" / "p1.md").write_text("full text\n", encoding="utf-8")
+    ResearcherProfile.from_files(pdir).build_manifest(write=True)
+    return pdir
+
+
+def test_static_deploy_and_anonymous_http_publish_the_same_set(built_profile_dir, make_api_client):
     """What ``rp publish --who public`` ships is exactly what anonymous HTTP serves.
 
     Two mechanisms decide what reaches the open web: the static export, and the
@@ -180,24 +176,14 @@ def test_static_deploy_and_anonymous_http_publish_the_same_set(tmp_path, make_ap
     deploy would have held back. This is the test that keeps them from drifting
     apart again.
     """
-    from .factories import ADA, build_profile_dir
-
-    root = tmp_path / "profiles"
-    root.mkdir()
-    pdir = build_profile_dir(
-        root / "drift-check", rid=ADA, cv=True, web=True, index="both", manifest=True
-    )
-    (pdir / "sources" / "papers").mkdir(parents=True, exist_ok=True)
-    (pdir / "sources" / "papers" / "p1.md").write_text("full text\n", encoding="utf-8")
-    ResearcherProfile.from_files(pdir).build_manifest(write=True)
-
     from researcher_profiles.publish import plan_profile_export
 
+    pdir = built_profile_dir
     prof = ResearcherProfile.from_files(pdir)
     all_artifacts = set(privacy.effective_tiers(prof.metadata))
     on_disk = {url for url in all_artifacts if (pdir / url).is_file()}
 
-    client = make_api_client(root)
+    client = make_api_client(pdir.parent)
     detail = client.get("/api/v1/profiles/drift-check/files")
     assert detail.status_code == 200
     withheld = set(detail.json()["withheld"])
@@ -239,11 +225,13 @@ def test_raised_by_names_the_specific_cause_not_the_rule():
     assert any("sources/cv.md" in phrase for phrase in note.raised_by)
 
 
-def test_the_profile_default_names_itself():
+def test_the_profile_default_holds_a_profile_back_and_names_itself():
     prof = _profile(
         visibility="limited",
         hasPart=[{"contentUrl": "sources/papers.jsonld", "role": "works"}],
     )
+    # A public artifact is floored by the profile default.
+    assert privacy.effective_tiers(prof)["sources/papers.jsonld"] == "limited"
     works = privacy.explain_tiers(prof)["sources/papers.jsonld"]
     assert works.effective == "limited"
     assert works.raised_by == ["the profile default (limited)"]
@@ -255,8 +243,9 @@ def test_a_public_artifact_has_nothing_to_explain():
 
 
 def test_derivation_restriction_is_transitive():
-    """A public derivative of a public derivative of a private CV is not
-    public: the rule walks the chain, it does not stop at one hop."""
+    """A derivative takes the most restrictive tier of its sources, and a
+    public derivative of a public derivative of a private CV is not public:
+    the rule walks the chain, it does not stop at one hop."""
     prof = _profile(
         hasPart=[
             {"contentUrl": "sources/cv.md", "role": "cv"},  # private
@@ -265,6 +254,7 @@ def test_derivation_restriction_is_transitive():
         ]
     )
     eff = privacy.effective_tiers(prof)
+    assert eff["sources/cv.md"] == "private"
     assert eff["digest.md"] == "private"
     assert eff["blurb.md"] == "private"
     assert any("digest.md" in p for p in privacy.explain_tiers(prof)["blurb.md"].raised_by)
@@ -351,7 +341,7 @@ def test_profile_visible_folds_in_a_host_floor():
 # ---------------------------------------------------------------------------
 
 
-def test_no_built_manifest_role_declares_derivedFrom(tmp_path):
+def test_no_built_manifest_role_declares_derivedFrom(built_profile_dir):
     """Authored syntheses do not inherit their sources' tier. See spec section 3.
 
     A paper summary, ``expertise.md``, and ``SOUL.md`` are new works, not
@@ -363,16 +353,7 @@ def test_no_built_manifest_role_declares_derivedFrom(tmp_path):
     REPRODUCES a private source, it gets ``derivedFrom`` and this test
     changes with it.
     """
-    from .factories import ADA, build_profile_dir
-
-    pdir = build_profile_dir(
-        tmp_path / "derivation", rid=ADA, cv=True, web=True, index="both", manifest=True
-    )
-    (pdir / "sources" / "papers").mkdir(parents=True, exist_ok=True)
-    (pdir / "sources" / "papers" / "p1.md").write_text("full text\n", encoding="utf-8")
-    ResearcherProfile.from_files(pdir).build_manifest(write=True)
-
-    prof = ResearcherProfile.from_files(pdir)
+    prof = ResearcherProfile.from_files(built_profile_dir)
     parts = list(prof.metadata.has_part) + list(prof.metadata.subject_of)
     assert parts, "sanity: the fixture has a manifest"
     assert all(not p.derived_from for p in parts)
@@ -451,33 +432,22 @@ class TestPersonaGuard:
     def test_has_persona_true_for_complete(self, jane_doe_readonly):
         assert jane_doe_readonly.has_persona is True
 
-    def test_has_persona_false_for_incomplete(self, incomplete):
-        assert incomplete.has_persona is False
-
     def test_persona_unavailable_is_profile_error(self):
         assert issubclass(PersonaUnavailableError, ProfileError)
 
-    # ----------------------------------------------------------------------
-    # Level gate: a lite profile is never persona-ready, even with stray content
-    # ----------------------------------------------------------------------
-
-    def test_has_persona_false_for_lite_even_with_content(self, lite_jane):
+    def test_lite_level_gates_persona_off_even_with_content(self, lite_jane):
         # SOUL/expertise are present on disk, but level=lite gates persona off.
         assert lite_jane.level == "lite"
         assert lite_jane.expertise.strip()
         assert lite_jane.soul.strip()
-        assert lite_jane.has_persona is False
 
-    def test_ask_raises_persona_unavailable_for_lite(self, lite_jane):
-        fake = stub_llm(lite_jane)
+    @pytest.mark.parametrize("profile", ["incomplete", "lite_jane"])
+    def test_ask_raises_persona_unavailable(self, request, profile):
+        prof = request.getfixturevalue(profile)
+        assert prof.has_persona is False
+        fake = stub_llm(prof)
         with pytest.raises(PersonaUnavailableError):
-            lite_jane.persona.ask("q")
-        fake.complete.assert_not_called()
-
-    def test_ask_raises_persona_unavailable(self, incomplete):
-        fake = stub_llm(incomplete)
-        with pytest.raises(PersonaUnavailableError):
-            incomplete.persona.ask("q")
+            prof.persona.ask("q")
         fake.complete.assert_not_called()
 
 
@@ -547,17 +517,7 @@ class TestRefusalContract:
             assert r.text == "ok"
             fake.complete.assert_called_once()
 
-    def test_citations_are_citation_refs(self, jane_doe):
-        stub_llm(jane_doe, "ans")
-        jane_doe.index.search = MagicMock(  # type: ignore[method-assign]
-            return_value=[_Hit("doe2016example", 0.8), _Hit("doe2019methods", 0.6)]
-        )
-        r = jane_doe.persona.ask("q?")
-        assert all(isinstance(c, CitationRef) for c in r.citations)
-        relevances = {c.paper_id: c.relevance for c in r.citations}
-        assert relevances["doe2016example"] == 0.8
-
-    def test_ask_emits_citations_for_paper_summary_chunks(self, jane_doe):
+    def test_paper_summary_chunks_become_citation_refs(self, jane_doe):
         """Regression: paper_summary chunks must produce non-empty citations.
 
         The embeddings store writes ``source_type="paper_summary"``; a check
@@ -566,11 +526,17 @@ class TestRefusalContract:
         """
         stub_llm(jane_doe, "ans")
         jane_doe.index.search = MagicMock(  # type: ignore[method-assign]
-            return_value=[_Hit("doe2016example", 0.8, source_type="paper_summary")]
+            return_value=[
+                _Hit("doe2016example", 0.8, source_type="paper_summary"),
+                _Hit("doe2019methods", 0.6, source_type="paper_summary"),
+            ]
         )
         r = jane_doe.persona.ask("q?")
         assert r.citations, "paper_summary chunks must yield citations"
         assert r.citations[0].paper_id == "doe2016example"
+        assert all(isinstance(c, CitationRef) for c in r.citations)
+        relevances = {c.paper_id: c.relevance for c in r.citations}
+        assert relevances["doe2016example"] == 0.8
 
     @pytest.mark.parametrize(
         "llm_text, expect_grounded",

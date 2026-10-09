@@ -1,24 +1,12 @@
 """The store's centroid matrix, its on-disk cache, and the query backend.
 
-One row per profile, slug-ordered and L2-normalized, so a query vector dotted
-against the matrix is a cosine similarity against every profile at once. That
-matrix is what makes ranking a whole store cheap: the expensive per-profile
-work (reading each profile's vectors) happens once.
+One L2-normalized row per profile, slug-ordered, so ``matrix @ query`` is the
+cosine against every profile at once.
 
-The vectors come from the store's :class:`~researcher_profiles.store.VectorStore`
-capability, never from a path. A store that already holds the whole matrix
-(a published site publishes one) hands it over in a single call; otherwise this
-stacks per-profile centroids itself.
-
-``<root>/.cache/centroids.npz`` is a write-through memo of the result, and
-purely an optimization: it exists only when the store is a directory, and a
-store without one recomputes in process. Two independent things can make it
-stale, and each has its own guard. *In process*, a write bumps the store's
-generation, which rebuilds the roster and drops the memoized matrix with it.
-*Across processes*, the ``.npz`` is validated against the current slug list and
-each profile's index mtime before it is trusted.
-
-Reached as ``store.centroids``.
+``<root>/.cache/centroids.npz`` is an optional write-through memo (directory
+stores only). In process, a write bumps the store's generation, which drops
+the memoized matrix. Across processes, the ``.npz`` is checked against the
+current slug list and each profile's index mtime before it is trusted.
 """
 
 import logging
@@ -45,9 +33,8 @@ logger = logging.getLogger(__name__)
 class CentroidManager:
     """``store.centroids``, the centroid matrix and the query embedder.
 
-    Both live here because they must agree: a query vector is only comparable
-    to the matrix when it came out of the same backend the indexes were built
-    with.
+    Kept together because a query vector is only comparable to the matrix when
+    it comes from the backend the indexes were built with.
     """
 
     def __init__(self, store: "VectorStore", rostered: "_RosterCache") -> None:
@@ -68,12 +55,7 @@ class CentroidManager:
 
     @property
     def cache_path(self) -> Optional[Path]:
-        """``<root>/.cache/centroids.npz``, or ``None`` without a root.
-
-        ``None`` is not a degradation: the matrix is still computed and still
-        memoized in process. What a store with no directory does without is
-        carrying it across processes.
-        """
+        """``<root>/.cache/centroids.npz``, or ``None`` without a root."""
         from ..utils.paths import store_cache_dir
 
         d = store_cache_dir(self._store.root)
@@ -81,22 +63,14 @@ class CentroidManager:
 
     @property
     def matrix(self) -> np.ndarray:
-        """L2-normalized centroids, one row per profile, slug-ordered.
-
-        Memoized in process and cached on disk. Both are dropped when the store
-        has been written to; the disk cache is additionally discarded when any
-        profile's embedding index is newer than it.
-        """
+        """L2-normalized centroids, one row per profile, slug-ordered."""
         return self.snapshot()[1]
 
     def snapshot(self) -> "tuple[_Roster, np.ndarray]":
         """``(roster, matrix)``, guaranteed row-aligned.
 
-        The pair, not the matrix alone, is what ranking needs: row ``i`` of the
-        matrix is ``roster.slugs[i]`` for as long as the caller holds both. A
-        caller that fetched the roster and the matrix in two steps could be
-        handed a matrix rebuilt across a write in between, and would then read
-        every score off the wrong profile.
+        Row ``i`` is ``roster.slugs[i]``. Fetching the two separately could
+        pair a roster with a matrix rebuilt after a write in between.
         """
         roster = self._rostered()
         if self._matrix is not None and self._matrix_generation == roster.generation:
@@ -128,9 +102,8 @@ class CentroidManager:
     def _cache_is_fresh(self, roster: "_Roster", cache_mtime: float) -> bool:
         """True when no profile's embedding index is newer than the cache.
 
-        A profile with no index at all makes the cache stale: its centroid
-        cannot be trusted to have come from anything. (So a store holding an
-        unbuilt profile recomputes on every load; see :meth:`_compute`.)
+        A profile with no index makes the cache stale, so a store holding an
+        unbuilt profile recomputes on every load.
         """
         root = roster.root
         if root is None:  # unreachable: there is no cache file without a root
@@ -155,9 +128,7 @@ class CentroidManager:
                     return None
                 vectors = np.array(data["vectors"], dtype=np.float32)
         except (OSError, ValueError, KeyError, zipfile.BadZipFile):
-            # A corrupt or unreadable cache degrades to a recompute; it must
-            # never break a load. Logged so a cache that never hits is
-            # diagnosable rather than merely slow.
+            # A bad cache degrades to a recompute; it must never break a load.
             logger.debug("centroid cache at %s unusable; recomputing", cache_path, exc_info=True)
             return None
         self._memoize(roster, vectors)
@@ -166,11 +137,8 @@ class CentroidManager:
     def _compute(self, roster: "_Roster") -> np.ndarray:
         """Read every profile's centroid through the store, normalize, memoize, persist.
 
-        A profile whose vectors are unbuilt (or empty) gets a zero row rather
-        than aborting the whole matrix: rows must stay aligned with the
-        roster's slugs, and a zero vector scores 0 against every query so it
-        never ranks. It is logged at WARNING so an operator can build the
-        missing index.
+        A profile with no vectors gets a zero row (logged at WARNING) so rows
+        stay aligned with the roster; a zero row never ranks.
         """
         from ..embeddings import IndexNotBuiltError
 
@@ -208,10 +176,8 @@ class CentroidManager:
     def _published_rows(store) -> dict[str, np.ndarray] | None:
         """``slug -> centroid`` when the store holds the whole matrix, else ``None``.
 
-        The one-request path. A published site ships every profile's centroid in
-        one blob, so asking per profile would turn one fetch into hundreds.
-        Keyed by slug rather than trusted positionally: the store's rows are its
-        own, and need not be the profiles the roster loaded.
+        A published site ships every centroid in one blob, saving a fetch per
+        profile. Keyed by slug, since the store's rows need not match the roster.
         """
         matrix = store.centroids_matrix()
         if matrix is None:

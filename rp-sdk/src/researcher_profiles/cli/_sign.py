@@ -1,8 +1,4 @@
-"""``rp sign`` and ``rp sign-verify``: the key_signature proof on profile.jsonld.
-
-The two verbs share one handler because they share a document, a key path and a
-JWK Set; only the direction differs.
-"""
+"""``rp sign`` and ``rp sign-verify``: the key_signature proof on profile.jsonld."""
 
 import argparse
 import json
@@ -119,10 +115,8 @@ def _cmd_sign(args: argparse.Namespace) -> int:
     else:
         key = signing.load_private_key(key_path)
 
-    # Normalize to the canonical published serialization before signing, so the
-    # signed bytes are exactly what a verifier reconstructs after loading and
-    # re-serializing (validation fills defaults like `level`; signing a raw dict
-    # would break the moment the document is re-emitted).
+    # Sign the canonical published serialization, so the signed bytes match what
+    # a verifier rebuilds after load and re-emit (validation fills defaults).
     try:
         doc = ProfileDocument.model_validate(doc).model_dump(mode="json")
     except pydantic.ValidationError as e:

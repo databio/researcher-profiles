@@ -1,9 +1,8 @@
 """Package-wide defaults for researcher_profiles."""
 
 DEFAULT_BACKEND_SPEC = "st:all-MiniLM-L6-v2"
-# Version of the embeddings sqlite index schema (.cache/embeddings.sqlite),
-# Unrelated to the published profile format (which is gated on the
-# `conformsTo` IRI, not an integer) and to the build sidecar's own counter.
+# Version of the embeddings sqlite index schema (.cache/embeddings.sqlite).
+# Unrelated to the published profile format version.
 INDEX_SCHEMA_VERSION = "1"
 
 # The fixed sentence every publisher embeds so a consumer can verify its local

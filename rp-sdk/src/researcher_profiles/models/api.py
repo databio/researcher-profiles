@@ -1,9 +1,8 @@
 """Pydantic models shared by the FastAPI server and the HTTP client.
 
-These types define the wire contract for ``researcher_profiles.api`` and
-``researcher_profiles.client.ApiArtifactStorage``. They are distinct from the
-on-disk pydantic models in ``schema/`` so the two layers
-can evolve independently, but the field names line up where reasonable.
+The wire contract for ``researcher_profiles.api`` and
+``researcher_profiles.client.ApiArtifactStorage``. Kept separate from the
+on-disk models in ``schema/`` so the two can evolve independently.
 """
 
 from typing import Literal, Optional
@@ -23,8 +22,7 @@ class _APIModel(BaseModel):
 class ProfileListEntry(_APIModel):
     """One entry in an ``rp:profileList`` response.
 
-    Extends :class:`ProfileSummary` with a ``url`` field so consumers can
-    discover the profile's content base URL from the listing alone.
+    ``url`` is the profile's content base URL.
     """
 
     url: str
@@ -57,17 +55,15 @@ class ProfileSummary(_APIModel):
     #: The profile directory name: a display handle, and the path segment
     #: this profile is served under. Not identity; may be renamed.
     slug: str
-    #: The identity: a canonical ORCID or a ``local:`` id. This is the join
-    #: key consumers should map onto their own users. The document requires
-    #: it; ``None`` here means the summary was built from a document that
-    #: failed to load.
+    #: The identity: a canonical ORCID or a ``local:`` id, and the join key
+    #: consumers map onto their own users. ``None`` means the document failed
+    #: to load.
     rid: Optional[str] = None
     name: str
     level: str = "full"
     affiliation: Optional[str] = None
     field: Optional[str] = None
-    # Corpus stats (populated by the server; clients use these for the
-    # list view's numeric columns). 0 when the profile has no papers.jsonld.
+    # Corpus stats. 0 when the profile has no papers.jsonld.
     paper_count: int = 0
     summary_count: int = 0
     fulltext_pct: float = 0.0
@@ -81,13 +77,8 @@ class ProfileMetadataPayload(_APIModel):
     """Wire shape of ``profile.jsonld``-derived metadata.
 
     Mirrors the on-disk :class:`~researcher_profiles.schema.ProfileDocument`
-    but uses ``extra="allow"`` so arbitrary keys round-trip cleanly between
-    server and client. This is not JSON-LD: the wire contract and
-    the on-disk format evolve independently, and a client that wants the
-    published bytes fetches ``/profiles/{slug}/profile.jsonld`` instead.
-
-    The derived ``orcid`` field is gone: ``rid`` is the join key and
-    ``orcid_of(rid)`` is one call away.
+    but allows extra keys and is not JSON-LD. For the published bytes, fetch
+    ``/profiles/{slug}/profile.jsonld``.
     """
 
     name: str
@@ -109,10 +100,6 @@ class ProfileMetadataPayload(_APIModel):
     training: list[dict] = []
     career: list[dict] = []
     expertise: list[str] = []
-    #: Declared below, not left to ``extra="allow"``. These values already rode
-    #: the wire (``_metadata_payload`` dumps the whole document), but only as
-    #: untyped extras, so the generated TypeScript saw ``[k: string]: unknown``
-    #: and no owner form could round-trip a field it could not read back typed.
     job_title: Optional[str] = None
     #: Display projections of :attr:`research_interests` when that is set
     #: (positive weights, negative weights), and free-text lists otherwise.
@@ -125,31 +112,25 @@ class ProfileMetadataPayload(_APIModel):
     research_interests: list[dict] = []
     same_as: list[str] = []
     methodological_commitments: list[str] = []
-    #: Optional clinical extension. Declared rather than left to
-    #: ``extra="allow"`` so the generated TypeScript sees real types and an
-    #: owner form can round-trip them; see ``docs/rp-spec/index.md``.
+    #: Optional clinical extension; see ``docs/rp-spec/index.md``.
     therapeutic_areas: list[dict] = []
     site_capabilities: Optional[dict] = None
     regulatory_experience: list[str] = []
-    #: Per-section declared tiers. Read-only here for the same reason
-    #: :attr:`visibility` is: they are set through ``PATCH /visibility``, which
-    #: is the one surface that knows about floors and the full-text lock.
+    #: Per-section declared tiers. Read-only here: set through
+    #: ``PATCH /visibility``, the one surface that knows about floors and the
+    #: full-text lock.
     section_visibility: list[dict] = []
-    #: The document's own declared tier. Read-only here: it is set through
-    #: ``PATCH /visibility`` (or, on a management host, the publication act), never by a
-    #: metadata patch, and it is not what decides who may read this response.
-    #: The server-side tier projection already did that.
+    #: The document's own declared tier. Read-only here, like
+    #: :attr:`section_visibility`. It does not decide who may read this
+    #: response; the server-side projection already did.
     visibility: str = "public"
 
 
 class ProfileDetail(_APIModel):
     """The whole-profile display shape: metadata, both narratives, the manifest.
 
-    Not an HTTP response model any more: ``GET /profiles/{slug}`` answers with
-    :class:`ProfileRecord`. This is the shape the static publisher writes
-    (``payloads.profile_detail_dict``), the shape ``rp-ui-lib`` renders (its
-    ``types.ts`` is generated from it), and the in-memory shape a host's
-    overlay and lens compositing work on.
+    The shape the static publisher writes and ``rp-ui-lib`` renders. The HTTP
+    read is :class:`ProfileRecord`.
     """
 
     slug: str
@@ -157,9 +138,8 @@ class ProfileDetail(_APIModel):
     rid: Optional[str] = None
     metadata: ProfileMetadataPayload
     #: Markdown body of ``personality/expertise.md``, or ``None`` when this
-    #: viewer's tier does not reach it. ``None``, never ``""``: a client must be
-    #: able to tell withheld from empty, and an owner shown an empty box would
-    #: reasonably conclude that publishing had worked.
+    #: viewer's tier does not reach it. ``None``, never ``""``, so a client can
+    #: tell withheld from empty.
     expertise: Optional[str] = None
     #: Markdown body of ``personality/SOUL.md``. See :attr:`expertise`.
     soul: Optional[str] = None
@@ -175,9 +155,7 @@ class ProfileDetail(_APIModel):
 class PaperEntry(_APIModel):
     """One paper as the static publisher and ``rp-ui-lib`` list it.
 
-    Not an HTTP response model any more: ``GET /profiles/{slug}/papers``
-    answers with :class:`PaperPage`. Kept because the static ``papers`` view
-    and the generated ``rp-ui-lib`` types are built from it.
+    The HTTP read is :class:`PaperPage`.
     """
 
     paper_id: Optional[str] = None
@@ -428,17 +406,14 @@ class PushResponse(_APIModel):
     # True when the pushed profile carries a built embedding index
     # (.cache/embeddings.sqlite), i.e. it is immediately matchable.
     indexed: bool = False
-    # Server-side files carried over rather than deleted, by class name
-    # ({"fulltext": 53, "index": 1}). Empty for a new profile, for a pruning
-    # push, or when the archive carried every class.
+    # Server-side files kept rather than deleted, by class name
+    # ({"fulltext": 53, "index": 1}).
     kept: dict[str, int] = {}
     # Manifest entries the server added back because the incoming manifest
     # dropped a file the server kept. A nonzero count means the pushed
     # profile.jsonld was not the whole index.
     spliced: int = 0
-    # {role: count} over the manifest the server holds now. The post-commit
-    # truth, so a client can say what the profile actually contains rather
-    # than what the push offered.
+    # {role: count} over the manifest the server holds after the commit.
     manifest_counts: dict[str, int] = {}
     # The ?mode= the push ran under: what happened to the live files the
     # archive did not carry (replace | merge | prune).
@@ -448,10 +423,8 @@ class PushResponse(_APIModel):
 class CapabilitiesResponse(_APIModel):
     """Result of ``GET /api/v1/capabilities``: what this server can be asked for.
 
-    A push client reads this *before* the PUT. Without it, asking an older
-    server for ``?mode=merge`` gets a plain replace and a 200: the push looks
-    like it worked and the profile is smaller. One cheap unauthenticated GET
-    turns that into a refusal.
+    A push client reads this before the PUT, so a server that lacks a
+    requested ``?mode=`` is refused up front instead of silently replacing.
     """
 
     #: API version this server serves.
@@ -509,10 +482,10 @@ class ResolveResponse(_APIModel):
 
 
 class MetadataPatch(_APIModel):
-    """Owner-editable metadata fields. Every field is optional; only the ones
-    present are applied. Unknown keys are allowed on the wire (``extra="allow"``)
-    but rejected server-side against the editable whitelist in
-    :mod:`researcher_profiles.profile.edit`.
+    """Owner-editable metadata fields. Only the fields present are applied.
+
+    Unknown keys pass the wire model but are rejected server-side against the
+    editable whitelist in :mod:`researcher_profiles.profile.edit`.
     """
 
     name: Optional[str] = None
@@ -529,46 +502,32 @@ class MetadataPatch(_APIModel):
     #: Typed entries (``ResearchInterest``), validated server-side like
     #: ``training``. Replaces the whole list.
     research_interests: Optional[list[dict]] = None
-    #: Authored history. Kept as ``list[dict]`` on the wire: the
-    #: entries are validated against ``schema.Training`` / ``schema.CareerEntry``
-    #: inside ``profile.edit.patch_metadata``, so a malformed entry is a 400
-    #: naming the entry rather than a 422 about the request body, and one set of
-    #: rules governs both.
+    #: ``list[dict]`` on the wire and validated in ``profile.edit``, so a
+    #: malformed entry is a 400 naming the entry rather than a 422.
     training: Optional[list[dict]] = None
     career: Optional[list[dict]] = None
     same_as: Optional[list[str]] = None
     #: The "how I think" narrative (``personality/SOUL.md``), markdown. Replaces
-    #: the whole narrative, in the same write as the other fields, so the
-    #: profile's ``content_hash`` moves once.
+    #: the whole narrative in the same write as the other fields.
     soul: Optional[str] = None
     #: Optimistic concurrency: the ``content_hash`` this edit was composed
-    #: against. Omitted, the patch is last-writer-wins (which is what a
-    #: single-owner CLI wants); supplied and stale, the patch is a 409 carrying
-    #: the current hash.
+    #: against. Omitted, the patch is last-writer-wins; supplied and stale, the
+    #: patch is a 409 carrying the current hash.
     base_hash: Optional[str] = None
 
 
 class WorkPatch(_APIModel):
     """Owner-editable fields of one work in ``sources/papers.jsonld``.
 
-    The same shape as :class:`MetadataPatch`, one level down: every field is
-    optional, only the ones present are applied, unknown keys are allowed on
-    the wire (``extra="allow"``) and rejected server-side against the editable
-    whitelist in :mod:`researcher_profiles.profile.edit`.
-
-    Field names are the ones that appear on disk, ``datePublished`` included,
-    so a caller patches what it read out of ``papers.jsonld`` rather than
-    translating into a second vocabulary.
+    Same rules as :class:`MetadataPatch`. Field names are the on-disk names,
+    ``datePublished`` included.
     """
 
     name: Optional[str] = None
     doi: Optional[str] = None
     openalex_id: Optional[str] = None
-    #: The publication year, spelled as the JSON-LD term rather than declared
-    #: ``year`` with an alias: FastAPI rebuilds a body model's fields for its
-    #: schema pass and pydantic then warns, once per aliased field, that the
-    #: alias has no effect there. The name a caller types is the same either
-    #: way, so the plain field is the one that does not print a warning.
+    #: The publication year. A plain field, not ``year`` with an alias, which
+    #: makes FastAPI's schema pass print a pydantic warning.
     datePublished: Optional[int] = None
     type: Optional[str] = None
     citation: Optional[str] = None
@@ -582,7 +541,7 @@ class WorkPatch(_APIModel):
     #: ``GET /papers`` or ``GET /papers/{paper_id}``) this edit was composed
     #: against. Supplied and stale, the patch is a 409 carrying the current
     #: version in ``X-RP-Paper-Version``. A work edit does not move the
-    #: profile's ``content_hash``, so that token cannot guard it.
+    #: profile's ``content_hash``.
     base_version: Optional[str] = None
 
 
@@ -600,10 +559,8 @@ class ArtifactVisibility(_APIModel):
 class SectionTier(_APIModel):
     """One inline section's declared tier.
 
-    Sections travel on the visibility patch rather than the metadata patch
-    because a tier is a privacy decision, not a display field: the one surface
-    that knows about host floors and the full-text lock has to be the one that
-    sets them.
+    Set through the visibility patch, not the metadata patch, because only
+    that surface knows about host floors and the full-text lock.
     """
 
     section: str
@@ -616,8 +573,7 @@ class VisibilityPatch(_APIModel):
     profile_visibility: Optional[str] = None
     artifacts: list[ArtifactVisibility] = []
     sections: list[SectionTier] = []
-    #: See :attr:`MetadataPatch.base_hash`. Tiers live in the document, so a
-    #: visibility write shares the one clock with metadata and soul writes.
+    #: See :attr:`MetadataPatch.base_hash`.
     base_hash: Optional[str] = None
 
 
@@ -627,12 +583,9 @@ class EditResult(_APIModel):
     slug: str
     rid: Optional[str] = None
     updated: list[str] = []
-    #: How many manifest artifacts a visibility patch actually re-tiered. An
-    #: owner who asks to hide "my paper summaries" needs to be told whether that
-    #: was one of them or all sixty-three.
+    #: How many manifest artifacts a visibility patch actually re-tiered.
     artifacts_changed: int = 0
-    #: The ``content_hash`` after this write. An editor holding a form open
-    #: sends it as the next ``base_hash`` without re-reading the profile.
+    #: The ``content_hash`` after this write: the next ``base_hash``.
     content_hash: Optional[str] = None
     #: Work edits only: the paper's version after this write (``None`` after a
     #: delete).
@@ -642,10 +595,8 @@ class EditResult(_APIModel):
 class ArtifactTier(_APIModel):
     """One artifact's tier, and why: the read side of the visibility API.
 
-    Every field is computed by ``privacy.explain_tiers``; nothing here is a
-    restatement of the rule in prose. ``visible_to`` and the report's ``counts``
-    come from ``privacy.tier_allows``, so an interface renders a consequence
-    ("a stranger can see 0 of 63 items") instead of teaching a tier lattice.
+    Computed by ``privacy.explain_tiers``; ``visible_to`` comes from
+    ``privacy.tier_allows``.
     """
 
     content_url: str
@@ -664,14 +615,10 @@ class ArtifactTier(_APIModel):
 
 
 class SectionTierReport(_APIModel):
-    """One inline section's tiers, and who they let in: the read side of the
-    section mechanism.
+    """One inline section's tiers, and who they let in.
 
-    A section has both a tier the owner *declared* and a tier that actually
-    *governs* after the profile default folds in, and an editor has to show
-    both: the control sits on ``declared``, the "resolves to" badge on
-    ``effective``. The old report collapsed the two into one ``{section: tier}``
-    map, so an owner could not tell what they set from what it became.
+    ``declared`` is what the owner set; ``effective`` is what governs after
+    the profile default folds in.
     """
 
     section: str
@@ -693,15 +640,11 @@ class VisibilityReport(_APIModel):
     rid: Optional[str] = None
     profile_visibility: str
     #: A host-imposed ceiling on this profile ("nobody has claimed it"), or
-    #: ``None``. An interface disables the options above it rather than
-    #: accepting a choice the server will override.
+    #: ``None``. The server overrides any choice above it.
     profile_floor: Optional[str] = None
     profile_floor_reason: Optional[str] = None
     artifacts: list[ArtifactTier] = []
-    #: One row per inline section, in ``SECTION_FIELDS`` order, each carrying
-    #: its declared tier, its effective tier, and who it lets in. An editor
-    #: shows a section's real tier beside the one the owner typed, rather than
-    #: the single collapsed value the old ``{section: tier}`` map gave.
+    #: One row per inline section, in ``SECTION_FIELDS`` order.
     sections: list[SectionTierReport] = []
     #: ``{"anonymous": 0, "lab": 12, "you": 63}``: items each viewer can see.
     counts: dict[str, int] = {}
@@ -777,14 +720,11 @@ class MatchResult(_APIModel):
     #: Directory name / display handle. Useful for links; not a join key.
     slug: str
     name: str
-    #: The join key: a canonical ORCID or a ``local:`` id. Consumers mapping a
-    #: match back to their own users must resolve on this. ``None`` only for
-    #: an unmigrated profile, and a consumer seeing None should fail loudly
-    #: rather than fall back to name matching, which silently binds the wrong
-    #: human when two researchers share a name.
+    #: The join key: a canonical ORCID or a ``local:`` id. A consumer seeing
+    #: ``None`` should fail loudly, not fall back to name matching, which binds
+    #: the wrong person when two researchers share a name.
     rid: Optional[str] = None
-    # Derived from `rid` (None when the rid is local). Retained for consumers
-    # that predate `rid`.
+    # Derived from `rid`; None when the rid is local.
     orcid: Optional[str] = None
     score: float
     evidence: MatchEvidencePayload
@@ -792,11 +732,9 @@ class MatchResult(_APIModel):
 
 class MatchResponse(_APIModel):
     matches: list[MatchResult]
-    #: How many of the entries below are actually ranked results (post
-    #: privacy-tier filtering). Together with ``total_profiles`` this is what
-    #: lets a caller tell "47 of 47 ranked" from "0 of 47 ranked". An empty
-    #: ``matches`` list alone cannot distinguish "nobody matched" from a
-    #: broken embedding path.
+    #: How many profiles were actually ranked, after privacy-tier filtering.
+    #: With ``total_profiles`` it tells "nobody matched" from a broken
+    #: embedding path.
     ranked_profiles: int
     #: The size of the indexed corpus this query was ranked against.
     total_profiles: int
@@ -871,9 +809,7 @@ class ReviewerMatchRequest(MatchRequest):
 
 
 class ReviewerMatchResult(MatchResult):
-    #: Present when a candidate has a COI (always, in annotate mode; only on
-    #: retained-but-flagged candidates otherwise; drop mode omits conflicted
-    #: candidates entirely, so their block never ships).
+    #: Present on a candidate with a COI. Drop mode omits such candidates.
     coi: Optional[CoiBlock] = None
 
 

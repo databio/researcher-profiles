@@ -7,7 +7,7 @@ import { orcidLoginChecks } from "../src/validate/orcidLogin";
 import type { CheckResult } from "../src/validate/types";
 
 const ORCID = "0000-0002-1825-0097";
-const ISSUER = "https://prosopia.databio.org";
+const ISSUER = "https://profiles.example.org";
 
 function proof(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -73,7 +73,7 @@ describe("orcidLoginChecks", () => {
     ["bad checksum", [proof({ orcid: "0000-0002-1825-0098" })]],
     ["orcid as a URL", [proof({ orcid: `https://orcid.org/${ORCID}` })]],
     ["missing verifiedAt", [proof({ verifiedAt: undefined })]],
-    ["issuer without scheme", [proof({ issuer: "prosopia.databio.org" })]],
+    ["issuer without scheme", [proof({ issuer: "profiles.example.org" })]],
     ["two proofs", [proof(), proof()]],
   ];
   for (const [label, proofs] of broken) {

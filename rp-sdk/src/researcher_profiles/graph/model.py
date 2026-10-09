@@ -1,11 +1,5 @@
 """Value objects for the derived profile graph.
 
-The graph models researchers as canonical persons (:class:`PersonNode`) and
-the relations between them (:class:`GraphEdge`). It is derived entirely from the
-already-published bibliometric fields of each profile (author lists,
-affiliations, training records), so nothing here depends on an LLM, a persona,
-or paper full text.
-
 Two node kinds:
 
 * ``profiled``: a person with a profile in the store. The node key is the
@@ -19,9 +13,8 @@ Edge types, each carrying evidence:
 1. ``coauthor`` (undirected): two persons on the same paper's author list.
 2. ``shared_institution`` (undirected): two persons share an institution.
 3. ``advised`` (directed advisee -> advisor): mentorship from ``training``.
-4. ``citation`` (directed A-cites-B): RESERVED. Not derivable from the current
-   corpus (``PaperRecord`` has no per-paper reference list); the type exists so
-   storage and consumers do not change when an OpenAlex enrichment lands.
+4. ``citation`` (directed A-cites-B): reserved; no builder emits it
+   (``PaperRecord`` has no reference list).
 """
 
 from enum import Enum
@@ -36,7 +29,7 @@ class EdgeType(str, Enum):
     coauthor = "coauthor"
     shared_institution = "shared_institution"
     advised = "advised"
-    #: RESERVED: see the module docstring. No builder emits this by default.
+    #: Reserved; see the module docstring.
     citation = "citation"
 
 
@@ -75,9 +68,7 @@ class PersonNode(BaseModel):
     slug: Optional[str] = None
     #: Best display name seen for this person.
     name: Optional[str] = None
-    #: Institution history: populated for profiled nodes only. Lets a COI check
-    #: catch a same-institution conflict against an external manuscript author
-    #: (who has no node of their own but passes an affiliation inline).
+    #: Institution history: populated for profiled nodes only.
     institutions: list[InstitutionRef] = Field(default_factory=list)
 
 

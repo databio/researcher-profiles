@@ -1,10 +1,7 @@
-"""Authoritative person -> rid resolution, gated by the ``resolve`` consumer scope.
+"""Person -> rid resolution, gated by the ``resolve`` consumer scope.
 
-``POST /identity/resolve`` is the identity function: a rid or name goes in, a
-rid comes out, and a true miss creates the identity (a ``lite``,
-``limited``, ``third_party`` stub). It is a write route and is gated like
-one; putting it behind ``match`` would let every read-tier key mint people.
-See ``researcher_profiles.resolve`` for the pipeline.
+A true miss mints a stub, so this is a write route; behind ``match`` every
+read-tier key could mint people.
 """
 
 from fastapi import Depends, HTTPException, Request
@@ -33,12 +30,8 @@ def resolve_identity(
 ) -> JSONResponse:
     """Resolve a person descriptor to a ``rid``, minting a stub on a true miss.
 
-    A sibling of the read-only ``GET /profiles/{slug}`` surface: that answers
-    "what profile is this rid", 404 on a miss, and never writes; this is the
-    identity function, and a true miss creates the identity. Every consumer
-    service that turns its own person data (a free-text name, a bare ORCID)
-    into a canonical ``rid`` calls this rather than hand-rolling matching or
-    minting its own local id. See ``resolve_person`` for the pipeline.
+    The stub is ``lite``, ``limited`` and ``third_party``. See ``resolve_person``
+    for the pipeline.
     """
     try:
         result = resolve_person(
@@ -61,10 +54,8 @@ def resolve_identity(
             for c in result.candidates
         ],
     )
-    # ``rid`` is significant even when null (it is what "deferred" looks
-    # like), so only ``candidates`` is dropped when empty. A blind
-    # ``exclude_none`` would also swallow a deferred response's ``rid``.
-    # Hosts that consume this route depend on that exact wire shape.
+    # A null ``rid`` means "deferred" and must stay on the wire, so only
+    # ``candidates`` is dropped when empty.
     exclude = {"candidates"} if not result.candidates else set()
     return JSONResponse(
         payload.model_dump(exclude=exclude),

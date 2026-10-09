@@ -222,7 +222,7 @@ treated as `lite`, with the discrepancy disclosed when it first matters.
 
 An interview-built profile is `full` with `provenance: self_published` and a
 `provenanceNote`; its expertise/SOUL contain no `[paper_id]` citations by
-design. No papers? See the interview path in rp-builder's README:
+design. No papers? Build one by interview instead:
 `rp interview prompt`, then `rp interview import`.
 
 ## Never

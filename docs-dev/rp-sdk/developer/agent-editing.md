@@ -59,12 +59,12 @@ def write_scope(caller: Caller, profile, action: str, detail: dict) -> None:
 app.state.hooks.write_scope = write_scope
 ```
 
-The actions rp-sdk passes, and what Prosopia (the reference host) requires
-for each. Prosopia gates writes part by part: each key has a table giving
+The actions rp-sdk passes, and what a host that gates writes part by part
+might require for each. In this example the host gates writes part by part: each key has a table giving
 every part `none`, `read`, or `write`, and a write needs `write` on every part
 it touches.
 
-| action | detail | Prosopia requires |
+| action | detail | Example host requires |
 |---|---|---|
 | `"metadata"` | `{"fields": ["name", "summary"]}` | `write` on each field's part (`summary`, `focus`, `background`, ..., or `works` for `research_outputs`); every editable field, AI-written ones included, has a part in the host's map, keyed by `researcher_profiles.edit.EDITABLE_METADATA_FIELDS` |
 | `"soul"` | `{}` | `write` on `soul` |
@@ -72,7 +72,7 @@ it touches.
 | `"visibility"` | `{"slug": "...", "profile_visibility": "...", "artifacts": [...]}` | never allowed for a key (`403 not_delegable`) |
 
 A refusal the host raises as `Forbidden(detail={...})` reaches the client as
-that dict under `detail`; Prosopia's looks like this:
+that dict under `detail`; for example:
 
 ```json
 {
@@ -84,7 +84,7 @@ that dict under `detail`; Prosopia's looks like this:
 ```
 
 A whole-profile push (`PUT /api/v1/profiles/{slug}`, what `rp push` sends) is
-gated the same way in Prosopia: the push is compared with the profile it
+gated the same way by such a host: the push is compared with the profile it
 replaces, and it lands only if every part it changes is `write`. Its 403 adds
 `needs_replace`, the changes no part covers, which only a key with the
 "Replace whole profiles" switch may make. `rp push` prints both lists.
@@ -97,8 +97,8 @@ A host serves one discovery endpoint; rp-sdk does not.
 identity, owner, parts table, "Replace whole profiles" switch, the profiles the
 account reaches (each with the parts the key may write there), and the acts no
 key may ever do (`never_delegable`). `rp agent whoami` prints it. There is no
-separate catalog endpoint for keys; Prosopia lists the parts at
-`GET /api/account/parts`.
+separate catalog endpoint for keys; a host may list its parts on an
+account route of its own.
 
 ## See also
 

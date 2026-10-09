@@ -1,17 +1,9 @@
 """Profile archive helpers for push (``PUT``) and install (``GET .../archive``).
 
-A profile travels as a (gzipped) tarball whose root is the profile
-directory's contents: ``profile.jsonld`` sits at the tar root. The
-helpers here build an archive from a directory and validate an inbound one.
-Committing the staged directory belongs to the store
-(:meth:`researcher_profiles.store.ProfileStore.commit_directory`), because what
-"live" means differs per backend: an atomic rename for a directory, a
-transaction for SQL. They are pure filesystem/tar code (no FastAPI), so the
-install client reuses them.
-
-``IngestResult`` and ``UploadError`` are re-exported here from
-:mod:`researcher_profiles.store`, where they are defined: they describe a store
-operation, and neither should require importing the HTTP layer to name.
+A profile travels as a gzipped tarball with ``profile.jsonld`` at the tar
+root. Committing the staged directory belongs to the store
+(:meth:`researcher_profiles.store.ProfileStore.commit_directory`). No FastAPI
+here, so the install client reuses these helpers.
 """
 
 import io
@@ -32,10 +24,8 @@ import pydantic
 from ..errors import ProfileError
 from ..privacy import ViewerTier
 
-# ``SLUG_RE`` is the directory-name grammar, re-exported from the single
-# canonical definition in ``schema/``. This is not an identity check. Never
-# match a ``rid`` against this; it forbids the uppercase ``X`` check digit some
-# ORCIDs carry.
+# ``SLUG_RE`` is the directory-name grammar, not an identity check. Never
+# match a ``rid`` against it; it forbids the uppercase ``X`` ORCID check digit.
 from ..store import IngestResult, ProfileStore, UploadError  # noqa: F401  (re-exported)
 from ..utils.paths import CACHE_DIRNAME, LEGACY_CACHE_DIRNAME
 from ..utils.slug import SLUG_RE  # noqa: F401  (re-exported)
@@ -45,12 +35,9 @@ if TYPE_CHECKING:  # pragma: no cover
 
 logger = logging.getLogger(__name__)
 
-#: Server-side size cap for profile pushes (``PUT``). A spec-clean profile is
-#: text-only (metadata, summaries, and extracted paper markdown) and runs a
-#: few MB even carrying full paper text, so 50 MB is comfortable headroom. A
-#: profile that hits this cap is signalling accidental non-text content (raw
-#: scraped HTML, binaries, embedded images), not normal growth; the cap is a
-#: guard that catches exactly that class of bloat regression.
+#: Server-side size cap for profile pushes (``PUT``). A text-only profile runs
+#: a few MB even with full paper text, so hitting 50 MB signals accidental
+#: non-text content (scraped HTML, binaries, images).
 DEFAULT_MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 
 #: Profile-relative directory holding downloaded paper fulltext. Excluded from
@@ -60,25 +47,16 @@ DEFAULT_MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 FULLTEXT_SUBDIR = ("sources", "papers")
 
 #: Whitelist of documented top-level profile members (see
-#: ``docs/rp-sdk/profile-format.md``). Anything else on disk, notably raw
-#: ``sources/html/`` scrape output, is a build-time intermediate that never
-#: ships, so the archive builder drops it regardless of what is present.
-#: ``index.html`` is the rendered profile page, a manifest part (role
-#: ``html``) like any other.
+#: ``docs/rp-sdk/profile-format.md``). Anything else on disk never ships.
 PROFILE_TOP_LEVEL = frozenset(
     {"profile.jsonld", "SKILL.md", "index.html", "personality", "sources", CACHE_DIRNAME}
 )
 
-#: Members under ``.cache/`` that ship. Only the derived ``embeddings.sqlite``
-#: index does; the other caches (``topics.json``, ``calibration.json``, …) are
-#: regenerable and stay local. Build-session bookkeeping (``build_state.json``,
-#: download attempts, rejection reasons, verification state) is
-#: unreachable from here: it lives in the build root outside the content tree,
-#: and pushing a profile publishes the record, not the build.
+#: Members under ``.cache/`` that ship. The other caches are regenerable and
+#: stay local.
 CACHE_MEMBERS = frozenset({"embeddings.sqlite"})
 
-#: Whitelist of documented ``sources/`` members. Raw scraped HTML
-#: (``sources/html/``) is absent: it is not a valid profile member.
+#: Whitelist of documented ``sources/`` members.
 SOURCES_MEMBERS = frozenset(
     {
         "papers.jsonld",
@@ -97,10 +75,9 @@ SOURCES_MEMBERS = frozenset(
 #: through it, so an archive without it is not a profile.
 PROFILE_DOCUMENT = "profile.jsonld"
 
-#: Why a file on disk did not enter the archive, in the order a report reads
-#: them. ``fulltext`` is policy (``include_fulltext=False``), ``legacy_cache``
-#: is a profile built before the ``cache/`` -> ``.cache/`` rename, and
-#: ``not_in_spec`` is everything the member whitelists reject.
+#: Why a file on disk did not enter the archive, in report order.
+#: ``fulltext`` is policy (``include_fulltext=False``), ``legacy_cache`` is a
+#: ``cache/`` directory, and ``not_in_spec`` is everything the whitelists reject.
 DROP_REASONS = ("fulltext", "legacy_cache", "not_in_spec")
 
 
@@ -111,9 +88,7 @@ class ProfileArchive:
     ``members`` is every regular file inside the tarball, profile-relative, so
     a caller can diff the push against a server without reopening the tar.
     ``dropped`` maps a reason from :data:`DROP_REASONS` to the paths on disk
-    that did not ship. The builder's exclusions are deliberate, but silent
-    exclusions are how a user ends up pushing a profile they did not build:
-    the account is returned so the caller can say so.
+    that did not ship, so the caller can tell the user.
     """
 
     data: bytes
@@ -124,15 +99,12 @@ class ProfileArchive:
 def _drop_reason(rel: str, *, include_fulltext: bool) -> str | None:
     """Why the profile-relative path ``rel`` does not ship, or None if it does.
 
-    The one place the member whitelists are applied. Prefix-based, so it
-    answers for a directory as readily as for a file.
+    Prefix-based, so it answers for a directory as well as a file.
     """
     parts = Path(rel).parts
     if parts[0] == LEGACY_CACHE_DIRNAME:
         return "legacy_cache"
-    # Dotfiles never ship. ``.cache/`` is the one dotted member on the
-    # whitelist, and only for the ``CACHE_MEMBERS`` below it; its own name
-    # is therefore exempt from this sweep, nothing nested under it is.
+    # Dotfiles never ship, except the top-level ``.cache/`` itself.
     if any(p.startswith(".") for p in parts[1:]) or (
         parts[0].startswith(".") and parts[0] != CACHE_DIRNAME
     ):
@@ -152,12 +124,8 @@ def _drop_reason(rel: str, *, include_fulltext: bool) -> str | None:
 def _walk_members(src: Path, *, include_fulltext: bool) -> tuple[list[str], dict[str, list[str]]]:
     """Split a profile directory into ``(members, dropped)``.
 
-    One walk, both answers, from the single :func:`_drop_reason` predicate, so
-    the tarball and the report it comes with can never disagree.
-
     A top-level directory that is not a profile member is reported as itself
-    and not descended into: a profile directory that happens to be a git
-    checkout would otherwise drown the report in ``.git/`` objects.
+    and not descended into, so a ``.git/`` does not flood the report.
     """
     members: list[str] = []
     dropped: dict[str, list[str]] = {}
@@ -185,8 +153,7 @@ def _only_members(src: Path, only: Sequence[str], *, include_fulltext: bool) -> 
     """The members of an ``only=`` archive: the document plus the named files.
 
     A named path that does not exist or is not a pushable member raises rather
-    than being dropped. Naming a file and having it silently vanish from the
-    upload is precisely the behaviour ``only=`` exists to replace.
+    than being silently dropped.
     """
     members = [PROFILE_DOCUMENT]
     for name in only:
@@ -214,9 +181,8 @@ def _normalize(ti: tarfile.TarInfo) -> tarfile.TarInfo:
 def _remote_entry(raw: dict) -> "ArtifactRef":
     """One served manifest entry back into an :class:`ArtifactRef`.
 
-    ``GET /profiles/{slug}`` stamps ``effective_visibility`` onto every entry
-    for the benefit of a reader. The model allows extra keys, so leaving it in
-    would write a derived field back into a published document; drop it.
+    Drops the served ``effective_visibility`` key so a derived field is not
+    written back into a published document.
     """
     from ..schema import ArtifactRef
 
@@ -228,12 +194,9 @@ def _project_only_manifest(
 ) -> tuple[list["ArtifactRef"], list["ArtifactRef"]]:
     """``(hasPart, subjectOf)`` for an ``only=`` push: the server's index, refreshed.
 
-    ``only=`` means "send these files and change nothing else". The document
-    has to travel regardless (the server loads staging through it), and the
-    manifest inside it is the index the server commits -- so taking that
-    manifest from the local directory is what turns "send one file" into
-    "replace the whole index". Here the manifest comes from the server, with
-    only the named files' size and digest restamped from disk.
+    ``only=`` means "send these files and change nothing else". The document's
+    manifest is the index the server commits, so it comes from the server,
+    with only the named files' size and digest restamped from disk.
 
     A named file the server does not know about is added from the local
     manifest, or from a freshly built entry when the local manifest has not
@@ -284,25 +247,13 @@ def build_profile_archive(
 ) -> ProfileArchive:
     """Tar+gzip a profile directory's contents (``profile.jsonld`` at the root).
 
-    Only the documented profile members ship: the top-level entries in
-    :data:`PROFILE_TOP_LEVEL` and, within ``sources/``, the entries in
-    :data:`SOURCES_MEMBERS`. Anything else on disk, such as dotfiles and stale
-    build intermediates, is dropped -- and named in
-    :attr:`ProfileArchive.dropped`, so a caller can tell the user what did not
-    travel instead of letting them find out from the server.
+    Only the documented profile members ship (:data:`PROFILE_TOP_LEVEL`,
+    :data:`SOURCES_MEMBERS`); everything else is named in
+    :attr:`ProfileArchive.dropped`.
 
-    ``include_fulltext`` is a copyright gate, not a size gate: with
-    ``include_fulltext=False`` (the default) the ``sources/papers/``
-    extracted-text tree is omitted, yielding the metadata+summaries+index
-    bundle that is safe to redistribute over the public GET serve.
-
-    The default is exclude. This is the shared entry point for every
-    archive that leaves this machine. The GET serve and the push client both
-    route through here, so the safe behaviour must be what you get when you
-    say nothing. Redistributing derived text of third-party copyrighted works
-    is an act a caller opts into explicitly (a local backup, an
-    operator-enabled serve), never something a caller falls into by forgetting
-    a keyword.
+    ``include_fulltext`` is a copyright gate (see :data:`FULLTEXT_SUBDIR`).
+    It defaults to exclude because every archive that leaves this machine
+    goes through here, so saying nothing must be the safe choice.
 
     ``only`` narrows the archive to :data:`PROFILE_DOCUMENT` plus the named
     profile-relative paths. The document is not optional: the server loads the
@@ -312,9 +263,8 @@ def build_profile_archive(
     ``only_manifest_from_remote`` is the server's current manifest
     (``{contentUrl: entry}``). With it, the ``only=`` archive's
     ``profile.jsonld`` is built in memory from that manifest rather than read
-    off disk, so a local copy whose manifest has fallen behind cannot shrink
-    the server's index. See :func:`_project_only_manifest`. Inline sections
-    (name, expertise, affiliations) still come from the local document.
+    off disk, so a stale local manifest cannot shrink the server's index.
+    Inline sections still come from the local document.
     """
     src = Path(profile_dir).expanduser().resolve()
     if not (src / PROFILE_DOCUMENT).is_file():
@@ -349,13 +299,10 @@ def build_profile_archive(
 def build_viewer_archive(profile_dir: str | os.PathLike, *, viewer: ViewerTier) -> bytes:
     """Tar+gzip only what a viewer entitled to ``viewer`` may see.
 
-    This is the egress archive: the one an HTTP caller can reach. Where
-    :func:`build_profile_archive` hands another machine the whole record (a
-    push, a migration), this answers "what may this reader have". What ships
-    is decided by :func:`~researcher_profiles.publish._export.plan_profile_export`,
-    the same projection ``rp publish`` writes to a static tree, so the archive
-    and a static export cannot drift. The whole-profile gate is the caller's
-    route.
+    The egress archive an HTTP caller can reach. What ships is decided by
+    :func:`~researcher_profiles.publish._export.plan_profile_export`, the
+    same projection ``rp publish`` writes, so the two cannot drift. The
+    whole-profile gate is the caller's job.
     """
     from ..publish._export import PROFILE_DOCUMENT, plan_profile_export
 
@@ -410,28 +357,19 @@ WITHHELD_CLASSES: dict[str, Callable[[str], bool]] = {
 #: What an ingest does with a live file the archive does not carry:
 #:
 #: * ``replace`` (the default): keep it only when it belongs to a
-#:   :data:`WITHHELD_CLASSES` class the archive carried no member of. A full
-#:   build push is a reproducible replacement of the record.
-#: * ``merge``: keep it, always. This is what ``rp push --only`` needs: send a
-#:   file or two and leave the rest of the server's copy alone.
+#:   :data:`WITHHELD_CLASSES` class the archive carried no member of.
+#: * ``merge``: keep it, always (``rp push --only``).
 #: * ``prune``: delete it, always. The archive is the whole profile.
 #:
-#: Keeping a file is not enough on its own. The manifest inside
-#: ``profile.jsonld`` is the index every reader (and the SQL store) works
-#: from, so a kept file the incoming manifest does not list is a file nobody
-#: can fetch and the SQL backend never even persists. Under ``merge`` and
-#: ``replace`` the committed manifest is therefore the incoming manifest
-#: **plus an entry for every kept file** (see
-#: :func:`_splice_kept_into_manifest`). Under ``prune`` nothing is kept, so
-#: nothing is spliced and the incoming manifest stands alone.
+#: Kept files get their manifest entries spliced back in
+#: (:func:`_splice_kept_into_manifest`).
 PushMode = Literal["replace", "merge", "prune"]
 
 #: The :data:`PushMode` values, for a route validating a query parameter.
 PUSH_MODES = get_args(PushMode)
 
-#: Class name for a kept file no :data:`WITHHELD_CLASSES` predicate matches.
-#: Only ``merge`` produces these: it keeps every live file the archive omitted,
-#: classed or not.
+#: Class name for a kept file no :data:`WITHHELD_CLASSES` predicate matches
+#: (only ``merge`` produces these).
 OTHER_CLASS = "other"
 
 
@@ -446,12 +384,9 @@ def extract_profile_archive(
     what the sender chose to send, not what landed.
 
     ``include_fulltext`` controls whether ``sources/papers/`` members are
-    written out. It defaults to ``True`` because this function's job is
-    faithful extraction of an archive already in hand: the install client keeps
-    whatever a server chose to serve it. The copyright policy lives at the
-    ingest boundary: ``PUT /profiles/{slug}`` always passes this explicitly
-    from the server's ``accept_fulltext`` flag, so a misbehaving or outdated
-    client cannot land copyrighted fulltext on a registry by sending it anyway.
+    written out. It defaults to ``True`` for faithful extraction (the install
+    client); the ingest path always passes the server's ``accept_fulltext``,
+    so a client cannot land fulltext on a registry by sending it anyway.
     """
     try:
         tf = tarfile.open(fileobj=io.BytesIO(data), mode="r:*")
@@ -495,32 +430,17 @@ def ingest_archive(
 ) -> IngestResult:
     """Validate, stage, and commit an uploaded profile tarball into ``store``.
 
-    The single extract->stage->commit code path shared by the operator push
-    (``PUT /api/v1/profiles/{slug}``) and the session-gated ingest, now over a
-    store rather than a root: the tarball is the interchange format and the
-    staging directory is transient, so what the profile ends up living in is
-    the store's business, not this function's.
-
-    The two callers differ only in ``include_fulltext`` (the copyright policy)
-    and ``build_missing_index`` (a user hosting their own profile wants it
-    rankable even when the archive shipped no index).
+    ``build_missing_index`` builds the vector index when the archive shipped
+    none.
 
     ``gate`` is called with the staged profile's rid after extraction and
     before commit; whatever it raises aborts the ingest with nothing written.
-    It exists because the store upserts on rid, not slug: the URL names a
-    handle, but the profile that gets replaced is whichever one carries the
-    archive's rid, so any "may you write this profile" check has to see the
-    rid. See ``app.state.push_gate``.
+    The store upserts on rid, not slug, so any "may you write this profile"
+    check has to see the rid. See ``app.state.push_gate``.
 
-    A push is a policy-filtered view of the sender's directory, not the whole
-    of it: ``build_profile_archive`` withholds fulltext by default, and
-    ``only=`` narrows it to a file or two. Absence from the tarball is
-    therefore not automatically a deletion: :data:`PushMode` says what it
-    means. Whatever survives is merged into staging before commit, so the
-    commit itself (and both store backends) still sees one complete directory.
-
-    Staging goes beside a directory store (an atomic ``os.rename`` needs the
-    same filesystem) and into the system scratch space otherwise.
+    Absence from the tarball is not automatically a deletion: :data:`PushMode`
+    says what it means. Kept files are merged into staging before commit, so
+    the store still sees one complete directory.
     """
     root = store.root
     with _staging_dir(root, slug) as staging:
@@ -545,16 +465,14 @@ def ingest_archive(
 def _live_manifest(store: "ProfileStore", slug: str) -> dict[str, tuple[str, "ArtifactRef"]]:
     """``{contentUrl: (manifest_slot, entry)}`` for the profile the store holds.
 
-    Empty when the store does not hold it yet: a create has no live manifest
-    to splice anything out of.
+    Empty when the store does not hold it yet.
     """
     if not store.exists(slug):
         return {}
     meta = store.get(slug).metadata
     return {
         **{p.content_url: ("subjectOf", p) for p in meta.subject_of},
-        # ``hasPart`` wins a duplicate contentUrl, matching the slot order the
-        # SQL store writes rows in.
+        # ``hasPart`` wins a duplicate contentUrl, as in the SQL store.
         **{p.content_url: ("hasPart", p) for p in meta.has_part},
     }
 
@@ -566,14 +484,11 @@ def _splice_kept_into_manifest(
 ) -> int:
     """Add the live manifest entries for every kept file the staged manifest omits.
 
-    A kept file that the committed manifest does not list is a file no reader
-    can fetch, and the SQL store will not even persist it: ``put`` writes rows
-    *by the recorded manifest*, not by what is in staging. So keeping bytes
-    without keeping the index entry is not a partial save, it is a silent
-    delete. Returns how many entries were added.
-
-    Ordering is deterministic: the staged entries keep their order and the
-    spliced ones follow, sorted by ``contentUrl``.
+    A kept file the committed manifest does not list is a file no reader can
+    fetch, and the SQL store (which writes rows by the manifest) never
+    persists it. Keeping bytes without the entry would be a silent delete.
+    Returns how many entries were added; spliced entries follow the staged
+    ones, sorted by ``contentUrl``.
     """
     from ..schema import ProfileDocument
     from ..schema.jsonld import canonical_dumps
@@ -596,9 +511,8 @@ def _splice_kept_into_manifest(
         (has_part if slot == "hasPart" else subject_of).append(entry)
     doc.has_part = has_part
     doc.subject_of = subject_of
-    # ``dateModified`` is deliberately untouched: the push itself stamps it
-    # through the normal write path, and this step restores entries that were
-    # already part of the record rather than changing the record.
+    # ``dateModified`` is left alone: the push stamps it through the normal
+    # write path.
     doc_path.write_text(canonical_dumps(doc.model_dump(mode="json")), encoding="utf-8")
     logger.info("spliced %d kept manifest entry(ies) back into %s", len(missing), doc_path)
     return len(missing)
@@ -607,9 +521,8 @@ def _splice_kept_into_manifest(
 def _committed_manifest_counts(store: "ProfileStore", slug: str) -> dict[str, int]:
     """``{role: count}`` over the manifest the store now holds, post-commit.
 
-    Read back from the store rather than from staging: this is the number the
-    client prints as "the server now holds N artifacts", and it must describe
-    what was committed, not what was offered.
+    Read back from the store, so it describes what was committed, not what
+    was offered.
     """
     try:
         entries = store.get(slug).manifest()
@@ -639,13 +552,8 @@ def _keep_omitted(
     authoritative for the whole class. Under ``merge`` every live file the
     archive did not name is kept, counted under its class or
     :data:`OTHER_CLASS`. Under ``prune`` nothing is. Returns
-    ``{class: [profile-relative paths kept]}`` for whatever contributed; a new
-    profile has nothing to keep either way. The paths, not just their count,
-    because the caller has to splice their manifest entries back in
-    (:func:`_splice_kept_into_manifest`) and cannot do that from a number.
+    ``{class: [profile-relative paths kept]}``.
 
-    The live copies come from the store's own directory when it has one and
-    from a scratch export otherwise (push is rare; an export is affordable).
     Fulltext kept this way is the server's own copy, already admitted under
     its ``accept_fulltext`` policy, so that gate does not apply here.
     """
@@ -697,8 +605,8 @@ def _keep_omitted(
 def _staged_rid(staging: Path) -> str:
     """The rid a staged directory's ``profile.jsonld`` declares.
 
-    Read the same way ``commit_directory`` will read it, so the rid the gate
-    judges is the rid that gets written.
+    Read the way ``commit_directory`` reads it, so the gate judges the rid
+    that gets written.
     """
     from ..profile import ResearcherProfile
 
@@ -712,9 +620,8 @@ def _staged_rid(staging: Path) -> str:
 def _staging_dir(root: "Path | None", slug: str) -> "Iterator[Path]":
     """A transient directory to extract into, removed on the way out.
 
-    Beside the profiles root when there is one, since ``swap_profile_dir``
-    renames the staging directory into place and ``os.rename`` cannot cross a
-    filesystem. Otherwise, anywhere the OS offers.
+    Beside the profiles root when there is one, since ``os.rename`` cannot
+    cross a filesystem.
     """
     if root is not None:
         staging = Path(root) / f".upload-{slug}-{uuid.uuid4().hex}"

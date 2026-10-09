@@ -1,11 +1,8 @@
 """The sized record shapes: one profile, one paper, one paper row.
 
-Built in one place so every surface that serves them (the REST routes, and a
-host's MCP server, both through ``api.service``) gets the same trim. The default
-``record`` view holds what an agent or a list view commonly needs and stays
-under 8 KB: long lists are cut to their top entries with a total, and the
-JSON-LD plumbing and the file manifest are left out. ``view="full"`` keeps
-every field, untrimmed.
+The default ``record`` view stays under 8 KB: long lists are cut to their top
+entries with a total, and the JSON-LD plumbing and the file manifest are left
+out. ``view="full"`` keeps every field, untrimmed.
 """
 
 from __future__ import annotations
@@ -125,10 +122,7 @@ def profile_record(
     store: ProfileStore,
     sizes: Optional[SizeIndex] = None,
 ) -> ProfileRecord:
-    """One profile as ``view`` shows it to ``viewer``. The one trim.
-
-    ``proofs`` are the registry-issued proofs to attach (``Service.proofs``).
-    """
+    """One profile as ``view`` shows it to ``viewer``, with ``proofs`` attached."""
     resolved = store.resolve_slug(prof.slug)
     sizes = sizes or SizeIndex(prof, viewer, store, resolved)
     data = metadata_payload_dict(prof, viewer, proofs=proofs)

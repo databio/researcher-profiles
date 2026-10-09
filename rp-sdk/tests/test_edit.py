@@ -310,6 +310,72 @@ class TestEditEndpointsOwnerScoped:
         assert r.status_code == 401
 
 
+class TestHeldBackProfileIsNotDisclosedByEdits:
+    """No edit gate: an anonymous edit is a 401 before any lookup.
+
+    A held-back profile and a missing one must get the same answer, or the
+    401-vs-404 difference tells a stranger the held-back profile exists.
+    """
+
+    PAPER = "doe2016example"
+    MISSING = "nobody-here"
+    ROUTES = [
+        ("patch", "/metadata", {"field": "Genomics"}),
+        ("get", "/visibility", None),
+        ("patch", "/visibility", {"profile_visibility": "public"}),
+        ("post", "/works", {"paper_id": "doe2026new", "name": "New"}),
+        ("patch", f"/works/{PAPER}", {"doi": "10.1/x"}),
+        ("delete", f"/works/{PAPER}", None),
+    ]
+
+    @pytest.fixture
+    def client(self, make_api_client, fixture_profiles_root):
+        c = make_api_client(fixture_profiles_root(SLUG), token="op-token")
+        store = c.app.state.service.store
+        store.get(SLUG).edit.set_visibility(profile_visibility="private")
+        store.evict(SLUG)
+        return c
+
+    @staticmethod
+    def _call(c, method, path, body, **kw):
+        if body is None:
+            return getattr(c, method)(path, **kw)
+        return getattr(c, method)(path, json=body, **kw)
+
+    @pytest.mark.parametrize("method,suffix,body", ROUTES)
+    def test_anonymous_private_and_missing_answer_alike(self, client, method, suffix, body):
+        hidden = self._call(client, method, f"/api/v1/profiles/{SLUG}{suffix}", body)
+        missing = self._call(client, method, f"/api/v1/profiles/{self.MISSING}{suffix}", body)
+        assert hidden.status_code == missing.status_code == 401, (hidden.text, missing.text)
+        assert hidden.json() == missing.json()
+
+    def test_operator_still_tells_them_apart(self, client):
+        auth = {"Authorization": "Bearer op-token"}
+        hidden = client.get(f"/api/v1/profiles/{SLUG}/visibility", headers=auth)
+        missing = client.get(f"/api/v1/profiles/{self.MISSING}/visibility", headers=auth)
+        assert hidden.status_code == 200, hidden.text
+        assert missing.status_code == 404
+
+
+class TestInsufficientAccessHint:
+    def test_hint_is_a_sentence_when_the_error_has_none(
+        self, make_api_client, fixture_profiles_root
+    ):
+        from researcher_profiles.errors import InsufficientScope
+
+        c = make_api_client(fixture_profiles_root(SLUG))
+
+        def _write_scope(caller, prof, action, detail):  # noqa: ARG001
+            raise InsufficientScope(frozenset({"profile:write"}), missing=["summary"])
+
+        c.app.state.hooks.write_scope = _write_scope
+        r = c.patch(f"/api/v1/profiles/{SLUG}/metadata", json={"field": "Genomics"})
+        assert r.status_code == 403, r.text
+        detail = r.json()["detail"]
+        assert detail["error"] == "insufficient_access"
+        assert detail["hint"] == "This needs Write on summary."
+
+
 class TestAuthoredHistoryIsEditable:
     """``training`` / ``career`` / ``job_title``: the first-run gap.
 

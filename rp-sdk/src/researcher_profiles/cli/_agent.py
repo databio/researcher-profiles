@@ -1,9 +1,7 @@
 """``rp agent`` and ``rp profile``: the agent credential and profile-editing verbs.
 
-Both verbs resolve a credential from ``credentials.toml``, build a
-``ManagementClient`` from it, and dispatch on a subcommand. Everything here
-talks to a remote server, so every import of the client machinery is deferred
-into the handler that needs it.
+Everything here talks to a remote server, so client imports are deferred into
+the handlers.
 """
 
 import argparse
@@ -145,9 +143,8 @@ def _agent_config(cred) -> int:
 def _agent_whoami(client, args: argparse.Namespace) -> int:
     """Print the key's identity, its parts table, and what it may write where.
 
-    The table is the whole of the key's authority: one level per part
-    (``none``, ``read``, ``write``) plus the "Replace whole profiles" switch.
-    A part the server does not list is ``none``.
+    One level per part (``none``, ``read``, ``write``) plus the "Replace whole
+    profiles" switch. A part the server does not list is ``none``.
     """
     from .auth.agent import AgentAPIError
 
@@ -234,9 +231,8 @@ def _profile_pull(client, slug: str, args: argparse.Namespace) -> int:
     content_hash = data.get("content_hash")
     soul = data.get("soul")
     if soul is None:
-        # Written into the round-trip document, and a later ``rp profile push``
-        # writes it back: a SOUL that was never read must say so, or pushing
-        # the empty body would erase the real one.
+        # A SOUL that was never read must say so, or a later push of the empty
+        # body would erase the real one.
         print(
             "warning: this key may not read the SOUL; the round-trip document's body is empty",
             file=sys.stderr,

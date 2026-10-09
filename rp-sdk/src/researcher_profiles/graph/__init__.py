@@ -1,22 +1,8 @@
 """The derived profile graph: coauthor / shared-institution / advised edges.
 
-A rebuildable, registry-level artifact over the profile store, modeled on the
-embeddings/centroid precedent. It is derived purely from already-published
-bibliometric fields (author lists, affiliations, training records), no LLM, no
-paper full text, no persona, no consent gate, so it works against the whole
-store, ``lite`` profiles included.
-
-Public API
-----------
-
-- :class:`ProfileGraph`: the query object (COI check, neighborhood, coauthors)
-- :func:`build_graph`: pure builder over a set of loaded profiles
-- :func:`load_profiles`: the graph's lightweight profile loader (no numpy)
-- :class:`PersonNode`, :class:`GraphEdge`, :class:`EdgeType`: the value objects
-- :func:`normalize_name`: the single name-fold the builder and COI check share
-
-The built graph persists at ``<root>/.cache/graph.sqlite`` and is a cache:
-deleting it is free; the next query rebuilds it.
+Derived only from published bibliometric fields (author lists, affiliations,
+training records), with no LLM, full text, persona or consent gate, so it
+covers the whole store, ``lite`` profiles included.
 """
 
 from .build import build_graph, load_profiles

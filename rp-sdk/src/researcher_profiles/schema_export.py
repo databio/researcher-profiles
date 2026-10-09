@@ -2,8 +2,7 @@
 
 Consumers who don't want to install this package can validate a profile
 directory against the JSON Schema files checked into ``schemas/`` at the repo
-root. This module (re)generates them from the authoritative Pydantic models in
-:mod:`researcher_profiles.schema`.
+root.
 
 Run via the CLI::
 
@@ -62,34 +61,23 @@ from .schema import (
     TrialsDocument,
 )
 
-# Model -> output filename. Almost every entry is an on-disk artifact schema
-# that defines what a conforming profile directory must contain. The one
-# exception is ``profile_export_bundle``, which is an INTERCHANGE contract: a
-# payload handed to a knowledge base at export time, never a file written into
-# a profile. It is published here so a non-Python consumer can validate a
-# bundle without installing this package.
-#
-# Pydantic's ``model_json_schema()`` defaults to ``by_alias=True``, so the
-# emitted schemas correctly show ``@id`` / ``@context`` / ``conformsTo`` rather
-# than the Python attribute names. ``tests/test_schema.py`` asserts that,
-# so a future model-config change cannot silently publish Python names into the
-# contract.
+# Model -> output filename. Every entry but ``profile_export_bundle`` is an
+# on-disk artifact schema. Schemas use field aliases (``@id``, ``conformsTo``),
+# not Python attribute names.
 _SCHEMA_MODELS = {
     "profile_jsonld": ProfileDocument,  # profile.jsonld
     "papers_jsonld": PapersDocument,  # sources/papers.jsonld
     "grants_jsonld": GrantsDocument,  # sources/grants.jsonld
     "trials_jsonld": TrialsDocument,  # sources/trials.jsonld (optional, clinical)
     "summary_file": SummaryFile,  # sources/summaries/*.summary.md frontmatter
-    # Published-standard schemas (static site artifacts). NOTE: profile.jsonld
-    # and papers.jsonld are the same documents authored and published (the
-    # "publishable by construction" collapse), so they have no separate
-    # published schema: `profile_jsonld` / `papers_jsonld` above cover both.
+    # Published static-site artifacts. profile.jsonld and papers.jsonld are
+    # the same documents authored and published, so the entries above cover both.
     "embedding_index": EmbeddingIndex,
     "profile_list": ProfileListDocument,
     "collection": ProfileCollection,
     "topic_index": TopicIndexDocument,
-    # INTERCHANGE, not an on-disk artifact: the bundle `build_export_bundle`
-    # hands a knowledge base. Nothing writes this into a profile directory.
+    # Interchange: the bundle `build_export_bundle` hands a knowledge base,
+    # published so non-Python consumers can validate it. Never written to disk.
     "profile_export_bundle": ProfileExportBundle,
 }
 
@@ -103,11 +91,7 @@ def build_schemas() -> dict[str, dict]:
 # Wire-contract schema (HTTP types in models/api.py, consumed by the TS viewer).
 # ---------------------------------------------------------------------------
 
-# These are the HTTP *wire* types (distinct from the on-disk artifact schemas
-# above). They are the single typed contract the researcher-profiles browser
-# (``rp-browser``) speaks. The TypeScript
-# ``rp-browser/src/types.ts`` is generated from this bundle so it can never
-# drift from the pydantic source of truth.
+# ``rp-ui-lib/src/types.ts`` is generated from this bundle.
 
 
 class _WireBundle(BaseModel):
@@ -119,9 +103,7 @@ class _WireBundle(BaseModel):
     profile_summary: ProfileSummary
     paper_entry: PaperEntry
     paper_summary: PaperSummary
-    # The sized HTTP reads: what ``GET /profiles/{slug}`` and its sub-routes
-    # answer. A host that calls the API types its responses with these and
-    # converts to the display shapes above at its boundary.
+    # The sized HTTP reads: ``GET /profiles/{slug}`` and its sub-routes.
     profile_record: ProfileRecord
     profile_parts: ProfileParts
     size: Size
@@ -136,9 +118,7 @@ class _WireBundle(BaseModel):
     passage_request: PassageRequest
     passage: Passage
     passage_list: PassageList
-    # The privacy-tier surface. Without these the frontend has no typed
-    # visibility bodies and would hand-write the shapes it renders, a second
-    # definition of the contract and the one place a drift would be invisible.
+    # The privacy-tier surface.
     visibility_report: VisibilityReport
     artifact_tier: ArtifactTier
     visibility_patch: VisibilityPatch
@@ -150,20 +130,12 @@ class _WireBundle(BaseModel):
 def build_wire_schema() -> dict:
     """Return one combined JSON Schema document for the HTTP wire types.
 
-    Every wire model appears under ``$defs``: the display shapes
-    (``ProfileDetail``, ``PaperEntry``, ...), the sized reads (``ProfileRecord``,
-    ``PaperPage``, ``PaperRow``, ``SummaryBatch``, ``FileList``, ``TextPage``,
-    ``PassageList``, ...) and the visibility bodies, so a single
+    Every wire model appears under ``$defs``, so a single
     ``json-schema-to-typescript`` pass emits all interfaces.
     """
     schema = _WireBundle.model_json_schema()
-    # Keep the wrapper's properties so every wire model under ``$defs`` is
-    # referenced; ``json-schema-to-typescript`` then emits each as a named
-    # top-level interface (ProfileDetail, PaperEntry, ...). The wrapper
-    # interface itself is a harmless by-product.
-    # Strip per-property ``title`` keys inside each $def so the generator emits
-    # inline property types instead of a named alias per field (cleaner output);
-    # the $def-level titles are what name the interfaces, so those stay.
+    # Drop per-property titles so the generator inlines property types instead
+    # of naming an alias per field. The $def titles name the interfaces.
     for defn in schema.get("$defs", {}).values():
         for prop in defn.get("properties", {}).values():
             prop.pop("title", None)

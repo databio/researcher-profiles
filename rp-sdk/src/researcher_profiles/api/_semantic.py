@@ -1,22 +1,15 @@
 """Search inside one profile: stored vectors, a query encoder, BM25, and RRF.
 
-The shared code behind three routes: paper search (``GET /profiles/{slug}/papers?q=``),
-passages (``POST .../passages``), and ``POST /profiles/{slug}/search``. Every
-function takes one profile and never touches another, ``/match``, or the
-centroid matrix.
+Every function works on one profile and never touches another.
 
-**Where the vectors live.** A store that serves vectors (the ``VectorStore``
-capability) hands out one profile's chunk index. On the SQL store those rows
-are the *public* subset and carry no text; on a directory store the
-build-local sqlite carries every chunk. Either way a hit is a key
-``(source_type, source_id, chunk_index)``: text is recovered by re-running the
-deterministic chunkers over the sources this caller may read
-(:func:`chunk_texts`), and a chunk whose length moved since indexing is stale
-and dropped.
+**Where the vectors live.** On the SQL store the stored rows are the *public*
+subset and carry no text; on a directory store the build-local sqlite carries
+every chunk. A hit is a key ``(source_type, source_id, chunk_index)``, and its
+text is recovered by re-running the chunkers over the sources this caller may
+read (:func:`chunk_texts`).
 
 **Hybrid.** Semantic and keyword rankings are merged with reciprocal-rank
-fusion. Whenever semantic search cannot run (no vectors, no encoder, a
-timeout, a different embedding model), callers fall back to keyword search
+fusion. When semantic search cannot run, callers fall back to keyword search
 and say so in a fixed-text note. A note never carries source or user text.
 """
 
@@ -28,13 +21,13 @@ import os
 import re
 import threading
 import weakref
-from collections import Counter, OrderedDict
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
 from typing import Any, Iterable, Mapping, Optional
 
 from ..privacy import ViewerTier, chunk_source_tiers, explain_tiers, tier_allows
-from ._projection import artifact_visible
+from ._projection import _visible_hits, artifact_visible
 
 logger = logging.getLogger(__name__)
 
@@ -136,8 +129,9 @@ def fuse(semantic: list, keyword: list) -> list[tuple[Any, float, list[str]]]:
 # ---------------------------------------------------------------------------
 
 _VECTOR_CACHE_MAX = 64
-_vector_cache: "weakref.WeakKeyDictionary[Any, OrderedDict]" = weakref.WeakKeyDictionary()
-_vector_lock = threading.Lock()
+#: ``store -> {(ref, write generation): index}``. Weak on the store, so a
+#: collected store never leaves a stale entry for a new one that reuses its id.
+_vector_cache: "weakref.WeakKeyDictionary[Any, dict]" = weakref.WeakKeyDictionary()
 
 
 def _flat_from_sqlite(index) -> Any:
@@ -182,20 +176,15 @@ def profile_vectors(store, ref: str):
     """The profile's chunk index from the store, or ``None``.
 
     ``None`` when the store cannot serve vectors or holds none for this
-    profile. LRU-cached per store, keyed by ``(ref, store write generation)``
-    so any write drops the entry; at most 64 profiles per store.
+    profile. Cached per store, keyed by ``(ref, store write generation)`` so any
+    write drops the entry; the cache is emptied when it passes 64 entries.
     """
     if not hasattr(store, "vector_index"):
         return None
+    per_store = _vector_cache.setdefault(store, {})
     key = (ref, getattr(store, "generation", None))
-    with _vector_lock:
-        try:
-            per_store = _vector_cache.setdefault(store, OrderedDict())
-        except TypeError:  # pragma: no cover - a store that cannot be weakly referenced
-            per_store = OrderedDict()
-        if key in per_store:
-            per_store.move_to_end(key)
-            return per_store[key]
+    if key in per_store:
+        return per_store[key]
     try:
         index = store.vector_index(ref)
         if not hasattr(index, "search_vector"):
@@ -207,10 +196,9 @@ def profile_vectors(store, ref: str):
         index = None
     if index is not None and getattr(index, "count", 0) == 0:
         index = None
-    with _vector_lock:
-        per_store[key] = index
-        while len(per_store) > _VECTOR_CACHE_MAX:
-            per_store.popitem(last=False)
+    if len(per_store) >= _VECTOR_CACHE_MAX:
+        per_store.clear()
+    per_store[key] = index
     return index
 
 
@@ -222,7 +210,7 @@ _backends: dict[str, Any] = {}
 _backend_lock = threading.Lock()
 _pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="rp-query-embed")
 _QUERY_CACHE_MAX = 1024
-_query_cache: OrderedDict = OrderedDict()
+_query_cache: dict = {}  # insertion-ordered; the oldest entry goes first
 
 
 def _query_backend(store) -> Any:
@@ -251,10 +239,7 @@ def _query_backend(store) -> Any:
 
 
 def encode(store, text: str, *, timeout_s: Optional[float] = None):
-    """``(unit vector | None, encoder name | None, note | None)`` for ``text``.
-
-    ``timeout_s`` defaults to :data:`EMBED_TIMEOUT_S`.
-    """
+    """``(unit vector | None, encoder name | None, note | None)`` for ``text``."""
     import numpy as np
 
     timeout_s = EMBED_TIMEOUT_S if timeout_s is None else timeout_s
@@ -265,7 +250,6 @@ def encode(store, text: str, *, timeout_s: Optional[float] = None):
     key = (name, " ".join((text or "").lower().split()))
     hit = _query_cache.get(key)
     if hit is not None:
-        _query_cache.move_to_end(key)
         return hit, name, None
     try:
         raw = _pool.submit(backend.embed, [text]).result(timeout=timeout_s)[0]
@@ -279,9 +263,9 @@ def encode(store, text: str, *, timeout_s: Optional[float] = None):
     n = float(np.linalg.norm(vec))
     if n > 1e-12:
         vec = vec / n
+    if len(_query_cache) >= _QUERY_CACHE_MAX:
+        _query_cache.pop(next(iter(_query_cache)), None)
     _query_cache[key] = vec
-    while len(_query_cache) > _QUERY_CACHE_MAX:
-        _query_cache.popitem(last=False)
     return vec, name, None
 
 
@@ -326,13 +310,6 @@ def same_space(encoder_name: str | None, index_spec: str | None) -> bool:
 # ---------------------------------------------------------------------------
 # Semantic hits, tier-filtered
 # ---------------------------------------------------------------------------
-
-
-def _visible_hits(prof_md, viewer: ViewerTier, hits) -> list:
-    """Drop every hit whose chunk source tier exceeds ``viewer``."""
-    from ._projection import _visible_hits as visible
-
-    return visible(prof_md, viewer, hits)
 
 
 def semantic_hits(
@@ -509,9 +486,8 @@ def search_chunks(
     """Semantic top-``k`` chunks of one profile, with their text, as ``(hits, note)``.
 
     ``hits`` is ``None`` when semantic search cannot run here (``note`` says
-    why). Otherwise each hit is a :class:`~researcher_profiles.embeddings.cache.SearchHit`
-    whose text was recovered from a source this viewer may read; a stale
-    chunk is dropped and counted in ``note``.
+    why). Otherwise each hit is a :class:`~researcher_profiles.embeddings.cache.SearchHit`;
+    stale chunks are counted in ``note``.
     """
     from ..embeddings.cache import SearchHit
 
@@ -557,15 +533,11 @@ def hybrid_rank_papers(
 ) -> tuple[list[tuple[str, float, list[str]]], str, Optional[str]]:
     """Rank a profile's papers for ``q``: meaning plus keywords, merged with RRF.
 
-    ``candidates`` is one dict per paper, already filtered by the caller's
-    other filters, with keys ``paper_id, title, journal, summary, abstract``
-    (``summary`` / ``abstract`` are ``None`` when this viewer may not read
-    them). Semantic side: cosine of ``q`` against the profile's
-    ``paper_summary`` / ``paper_abstract`` vectors, best chunk per paper,
-    kept at ``MIN_COSINE`` or above, and only for a text the candidate says
-    this viewer may read. Keyword side: BM25 over title, summary, abstract
-    and journal, kept when any query term matches. Papers neither side kept
-    are dropped.
+    ``candidates`` is one dict per paper with keys ``paper_id, title,
+    journal, summary, abstract`` (``summary`` / ``abstract`` are ``None`` when
+    this viewer may not read them, and then that side gets no semantic
+    credit). Semantic hits below ``MIN_COSINE`` are dropped, as are papers
+    neither side kept.
 
     Returns ``([(paper_id, rrf_score, matched_by)], mode, note)``: best first;
     ``mode`` is ``"hybrid"`` when the semantic ranking ran, else

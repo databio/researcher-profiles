@@ -1,9 +1,6 @@
 /**
- * Guard for the Browse analysis views (Clusters, Topics, Search). With nothing
- * loaded these routes would dead-end, so we render an empty-state screen
- * instead of the page's broken content. A host application can replace that
- * screen through the `emptyScreen` shell slot, which is how a deployment with
- * accounts says "sign in" instead of "add a source".
+ * Guard for the Browse analysis views: with nothing loaded, render an empty
+ * state (replaceable by the host's `emptyScreen` slot) instead.
  */
 import type { ReactNode } from "react";
 import { ShellState } from "./ShellState";

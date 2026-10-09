@@ -1,16 +1,7 @@
-"""The read projection every route module shares.
+"""The read projection shared by the routes: visibility gates and wire payloads.
 
-The projection is the gates that decide whether a viewer may see a profile and
-which of its pieces, and the functions that turn a loaded profile into a wire
-payload. The three ``APIRouter`` objects the route modules attach to live
-beside this, in :mod:`.routers._routers`.
-
-Some of these are the hooks a hosting service composes against, and they are
-re-exported without an underscore from ``researcher_profiles.api``:
-``artifact_visible``, ``metadata_payload``, ``withheld``, and the serve-time
-document helpers ``served_document`` and ``served_document_bytes``. Everything
-else here is internal to the route modules. Cache invalidation after a write
-is ``Service.invalidate``.
+The public names are re-exported from ``researcher_profiles.api`` so a host
+projects through the same code as the SDK.
 """
 
 import json
@@ -19,9 +10,6 @@ from collections.abc import Sequence
 from datetime import datetime, timezone
 from email.utils import format_datetime
 
-from fastapi import Request
-
-from ..errors import NotFound
 from ..models.api import (
     ProfileMetadataPayload,
     ProfileSummary,
@@ -33,7 +21,6 @@ from ..privacy import (
     ViewerTier,
     chunk_source_tiers,
     label_access_rights,
-    profile_visible,
     project_document,
     tier_allows,
 )
@@ -48,21 +35,12 @@ from ..schema import (
 )
 from ..schema.jsonld import canonical_dumps
 from ..store import ProfileStore
-from .deps import (
-    get_profile_tier_floor,
-    viewer_tier_for,
-)
 
 logger = logging.getLogger(__name__)
 
 
 def _profile_summary(prof, viewer: ViewerTier) -> ProfileSummary:
-    """Validate the shared summary projection into the wire model.
-
-    The projection itself lives in ``payloads.profile_summary_dict``, which the
-    static publisher renders from too, so a profile looks the same over HTTP as
-    in the published site.
-    """
+    """Validate ``payloads.profile_summary_dict`` (shared with the static publisher) into the wire model."""
     return ProfileSummary.model_validate(profile_summary_dict(prof, viewer))
 
 
@@ -71,20 +49,13 @@ def metadata_payload(
 ) -> ProfileMetadataPayload:
     """Validate the shared metadata projection into the wire model.
 
-    Part of the read-projection hooks re-exported from
-    ``researcher_profiles.api``: a hosting service composing its own surface
-    projects a profile's metadata through this, so its answer and the SDK's
-    cannot drift. The projection is ``payloads.metadata_payload_dict``.
-
-    ``proofs`` are the registry-issued proofs to attach to this read (see
-    ``Service.proofs``); any stored copy of such a proof is dropped.
+    ``proofs`` are the registry-issued proofs to attach to this read; any
+    stored copy of such a proof is dropped.
     """
     return ProfileMetadataPayload.model_validate(metadata_payload_dict(prof, viewer, proofs=proofs))
 
 
-# ---------------------------------------------------------------------------
-# Registry-issued proofs (computed per read, never stored)
-# ---------------------------------------------------------------------------
+# Registry-issued proofs are computed per read, never stored.
 
 
 def _served(prof, viewer: ViewerTier, proofs: Sequence[Proof]) -> ProfileDocument:
@@ -96,10 +67,8 @@ def _served(prof, viewer: ViewerTier, proofs: Sequence[Proof]) -> ProfileDocumen
 def served_document(service, prof, viewer: ViewerTier) -> ProfileDocument:
     """The document a registry serves: the stored record plus its registry proofs.
 
-    Projected for ``viewer`` (sections and ``accessRights``). The stored
-    document's own registry-issued proofs (none should exist) are dropped and
-    the hook's are appended. Never mutates ``prof.metadata``: the store caches
-    that object.
+    Projected for ``viewer``. Stored registry-issued proofs are replaced by the
+    hook's. Never mutates ``prof.metadata``, which the store caches.
     """
     return _served(prof, viewer, service.proofs(prof.metadata.rid))
 
@@ -109,19 +78,14 @@ def served_document_bytes(
 ) -> bytes:
     """The ``profile.jsonld`` bytes to serve for ``prof`` to ``viewer``.
 
-    With no section projection, no registry proof to attach, and no stored
-    copy of a registry-issued proof, the stored JSON (``store.document_bytes``)
-    comes back as written, each manifest entry labeled with its derived
-    ``accessRights``. Otherwise the served document is re-serialized
-    canonically, which drops any stored registry-issued proof (a bare server
-    with no hook must not serve one either). Raises what ``document_bytes``
-    raises when the store has lost the profile.
+    When nothing needs projecting, the stored JSON comes back as written plus
+    ``accessRights`` labels; otherwise the served document is re-serialized.
+    Raises what ``store.document_bytes`` raises.
     """
     proofs = service.proofs(prof.metadata.rid)
     stored_registry_proof = any(p.kind in REGISTRY_ISSUED_PROOF_KINDS for p in prof.metadata.proof)
     if not prof.metadata.section_visibility and not proofs and not stored_registry_proof:
-        # The stored JSON as written, plus the derived ``accessRights`` labels.
-        # Re-dumping the model instead would also reshape untouched fields.
+        # Re-dumping the model would reshape untouched fields.
         stored = json.loads(store.document_bytes(slug))
         label_access_rights(stored, prof.metadata)
         return canonical_dumps(stored).encode()
@@ -132,33 +96,27 @@ def served_document_bytes(
 # ---------------------------------------------------------------------------
 # The two gates
 #
-# Every read on ``public_router`` passes through these, in this order:
+# Every read passes through these, in this order:
 #
-#   1. the profile gate: whether this viewer may see this profile at all.
+#   1. the profile gate (``Service.visible``): whether this viewer may see
+#      this profile at all.
 #   2. the artifact gate: which of its pieces they may see.
 #
 # Failing the profile gate is a 404 with the same body a genuinely nonexistent
 # slug produces. Never a 403: a 403 tells the caller the profile exists, which
 # is the one bit a held-back profile is trying not to disclose.
 #
-# Both gates are projections of ``privacy.explain_tiers`` / ``privacy.tier_allows``.
-# Nothing here compares two tiers itself.
+# Both gates defer to ``privacy``; nothing here compares tiers itself.
 # ---------------------------------------------------------------------------
 
 
-#: Every tier-projected response is a function of the caller's credentials, not
-#: only of its URL. Without this a shared cache that stored one caller's copy
-#: would serve it to the next caller, which on the one route with a TTL means
-#: handing a stranger an owner's view.
+#: Tier-projected responses depend on credentials, not only the URL. Without
+#: this a shared cache could hand a stranger an owner's view.
 VARY_ON_CREDENTIALS = "Authorization, Cookie"
 
 
-#: How long a shared cache may hold the anonymous rendering of a public
-#: profile document. This is the bound on unpublishing: an owner who withdraws
-#: consent is invisible to the origin on the next request, and to a shared
-#: cache within this many seconds. Sixty is the number we are choosing; it is
-#: short enough that "I unpublished and it is still up" is not a support
-#: question, and long enough to absorb a crawl.
+#: Seconds a shared cache may hold the anonymous rendering of a public profile
+#: document. This bounds how long an unpublished profile stays visible in caches.
 PUBLIC_DOCUMENT_MAX_AGE = 60
 
 
@@ -175,24 +133,8 @@ def _http_date(iso: str | None) -> str | None:
         return None
 
 
-def _profile_missing(ref: str) -> NotFound:
-    """The 404 for "no such profile" and for "not for you": byte-identical."""
-    return NotFound(f"profile {ref!r} not found")
-
-
-def _gate_profile(service, caller, prof, viewer: ViewerTier, ref: str) -> None:
-    """Raise the not-found unless ``viewer`` may see this profile."""
-    floor = service.floor(caller, prof, ref)
-    if not profile_visible(prof.metadata, viewer, floor=floor.tier):
-        raise _profile_missing(ref)
-
-
 def _is_hard_floor(content_url: str) -> bool:
-    """Withheld from every viewer, owner included (spec section 4).
-
-    ``.cache/``/``.keys/`` is build-local derived state and key material, not a
-    servable artifact.
-    """
+    """Withheld from every viewer, owner included (spec section 4): build state and keys."""
     return any(content_url.startswith(prefix) for prefix in ALWAYS_PRIVATE_PREFIXES)
 
 
@@ -205,11 +147,9 @@ def artifact_visible(
 ) -> bool:
     """Whether ``viewer`` receives the body backing ``content_url``.
 
-    An artifact absent from the manifest has declared no tier of its own, so
-    the profile default and its role default govern it (spec section 2): the
-    same answer ``explain_tiers`` would give if it were listed. Treating an
-    unlisted artifact as invisible instead would make a profile built before
-    manifests were written look empty rather than public.
+    An artifact absent from the manifest takes the profile and role defaults
+    (spec section 2), not invisibility, so a manifest-less profile does not look
+    empty.
     """
     if _is_hard_floor(content_url):
         return False
@@ -223,9 +163,8 @@ def artifact_visible(
 def withheld(explain: dict[str, TierExplanation], viewer: ViewerTier) -> list[str]:
     """The ``contentUrl``s this viewer did not receive.
 
-    Named, not silently absent: a client has to be able to tell "withheld" from
-    "does not exist", and an owner previewing as a stranger has to be able to
-    see the shape of what the stranger is missing.
+    Named, not silently absent, so a client can tell "withheld" from "does not
+    exist".
     """
     return sorted(
         url
@@ -237,10 +176,8 @@ def withheld(explain: dict[str, TierExplanation], viewer: ViewerTier) -> list[st
 def _allowed_source_types(prof_md, viewer: ViewerTier) -> list[str] | None:
     """Embedding-chunk ``source_type``s this viewer may be quoted, or ``None``.
 
-    ``None`` means "no restriction" (every known source type is allowed), so
-    the search path is byte-identical to the unfiltered one for a viewer
-    entitled to everything. Resolved with :func:`privacy.chunk_source_tiers`,
-    the same function the flat exporter uses; there is no second allowlist.
+    ``None`` means no restriction, so the search path is unfiltered for a
+    viewer entitled to everything.
     """
     tiers = chunk_source_tiers(prof_md, [(st, "") for st in CHUNK_SOURCE_TYPE_ROLE])
     allowed = [st for (st, _), tier in tiers.items() if tier_allows(viewer, tier)]
@@ -249,29 +186,11 @@ def _allowed_source_types(prof_md, viewer: ViewerTier) -> list[str] | None:
     return allowed
 
 
-def _ranked_visible(request: Request, prof, viewer: ViewerTier) -> tuple[bool, ViewerTier]:
-    """``(may this viewer be told about it, their tier for it)``. Fail-closed.
-
-    ``viewer`` is the caller's baseline; the tier that governs is resolved per
-    profile, because a grant is held on one profile and not on the rest.
-    """
-    md = getattr(prof, "metadata", None)
-    if md is None:
-        return False, viewer
-    slug = getattr(prof, "slug", None)
-    per_profile = viewer_tier_for(request, slug)
-    floor = get_profile_tier_floor(request, prof, slug)
-    return profile_visible(md, per_profile, floor=floor.tier), per_profile
-
-
 def _visible_hits(prof_md, viewer: ViewerTier, hits) -> list:
     """Drop every chunk whose source tier exceeds ``viewer``.
 
-    A chunk is derived from a document, so it carries that document's tier.
-    This is the general derivation rule, applied to the served sqlite index exactly as
-    ``embeddings/flat.py`` applies it to the exported one. Without this a
-    ``match``-scoped consumer reads a researcher's CV back verbatim, chunk by
-    chunk, from a profile whose CV is ``private``.
+    A chunk carries its source document's tier. Without this a ``match``
+    consumer could read a ``private`` CV back chunk by chunk.
     """
     hits = list(hits or [])
     if not hits:
@@ -281,21 +200,13 @@ def _visible_hits(prof_md, viewer: ViewerTier, hits) -> list:
     return [h for h in hits if tier_allows(viewer, tiers[(h.source_type, h.source_id)])]
 
 
-# ---------------------------------------------------------------------------
-# Owner-scoped interactive edits (edit_router)
-# ---------------------------------------------------------------------------
-
-
 def _content_hash(store: ProfileStore, ref: str) -> str | None:
     """This profile's ``content_hash``, or ``None`` if the store cannot say.
 
-    Never raises. A store that cannot produce the digest is a store that cannot
-    detect a conflict, and that is a reason to serve the profile without a
-    concurrency token, not a reason to fail the read.
+    Never raises: a missing digest means no concurrency token, not a failed read.
     """
     try:
         return store.content_hash(ref)
-    # Boundary: a store that cannot digest is a store that cannot detect a conflict.
     except Exception:  # pragma: no cover - defensive; every shipped store answers
         logger.debug("content_hash unavailable for %r", ref, exc_info=True)
         return None

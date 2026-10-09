@@ -1,14 +1,9 @@
 """``push_profile``: upload a locally built profile directory to a server.
 
 A push is a preflight and a PUT, in that order. The preflight builds the
-archive, asks the server what it already holds, and answers the three
-questions a user has before bytes move: what changes, what disappears, and
-what on disk did not ship at all. Nothing is uploaded until they are answered,
-and a push that would delete server-side files refuses unless told otherwise.
-
-The diff costs one ``GET /api/v1/profiles/{slug}``: the response carries the
-whole manifest (``contentUrl``, ``role``, ``sha256``) at every tier, so no new
-server surface is needed to compare a directory against a registry.
+archive and diffs it against what the server holds (one
+``GET /api/v1/profiles/{slug}``, whose manifest carries ``sha256`` at every
+tier). A push that would delete server-side files refuses unless forced.
 """
 
 import hashlib
@@ -22,9 +17,7 @@ from typing import Any, Optional
 from ._http import _server_base, auth_headers
 
 #: The diff groups a plan carries, in the order a reader wants them.
-#: ``respliced`` is a view of part of ``kept``, not a group beside it: those
-#: entries are kept *and* absent from the local manifest, which is the state
-#: that once looked like "removed 0" while 53 artifacts disappeared.
+#: ``respliced`` is a subset of ``kept``, not a separate group.
 PLAN_GROUPS = ("added", "changed", "unchanged", "removed", "kept", "respliced")
 
 #: The capability name a server advertises when it splices a kept file's
@@ -32,14 +25,35 @@ PLAN_GROUPS = ("added", "changed", "unchanged", "removed", "kept", "respliced")
 #: local manifest dropped is deleted no matter how many files the server keeps.
 SPLICE_FEATURE = "manifest_splice"
 
-#: Role for an artifact neither manifest names. A file can be on disk and in
-#: the archive without being in the manifest yet (``rp manifest --write`` has
-#: not run); it still has to land in some group.
+#: Role for an archived file neither manifest names (``rp manifest --write``
+#: has not run).
 UNKNOWN_ROLE = "other"
 
 
 class PushRefused(Exception):
-    """A preflight check said no. Nothing was sent."""
+    """A preflight check (or the server) said no. Nothing was written.
+
+    ``str(e)`` is one line naming what is wrong, with the numbers. ``code`` is
+    a stable slug for the case; ``fix`` is the next step, in ``rp push`` flags;
+    ``details`` are extra lines (paths, parts) a reader may want.
+    """
+
+    code = "refused"
+
+    def __init__(self, message: str, *, code: str = "", fix: str = "", details=()):
+        super().__init__(message)
+        self.code = code or type(self).code
+        self.fix = fix
+        self.details: list[str] = list(details)
+
+
+#: How many paths a refusal lists before it summarizes the rest.
+_DETAIL_CAP = 20
+
+
+def _capped(paths: Sequence[str]) -> list[str]:
+    more = len(paths) - _DETAIL_CAP
+    return list(paths[:_DETAIL_CAP]) + ([f"... and {more} more"] if more > 0 else [])
 
 
 class PushWouldRemove(PushRefused):
@@ -47,33 +61,63 @@ class PushWouldRemove(PushRefused):
 
     def __init__(self, plan: "PushPlan"):
         self.plan = plan
-        n = sum(len(paths) for paths in plan.removed.values())
-        why = f"{n} file(s) the server holds are not in this push"
-        if plan.shrinks:
-            why += (
-                f"; the manifest would go from {plan.manifest_before} to "
-                f"{plan.manifest_after} entries"
+        removed = plan.paths("removed")
+        shrink = f"manifest {plan.manifest_before} -> {plan.manifest_after} entries"
+        if removed:
+            super().__init__(
+                f"{len(removed)} server file(s) are not in this push and would be deleted "
+                f"({shrink})",
+                code="would-remove",
+                fix="--merge keeps them, --force deletes them, "
+                "--prune also drops kept fulltext/index",
+                details=_capped(removed),
             )
-        super().__init__(why)
+        else:
+            super().__init__(
+                f"local manifest is smaller than the server's ({shrink}); likely a partial copy",
+                code="manifest-shrink",
+                fix=f"`rp where {plan.slug}` and push from the directory that built it, "
+                "or --force to drop the entries",
+            )
 
 
 class PushInsufficientAccess(PushRefused):
     """The server refused the push part by part (403 ``insufficient_access``).
 
     An app or API key without the "Replace whole profiles" switch may push only
-    when every part the push changes is Write in its table. The server compares
-    the push with the profile it would replace, writes nothing, and names what
-    is in the way: ``missing`` (parts the key needs Write on) and
-    ``needs_replace`` (changes no part covers, such as what the public sees,
-    which only the switch allows).
+    when every part the push changes is Write in its table. ``missing`` names
+    parts the key needs Write on; ``needs_replace`` names changes no part
+    covers, which only the switch allows. ``hint`` is the server's own text.
     """
 
-    def __init__(self, body: dict):
+    code = "insufficient-access"
+
+    def __init__(self, body: dict, *, only: bool = False):
         self.required: list[str] = list(body.get("required") or [])
         self.missing: list[str] = list(body.get("missing") or [])
         self.needs_replace: list[str] = list(body.get("needs_replace") or [])
         self.hint: str = body.get("hint") or ""
-        super().__init__("this key may not change every part this push touches")
+        details = []
+        if self.missing:
+            details.append(f"needs Write on: {', '.join(self.missing)}")
+        if self.needs_replace:
+            parts = ", ".join(self.needs_replace)
+            details.append(f'needs "Replace whole profiles" for: {parts}')
+        if not details and self.hint:
+            details.append(self.hint)
+        if only:
+            fix = (
+                "profile.jsonld travels with --only, so its sections must match the "
+                "server's; or have the account holder widen this key on the Privacy page"
+            )
+        else:
+            fix = (
+                "--only <file> to send only parts you may write, or have the account "
+                "holder widen this key on the Privacy page"
+            )
+        super().__init__(
+            "this key may not change every part this push touches", fix=fix, details=details
+        )
 
 
 def _insufficient_access(resp: Any) -> Optional[dict]:
@@ -94,29 +138,22 @@ def _insufficient_access(resp: Any) -> Optional[dict]:
 class PushPlan:
     """What a push would do to the server's copy, computed before it runs.
 
-    Every group maps a manifest ``role`` to the profile-relative paths in it,
-    because "3 paper_summary, 1 works" is a sentence a reader can act on and
-    four bare filenames are not. ``removed`` is what this push deletes;
-    ``kept`` is what the server holds on to anyway, which depends on the push
-    mode (a withheld class under ``replace``, everything under ``merge``).
-    ``dropped`` is the archive builder's account of files on disk that never
-    entered the tarball.
+    Every group maps a manifest ``role`` to the profile-relative paths in it.
+    ``removed`` is what this push deletes; ``kept`` is what the server holds on
+    to anyway, which depends on the push mode (a withheld class under
+    ``replace``, everything under ``merge``). ``dropped`` is files on disk that
+    never entered the tarball.
 
-    ``respliced`` is the subset of ``kept`` whose entries the **local**
-    manifest no longer lists. The server keeps those bytes and adds the
-    manifest entry back, so they survive -- but only on a server that
-    advertises ``manifest_splice``. Against one that does not, they are
-    counted as ``removed`` instead, because a kept file with no manifest entry
-    is a file no reader can fetch.
+    ``respliced`` is the subset of ``kept`` whose entries the local manifest
+    no longer lists. The server adds the entry back, but only if it advertises
+    ``manifest_splice``. Otherwise they count as ``removed``, because a kept
+    file with no manifest entry is a file no reader can fetch.
 
-    ``manifest_before`` / ``manifest_after`` are entry counts: what the server
-    indexes now, and what it would index after this push. A push whose
-    manifest shrinks is a removal even when ``removed`` is empty; that
-    disagreement is what let a one-file push delete 53 artifacts under a
-    report that read ``removed 0``.
+    ``manifest_before`` / ``manifest_after`` are entry counts now and after the
+    push. A shrinking manifest is a removal even when ``removed`` is empty.
 
-    ``profile.jsonld`` is in no group: it is the manifest rather than an entry
-    in it, and it always travels.
+    ``profile.jsonld`` is in no group: it is the manifest itself and always
+    travels.
     """
 
     slug: str
@@ -133,8 +170,7 @@ class PushPlan:
     #: Manifest entry counts: the server's now, and the predicted post-commit one.
     manifest_before: int = 0
     manifest_after: int = 0
-    #: Local manifest entries with no file on disk (legacy ``cache/`` excluded).
-    #: The signature of a partial copy; see ``push_profile``'s refusal.
+    #: Local manifest entries with no file on disk (``cache/`` excluded).
     local_stale: list[str] = field(default_factory=list)
 
     @property
@@ -143,11 +179,7 @@ class PushPlan:
         return self.manifest_after < self.manifest_before
 
     def counts(self) -> dict[str, int]:
-        """``{group: file count}`` for every group in :data:`PLAN_GROUPS`.
-
-        ``respliced`` overlaps ``kept`` by construction; it is reported as its
-        own number because it is the one a reader has to see.
-        """
+        """``{group: file count}`` for every group in :data:`PLAN_GROUPS` (``respliced`` overlaps ``kept``)."""
         return {g: sum(len(paths) for paths in getattr(self, g).values()) for g in PLAN_GROUPS}
 
     def paths(self, group: str) -> list[str]:
@@ -195,9 +227,8 @@ def _sha256(path: Path) -> str:
 def _remote_manifest(http: Any, slug: str) -> tuple[bool, dict[str, dict]]:
     """``(exists, {contentUrl: manifest entry})`` for the server's copy.
 
-    A 404 is the create case, not a failure. Any other error is: pushing
-    blind, having failed to learn what the server holds, is how a push
-    silently deletes a profile.
+    A 404 is the create case. Any other error raises: pushing without knowing
+    what the server holds could silently delete a profile.
     """
     resp = http.get(f"/api/v1/profiles/{slug}/files")
     if resp.status_code == 404:
@@ -215,10 +246,8 @@ def _remote_manifest(http: Any, slug: str) -> tuple[bool, dict[str, dict]]:
 def _server_capabilities(http: Any) -> dict:
     """What the server says it supports, or ``{}`` when it will not say.
 
-    ``{}`` is the honest answer for a build that predates
-    ``GET /api/v1/capabilities`` (a 404) or a transport that failed; the
-    caller decides what to do about it, and the decision differs per mode.
-    Never raises: this is a pre-check, not the push.
+    ``{}`` covers a server without ``GET /api/v1/capabilities`` (a 404) and a
+    failed transport. Never raises.
     """
     try:
         resp = http.get("/api/v1/capabilities")
@@ -238,10 +267,7 @@ def _server_capabilities(http: Any) -> dict:
 def _local_manifest_entries(src: Path) -> dict[str, dict]:
     """``contentUrl -> entry`` from the profile's own ``profile.jsonld`` manifest.
 
-    The local manifest is not a description of the directory: it is the index
-    that travels inside ``profile.jsonld`` and becomes the server's index on
-    commit. A preflight that never reads it cannot tell a push that adds a
-    file from a push that drops fifty-three.
+    This manifest, not the directory, becomes the server's index on commit.
     """
     from ..api.upload import PROFILE_DOCUMENT
 
@@ -256,9 +282,8 @@ def _local_manifest_entries(src: Path) -> dict[str, dict]:
 def _local_stale_entries(src: Path) -> list[str]:
     """Local manifest entries naming a file the directory does not have.
 
-    The signature of a partial copy. Retired ``cache/`` entries are excluded:
-    those name a file that IS there under the pre-rename directory name, and
-    ``push_profile`` refuses on them separately with its own fix.
+    The sign of a partial copy. ``cache/`` entries are excluded because
+    ``push_profile`` refuses on them separately.
     """
     from ..schema.manifest import manifest_drift
     from ..utils.paths import LEGACY_CACHE_DIRNAME
@@ -300,18 +325,12 @@ def _plan_push(
 ) -> PushPlan:
     """Diff the server's manifest against the manifest this push would commit.
 
-    Not against the archive's members. The tarball is bytes; the *manifest*
-    inside ``profile.jsonld`` is the index the server commits, the only thing
-    a reader can fetch through, and the only thing the SQL store writes rows
-    for. Diffing members against the remote manifest answered "what bytes
-    travel" while the question was "what will the server still have", and the
-    two gave opposite answers for the push that deleted 53 artifacts.
+    Not against the archive's members: the manifest is what the server
+    commits and what a reader can fetch through.
 
-    Local digests are computed from the files going into the tarball rather
-    than read out of ``profile.jsonld``: the recorded manifest can be stale,
-    and a stale digest turns a real change into "unchanged". A remote entry
-    with no recorded digest counts as changed for the same reason -- there is
-    no evidence it is the same file.
+    Local digests are computed from the files, not read from
+    ``profile.jsonld``, because the recorded manifest can be stale. A remote
+    entry with no digest counts as changed.
 
     The keep rule mirrors ``upload._keep_omitted`` exactly, mode for mode:
     ``merge`` keeps everything the archive omits, ``prune`` keeps none of it,
@@ -340,10 +359,8 @@ def _plan_push(
         else:
             changed.append(rel)
 
-    # The manifest that travels inside profile.jsonld. With ``only``, the
-    # archive builder replaced it with the server's own (see
-    # ``upload._project_only_manifest``), so the server's index is what gets
-    # committed; otherwise it is whatever the local document happens to say.
+    # With ``only``, the archive carries the server's manifest
+    # (``upload._project_only_manifest``); otherwise the local one.
     staged_urls = set(remote) if only else set(local_manifest)
 
     authoritative = {
@@ -405,49 +422,35 @@ def push_profile(
 ) -> PushResult:
     """Push a locally built profile directory to a remote server.
 
-    Builds the archive via
+    Builds the archive with
     :func:`researcher_profiles.api.upload.build_profile_archive`, the same
-    spec-whitelist builder the server's GET serve uses, so push and serve
-    share one exclusion implementation. The archive can never carry dotfiles
-    or non-spec files such as raw ``sources/html/`` scrape output.
+    spec-whitelist builder the server uses, so it never carries dotfiles or
+    non-spec files.
 
-    ``include_fulltext`` defaults to ``False``: the extracted
-    ``sources/papers/`` text is a derived copy of publisher-copyrighted works,
-    and a push is the moment it would leave this machine. Set it to ``True``
-    only for a destination you know is entitled to the fulltext, such as a
-    private backup or your own registry running with
-    ``accept_fulltext=True``. This flag is a client-side courtesy only: the
-    receiving server strips fulltext on ingest unless its own policy admits
-    it, so opting in here does not by itself get the text accepted.
+    ``include_fulltext`` defaults to ``False``: ``sources/papers/`` text is a
+    copy of publisher-copyrighted works. Set it only for a destination entitled
+    to it (a private backup, a registry with ``accept_fulltext=True``). The
+    server still strips fulltext on ingest unless its own policy admits it.
 
     ``mode`` is the :data:`~researcher_profiles.api.upload.PushMode` sent as
     ``?mode=``: what the server does with the live files this archive does not
     carry. ``replace`` (the default) keeps only a withheld class the archive
     carried none of, so a full build push replaces the record; ``merge`` keeps
     every omitted file; ``prune`` keeps none. Passing ``only`` without a mode
-    selects ``merge``, because sending one file and deleting the rest of the
-    profile is never what naming a file meant.
+    selects ``merge``, so naming one file never deletes the rest.
 
     ``only`` narrows the archive to ``profile.jsonld`` plus the named
-    profile-relative paths, and takes the manifest inside that document from
-    the **server** rather than from disk: naming a file to send has never
-    meant "and re-index the profile from this directory". Inline sections
-    (name, expertise, affiliations) still come from the local document; to
-    change one field and nothing else, use ``rp work patch``.
+    profile-relative paths, and takes the manifest from the server rather than
+    from disk. Inline sections (name, expertise, affiliations) still come from
+    the local document; to change one field only, use ``rp work patch``.
 
-    Before any of that travels, the preflight diffs the server's manifest
-    against the manifest this push would commit, into a :class:`PushPlan`. A
-    push that would remove files, or that would leave the server indexing
-    fewer artifacts than it does now, raises :class:`PushWouldRemove` unless
-    ``force=True``. A profile still carrying the retired ``cache/`` directory,
-    or whose manifest names files this directory does not have (the signature
-    of a partial copy), raises :class:`PushRefused`. All of them leave the
-    server untouched. A 403 ``insufficient_access`` (an app or API key
-    without Write on a part the push changes) raises
-    :class:`PushInsufficientAccess`, and the server has written nothing.
-    ``dry_run=True`` stops after the plan and returns it,
-    removals and all, rather than raising: a run that uploads nothing has
-    nothing to refuse.
+    The preflight builds a :class:`PushPlan`. A push that would remove files,
+    or shrink the server's manifest, raises :class:`PushWouldRemove` unless
+    ``force=True``. A profile with a ``cache/`` directory, or whose manifest
+    names files the directory lacks, raises :class:`PushRefused`. A 403
+    ``insufficient_access`` raises :class:`PushInsufficientAccess`. In all of
+    these the server is untouched. ``dry_run=True`` returns the plan instead
+    of raising.
 
     Returns a :class:`PushResult`: the plan, the mode, and the server's parsed
     summary (``{slug, name, level, indexed, kept, spliced, manifest_counts,
@@ -472,25 +475,23 @@ def push_profile(
     legacy = archive.dropped.get("legacy_cache") or []
     if legacy:
         raise PushRefused(
-            f"{len(legacy)} file(s) under the retired {LEGACY_CACHE_DIRNAME}/ directory "
-            f"would not ship: {legacy[:5]}\n"
-            f"move the file(s) from {LEGACY_CACHE_DIRNAME}/ to {CACHE_DIRNAME}/ and run "
-            "`rp manifest --write` (it will show what changes and refuse to drop entries)"
+            f"{len(legacy)} file(s) under the retired {LEGACY_CACHE_DIRNAME}/ would not ship",
+            code="legacy-cache",
+            fix=f"move them to {CACHE_DIRNAME}/, then `rp manifest --write`",
+            details=_capped(legacy),
         )
 
-    # A manifest that names files this directory does not have is not drift to
-    # be tidied up, it is the tell that this is a partial copy of the profile.
-    # Pushing it re-indexes the server from an incomplete directory. With
-    # ``only`` the manifest comes from the server instead, so the stale local
-    # entries never travel and the refusal would be noise.
+    # Stale entries mean a partial copy, which would re-index the server from
+    # an incomplete directory. With ``only`` the local manifest never travels.
     stale = _local_stale_entries(src)
     if stale and not only:
         raise PushRefused(
-            f"{len(stale)} manifest entry(ies) name files this directory does not have: "
-            f"{stale[:5]}\n"
-            "This copy is not the whole profile. Push from the directory that built it\n"
-            "(`rp where <slug>` shows which root is in force), or pass --only to send\n"
-            "named files without touching the rest."
+            f"{len(stale)} manifest entry(ies) name files missing here; "
+            "this copy is not the whole profile",
+            code="partial-copy",
+            fix=f"`rp where {slug}` and push from the directory that built it, "
+            "or --only <path> to send only the named files",
+            details=_capped(stale),
         )
 
     http = (
@@ -501,20 +502,19 @@ def push_profile(
     try:
         caps = _server_capabilities(http)
         advertised = caps.get("push_modes") or []
-        # ``replace`` is what a server that has never heard of ``?mode=`` does
-        # anyway, so silence there is not a disagreement. Asking such a server
-        # for ``merge`` or ``prune`` is: it would answer 200 and do a replace.
+        # A server without ``?mode=`` support always replaces, so asking it for
+        # ``merge`` or ``prune`` would answer 200 and do a replace.
         if advertised and mode not in advertised:
             raise PushRefused(
-                f"server does not support mode={mode} (it offers: "
-                f"{', '.join(advertised) or 'none'}).\n"
-                "Upgrade the server, or push a full build with the default mode."
+                f"server does not support mode={mode} (offers: {', '.join(advertised)})",
+                code="mode-unsupported",
+                fix="drop --merge/--prune/--only and push a full build, or upgrade the server",
             )
         if not advertised and mode != "replace":
             raise PushRefused(
-                f"server does not advertise its push modes, so mode={mode} cannot be "
-                "relied on:\nit may predate ?mode= and silently run a replace. "
-                "Upgrade the server, or push a\nfull build with the default mode."
+                f"server does not advertise push modes; mode={mode} may silently run a replace",
+                code="mode-unknown",
+                fix="drop --merge/--prune/--only and push a full build, or upgrade the server",
             )
         splices = SPLICE_FEATURE in (caps.get("features") or [])
 
@@ -538,13 +538,8 @@ def push_profile(
             only=only,
             splices=splices,
         )
-        # A dry run answers first, refusals included: showing the removals is
-        # the whole point of asking, and a run that uploads nothing cannot
-        # perform them anyway.
         if dry_run:
             return PushResult(plan=plan, mode=mode)
-        # A shrinking manifest is a removal even when no single path landed in
-        # ``removed``: fewer entries means fewer artifacts a reader can fetch.
         if (plan.removed or plan.shrinks) and not force:
             raise PushWouldRemove(plan)
         resp = http.put(
@@ -556,7 +551,7 @@ def push_profile(
             raise PermissionError(resp.text)
         denied = _insufficient_access(resp)
         if denied is not None:
-            raise PushInsufficientAccess(denied)
+            raise PushInsufficientAccess(denied, only=bool(only))
         if resp.status_code >= 400:
             raise RuntimeError(f"push failed ({resp.status_code}): {resp.text[:300]}")
         return PushResult(plan=plan, mode=mode, summary=resp.json())

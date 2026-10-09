@@ -1,12 +1,7 @@
 /**
- * The "no garbage characters" rule for paper full text and summaries.
- *
- * Mirrors `researcher_profiles.text_artifact.text_artifact_problems` in the
- * Python SDK (same rules, same thresholds). See that module for why the
- * thresholds are shares rather than "any": real PDF extraction leaves a few
- * stray characters in legitimate papers, while binary decoded as text is
- * dense with them. Greek letters, math symbols, accents, curly quotes, and
- * dashes are all fine.
+ * The "no garbage characters" rule for paper full text and summaries. Mirrors
+ * `researcher_profiles.text_artifact.text_artifact_problems` (same rules and
+ * thresholds); see that module for why the thresholds are shares.
  */
 
 /** Manifest roles whose files this rule applies to. */

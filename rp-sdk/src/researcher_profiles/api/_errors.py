@@ -1,9 +1,7 @@
 """The HTTP mapper: one exception handler turns every typed service error into a reply.
 
-The service functions raise :mod:`researcher_profiles.errors` types and know
-nothing about status codes; this is the one place they become HTTP. The wire
-shapes are the ones the routes answered with before the service layer existed,
-so the SPA and the ``rp`` CLI see no change:
+Service functions raise :mod:`researcher_profiles.errors` types and know
+nothing about status codes; this is the one place they become HTTP:
 
 =====================  ======  ==================================================
 error                  status  body
@@ -21,9 +19,6 @@ error                  status  body
                                when ``code`` is set, else ``{"detail": message}``
 ``RateLimited``        429     ``{"detail": message}`` + ``Retry-After``
 =====================  ======  ==================================================
-
-``Invalid`` is a 400, not a 422: it is the status the edit routes have always
-answered a bad patch with.
 """
 
 from __future__ import annotations
@@ -56,7 +51,9 @@ def service_error_response(request: Request, exc: ServiceError) -> JSONResponse:
             "error": "insufficient_access",
             "required": list(exc.required),
             "missing": list(exc.missing),
-            "hint": exc.hint,
+            # Always a string (docs/rp-spec/authentication.md), never null.
+            "hint": exc.hint
+            or f"This needs Write on {', '.join(exc.missing or exc.required) or 'this profile'}.",
         }
     elif isinstance(exc, Forbidden):
         status, detail = 403, exc.detail if exc.detail is not None else exc.message

@@ -1,8 +1,7 @@
 """Per-profile sqlite-vec embedding store.
 
-The DB lives at ``<profile>/.cache/embeddings.sqlite`` so it travels with
-the profile. There is no migration code: incompatible existing DBs are
-dropped and recreated when ``build_index(force=True)`` is called.
+The DB lives at ``<profile>/.cache/embeddings.sqlite``. An incompatible DB is
+dropped and recreated by ``build_index(force=True)``.
 """
 
 import hashlib
@@ -66,11 +65,7 @@ class IndexReport:
 
 @dataclass(frozen=True)
 class IndexStats:
-    """One profile's embedding-index facts, gathered in a single open.
-
-    The typed form of what a coverage report needs to know about an index
-    without opening it itself.
-    """
+    """One profile's embedding-index facts, gathered in a single open."""
 
     exists: bool = False
     n_chunks: int = 0
@@ -117,7 +112,7 @@ def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-# Shared vec0 nearest-neighbour SELECT used by both search paths. Params: (blob, k).
+# Params: (blob, k).
 _SEARCH_SELECT = (
     "SELECT c.id, c.source_type, c.source_id, c.chunk_index, c.section, "
     "c.text, c.meta, v.distance, v.embedding "
@@ -141,7 +136,6 @@ def _rows_to_hits(rows, query_vec, k, *, skip=None) -> list["SearchHit"]:
             continue
         if distance is None:
             # vec0 occasionally returns NULL distance for valid rows.
-            # Recompute in Python so users still get k results back.
             logger.debug(
                 "vec0 returned NULL distance for chunk_id=%s; recomputing in Python.",
                 _id,
@@ -205,12 +199,7 @@ class SqliteEmbeddingIndex:
         self._cached_backend: EmbeddingBackend | None = None
 
     def _level(self) -> str:
-        """The profile's depth tier.
-
-        Prefers the already-loaded document; falls back to a direct read of
-        ``profile.jsonld`` so ``SqliteEmbeddingIndex(path)`` (the CLI's entry point)
-        indexes a lite profile correctly without the caller doing the load.
-        """
+        """The profile's depth tier, from the loaded document or ``profile.jsonld``."""
         level = getattr(self._profile_document, "level", None)
         if level:
             return str(level)
@@ -238,7 +227,6 @@ class SqliteEmbeddingIndex:
             return None, override
         if env_override:
             return None, get_backend(env_override)
-        # From profile config
         if self._profile_document is not None:
             spec = getattr(self._profile_document, "embedding_backend", None)
             if spec is None and hasattr(self._profile_document, "model_extra"):
@@ -255,11 +243,9 @@ class SqliteEmbeddingIndex:
     def _enumerate_chunks(self) -> list[Chunk]:
         """Every chunk this profile is indexed over.
 
-        Delegates to :func:`~.chunking.enumerate_source_chunks`, the one
-        enumeration the serve-time text recovery also uses, so a stored row's
+        Uses the same enumeration as serve-time text recovery, so a row's
         ``(source_type, source_id, chunk_index)`` names the same text on both
-        sides. A ``lite`` profile is indexed over paper abstracts instead of
-        personality documents and summaries.
+        sides.
         """
         from ..build_state import BuildState
         from ..profile.storage import DirectoryArtifactStorage
@@ -306,7 +292,6 @@ class SqliteEmbeddingIndex:
                 f"(dim={existing_dim}); requested backend={be.name!r} "
                 f"(dim={be.dim}). Pass force=True to rebuild."
             )
-        # Force: drop and recreate from scratch.
         self.db_path.unlink()
         return {}
 
@@ -326,11 +311,7 @@ class SqliteEmbeddingIndex:
     def _diff_chunks(
         self, conn: sqlite3.Connection, chunks: list[Chunk]
     ) -> tuple[list[_PendingChunk], int]:
-        """Split ``chunks`` into work to do and work already done.
-
-        Returns the pending chunks and the count of unchanged ones, so the
-        caller owns the report rather than this method mutating it.
-        """
+        """Return ``(pending chunks, count of unchanged chunks)``."""
         existing_rows: dict[tuple[str, str, int], tuple[int, str]] = {}
         for row in conn.execute(
             "SELECT id, source_type, source_id, chunk_index, text_hash FROM chunks"
@@ -461,7 +442,6 @@ class SqliteEmbeddingIndex:
         try:
             ensure_schema(conn, dim=be.dim)
             if force and existing_meta:
-                # Same backend, but caller wants a clean rebuild.
                 conn.execute("DELETE FROM chunks")
                 conn.execute("DELETE FROM chunk_vec")
                 conn.commit()
@@ -500,10 +480,6 @@ class SqliteEmbeddingIndex:
         return report
 
     # ------------------------------------------------------------------
-    # Search
-    # ------------------------------------------------------------------
-
-    # ------------------------------------------------------------------
     # Facts about the index file (no sqlite-vec required)
     # ------------------------------------------------------------------
 
@@ -524,24 +500,14 @@ class SqliteEmbeddingIndex:
 
     @property
     def backend_spec(self) -> str:
-        """The embedding model this index was built with; ``""`` when unbuilt.
-
-        Half of the :class:`~researcher_profiles.embeddings.protocol.VectorIndex`
-        contract, and the same field ``embeddings/index.json`` publishes under
-        that name.
-        """
+        """The embedding model this index was built with; ``""`` when unbuilt."""
         return self.index_meta().get("backend_name", "")
 
     def centroid(self):
         """The L2-normalized mean of every chunk vector, npz-cached.
 
-        The other half of ``VectorIndex``. Delegates to
-        :func:`~researcher_profiles.embeddings.profile_vec.index_centroid`,
-        which is also what ``prof.index.embedding("centroid")`` reaches, so a
-        centroid read through a store and one read through a profile are the
-        same number out of the same cache. Imported inside the method: numpy is
-        the ``vectors`` extra and the facts-about-the-file half of this class
-        stays usable without it.
+        Imported lazily: numpy is the ``vectors`` extra, and the file-facts
+        methods must work without it.
         """
         from .profile_vec import index_centroid
 
@@ -604,8 +570,7 @@ class SqliteEmbeddingIndex:
             raise IndexNotBuiltError(
                 f"Index at {self.db_path} is missing backend metadata; rebuild it."
             )
-        # Reuse the cached backend if it matches the stored name (avoids
-        # re-instantiating heavy models, and lets tests use FakeBackend).
+        # Reuse the cached backend when the name matches (models are heavy).
         if self._cached_backend is not None and self._cached_backend.name == meta.get(
             "backend_name"
         ):
@@ -613,9 +578,7 @@ class SqliteEmbeddingIndex:
         else:
             try:
                 be = get_backend(meta["backend_name"])
-            # Resource boundary, not a swallow: any backend construction failure
-            # is re-raised, this only stops the open connection leaking on the
-            # way out.
+            # Re-raised; this only closes the connection.
             except Exception:
                 logger.debug(
                     "backend %r could not be constructed for %s",
@@ -626,7 +589,7 @@ class SqliteEmbeddingIndex:
                 conn.close()
                 raise
             self._cached_backend = be
-        # Override dim from stored value (don't trust backend table)
+        # The stored dim wins over the backend table.
         try:
             be.dim = int(meta["embedding_dim"])
         except (KeyError, ValueError, TypeError):
@@ -655,7 +618,7 @@ class SqliteEmbeddingIndex:
                     else:
                         type_filter = list(raw)
 
-            # If filtering, fetch more than k from vec0 and post-filter.
+            # vec0 cannot filter, so over-fetch and post-filter.
             fetch_k = k * 4 if type_filter else k
             rows = conn.execute(_SEARCH_SELECT, (blob, fetch_k)).fetchall()
             skip = None
@@ -699,12 +662,7 @@ class SqliteEmbeddingIndex:
 
 
 def index_backend_name(profile_dir: str | os.PathLike) -> str:
-    """``index_meta.backend_name`` for a profile dir, or ``""``.
-
-    Module-level so a caller that only has a path (notably
-    ``FilesystemProfileStore.backend_spec``, scanning a root) can ask without
-    constructing a :class:`SqliteEmbeddingIndex`.
-    """
+    """``index_meta.backend_name`` for a profile dir, or ``""``."""
     db = cache_dir(Path(profile_dir)) / "embeddings.sqlite"
     return _read_meta(db).get("backend_name", "")
 
@@ -712,8 +670,7 @@ def index_backend_name(profile_dir: str | os.PathLike) -> str:
 def _read_meta(db_path: Path) -> dict[str, str]:
     """``index_meta`` as a dict; ``{}`` when there is no readable index.
 
-    The tolerant sibling of :func:`._sqlite.read_index_meta_path`, which
-    raises. A plain connection: reading meta must never require sqlite-vec.
+    A plain connection: reading meta must never require sqlite-vec.
     """
     if not db_path.is_file():
         return {}

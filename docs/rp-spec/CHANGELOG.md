@@ -40,3 +40,20 @@ expands `visibility` values to `rp:Public`, `rp:Limited`, and `rp:Private`,
 each a `skos:closeMatch` to those terms. Served manifest entries carry
 `accessRights` (`dcterms:accessRights`), the EU IRI of the entry's effective
 tier; it is derived at serve time and never stored.
+
+Push modes. `PUT /profiles/{slug}` with an archive takes a `mode` query
+parameter that says what happens to live files the archive omits: `replace`
+(the default; keeps a withheld class, full text or the search index, that the
+archive carried none of), `merge` (keeps every omitted file), or `prune`
+(deletes every omitted file). Kept files are spliced back into the manifest.
+The push response gains `kept`, `spliced`, `manifest_counts`, and `mode`.
+`GET /capabilities` lists the accepted modes and features so a client can
+check before it pushes. The old line that full text "is stripped on ingest"
+now says what is true: a server that does not accept full text drops incoming
+`sources/papers/` members, but keeps the full text it already holds.
+
+Text artifacts. `paper_fulltext` and `paper_summary` files must be readable
+text: valid UTF-8, no NUL, no more than 1% U+FFFD and 2% control characters
+(tab, newline, and carriage return excepted), and no raw PDF body. The
+conformance suite already enforced this (`invalid/garbled-fulltext`); the
+spec now states it, as Base conformance rule 7.

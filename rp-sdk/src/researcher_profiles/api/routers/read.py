@@ -1,8 +1,7 @@
 """The public read surface: the profile listing and one profile's artifacts.
 
-Every route here hangs on ``public_router`` and resolves a viewer tier, then
-projects its response against that tier. An anonymous request is not a
-different code path; it is the viewer whose tier is ``public``.
+Every response is projected through the viewer tier; anonymous is the
+``public`` tier, not a separate code path.
 """
 
 import hashlib
@@ -10,9 +9,10 @@ import logging
 from datetime import datetime, timezone
 from typing import Literal, Optional
 
-from fastapi import Depends, HTTPException, Query, Request, Response
+from fastapi import Depends, Query, Request, Response
 
 from ... import __version__
+from ...errors import Invalid
 from ...models.api import (
     FileList,
     PaperPage,
@@ -20,51 +20,18 @@ from ...models.api import (
     ProfileListEntry,
     ProfileListResponse,
     ProfileRecord,
-    ProfileSummary,
     SummaryBatch,
     TextPage,
 )
 from ...models.published import ProfileCard, ProfileCollection
-from ...privacy import (
-    ALWAYS_PRIVATE_PREFIXES,
-    ViewerTier,
-    effective_tiers,
-    explain_tiers,
-    profile_visible,
-    tier_allows,
-)
-from ...schema import (
-    validate_ref,
-)
+from ...privacy import ViewerTier
+from ...schema import validate_ref
 from ...schema.jsonld import CONTEXT_URL
-from ...store import ProfileNotFoundError, ProfileStore
+from ...store import ProfileStore
 from .. import service as svc
-from .._limits import BATCH_IDS_CAP
-from .._projection import (
-    PUBLIC_DOCUMENT_MAX_AGE,
-    VARY_ON_CREDENTIALS,
-    _gate_profile,
-    _http_date,
-    _profile_missing,
-    _profile_summary,
-    served_document_bytes,
-    withheld,
-)
-from .._sizes import (
-    SizeIndex,
-    summary_url,
-)
+from .._projection import PUBLIC_DOCUMENT_MAX_AGE, VARY_ON_CREDENTIALS, _http_date
 from ..caller import Caller
-from ..deps import (
-    get_caller,
-    get_profile,
-    get_profile_tier_floor,
-    get_read_caller,
-    get_service,
-    get_store,
-    get_viewer_tier,
-    viewer_tier_for,
-)
+from ..deps import get_read_caller, get_service, get_store
 from ..service import Service
 from ._routers import public_router
 
@@ -77,11 +44,7 @@ def _cache_headers(
     etag: str | None = None,
     last_modified_iso: str | None = None,
 ) -> dict[str, str]:
-    """Cache directives for a tier-projected response.
-
-    Only the anonymous rendering is shareable, and only briefly: every other
-    tier is somebody's private view of a profile and is never stored.
-    """
+    """Cache directives: only the anonymous rendering is shareable, and only briefly."""
     headers = {
         "Cache-Control": (
             f"public, max-age={PUBLIC_DOCUMENT_MAX_AGE}"
@@ -98,62 +61,19 @@ def _cache_headers(
     return headers
 
 
-def _visible_summaries(request: Request, store: ProfileStore) -> list[ProfileSummary]:
-    """Every profile this caller may see, summarized. The one listing walk.
-
-    ``GET /profiles`` returns the profile list; ``GET /collection.json`` returns
-    the ranking bundle. They differ in shape and in what they carry, but both
-    must answer for the same set of visible profiles, so they share this one
-    walk rather than each deciding for itself who is in it. A second walk is a
-    second privacy implementation; the projection exists so there is only one.
-    """
-    out: list[ProfileSummary] = []
-    failed = 0
-    for slug in store.list_slugs():
-        try:
-            prof = store.get(slug)
-        # Boundary: one profile's load; the listing still answers for the rest.
-        except Exception:
-            # A load failure is an outage, not a privacy decision, and the two
-            # must never look alike from here: a profile that vanishes because
-            # its bytes are unreadable has to be countable, or a corrupted
-            # store reads as a store full of private profiles.
-            failed += 1
-            logger.exception("could not load profile %s", slug)
-            continue
-        try:
-            # Per profile, not per request: the caller's tier depends on which
-            # profile, so an owner's own held-back profile belongs in their list.
-            per_profile = viewer_tier_for(request, slug)
-            floor = get_profile_tier_floor(request, prof, slug)
-            if not profile_visible(prof.metadata, per_profile, floor=floor.tier):
-                continue
-            out.append(_profile_summary(prof, per_profile))
-        # Boundary: one profile's summary projection; the listing still answers.
-        except Exception:
-            failed += 1
-            logger.exception("could not summarize profile %s", slug)
-    if failed:
-        logger.warning("listing omitted %d profile(s) that failed to load", failed)
-    return out
-
-
 @public_router.get("/profiles")
 def list_profiles(
     request: Request,
     store: ProfileStore = Depends(get_store),
-    viewer: ViewerTier = Depends(get_viewer_tier),  # noqa: ARG001
+    service: Service = Depends(get_service),
+    caller: Caller = Depends(get_read_caller),
 ) -> Response:
-    """The profile list, in ``rp:profileList`` format.
+    """The profile list, in ``rp:profileList`` format, as a static ``profiles.json``.
 
-    Returns the same envelope a static server publishes as ``profiles.json``,
-    with enriched entries that include summary fields. Projected through the
-    caller's viewer tier: a profile this viewer may not see is absent.
-
-    Never stored by a shared cache: the membership of this list is a function of
-    who asked, so one caller's copy is nobody else's answer.
+    A profile this viewer may not see is absent. Never shared-cached, since
+    membership depends on who asked.
     """
-    summaries = _visible_summaries(request, store)
+    summaries = svc.list_profiles(service, caller)
     origin = _public_origin(request)
     envelope = ProfileListResponse(
         name=store.name if hasattr(store, "name") else None,
@@ -187,14 +107,8 @@ def list_profiles(
 def _public_origin(request: Request) -> str:
     """The scheme + host a client reached this server on, no trailing slash.
 
-    ``request.base_url`` is what the ASGI server saw, which behind a TLS-
-    terminating reverse proxy is ``http://``, a URL the browser then refuses to
-    load from an ``https://`` page. The forwarded headers are the proxy's
-    statement of what the client actually asked for, so they win when present.
-
-    Only used to make the collection bundle's ``base`` URLs absolute. They have to
-    be: a client resolves a manifest against them with ``new URL(base)``, which
-    has no document to resolve a root-relative path against.
+    Forwarded headers win over ``request.base_url``, which is ``http://``
+    behind a TLS-terminating proxy and blocked as mixed content.
     """
     base = request.base_url
     scheme = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip()
@@ -205,36 +119,17 @@ def _public_origin(request: Request) -> str:
 @public_router.get("/collection.json")
 def get_collection(
     request: Request,
-    store: ProfileStore = Depends(get_store),
-    viewer: ViewerTier = Depends(get_viewer_tier),  # noqa: ARG001
+    service: Service = Depends(get_service),
+    caller: Caller = Depends(get_read_caller),
 ) -> Response:
-    """The collection as a **bundle document**, for a browser client's home view.
+    """The visible profiles as a collection bundle document, for a browser home view.
 
-    This exists because the SPA's home source is a document URL, not an API
-    call, and on a hosted registry there was no document at that URL to fetch.
-    It answers for the same set of visible profiles as ``GET /profiles``, under
-    the same projection, so one explorer build reads a hosted registry and a
-    rendered directory of static files with the same code.
-
-    It is not identical to the static ``collection.jsonld`` a published site
-    writes. This dynamic bundle carries ``artifacts: []`` and no centroids: the
-    sqlite index the centroids come from is a server-only floor (``.cache/``),
-    so a client ranks against a hosted registry by calling ``/match`` on the
-    server. The static ``collection.jsonld`` carries the stacked centroids
-    inline, so a client ranks that collection itself, offline.
-
-    Each card's ``base`` is the absolute
-    ``.../api/v1/profiles/{slug}/content/``: the base URL
-    ``get_profile_artifact`` serves, from which ``profile.jsonld`` and every
-    relative ``contentUrl`` inside it resolve. Absolute rather than
-    root-relative because a client resolves the manifest against it with a bare
-    URL parse, which has no document to resolve a relative path against.
-
-    ``Cache-Control: private, no-store``: the membership of this list is a
-    function of who asked, so a shared cache holding one caller's copy would
-    hand a stranger an owner's collection.
+    Unlike a static ``collection.jsonld`` it carries no centroids or
+    ``artifacts``: their source index is a server-only floor, so clients rank
+    with ``/match``. Each card's ``base`` is the absolute ``content/`` URL,
+    since a client resolves it with a bare URL parse. Never shared-cached.
     """
-    summaries = _visible_summaries(request, store)
+    summaries = svc.list_profiles(service, caller)
     origin = _public_origin(request)
     bundle = ProfileCollection(
         **{
@@ -242,9 +137,6 @@ def get_collection(
             "@id": str(request.url.replace(query="")),
             "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "generator": f"researcher-profiles/{__version__}",
-            # No centroid blob is served over HTTP: the sqlite index it is
-            # derived from is a hard floor (``.cache/``), so the bundle carries
-            # no ``artifacts`` and clients fall back to server-side /match.
             "backend_spec": None,
             "dim": None,
             "count": len(summaries),
@@ -281,32 +173,25 @@ def get_collection(
 def get_profile_detail(
     slug: str,
     request: Request,
-    viewer: ViewerTier = Depends(get_viewer_tier),
     service: Service = Depends(get_service),
     caller: Caller = Depends(get_read_caller),
     view: Literal["record", "full"] = "record",
 ) -> Response:
     """One profile, sized for this caller.
 
-    ``view="record"`` (the default) is the trimmed record: the common fields,
-    long lists cut to their top entries with a total, the edit version
-    (``content_hash``) and, under ``parts``, what this caller may fetch of the
-    narrative and the works file and how big each is. It stays under 8 KB.
-    ``view="full"`` carries every metadata field untrimmed plus the ``soul``
-    and ``expertise`` bodies, for an edit form or a client that mirrors the
-    profile. Neither view carries the file manifest: that is
-    ``GET /profiles/{slug}/files``.
+    ``view="record"`` (default) trims long lists, adds ``content_hash`` and the
+    readable ``parts`` with sizes, and stays under 8 KB. ``view="full"`` adds
+    every field plus the ``soul`` and ``expertise`` bodies. The file manifest
+    is ``GET /profiles/{slug}/files``.
 
-    A field this caller may not see is ``null`` and named in ``withheld``,
-    never ``""``: a client has to be able to tell withheld from empty.
-
-    ``ETag`` is weak and derived from ``content_hash`` (plus the viewer tier and
-    the view), so ``If-None-Match`` answers 304 without a body.
+    A withheld field is ``null`` and named in ``withheld``, never ``""``. The
+    weak ``ETag`` covers ``content_hash``, tier and view.
     """
     record = svc.get_profile(service, caller, slug, view=view)
     headers = {"Cache-Control": "private, no-store", "Vary": VARY_ON_CREDENTIALS}
     current = record.content_hash
     if current:
+        viewer = request.state.viewer_tier
         etag = f'W/"{current.split(":", 1)[-1][:32]}-{viewer}-{view}"'
         headers["ETag"] = etag
         if request.headers.get("if-none-match") == etag:
@@ -321,38 +206,19 @@ def get_profile_detail(
 @public_router.get("/profiles/{slug}/files", response_model=FileList)
 def get_profile_files(
     slug: str,
-    request: Request,
     response: Response,
-    store: ProfileStore = Depends(get_store),
-    viewer: ViewerTier = Depends(get_viewer_tier),
+    service: Service = Depends(get_service),
+    caller: Caller = Depends(get_read_caller),
 ) -> FileList:
     """The profile's manifest, each entry labeled with its effective tier.
 
-    Served whole at every tier (spec section 6, tier-invariant), with each
-    entry's ``effective_visibility`` so no client recomputes the derivation
-    rule, its ``slot`` (``hasPart`` or ``subjectOf``), and ``withheld`` naming
-    what this viewer may not read. A push client reads this to learn what the
-    server holds.
+    Served whole at every tier (spec section 6), with each entry's ``slot`` and
+    ``effective_visibility``, and ``withheld`` naming what this viewer may not
+    read.
     """
-    prof = get_profile(slug, store)
-    _gate_profile(get_service(request), get_caller(request), prof, viewer, slug)
-    response.headers["Cache-Control"] = "private, no-store"
-    response.headers["Vary"] = VARY_ON_CREDENTIALS
-    explain = explain_tiers(prof.metadata)
-    files = []
-    for slot, parts in (
-        ("hasPart", prof.metadata.has_part),
-        ("subjectOf", prof.metadata.subject_of),
-    ):
-        for part in parts:
-            entry = part.model_dump(mode="json")
-            detail = explain.get(part.content_url)
-            entry["effective_visibility"] = (
-                detail.effective if detail is not None else part.visibility
-            )
-            entry["slot"] = slot
-            files.append(entry)
-    return FileList(files=files, withheld=withheld(explain, viewer))
+    files = svc.list_files(service, caller, slug)
+    _no_store(response)
+    return files
 
 
 @public_router.get(
@@ -361,48 +227,26 @@ def get_profile_files(
 def get_profile_jsonld(
     slug: str,
     request: Request,
-    store: ProfileStore = Depends(get_store),
-    viewer: ViewerTier = Depends(get_viewer_tier),
+    service: Service = Depends(get_service),
+    caller: Caller = Depends(get_read_caller),
 ) -> Response:
     """Serve the profile's ``profile.jsonld``: the stored record plus registry proofs.
 
-    The served document is the stored record plus any registry-issued proofs
-    (``orcid_login``), which the registry computes on every request from its
-    own live state and never stores (``app.state.hooks.registry_proofs``). A profile
-    with no section projection and no registry proof is served as the exact
-    bytes the store persisted (``store.document_bytes``), so the
-    ``conformsTo`` claim is about a file anyone can retrieve byte for byte.
-    ``/profiles/{slug}/content/profile.jsonld`` returns the same bytes.
+    Registry proofs (``orcid_login``) are computed per request, never stored.
+    With nothing to project, the stored bytes are served as written, so
+    ``conformsTo`` refers to a file anyone can retrieve byte for byte.
     """
     try:
         validate_ref(slug)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-    prof = get_profile(slug, store)
-    _gate_profile(get_service(request), get_caller(request), prof, viewer, slug)
-    return _document_response(request, store, prof, viewer, slug)
+        raise Invalid(str(e)) from e
+    data, prof, viewer = svc.get_document(service, caller, slug)
+    return _document_response(request, data, prof, viewer)
 
 
-def _document_response(
-    request: Request, store: ProfileStore, prof, viewer: ViewerTier, slug: str
-) -> Response:
-    """The one ``profile.jsonld`` response, shared by both document URLs.
-
-    Gated by the profile tier only (the caller has already run the gate);
-    inline sections are projected when the profile declares section
-    visibility, and registry-issued proofs are attached (see
-    :func:`served_document_bytes`).
-    """
-    try:
-        data = served_document_bytes(
-            get_service(request), store, prof, viewer, store.resolve_slug(slug)
-        )
-    except (ProfileNotFoundError, KeyError) as e:
-        raise _profile_missing(slug) from e
-    # A strong etag over the served bytes, so the short revalidation above is a
-    # 304 rather than a re-send. It is the document itself, not a timestamp: two
-    # replicas serving the same profile agree on it, and a change in a
-    # registry proof changes it.
+def _document_response(request: Request, data: bytes, prof, viewer: ViewerTier) -> Response:
+    """The one ``profile.jsonld`` response, shared by both document URLs."""
+    # Strong etag over the served bytes, so replicas agree and a proof change shows.
     etag = '"' + hashlib.sha256(data).hexdigest()[:32] + '"'
     headers = _cache_headers(viewer, etag=etag, last_modified_iso=prof.metadata.date_modified)
     if request.headers.get("if-none-match") == etag:
@@ -419,111 +263,34 @@ def get_profile_artifact(
     slug: str,
     artifact: str,
     request: Request,
-    store: ProfileStore = Depends(get_store),
-    viewer: ViewerTier = Depends(get_viewer_tier),
+    service: Service = Depends(get_service),
+    caller: Caller = Depends(get_read_caller),
 ) -> Response:
     """Serve one manifest artifact, projected through the caller's viewer tier.
 
-    This is the one artifact-serving route, and it is the read plane a browser
-    client actually needs: ``/api/v1/profiles/{slug}/content/`` is a base URL
-    from which ``profile.jsonld`` and every relative ``contentUrl`` the manifest
-    names resolve. Without it the SPA could fetch a profile document from a
-    hosted registry and then fail on every artifact inside it.
+    ``content/`` is the base URL every relative ``contentUrl`` resolves against.
 
-    The gate is the viewer tier, not the router. A hosted registry keeps the
-    whole profile, every tier, in one store, so an owner-or-nothing route
-    would be the wrong shape: it would lock a signed-in owner out of the public
-    view and give nobody a way to read the public tier without a credential.
-    An owner reads their own ``private`` CV because a management host's
-    resolver gives them the ``private`` viewer tier, not because this path
-    is reserved for them.
+    Refusals, in order:
 
-    Three refusals, in order:
+    * the profile gate: 404, identical to a nonexistent slug;
+    * the hard floors (``.cache/``, ``.keys/``; ``docs/rp-spec/privacy.md``):
+      403, since they are withheld from everyone and their existence is no
+      secret;
+    * the artifact gate: 404, identical to an artifact not in the manifest, so
+      errors cannot enumerate the private half of a profile.
 
-    * the profile gate: 404, byte-identical to a nonexistent slug;
-    * the hard floors of ``docs/rp-spec/privacy.md``: **403**, and
-      not a 404: these are withheld from *everyone*, the owner
-      included, so there is no viewer for whom their existence is a secret and
-      nothing is disclosed by saying why.
-
-      - ``.cache/`` and ``.keys/``: build-local derived state (the sqlite
-        embedding index) and key material, not servable profile artifacts.
-
-    * the artifact gate: 404, byte-identical to an artifact that is not in the
-      manifest at all. "Not for you" and "not there" must not be tellable apart,
-      or the error message enumerates the private half of the profile.
-
-    Past all three, a manifest entry whose body the store does not hold (a
-    push withheld it) is a 404 that says so. Only a caller the tier gate
-    admitted can reach it, so it discloses nothing they may not see.
-
-    Only paths the manifest declares are servable; an unknown or traversing path
-    is a 404. ``X-RP-Effective-Tier`` reports the tier the derivation rule
-    resolved (``privacy.effective_tiers``), so a derivative never advertises a
-    looser tier than its sources.
+    A permitted entry whose body the store lacks is a 404 that says so. Only
+    paths the manifest declares are servable. ``X-RP-Effective-Tier`` reports
+    the derived tier.
     """
-    prof = get_profile(slug, store)
-    _gate_profile(get_service(request), get_caller(request), prof, viewer, slug)
-    resolved = store.resolve_slug(slug)
-
-    # ``profile.jsonld`` is the manifest, not an entry in it, so it is resolved
-    # here rather than through the manifest lookup below. This is what makes
-    # ``/content/`` a usable base URL: a client points at one directory and
-    # follows relative contentUrls out of the document it finds there, exactly
-    # as it does against a static site. The same response as
-    # ``/profiles/{slug}/profile.jsonld``: same bytes, same ETag.
-    if artifact == "profile.jsonld":
-        return _document_response(request, store, prof, viewer, resolved)
-
-    # Only manifest artifacts are servable. Keying off effective_tiers (rather
-    # than the raw path) both bounds the surface to declared artifacts and gives
-    # us the derivation-correct tier in one lookup.
-    effective = effective_tiers(prof.metadata)
-    unknown = HTTPException(
-        status_code=404,
-        detail=f"artifact {artifact!r} is not a manifest artifact of {resolved!r}",
-    )
-    if artifact not in effective:
-        raise unknown
-    part = next((p for p in prof.manifest() if p.content_url == artifact), None)
-    if part is None:  # pragma: no cover - effective_tiers is built from the manifest
-        raise unknown
-
-    # Hard floors: never served, to anybody, at any tier.
-    if any(artifact.startswith(prefix) for prefix in ALWAYS_PRIVATE_PREFIXES):
-        raise HTTPException(
-            status_code=403,
-            detail="build-local derived state is not a servable artifact",
-        )
-
-    if not tier_allows(viewer, effective[artifact]):
-        raise unknown
-
-    # The store owns retrieval, including the traversal refusal a directory
-    # backend needs and a relational one structurally cannot need.
-    #
-    # A manifest row can outlive its body: a push that withholds a class of
-    # files (``sources/papers/`` fulltext is withheld by default) still commits
-    # a manifest listing them. The caller has already passed the tier gate
-    # here, so they may know the artifact exists; telling them it is "not a
-    # manifest artifact" would be false and sends them hunting for a
-    # permission problem. Say what is actually wrong instead.
-    try:
-        data = store.artifact_bytes(resolved, artifact)
-    except (ProfileNotFoundError, KeyError) as e:
-        raise HTTPException(
-            status_code=404,
-            detail=(
-                f"artifact {artifact!r} is listed in the manifest of {resolved!r} "
-                "but its content was not uploaded to this registry"
-            ),
-        ) from e
-
+    data, media_type, prof, viewer, tier = svc.get_artifact(service, caller, slug, artifact)
+    if tier is None:  # profile.jsonld: the served document
+        return _document_response(request, data, prof, viewer)
     return Response(
         content=data,
-        media_type=part.encoding_format or "application/octet-stream",
+        media_type=media_type or "application/octet-stream",
         headers={
-            "X-RP-Effective-Tier": effective[artifact],
+            "X-RP-Effective-Tier": tier,
             "Cache-Control": "private, no-store",
             "Vary": VARY_ON_CREDENTIALS,
         },
@@ -550,12 +317,9 @@ def list_papers(
 ) -> PaperPage:
     """The works list as rich rows, paged, gated on the tier of ``sources/papers.jsonld``.
 
-    Each row carries what a caller needs to choose its next read: identity,
-    a short summary, the ``summary`` and full-text ``text`` sizes *this caller*
-    may fetch (``{available, bytes, approx_tokens, reason}``), and the paper's
-    ``version`` for an edit. Advertising a part the caller cannot retrieve
-    would send them into a 404 and teach them the profile is broken rather
-    than private.
+    Each row carries identity, a short summary, the ``summary`` and ``text``
+    sizes this caller may fetch (``{available, bytes, approx_tokens, reason}``),
+    and the paper's ``version`` for an edit.
 
     Without ``q``, rows are newest first (``year`` desc, then ``paper_id``),
     paged with a keyset cursor. With ``q``, rows are ranked by hybrid search
@@ -617,10 +381,9 @@ def get_paper(
 @public_router.get("/profiles/{slug}/summaries", response_model=SummaryBatch)
 def get_summaries(
     slug: str,
-    request: Request,
     response: Response,
-    store: ProfileStore = Depends(get_store),
-    viewer: ViewerTier = Depends(get_viewer_tier),
+    service: Service = Depends(get_service),
+    caller: Caller = Depends(get_read_caller),
     ids: str = Query(..., description="Comma-separated paper ids, at most 20."),
 ) -> SummaryBatch:
     """Several generated paper summaries in one read, each gated on its own tier.
@@ -630,25 +393,9 @@ def get_summaries(
     reason (``not_permitted``, ``none``, ``not_uploaded``), the same answer the
     rows' ``summary`` size gives.
     """
-    prof = get_profile(slug, store)
-    _gate_profile(get_service(request), get_caller(request), prof, viewer, slug)
-    response.headers["Cache-Control"] = "private, no-store"
-    response.headers["Vary"] = VARY_ON_CREDENTIALS
-    wanted = svc.split_ids(ids)
-    taken, rest = wanted[:BATCH_IDS_CAP], wanted[BATCH_IDS_CAP:]
-    sizes = SizeIndex(prof, viewer, store, store.resolve_slug(slug))
-    summaries = prof.summaries
-    out: dict[str, str] = {}
-    unavailable: dict[str, str] = {}
-    for pid in taken:
-        size = sizes.of(summary_url(pid))
-        if size.available and pid in summaries:
-            out[pid] = summaries[pid]
-        else:
-            unavailable[pid] = size.reason or "none"
-    return SummaryBatch(
-        summaries=out, unavailable=unavailable, limit_applied=len(taken), not_processed=rest
-    )
+    batch = svc.get_summaries(service, caller, slug, ids)
+    _no_store(response)
+    return batch
 
 
 @public_router.get(
@@ -668,9 +415,7 @@ def get_paper_text(
 ) -> TextPage:
     """A paper's full text, bounded: whole up to ~80K chars, else paged.
 
-    Gated exactly like ``GET /profiles/{slug}/content/sources/papers/{id}.md``:
-    a full text this caller may not read is the same 404 as one that does not
-    exist. Above 80K chars the page is the first chunk, cut at a paragraph,
+    A text this caller may not read is the same 404 as a missing one. Above 80K chars the page is the first chunk, cut at a paragraph,
     with ``has_more`` and ``next_offset``. ``section=`` reads one heading's
     span (names are in ``sections``). Offsets are indices into the whole text.
     """

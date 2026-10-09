@@ -1,8 +1,7 @@
 """Vocabulary every schema module shares: the format hint, the depth and
 privacy tiers, the provenance labels, and the tolerant base for nested nodes.
 
-This is the leaf of the ``schema`` package: it imports nothing from its
-siblings, so every model module can depend on it without a cycle.
+The leaf of the ``schema`` package: it imports nothing from its siblings.
 """
 
 from typing import Annotated, Any, Literal
@@ -17,22 +16,20 @@ FORMAT_HINT = "a profile is profile.jsonld + sources/papers.jsonld"
 # Enums
 # ---------------------------------------------------------------------------
 
-# Profile depth tier. A single ordered axis of increasing cost and
-# capability, and also an input-requirements hierarchy:
+# Profile depth tier, ordered by cost, capability, and required inputs:
 #   lite -> public bibliometric identity + works + abstract index; no LLM,
 #           no PDFs, no persona. Name + rid is sufficient.
-#   full -> today's complete build (summaries, expertise, SOUL, persona).
+#   full -> the complete build (summaries, expertise, SOUL, persona).
 #           Name + rid is still sufficient.
 #   deep -> full + exhaustive corpus + supplied private resources (grant
-#           records, a CV, website URLs). These cannot be discovered through
-#           public APIs; a deep build with none configured must fail loudly.
-# `level` is written explicitly on every profile; there is no "absent means
-# full" fallback chain.
+#           records, a CV, website URLs). A deep build with none configured
+#           must fail loudly.
+# `level` is written explicitly on every profile; absent does not mean full.
 ProfileLevel = Literal["lite", "full", "deep"]
 
-#: Privacy tier, most to least permissive. Declared IN the profile (on each
+#: Privacy tier, most to least permissive. Declared in the profile (on each
 #: artifact and as a profile-level default) so a profile is self-describing and
-#: a dumb sync is a correct sync, with no registry-side ``.visibility.json`` sidecar.
+#: a dumb sync is a correct sync.
 #:
 #: ``public``   anyone may access; served on the open web, syncs anywhere.
 #: ``limited``  only readers the owner or host has granted access (named apps,
@@ -44,7 +41,7 @@ ProfileLevel = Literal["lite", "full", "deep"]
 #: mapping to the EU access-right, COAR and ORCID vocabularies.
 VisibilityTier = Literal["public", "limited", "private"]
 
-#: Tier names retired in the 2026-10 rename. Rejected, never aliased.
+#: Retired tier names. Rejected, never aliased.
 RENAMED_TIERS: dict[str, str] = {"internal": "limited", "restricted": "private"}
 
 
@@ -89,26 +86,18 @@ ROLE_DEFAULT_VISIBILITY: dict[str, Visibility] = {
     # work; the public documents derived from it carry a disclosure line
     # instead, so the digest itself never needs to reach anyone but the owner.
     "interview": "private",
-    # Grant-derived embedding text (title + abstract) is private. This is the
-    # singular chunk source_type produced by ``chunk_grant``; the manifest
-    # collection role for grants is the plural ``grants`` (a public bibliographic
-    # record), which no artifact resolves through this map. So this entry governs
-    # only embedding-chunk tier resolution and makes cv/web/grant/paper_fulltext-
-    # derived chunks all drop out of the public export by the one derivation rule.
+    # Grant-derived embedding text. The singular chunk source_type, used only
+    # for chunk tiers; the public ``grants`` collection role is not this.
     "grant": "private",
     # Build-local sqlite index; the servable embeddings are the flat artifacts.
     "embedding_index_sqlite": "private",
-    # The optional clinical trials collection. Trial participation is site and
-    # patient-adjacent operational detail, so it starts limited and an owner
-    # opts it into the open web deliberately. The narrative that describes it
-    # (``clinical_expertise``) is authored for publication and stays public.
+    # Trial participation is site and patient-adjacent detail, so it starts
+    # limited. The ``clinical_expertise`` narrative is authored for publication.
     "trials": "limited",
 }
 
 #: No role carries a hard privacy floor: every artifact's tier is the owner's
-#: to choose. Kept as an (empty) name so the wire/schema exports and any
-#: consumer importing it stay stable; a role's *default* tier lives in
-#: :data:`ROLE_DEFAULT_VISIBILITY`.
+#: to choose. Defaults live in :data:`ROLE_DEFAULT_VISIBILITY`.
 ALWAYS_PRIVATE_ROLES: frozenset[str] = frozenset()
 
 
@@ -120,10 +109,8 @@ def role_default_visibility(role: str | None) -> Visibility:
 def most_restrictive(*tiers: str | None) -> Visibility:
     """Return the most restrictive of the given tiers (``public`` if none).
 
-    This is the derivation rule: an artifact's effective tier is the most
-    restrictive of its own tier and those of everything it was derived from. A
-    summary of a ``private`` paper is not ``public`` merely because nobody
-    marked it.
+    The derivation rule: a summary of a ``private`` paper is not ``public``
+    merely because nobody marked it.
     """
     rank = 0
     for t in tiers:
@@ -150,12 +137,8 @@ def most_restrictive(*tiers: str | None) -> Visibility:
 #:                     the subject controls. See :class:`Proof` / :mod:`signing`.
 #: ``institution_verified`` (reserved) an institution vouched via SSO/email.
 #:
-#: ``provenance`` is a single coarse "headline" trust label for crawlers. It is
-#: an open set: the values below are the ones this reference implementation
-#: understands, but, matching the consumer rule in docs/rp-spec/index.md
-#: ("Consumers MUST ignore unknown enum values rather than treating them as
-#: validation failures"), an unrecognized value is tolerated (warned, not
-#: rejected). Fine-grained, multi-source evidence lives in :class:`Proof`.
+#: ``provenance`` is a single coarse "headline" trust label for crawlers.
+#: Fine-grained, multi-source evidence lives in :class:`Proof`.
 KNOWN_PROVENANCE: frozenset[str] = frozenset(
     {
         "orcid_verified",
@@ -169,10 +152,9 @@ KNOWN_PROVENANCE: frozenset[str] = frozenset(
     }
 )
 
-#: Provenance is a plain string, not a closed ``Literal``: the format
-#: standardizes the envelope for a proof, not the identity source, so the set
-#: of headline labels must stay open. :data:`KNOWN_PROVENANCE` is the recognized
-#: set; unknown values warn (see :meth:`ProfileDocument._warn_unknown_provenance`).
+#: An open set, so a plain string: unknown values warn, not fail, per the
+#: consumer rule in docs/rp-spec/index.md. :data:`KNOWN_PROVENANCE` is the
+#: recognized set.
 Provenance = str
 
 
@@ -181,14 +163,10 @@ Provenance = str
 # Python type
 # ---------------------------------------------------------------------------
 
-# A handful of fields hold a flat Python value but are written as a JSON-LD
-# node or typed literal (``datePublished`` is an ``xsd:gYear`` string,
-# ``isPartOf`` a ``Periodical`` node, ``about`` an ``{"@id": ...}`` reference).
-# A ``mode="before"`` validator reads the on-disk form and a field serializer
-# writes it back, so pydantic's generated JSON Schema would otherwise describe
-# the Python type and reject every document this package writes. These
-# annotations make the exported schema describe the shapes the model actually
-# loads: the published form first, and the flat form it also tolerates.
+# Some fields hold a flat Python value but are written as a JSON-LD node or
+# typed literal. Without these annotations the generated JSON Schema would
+# describe the Python type and reject every document this package writes.
+# Each lists the published form first, then the flat form it also accepts.
 
 _NULL: dict[str, Any] = {"type": "null"}
 
@@ -266,16 +244,9 @@ IdRef = Annotated[
 class _Base(BaseModel):
     """Tolerant base for nested value objects (not standalone documents).
 
-    ``extra="allow"``, matching :class:`JsonLdModel` and the format's stated
-    posture: unknown terms are ignored, not rejected (``docs/rp-spec/index.md``;
-    ``validate.py`` rule D6). Nested nodes get no carve-out: a
-    publisher may extend a ``ResearchOutput`` exactly as it may extend the
-    document root.
-
-    Drift is *reported*, not enforced here: :func:`validate.undeclared_terms`
-    walks nested objects and names every unmodeled key. Enforcement belongs at
-    the generation site, not on *load*: forbidding here only stopped this
-    package reading data its own writers had produced.
+    ``extra="allow"``: unknown terms are ignored, not rejected
+    (``docs/rp-spec/index.md``; ``validate.py`` rule D6), at every depth.
+    :func:`validate.undeclared_terms` reports them.
     """
 
     model_config = ConfigDict(

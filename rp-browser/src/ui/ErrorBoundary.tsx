@@ -1,11 +1,6 @@
 /**
- * Last-resort catch for render-time throws.
- *
- * Before this existed, any throw during render unmounted the whole React
- * tree to a literally blank white page. That was indistinguishable from the
- * reported "white-on-white navbar" bug and the reason that diagnosis was
- * ambiguous. A card with the error and a reload button must always be the
- * worst case, never a blank screen.
+ * Last-resort catch for render-time throws. The worst case must be a card
+ * with the error and a reload button, never a blank page.
  */
 import { Component, type ErrorInfo, type ReactNode } from "react";
 

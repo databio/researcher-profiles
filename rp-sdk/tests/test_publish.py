@@ -823,3 +823,27 @@ class TestHostingConfigs:
         data = json.loads(well_known_json(base_url="https://example.com"))
         assert data["version"] == 1
         assert data["base_url"] == "https://example.com"
+
+
+class TestChangeAudience:
+    """Re-publishing into a folder must not silently widen its audience."""
+
+    def test_widening_refused_unless_flagged_and_narrowing_allowed(self, tmp_path):
+        from researcher_profiles.publish import PublishError, publish_collection
+
+        root = tmp_path / "profiles"
+        _audience_profile(root)
+        out = tmp_path / "out"
+        publish_collection(root, out, viewer="public")
+        with pytest.raises(PublishError, match="widen"):
+            publish_collection(root, out, viewer="limited")
+        publish_collection(root, out, viewer="limited", change_audience=True)
+        # Narrowing needs no flag.
+        publish_collection(root, out, viewer="public")
+        assert json.loads((out / ".rp-publish.json").read_text())["who"] == "public"
+
+    def test_cli_flag_is_registered(self):
+        from researcher_profiles.cli import build_parser
+
+        args = build_parser().parse_args(["publish", "x", "-o", "y", "--change-audience"])
+        assert args.change_audience is True

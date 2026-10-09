@@ -1,13 +1,11 @@
 """Authoritative name/rid resolution, with mint-on-miss.
 
-This is the entity-resolution entry point consumer services (grant
-trackers, knowledge bases, program managers) call to turn the person data
-they hold (a free-text PI name, a bare ORCID) into a consistent ``rid``. It
-is not ``/match``: that route is read-only semantic search and
-non-deterministic. Resolution here is deterministic and cautious. The same
-person, resolved the same way twice, converges on the same ``rid``. When
-the evidence cannot decide, the resolver defers rather than guessing,
-because an identity system's worst failure is a silent merge.
+Turns person data (a free-text name, a bare ORCID) into a consistent
+``rid``. Unlike ``/match`` (semantic, non-deterministic), resolution is
+deterministic and cautious: the same person resolved the same way twice
+converges on the same ``rid``, and when the evidence cannot decide the
+resolver defers rather than guessing, because an identity system's worst
+failure is a silent merge.
 
 The pipeline (:func:`resolve_person`):
 
@@ -20,8 +18,8 @@ The pipeline (:func:`resolve_person`):
 2. Name only: placeholder strings ("Unknown", "et al", "Anonymous
    Author") are refused outright. Profiles sharing the coarse fold
    (surname + first initial, via
-   :func:`~researcher_profiles.graph.identity.normalize_name`, the one
-   name-fold in the package) are compared on their given names:
+   :func:`~researcher_profiles.graph.identity.normalize_name`) are compared
+   on their given names:
 
    - full given names agree ("Jane Doe" vs "Doe, Jane"; middle names are
      ignored): a ``"strong"`` match.
@@ -78,8 +76,8 @@ affiliation as the sole deciding evidence for an initials-only name:
 "Doe, J." plus institution is common input for a typical deployment, and a
 second J. Doe at the same institution not yet in the store would be wrongly
 matched. ``visibility="private"`` profiles are invisible to name
-matching (that tier is served to nobody but the owner), so resolving a private
-person's name mints a separate stub. Likewise a hidden occupant of the
+matching (that tier is served to nobody but the owner, not even as a
+candidate name), so resolving a private person's name mints a separate stub. Likewise a hidden occupant of the
 deterministic rid whose affiliation conflicts is silently split into a
 fresh person at high confidence, where the same evidence on a visible
 profile would defer. This is the safe direction (splits recover, merges
@@ -87,11 +85,9 @@ do not), but it is an asymmetry. A ``create_new`` random id can collide
 with a name's deterministic rid at ~2^-24 per call (shared namespace),
 surfacing as ``created=False`` with a same-named person's rid. The
 candidate scan loads every profile document (not an indexed query):
-~1.5s per resolve at 800 profiles. This is fine at a typical deployment's
-hundreds, and the store needs a fold-keyed index before that grows by an
-order of magnitude. Every minted stub adds to that cost for every later
-resolve, so a runaway consumer loop degrades the whole identity plane
-(quotas are currently a no-op).
+~1.5s per resolve at 800 profiles. A store an order of magnitude larger
+needs a fold-keyed index. Every minted stub adds to that cost for every
+later resolve.
 
 Stub profiles are minted ``provenance="third_party"`` (a real person
 asserted by a calling service, not ``synthetic``, which means "not a real
@@ -224,11 +220,8 @@ def _given_tokens(raw_tokens: list[str]) -> list[str]:
 def _name_parts(name: str) -> Optional[tuple[str, list[str]]]:
     """``(folded_surname, folded_given_tokens)`` for a display name.
 
-    Uses the same surname detection as :func:`normalize_name` (a comma
-    marks the surname; otherwise it is the last non-suffix token), but
-    keeps the given tokens rather than reducing to one initial. The fold
-    decides which profiles are worth comparing; this decides whether they
-    are the same person.
+    Same surname detection as :func:`normalize_name`, but keeps the given
+    tokens rather than reducing to one initial.
     """
     raw = str(name or "").strip()
     if not raw:
@@ -264,9 +257,7 @@ def _given_strength(query_givens: list[str], profile_givens: list[str]) -> Optio
     the fold hit is the same person. ``"weak"``: at least one side carries
     only an initial, so Jane vs John is indistinguishable and the match
     needs corroboration. ``None``: full given names disagree, meaning
-    different people whatever the surname says. Middle names are
-    ignored: "Jane A. Doe" and "Jane Doe" are one person in every corpus
-    this serves.
+    different people whatever the surname says. Middle names are ignored.
     """
     q = query_givens[0] if query_givens else ""
     p = profile_givens[0] if profile_givens else ""
@@ -282,13 +273,9 @@ def _given_strength(query_givens: list[str], profile_givens: list[str]) -> Optio
 def _mint_key(name: str) -> Optional[str]:
     """The deterministic-mint key: surname plus every given token.
 
-    At least as fine as the strong-match class: two names this key equates
-    ("Jane Doe" / "Doe, Jane" / "Jane Doe Jr") are ones the matcher also
-    calls the same person, so the concurrent-race collapse can never merge
-    two people the matcher keeps apart ("J.A. Doe" vs "J.B. Doe" carry
-    different keys). The cost is the reverse: matcher-tolerated spelling
-    differences (a middle initial present or absent) mint different rids
-    if they race, a recoverable split, which is preferred over a merge.
+    At least as fine as the strong-match class ("J.A. Doe" vs "J.B. Doe"
+    carry different keys), so a race collapse never merges two people the
+    matcher keeps apart. See step 4 in the module docstring.
     """
     parts = _name_parts(name)
     if parts is None:
@@ -302,8 +289,7 @@ def _rid_for_key(key: str) -> str:
 
     The hash is over the full key (that is the identity). The readable
     slug part is capped so a very long name cannot exceed a filesystem's
-    name limit; the two backends must mint the same rid for the same
-    person.
+    name limit. Both backends must mint the same rid for the same person.
     """
     digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:6]
     slug_part = "-".join(key.split())[:48].rstrip("-")
@@ -313,9 +299,7 @@ def _rid_for_key(key: str) -> str:
 def _deterministic_local_rid(name: str) -> str:
     """Mint the ``local:`` rid this name always mints.
 
-    This differs from ``schema.mint_local_rid`` (random suffix), which is
-    what ``create_new`` and the occupied-rid fallback use for an id not
-    keyed to a name.
+    Unlike ``schema.mint_local_rid``, which uses a random suffix.
     """
     key = _mint_key(name)
     if not key:
@@ -334,8 +318,6 @@ def _stub_document(rid: str, name: str, affiliation: Optional[str]) -> ProfileDo
         rid=rid,
         provenance="third_party",
         level="lite",
-        # A resolver stub must not appear on the public read plane: nobody
-        # has claimed it and nothing in it has been verified.
         visibility="limited",
         affiliation=affiliation or None,
         hasCitationGraph=False,
@@ -348,11 +330,9 @@ def _slug_candidates(store: Any, rid: str, name: str) -> list[str]:
 
     The name-derived slug first, then the rid body, which always satisfies
     the slug grammar (short names like "Doe, J." or "Madonna" derive no
-    name slug at all, and a display concern must not 400 an identity
-    operation). More than one candidate exists because a slug can be
-    unusable for reasons ``list_slugs`` cannot see, for example a directory
-    left behind by a create that died mid-write. Trying the next name
-    heals that wedge instead of making the person permanently unmintable.
+    name slug at all). Several candidates, because a slug can be unusable
+    for reasons ``list_slugs`` cannot see (a directory left by a create that
+    died mid-write); trying the next one keeps the person mintable.
     """
     taken = set(store.list_slugs())
     out: list[str] = []
@@ -370,16 +350,11 @@ def _slug_candidates(store: Any, rid: str, name: str) -> list[str]:
 def _create_stub(store: Any, *, rid: str, name: str, affiliation: Optional[str]) -> bool:
     """Create the stub profile for ``rid``; returns True when this call created it.
 
-    ``store.create`` runs in one write unit, so a host's pre-commit hooks
-    (ownership, staleness) fire exactly as they do for any other
-    create. A concurrent resolve minting the same deterministic rid surfaces
-    as a ``ProfileWriteError`` or as a raw ``FileExistsError`` from the
-    directory (a backend that raises anything else for a losing race must
-    wrap it in one of those). Whatever the shape, if the rid now exists the
-    race resolved itself and this call lost. Only such a slug-shaped failure
-    earns the next candidate; anything else (a hook's policy refusal, a dead
-    database) would fail identically under every name, so it propagates on
-    the first attempt.
+    A losing concurrent race surfaces as ``ProfileWriteError`` or
+    ``FileExistsError`` (a backend must raise one of those for it); if the
+    rid now exists, this call lost and returns False. Only such a failure
+    tries the next slug; anything else (a hook's policy refusal, a dead
+    database) would fail under every name, so it propagates at once.
     """
     document = _stub_document(rid, name, affiliation)
     last_error: Optional[Exception] = None
@@ -388,9 +363,7 @@ def _create_stub(store: Any, *, rid: str, name: str, affiliation: Optional[str])
             store.create(document, slug=slug)
             return True
         except WriteHookError:
-            # A host hook refused the write on policy. That is a decision,
-            # not a race. It propagates even when the rid happens to
-            # exist, and it is never retried under another slug.
+            # A policy refusal, not a race: never retried, even if the rid exists.
             raise
         except (ProfileWriteError, FileExistsError) as e:
             if store.exists(rid):
@@ -418,14 +391,11 @@ class _Scored:
 def _compatible_profiles(store: Any, fold_key: str, query_givens: list[str]) -> list[_Scored]:
     """Profiles that could be this person, scored strong/weak.
 
-    A linear scan via the coarse fold, then a given-name comparison;
-    profiles whose full given names conflict with the query are excluded
-    here, not deferred on. Every profile read happens inside the try: both
-    backends load lazily, so the parse error a malformed neighbor raises
-    surfaces at ``.name``, not at ``get``. A malformed or concurrently
-    deleted neighbor is skipped; an infrastructure error aborts the resolve
-    rather than quietly shrinking the candidate set, because a shrunken set
-    changes an identity decision.
+    Profiles whose full given names conflict are excluded, not deferred on.
+    Every profile read is inside the try because both backends load lazily
+    (a parse error surfaces at ``.name``, not at ``get``). A malformed or
+    deleted neighbor is skipped; an infrastructure error aborts the resolve,
+    because a silently shrunken candidate set changes an identity decision.
     """
     out: list[_Scored] = []
     for slug in store.list_slugs():
@@ -437,11 +407,7 @@ def _compatible_profiles(store: Any, fold_key: str, query_givens: list[str]) -> 
             visibility = prof.metadata.visibility
         except ProfileError:  # malformed or concurrently-deleted neighbor
             continue
-        if visibility == "private":
-            # The private tier is served to nobody but the owner, not even as a
-            # candidate's name in a resolve response. The mint path also
-            # refuses to hand back a private occupant's rid (see the
-            # occupied-rid fallback in resolve_person).
+        if visibility == "private":  # see the module docstring
             continue
         if not rid or normalize_name(pname) != fold_key:
             continue
@@ -475,8 +441,7 @@ def _resolve_create_new(store: Any, *, name: str, affiliation: Optional[str]) ->
             f"name {name!r} is a placeholder, not a person; refusing to mint an identity for it"
         )
     if _mint_key(name) is None:
-        # The same usability bar as the name path: an identity nothing
-        # can ever match by name is permanent junk in the scan.
+        # An identity nothing can match by name is permanent junk in the scan.
         raise ResolveError(f"name {name!r} folds to nothing usable")
     minted = mint_local_rid(name)
     created = _create_stub(store, rid=minted, name=name, affiliation=affiliation)
@@ -492,14 +457,10 @@ def _resolve_by_rid(
     except ValueError as e:
         raise ResolveError(str(e)) from e
     if store.exists(rid):
-        # ``rid_for`` follows a merge alias, so a retired rid answers with its
-        # live successor and never mints a stub over a retired identity.
+        # ``rid_for`` follows a merge alias to the live successor.
         return ResolveResult(rid=store.rid_for(rid), created=False, confidence="exact")
     if is_local(rid):
-        # A local: rid is only ever chosen by this resolver, never
-        # supplied from outside: accepting one for a profile that does
-        # not exist would let a caller plant identities at chosen (and,
-        # for the deterministic form, publicly computable) ids.
+        # Never accept an outside local: rid (see module docstring, step 1).
         raise ResolveError(
             f"no profile for {rid!r}: a local: rid can be resolved only "
             "after the resolver has minted it (to create a new person "
@@ -528,17 +489,12 @@ def _self_identified(
 ) -> Optional[str]:
     """The rid of a candidate that is this name's own identity, if any.
 
-    A candidate at this name's own deterministic rid is this name's identity
-    by construction, and it binds even with weak neighbors in the fold bucket.
-    Otherwise a second bucket member would permanently un-resolve a name
-    whose resolution was idempotent until then. It yields to a better-evidenced identity (a
-    compatible ORCID profile: the name-then-ORCID deferral stands) and to a
-    conflicting affiliation.
+    Binds even with weak neighbors in the fold bucket, so a second bucket
+    member cannot un-resolve a name that resolved before. Yields to a
+    compatible ORCID profile and to a conflicting affiliation.
 
-    Both halves of the check matter: the rid must match and the occupant's own
-    name must compute it. The rid is publicly computable, so a profile pushed
-    onto it under a merely fold-compatible name ("W. Zhang" at Wei Zhang's
-    rid) must get no more deference than it would at any other rid.
+    The occupant's own name must also compute the rid: the rid is publicly
+    computable, so "W. Zhang" pushed onto Wei Zhang's rid gets no deference.
     """
     own = [
         c
@@ -555,12 +511,10 @@ def _affiliation_selected(strong: list[_Scored], *, affiliation: Optional[str]) 
     """Affiliation as selector among several same-named people.
 
     Exactly one strong candidate agrees and every other strong candidate
-    conflicts. Both halves matter: a candidate with no affiliation on record
-    is silent, not disconfirmed, so it must keep the deferral. Otherwise a
-    local stub carrying the affiliation the caller itself stamped at mint
-    would outrank a richer ORCID profile that never recorded one. Weak
-    (initials-only) pools never select; see the unique-weak rule for the one
-    corroborated weak bind.
+    conflicts. A candidate with no affiliation on record is silent, not
+    disconfirmed, so it keeps the deferral; otherwise a stub carrying the
+    affiliation the caller stamped at mint would outrank a richer ORCID
+    profile that never recorded one. Weak pools never select.
     """
     agreeing = [c for c in strong if _affiliations_agree(affiliation, c.affiliation)]
     if len(agreeing) == 1 and all(
@@ -581,9 +535,7 @@ def _bind_by_name(
 ) -> Optional[str]:
     """The rid the name evidence binds to, or ``None`` to defer.
 
-    Pure: no store, no I/O. All four bind rules live here (unique strong
-    candidate, self-identification, unique weak candidate with affiliation
-    agreement, affiliation as selector among several strong candidates).
+    Pure: no store, no I/O.
     """
     strong = [c for c in candidates if c.strength == "strong"]
     if len(strong) == 1 and not _affiliations_conflict(affiliation, strong[0].affiliation):
@@ -595,13 +547,8 @@ def _bind_by_name(
         )
         if own_rid is not None:
             return own_rid
-        # A unique weak match binds on affiliation agreement, the one
-        # sole-evidence bind (a documented tradeoff): "Doe, J."
-        # plus an institution column from the same source is common input
-        # for consumer services, and requiring a human for every such row
-        # would make the resolver useless for it. The risk (a second J. Doe
-        # at the same institution, not yet in the store) is accepted; set the
-        # affiliation aside to force a deferral instead.
+        # The unique-weak bind: an accepted tradeoff (see module docstring).
+        # Omit the affiliation to force a deferral instead.
         if len(candidates) == 1 and _affiliations_agree(affiliation, candidates[0].affiliation):
             return candidates[0].rid
 
@@ -615,13 +562,10 @@ def _mint_on_miss(
 ) -> ResolveResult:
     """Mint deterministically, so the same name always computes the same rid.
 
-    A concurrent duplicate collides in ``store.create`` and is absorbed. A rid
-    that turns out to be occupied despite the empty scan is bound only when
-    the occupant provably is this person: visible, its name computing this
-    exact mint key, and no affiliation conflict. That is the concurrent race
-    winner. Any other occupant (private, malformed, renamed since mint, or
-    a profile pushed onto the computable rid by someone else) must not be
-    handed out; a fresh random id is minted instead.
+    An occupied rid is bound only when the occupant provably is this person
+    (the concurrent race winner): visible, its name computing this exact mint
+    key, and no affiliation conflict. Any other occupant is never handed out;
+    a fresh random id is minted instead.
     """
     if store.exists(mint_rid):
         occupant = None
@@ -658,13 +602,10 @@ def resolve_person(
 ) -> ResolveResult:
     """Resolve a person descriptor to a ``rid``, minting a stub on a true miss.
 
-    Resolution is rid-first, cautious on names, and deterministic on
-    mints; see the module docstring for the full pipeline.
-    ``affiliation`` is stamped on any minted stub, selects among
-    same-named candidates, and vetoes a match it contradicts.
-    ``create_new=True`` skips matching and mints a fresh identity for
-    ``name``, the answer to a deferral whose candidates are all wrong. The resolver picks the id, and calling it twice creates two
-    people.
+    See the module docstring for the pipeline. ``affiliation`` is stamped on
+    any minted stub, selects among same-named candidates, and vetoes a match
+    it contradicts. ``create_new=True`` skips matching and mints a fresh
+    identity for ``name``; calling it twice creates two people.
 
     Raises :class:`ResolveError` when the request itself is unusable. It
     never raises for "no such person"; that is the mint path, not an
@@ -675,7 +616,6 @@ def resolve_person(
     if not rid and not name:
         raise ResolveError("supply at least one of rid or name")
 
-    # An explicit new-person mint: no matching, resolver-chosen random id.
     if create_new:
         if rid:
             raise ResolveError(
@@ -686,12 +626,9 @@ def resolve_person(
             )
         return _resolve_create_new(store, name=name, affiliation=affiliation)
 
-    # 1. rid-first: an ORCID is the identity; a minted local: id is too.
     if rid:
         return _resolve_by_rid(store, rid=rid, name=name, affiliation=affiliation)
 
-    # 2. Name path: coarse fold to find comparable profiles, given names to
-    #    decide, affiliation to select and to veto.
     if _is_junk_name(name):
         raise ResolveError(
             f"name {name!r} is a placeholder, not a person; refusing to "
@@ -711,10 +648,6 @@ def resolve_person(
     if bound is not None:
         return ResolveResult(rid=bound, created=False, confidence="high")
 
-    # 3. Deferral: compatible profiles exist but the evidence cannot pick
-    #    one. Mint nothing, guess nothing; the caller confirms and
-    #    re-resolves with the chosen profile's rid, or with
-    #    ``create_new=True`` when none of them is their person.
     if compatible:
         return ResolveResult(
             rid=None,
@@ -725,9 +658,8 @@ def resolve_person(
             ),
         )
 
-    # 4. True miss. mint_key and mint_rid are non-None here: the
-    #    fold-usability check above refused every input _mint_key returns
-    #    None for.
+    # mint_key and mint_rid are non-None: the fold check above refused
+    # every input _mint_key returns None for.
     return _mint_on_miss(
         store, name=name, affiliation=affiliation, mint_key=mint_key, mint_rid=mint_rid
     )
