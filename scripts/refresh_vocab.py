@@ -1,4 +1,8 @@
-"""Rebuild the pinned vocabulary files (``rp vocab refresh``).
+#!/usr/bin/env python3
+"""Rebuild the pinned vocabulary files (maintainer tool, not shipped).
+
+Usage: python scripts/refresh_vocab.py [--openalex] [--mesh PATH]
+                                       [--release YYYY-MM] [--out-dir DIR]
 
 Run every year or two, not on a schedule: a refresh changes what every stored
 code resolves to, so it is a deliberate, reviewed commit.
@@ -14,18 +18,21 @@ Network access is the refresh's alone; nothing on the load path fetches.
 
 from __future__ import annotations
 
+import argparse
 import gzip
 import json
+import os
+import sys
 import time
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any
 
-from . import MESH_FILE, MESH_SYSTEM, OPENALEX_FILE, OPENALEX_SYSTEM
+from researcher_profiles.vocab import MESH_FILE, MESH_SYSTEM, OPENALEX_FILE, OPENALEX_SYSTEM
 
 if TYPE_CHECKING:
-    from ..openalex_client import OpenAlexClient
+    from researcher_profiles.openalex_client import OpenAlexClient
 
 #: OpenAlex's largest supported page size.
 PER_PAGE = 100
@@ -36,7 +43,7 @@ MAX_SYNONYMS = 12
 
 def package_dir() -> Path:
     """Where the pinned files live in this checkout (the package directory)."""
-    return Path(__file__).resolve().parent
+    return Path(__file__).resolve().parents[1] / "rp-sdk/src/researcher_profiles/vocab"
 
 
 def fetch_openalex_topics(client: OpenAlexClient, *, pause: float = 0.1) -> list[dict]:
@@ -153,9 +160,7 @@ def refresh(
     if openalex:
         path = out / OPENALEX_FILE
         before = _ids(path, "topics")
-        import os
-
-        from ..openalex_client import OpenAlexClient
+        from researcher_profiles.openalex_client import OpenAlexClient
 
         with OpenAlexClient(os.environ.get("OPENALEX_API_KEY")) as client:
             topics = fetch_openalex_topics(client)
@@ -178,3 +183,38 @@ def refresh(
             f"{len(after - before)} added, {len(before - after)} removed -> {path}"
         )
     return lines
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(
+        description="Rewrite the pinned vocabulary files from their sources"
+    )
+    ap.add_argument(
+        "--openalex", action="store_true", help="Refetch the OpenAlex topic list (network)"
+    )
+    ap.add_argument(
+        "--mesh",
+        metavar="PATH",
+        help="NLM MeSH descriptor XML (desc<YEAR>.xml, or its .gz); the year is the release",
+    )
+    ap.add_argument("--release", help="OpenAlex snapshot release (default: this month, YYYY-MM)")
+    ap.add_argument(
+        "--out-dir",
+        help="Directory to write into (default: the package's own vocab/ directory)",
+    )
+    args = ap.parse_args(argv)
+    if not args.openalex and not args.mesh:
+        print("error: nothing to refresh; pass --openalex and/or --mesh PATH", file=sys.stderr)
+        return 2
+    for line in refresh(
+        openalex=args.openalex,
+        mesh_xml=Path(args.mesh) if args.mesh else None,
+        out_dir=Path(args.out_dir) if args.out_dir else None,
+        release=args.release,
+    ):
+        print(line)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

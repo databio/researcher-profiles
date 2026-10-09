@@ -15,7 +15,7 @@ data:
 in, never a term's own update date or a retrieval date.
 
 Both files load lazily and once; importing this module reads nothing.
-``rp vocab refresh`` rewrites the files (see :mod:`.refresh`).
+``scripts/refresh_vocab.py`` (a maintainer script, not shipped) rewrites the files.
 """
 
 from __future__ import annotations

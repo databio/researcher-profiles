@@ -2,16 +2,17 @@
 
 Pins what a stored concept code resolves to (the ``@id``, label and release
 every tool builds from the same snapshot), that an unknown code is reported as
-unknown rather than invented, and the refresh command's file shape.
+unknown rather than invented, and the refresh script's file shape.
 """
 
 import gzip
+import importlib.util
 import json
+from pathlib import Path
 
 import pytest
 
 from researcher_profiles import vocab
-from researcher_profiles.cli import main
 from researcher_profiles.vocab import MESH_SYSTEM, OPENALEX_SYSTEM
 
 
@@ -74,13 +75,19 @@ _MESH_XML = """<?xml version="1.0"?>
 """
 
 
+_SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "refresh_vocab.py"
+_spec = importlib.util.spec_from_file_location("refresh_vocab", _SCRIPT)
+refresh_vocab = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(refresh_vocab)
+
+
 class TestRefresh:
     def test_mesh_refresh_writes_the_release_from_the_file_name(self, tmp_path, capsys):
         src = tmp_path / "desc2031.gz"
         src.write_bytes(gzip.compress(_MESH_XML.encode()))
         out = tmp_path / "out"
         out.mkdir()
-        assert main(["vocab", "refresh", "--mesh", str(src), "--out-dir", str(out)]) == 0
+        assert refresh_vocab.main(["--mesh", str(src), "--out-dir", str(out)]) == 0
         data = json.loads(gzip.decompress((out / vocab.MESH_FILE).read_bytes()))
         assert data["release"] == "2031"
         assert data["system"] == MESH_SYSTEM
@@ -95,4 +102,4 @@ class TestRefresh:
         assert "1 added, 0 removed" in capsys.readouterr().out
 
     def test_nothing_to_refresh_is_a_usage_error(self):
-        assert main(["vocab", "refresh"]) == 2
+        assert refresh_vocab.main([]) == 2

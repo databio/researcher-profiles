@@ -42,7 +42,7 @@ term's own update date and not the date anyone fetched it.
   month of the pinned copy, e.g. `2026-09`.
 
 The reference implementation keeps these pinned copies in rp-sdk
-(`researcher_profiles/vocab/`) and refreshes them with `rp vocab refresh`
+(`researcher_profiles/vocab/`) and refreshes them with a maintainer script
 every year or two. Every tool that resolves a code reads the same copy, so a
 stored code means the same thing everywhere even after OpenAlex changes its
 list. A code the pinned copy does not know is kept and flagged, not dropped.
