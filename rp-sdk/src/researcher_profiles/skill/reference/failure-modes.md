@@ -73,18 +73,19 @@ gap. See the next section for that case.
 
 **Behavior**: Skip it. A manifest is the complete artifact index for *every*
 tier of consumer, so it lists artifacts a public reader cannot
-fetch: entries with `visibility: "restricted"` or `"internal"`. Full text of
-copyrighted papers (`role: "paper_fulltext"`) is always restricted, and on a
-real profile it is routinely a third or more of the manifest. Do not fetch
+fetch: entries with `visibility: "private"` or `"limited"`. Full text of
+papers (`role: "paper_fulltext"`) defaults to `private` (the owner may
+re-tier it), and on a real profile it is routinely a third or more of the
+manifest. Do not fetch
 such an entry unless you hold credentials for that tier; do not spend fetch
 budget on it; and if you do fetch one and get a 404 or 403, do **not** report
 it as a broken artifact, a dangling reference, or a publisher error. An entry
 with no `visibility` field is `public`.
 
-**Example text** (only when the user asked for something the restricted
+**Example text** (only when the user asked for something the private
 artifact would have answered):
 > The full text of `<paper_id>` is listed in this profile's manifest, but
-> it's marked restricted. Published papers' full text isn't served on the
+> it's marked private. Published papers' full text isn't served on the
 > open web, and I don't hold credentials for that tier. I'm answering from
 > the summary instead, which is what's public here.
 

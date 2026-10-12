@@ -1,11 +1,6 @@
-"""Everything that calls a model.
+"""Everything that calls a model: persona blocks, evidence, the client, ask/review/innovate/riff, Chat.
 
-The persona blocks a request is built from, the evidence rendered into it, the
-client that wraps the SDK, and the four methods that go through all of it:
-``.ask``, ``.review``, ``.innovate``, ``.riff``, plus stateful ``Chat``.
-Every test here stubs the model; the ones that hit the real API live in
-``tests/integration/test_llm_real.py`` under the ``llm`` marker, which
-``addopts`` deselects by default.
+Every model call is stubbed; real-API tests live in ``tests/integration/test_llm_real.py`` (``llm`` marker).
 """
 
 import json
@@ -18,9 +13,6 @@ from researcher_profiles import (
     GenerativeParseError,
     Idea,
     LLMClient,
-    LLMResponse,
-    PersonaResponse,
-    Riff,
     Turn,
 )
 from researcher_profiles.generative import (
@@ -30,10 +22,6 @@ from researcher_profiles.generative.persona import PERSONA_PREAMBLE, build_perso
 from researcher_profiles.utils.paths import build_logs_dir
 
 from .factories import fake_llm_response, stub_llm
-
-# --------------------------------------------------------------------------
-# Persona blocks, evidence, .ask / .review, LLMClient
-# --------------------------------------------------------------------------
 
 
 class _Chunk:
@@ -46,8 +34,6 @@ class _Chunk:
 
 
 class TestPersonaBlocks:
-    """The persona block builder: what every request carries as its system prompt."""
-
     @pytest.mark.parametrize(
         "mode, expected_marker",
         [
@@ -60,7 +46,6 @@ class TestPersonaBlocks:
     )
     def test_persona_blocks_shape_and_mode(self, mode, expected_marker):
         blocks = build_persona_system_blocks(expertise_md="EXP", soul_md="SOUL", mode=mode)
-        assert isinstance(blocks, list)
         assert blocks[0]["type"] == "text"
         assert blocks[0]["cache_control"] == {"type": "ephemeral"}
         # Persona content present.
@@ -70,6 +55,8 @@ class TestPersonaBlocks:
         # Mode instructions appear AFTER the cache boundary.
         assert "cache_control" not in blocks[1]
         assert expected_marker in blocks[1]["text"]
+        # The persona prefix is identical across modes, so the prompt cache hits.
+        assert blocks[0] == build_persona_system_blocks("EXP", "SOUL", mode="ask")[0]
 
     def test_persona_blocks_unknown_mode(self):
         with pytest.raises(ValueError):
@@ -91,8 +78,6 @@ class TestPersonaBlocks:
 
 
 class TestEvidenceRendering:
-    """``_render_evidence``: retrieved chunks turned into prompt text."""
-
     def test_render_evidence_empty(self):
         text, refs = llm_mod._render_evidence([])
         assert text == ""
@@ -118,14 +103,11 @@ class TestEvidenceRendering:
 
 
 class TestAsk:
-    """``.ask`` on a real profile, with a mocked LLM."""
-
     def test_ask_calls_llm_with_persona_system_blocks(self, jane_doe):
         fake = stub_llm(jane_doe, "an answer")
 
         resp = jane_doe.persona.ask("what is ExampleOverlap?")
 
-        assert isinstance(resp, PersonaResponse)
         assert resp.text == "an answer"
         assert resp.citations == []
         assert resp.model == "claude-sonnet-4-6"
@@ -133,10 +115,7 @@ class TestAsk:
 
         fake.complete.assert_called_once()
         kwargs = fake.complete.call_args.kwargs
-        system = kwargs["system"]
-        assert isinstance(system, list)
-        assert system[0]["cache_control"] == {"type": "ephemeral"}
-        assert "MODE: ASK" in system[1]["text"]
+        assert "MODE: ASK" in kwargs["system"][1]["text"]
         messages = kwargs["messages"]
         assert messages[0]["role"] == "user"
         assert "QUESTION: what is ExampleOverlap?" in messages[0]["content"]
@@ -165,6 +144,7 @@ class TestAsk:
         "method, arg, call_kwargs, expected_fields, forbidden_substring",
         [
             ("ask", "hello?", {}, {"question": "hello?", "k": 5}, None),
+            ("ask", "x" * 2000, {}, {"question": "x" * 500}, None),  # long strings cut to 500
             (
                 "review",
                 "TOPSECRET grant draft content",
@@ -173,7 +153,7 @@ class TestAsk:
                 "TOPSECRET",
             ),
         ],
-        ids=["ask", "review"],
+        ids=["ask", "ask-long-question", "review"],
     )
     def test_usage_log_records_the_call(
         self, jane_doe, method, arg, call_kwargs, expected_fields, forbidden_substring
@@ -195,26 +175,12 @@ class TestAsk:
         assert rec["usage"]["input_tokens"] == 100
         for key, value in expected_fields.items():
             assert rec[key] == value
-        # Asserted on the raw line, not the parsed dict: the material must not
-        # appear anywhere in it.
+        # Raw line, not the parsed dict: the material must not appear anywhere in it.
         if forbidden_substring is not None:
             assert forbidden_substring not in lines[0]
 
-    def test_ask_truncates_long_question_in_log(self, jane_doe):
-        stub_llm(jane_doe, "hello world")
-        jane_doe.index.search = MagicMock(return_value=[])  # type: ignore[method-assign]
-
-        long_q = "x" * 2000
-        jane_doe.persona.ask(long_q)
-
-        log_path = build_logs_dir(jane_doe.directory) / "llm-usage.jsonl"
-        rec = json.loads(log_path.read_text().strip().splitlines()[-1])
-        assert len(rec["question"]) <= 500
-
 
 class TestReview:
-    """``.review`` on a real profile, with a mocked LLM."""
-
     def test_review_basic(self, jane_doe):
         fake = stub_llm(jane_doe, "review text")
         chunks = [_Chunk("doe2019methods", "union vs intersection", year=2024)]
@@ -223,7 +189,6 @@ class TestReview:
         material = "We will take the union of all peak calls."
         resp = jane_doe.persona.review(material, focus="methods")
 
-        assert isinstance(resp, PersonaResponse)
         assert resp.text == "review text"
         assert [c.paper_id for c in resp.citations] == ["doe2019methods"]
 
@@ -238,24 +203,17 @@ class TestReview:
 
     def test_review_without_focus_uses_material_prefix(self, jane_doe):
         stub_llm(jane_doe, "hello world")
-        jane_doe.index.search = MagicMock(return_value=[])  # type: ignore[method-assign]
 
         material = "A short grant draft about chromatin accessibility."
         jane_doe.persona.review(material)
 
         # search should be called with a prefix of the material
         call_args = jane_doe.index.search.call_args
-        assert call_args is not None
         assert material.startswith(call_args.args[0])
 
 
 def _fake_anthropic_sdk(*, text="hi", model="claude-sonnet-4-6", request_id=None, **usage):
-    """A stand-in ``anthropic`` module returning one text block.
-
-    Returns ``(fake_anthropic, fake_sdk_client)``: patch the first into
-    ``sys.modules`` and assert against the second's recorded ``messages.create``
-    call. ``request_id=None`` leaves ``_request_id`` unset on the message.
-    """
+    """A stand-in ``anthropic`` module returning one text block: ``(fake_anthropic, fake_sdk_client)``."""
     counts = {
         "input_tokens": 10,
         "output_tokens": 2,
@@ -282,19 +240,42 @@ def _fake_anthropic_sdk(*, text="hi", model="claude-sonnet-4-6", request_id=None
 
 
 class TestLLMClient:
-    """``LLMClient``: lazy SDK import and ``complete()`` wrapping."""
-
-    def test_llm_client_wraps_anthropic_response(self):
-        fake_anthropic, fake_sdk_client = _fake_anthropic_sdk(request_id="req_xyz")
+    @pytest.mark.parametrize(
+        "complete_kwargs, request_id, expected_model, expected_thinking",
+        [
+            ({}, "req_xyz", "claude-sonnet-4-6", None),
+            (
+                {"model": "claude-opus-4-7", "thinking": {"type": "adaptive"}},
+                None,
+                "claude-opus-4-7",
+                {"type": "adaptive"},
+            ),
+        ],
+        ids=["defaults", "model-and-thinking"],
+    )
+    def test_llm_client_threads_kwargs_to_the_sdk(
+        self, complete_kwargs, request_id, expected_model, expected_thinking
+    ):
+        """``expected_thinking=None`` means the key must be absent, not null."""
+        fake_anthropic, fake_sdk_client = _fake_anthropic_sdk(request_id=request_id)
 
         with patch.dict("sys.modules", {"anthropic": fake_anthropic}):
             client = LLMClient(api_key="sk-test")
             resp = client.complete(
-                system=[{"type": "text", "text": "sys"}],
-                messages=[{"role": "user", "content": "hi"}],
+                system=[{"type": "text", "text": "s"}],
+                messages=[{"role": "user", "content": "u"}],
+                **complete_kwargs,
             )
 
-        assert isinstance(resp, LLMResponse)
+        kwargs = fake_sdk_client.messages.create.call_args.kwargs
+        assert kwargs["model"] == expected_model
+        assert kwargs["max_tokens"] == 4096
+        if expected_thinking is None:
+            assert "thinking" not in kwargs
+        else:
+            assert kwargs["thinking"] == expected_thinking
+
+        # The SDK response is wrapped into an LLMResponse.
         assert resp.text == "hi"
         assert resp.model == "claude-sonnet-4-6"
         assert resp.usage == {
@@ -303,46 +284,8 @@ class TestLLMClient:
             "cache_creation_input_tokens": 5,
             "cache_read_input_tokens": 0,
         }
-        assert resp.request_id == "req_xyz"
-        assert fake_sdk_client.messages.create.call_args.kwargs["max_tokens"] == 4096
-
-    @pytest.mark.parametrize(
-        "complete_kwargs, expected_model, expected_thinking",
-        [
-            ({}, "claude-sonnet-4-6", None),
-            (
-                {"model": "claude-opus-4-7", "thinking": {"type": "adaptive"}},
-                "claude-opus-4-7",
-                {"type": "adaptive"},
-            ),
-        ],
-        ids=["defaults", "model-and-thinking"],
-    )
-    def test_llm_client_threads_kwargs_to_the_sdk(
-        self, complete_kwargs, expected_model, expected_thinking
-    ):
-        """``expected_thinking=None`` means the key must be absent, not null."""
-        fake_anthropic, fake_sdk_client = _fake_anthropic_sdk()
-
-        with patch.dict("sys.modules", {"anthropic": fake_anthropic}):
-            client = LLMClient(api_key="sk-test")
-            client.complete(
-                system=[{"type": "text", "text": "s"}],
-                messages=[{"role": "user", "content": "u"}],
-                **complete_kwargs,
-            )
-
-        kwargs = fake_sdk_client.messages.create.call_args.kwargs
-        assert kwargs["model"] == expected_model
-        if expected_thinking is None:
-            assert "thinking" not in kwargs
-        else:
-            assert kwargs["thinking"] == expected_thinking
-
-
-# --------------------------------------------------------------------------
-# The generative module: .innovate / .riff
-# --------------------------------------------------------------------------
+        if request_id is not None:
+            assert resp.request_id == request_id
 
 
 _GOOD_IDEAS_JSON = json.dumps(
@@ -391,60 +334,34 @@ _GENERATIVE_RESPONSE = {"innovate": _GOOD_IDEAS_JSON, "riff": _GOOD_RIFFS_JSON}
 class TestGenerativePersona:
     """The persona the generative modes share, and where they diverge."""
 
-    def test_persona_block_identical_across_modes(self):
-        """Persona prefix must match across ask/review/innovate/riff for cache hits."""
-        ask = build_persona_system_blocks("E", "S", mode="ask")
-        review = build_persona_system_blocks("E", "S", mode="review")
-        innovate = build_persona_system_blocks("E", "S", mode="innovate")
-        riff = build_persona_system_blocks("E", "S", mode="riff")
-        assert ask[0]["text"] == review[0]["text"] == innovate[0]["text"] == riff[0]["text"]
-        assert all(
-            b[0]["cache_control"] == {"type": "ephemeral"} for b in (ask, review, innovate, riff)
-        )
-
-    # ----------------------------------------------------------------------
-    # defaults / contract: .innovate and .riff mirrored
-    # ----------------------------------------------------------------------
-
     @pytest.mark.parametrize(
-        "method, arg, expected_k, expected_temp, mode_tail",
+        "method, arg, arg_key, n, expected_k, expected_temp, mode_tail",
         [
-            ("innovate", "topic", 12, 0.7, "MODE: INNOVATE"),
-            ("riff", "seed", 4, 1.0, "MODE: RIFF"),
+            ("innovate", "a topic", "topic", 3, 12, 0.7, "MODE: INNOVATE"),
+            ("riff", "a seed", "seed", 5, 4, 1.0, "MODE: RIFF"),
         ],
         ids=["innovate", "riff"],
     )
-    def test_generative_defaults(self, jane_doe, method, arg, expected_k, expected_temp, mode_tail):
+    def test_generative_contract(
+        self, jane_doe, method, arg, arg_key, n, expected_k, expected_temp, mode_tail
+    ):
         fake = stub_llm(jane_doe, _GENERATIVE_RESPONSE[method])
 
-        getattr(jane_doe.persona, method)(arg)
+        getattr(jane_doe.persona, method)(arg, n=n)
 
         jane_doe.index.search.assert_called_once_with(arg, k=expected_k)
         kwargs = fake.complete.call_args.kwargs
         assert kwargs["temperature"] == expected_temp
         assert mode_tail in kwargs["system"][1]["text"]
 
-    @pytest.mark.parametrize(
-        "method, arg, arg_key, n, expected_k, expected_temp",
-        [
-            ("innovate", "a topic", "topic", 3, 12, 0.7),
-            ("riff", "a seed", "seed", 5, 4, 1.0),
-        ],
-        ids=["innovate", "riff"],
-    )
-    def test_generative_writes_usage_jsonl(
-        self, jane_doe, method, arg, arg_key, n, expected_k, expected_temp
-    ):
-        stub_llm(jane_doe, _GENERATIVE_RESPONSE[method])
-
-        getattr(jane_doe.persona, method)(arg, n=n)
-
         log_path = build_logs_dir(jane_doe.directory) / "llm-usage.jsonl"
         rec = json.loads(log_path.read_text().strip().splitlines()[-1])
-        assert rec["method"] == method
-        assert rec["n"] == n
-        assert rec["k"] == expected_k
-        assert rec["temperature"] == expected_temp
+        assert (rec["method"], rec["n"], rec["k"], rec["temperature"]) == (
+            method,
+            n,
+            expected_k,
+            expected_temp,
+        )
         assert rec[arg_key] == arg
 
     @pytest.mark.parametrize(
@@ -464,24 +381,19 @@ class TestGenerativePersona:
 
 
 class TestInnovate:
-    """``.innovate``: structured ideas, retried until the JSON parses."""
-
     def test_innovate_returns_n_ideas(self, jane_doe):
         fake = stub_llm(jane_doe, _GOOD_IDEAS_JSON)
-        jane_doe.index.search = MagicMock(return_value=[])  # type: ignore[method-assign]
 
         ideas = jane_doe.persona.innovate("chromatin accessibility", n=3)
 
         assert len(ideas) == 3
-        assert all(isinstance(i, Idea) for i in ideas)
         assert ideas[0].hypothesis == "H1"
         assert ideas[0].related_works == ["doe2016example"]
         assert ideas[1].related_works == []
-
-        kwargs = fake.complete.call_args.kwargs
-        assert kwargs["temperature"] == 0.7
-        assert "MODE: INNOVATE" in kwargs["system"][1]["text"]
-        assert "TOPIC: chromatin accessibility" in kwargs["messages"][0]["content"]
+        assert (
+            "TOPIC: chromatin accessibility"
+            in fake.complete.call_args.kwargs["messages"][0]["content"]
+        )
 
     def test_innovate_retries_on_bad_json(self, jane_doe):
         fake = stub_llm(jane_doe)
@@ -489,7 +401,6 @@ class TestInnovate:
             fake_llm_response("not json at all"),
             fake_llm_response(_GOOD_IDEAS_JSON),
         ]
-        jane_doe.index.search = MagicMock(return_value=[])  # type: ignore[method-assign]
 
         ideas = jane_doe.persona.innovate("topic", n=3)
         assert len(ideas) == 3
@@ -503,7 +414,6 @@ class TestInnovate:
     def test_innovate_extracts_json_from_fenced_block(self, jane_doe):
         fenced = f"Sure, here you go:\n```json\n{_GOOD_IDEAS_JSON}\n```\n"
         stub_llm(jane_doe, fenced)
-        jane_doe.index.search = MagicMock(return_value=[])  # type: ignore[method-assign]
 
         ideas = jane_doe.persona.innovate("topic")
         assert len(ideas) == 3
@@ -521,30 +431,15 @@ class TestInnovate:
 
 
 class TestRiff:
-    """``.riff``: short reactions, optionally citing a paper."""
-
     def test_riff_returns_n_riffs_with_optional_citation(self, jane_doe):
         stub_llm(jane_doe, _GOOD_RIFFS_JSON)
-        jane_doe.index.search = MagicMock(return_value=[])  # type: ignore[method-assign]
 
         riffs = jane_doe.persona.riff("seed concept", n=5)
-        assert len(riffs) == 5
-        assert all(isinstance(r, Riff) for r in riffs)
-        assert riffs[0].related_work == "doe2016example"
-        assert riffs[1].related_work is None
-        assert riffs[2].related_work is None  # missing key -> None
-        assert riffs[3].related_work is None  # "null" string -> None
-        assert riffs[4].related_work is None  # "" -> None
-
-
-# --------------------------------------------------------------------------
-# Chat: a stateful conversation over a profile
-# --------------------------------------------------------------------------
+        # Three null forms: missing key, the string "null", and "".
+        assert [r.related_work for r in riffs] == ["doe2016example", None, None, None, None]
 
 
 class TestChat:
-    """Tests for the Chat module."""
-
     @pytest.fixture
     def stub_profile(self, jane_doe):
         """``jane-doe`` with a stubbed LLM answering "hi"; yields (profile, mock)."""
@@ -554,11 +449,10 @@ class TestChat:
         prof, _fake = stub_profile
         chat = prof.persona.chat()
         chat.send("hello")
-        assert len(chat.history) == 2
-        assert chat.history[0].role == "user"
-        assert chat.history[0].content == "hello"
-        assert chat.history[1].role == "assistant"
-        assert chat.history[1].content == "hi"
+        assert [(t.role, t.content) for t in chat.history] == [
+            ("user", "hello"),
+            ("assistant", "hi"),
+        ]
 
     def test_to_dict_from_dict_roundtrip(self, stub_profile):
         prof, _ = stub_profile
@@ -575,7 +469,6 @@ class TestChat:
         assert restored.k == 3
         assert restored.model == "m1"
         assert len(restored.history) == 4
-        assert all(isinstance(t, Turn) for t in restored.history)
         assert restored.history[0].content == "first"
 
     def test_from_dict_raises_on_slug_mismatch(self, stub_profile):

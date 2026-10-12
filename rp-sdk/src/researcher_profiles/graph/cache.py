@@ -1,18 +1,7 @@
 """SQLite persistence for the derived profile graph.
 
-The graph is a **cache**, not a database of record: it is rebuilt from profiles,
-never hand-edited, and lives under the already-disposable ``<root>/.cache/``
-tree at ``graph.sqlite``, the same place the centroid matrix caches. Deleting
-it is free; the next query rebuilds it.
-
-Schema:
-
-* ``nodes(person_key, rid, slug, name, kind, institutions_json)``
-* ``edges(src_key, dst_key, type, directed, confidence, paper_count,
-  first_year, last_year, institution, overlap_years, training_kind,
-  evidence_json)``, indexed on ``(src_key, type)`` and ``(dst_key, type)`` for
-  neighbor lookups from either end of an undirected edge.
-* ``graph_meta(key, value)``: build timestamp, counts, source hash.
+``<root>/.cache/graph.sqlite`` is a cache, never a record: deleting it is free,
+and the next query rebuilds it.
 """
 
 import json
@@ -73,11 +62,7 @@ def _int_to_bool(v: Optional[int]) -> Optional[bool]:
 def save_graph(
     root: str | Path, nodes: list[PersonNode], edges: list[GraphEdge], meta: dict
 ) -> Path:
-    """Write the graph to ``<root>/.cache/graph.sqlite`` atomically-ish.
-
-    The whole DB is rewritten from scratch (drop + recreate), because the graph
-    is derived in full. There is no partial-write correctness to preserve.
-    """
+    """Rewrite ``<root>/.cache/graph.sqlite`` in full, via a temp file and rename."""
     store_cache_dir(Path(root).expanduser().resolve())
     path = graph_db_path(root)
     tmp = path.with_suffix(".sqlite.tmp")
@@ -168,8 +153,7 @@ def _row_to_edge(row: sqlite3.Row) -> GraphEdge:
 def load_graph(root: str | Path) -> tuple[list[PersonNode], list[GraphEdge], dict]:
     """Load nodes, edges, and meta from ``graph.sqlite``.
 
-    Raises :class:`FileNotFoundError` when the DB is absent, so the caller can
-    fall back to a rebuild.
+    Raises :class:`FileNotFoundError` when the DB is absent.
     """
     path = graph_db_path(root)
     if not path.is_file():
@@ -185,42 +169,9 @@ def load_graph(root: str | Path) -> tuple[list[PersonNode], list[GraphEdge], dic
     return nodes, edges, meta
 
 
-def delete_profile(root: str | Path, rid: str) -> None:
-    """Remove one profile's node and its incident edges from the store.
-
-    The incremental primitive: on a single-profile change a caller may drop that
-    profile's rows and re-derive, rather than rebuilding the whole graph. It is
-    the full rebuild, not this, that remains the source of truth (the write
-    invalidation path unlinks the DB and rebuilds), so this can never silently
-    diverge from a clean build.
-    """
-    path = graph_db_path(root)
-    if not path.is_file():
-        return
-    conn = sqlite3.connect(str(path))
-    try:
-        conn.execute("DELETE FROM nodes WHERE person_key = ?", (rid,))
-        conn.execute("DELETE FROM edges WHERE src_key = ? OR dst_key = ?", (rid, rid))
-        conn.commit()
-    finally:
-        conn.close()
-
-
-def unlink_graph(root: str | Path) -> None:
-    """Delete the on-disk graph cache (called by the post-write invalidation hook)."""
-    path = graph_db_path(root)
-    if path.exists():
-        try:
-            path.unlink()
-        except OSError:
-            pass
-
-
 __all__ = [
     "GRAPH_DB_NAME",
     "graph_db_path",
     "save_graph",
     "load_graph",
-    "delete_profile",
-    "unlink_graph",
 ]

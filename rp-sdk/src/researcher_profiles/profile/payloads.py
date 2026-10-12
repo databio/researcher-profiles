@@ -1,46 +1,39 @@
 """Turn a profile into the plain dicts that the HTTP API and the published site both serve.
 
-These functions take a ``ResearcherProfile`` and return plain dicts matching
-the Pydantic wire models in ``models/api.py``. They have exactly two callers,
-and the point of the module is that both go through them: ``api/_projection.py``
-validates these dicts into the wire models the HTTP routes return, and the
-static publisher in ``publish/__init__.py`` renders them into ``index.html``,
-``index.jsonld`` and ``SKILL.md``. That is what makes the invariant hold:
-whatever a profile looks like over HTTP, it looks the same in the published
-site.
+The dicts match the wire models in ``models/api.py``. Both the API and the
+static publisher go through these functions, so a profile looks the same over
+HTTP and on the published site.
 """
 
+from collections.abc import Sequence
 from typing import Any
 
 import pydantic
 
 from ..build_state import BuildState
+from ..privacy import ViewerTier, project_document
+from ..schema import strip_registry_issued_proofs
 from . import ResearcherProfile
 
 
-def profile_summary_dict(prof: ResearcherProfile) -> dict[str, Any]:
-    """Produce the dict matching ``ProfileSummary`` (GET /api/v1/profiles)."""
-    md = prof.metadata
-    # Corpus stats. Each is computed lazily off the loaded profile.
-    # ``prof.papers`` and ``prof.summaries`` are already memoized on the
-    # profile object, so repeated calls are cheap. A load failure propagates:
-    # reporting a corrupt corpus as a healthy profile with zero papers is the
-    # one answer nobody can act on.
+def profile_summary_dict(prof: ResearcherProfile, viewer: ViewerTier) -> dict[str, Any]:
+    """Produce the dict matching ``ProfileSummary`` (GET /api/v1/profiles).
+
+    ``viewer`` has no default: a summary carries inline document fields, so a
+    forgotten tier would publish them at every tier.
+    """
+    md = project_document(prof.metadata, viewer)
+    # A load failure propagates: a corrupt corpus must not look like a healthy
+    # profile with zero papers.
     papers = prof.papers
     summaries = prof.summaries
 
     paper_count = len(papers)
     summary_count = sum(1 for p in papers if p.paper_id and p.paper_id in summaries)
 
-    # "fulltext" = the paper has a downloadable / downloaded MD on disk.
-    # We use the status field as the source of truth (set by whatever fetched
-    # the full text). Counting ``full_text_link`` presence instead would
-    # over-count: it would include papers we only have URLs for but never
-    # fetched.
-    # Download status and contamination are build state, so they come from
-    # .build/<slug>/meta/build_state.json rather than the published paper
-    # record. A profile published without its sidecar reports 0 for both,
-    # which is correct: nobody served it that information.
+    # "fulltext" counts downloaded papers, not ``full_text_link`` presence,
+    # which would include links never fetched. Download status and
+    # contamination are build state; without the sidecar both report 0.
     try:
         state = prof.build_state
     except (OSError, pydantic.ValidationError):
@@ -65,18 +58,32 @@ def profile_summary_dict(prof: ResearcherProfile) -> dict[str, Any]:
         "summary_count": summary_count,
         "fulltext_pct": fulltext_pct,
         "contaminated_count": contaminated_count,
+        # From the projected document, so a withheld Clinical section never
+        # shows through as true.
+        "clinical": bool(md.therapeutic_areas),
     }
 
 
-def metadata_payload_dict(prof: ResearcherProfile) -> dict[str, Any]:
+def metadata_payload_dict(
+    prof: ResearcherProfile, viewer: ViewerTier, *, proofs: Sequence[Any] = ()
+) -> dict[str, Any]:
     """Project the on-disk JSON-LD document onto the (non-JSON-LD) wire shape.
 
-    The wire contract speaks Python-ish field names, so this dumps by name
-    rather than by alias; a client that wants the published JSON-LD bytes
-    fetches ``/profiles/{slug}/profile.jsonld`` instead.
+    Dumps by field name, not alias; the JSON-LD bytes are at
+    ``/profiles/{slug}/profile.jsonld``.
+
+    ``viewer`` is required on purpose: a default would make a forgotten tier
+    silently expose the whole document.
+
+    ``proofs`` are the registry-issued proofs the serving registry attaches.
+    Any registry-issued proof in the stored document is dropped first: only
+    the registry computes those.
     """
-    md = prof.metadata
+    md = project_document(prof.metadata, viewer)
     data = md.model_dump(mode="json", by_alias=False)
+    data["proof"] = strip_registry_issued_proofs(data.get("proof") or []) + [
+        p.model_dump(mode="json", by_alias=False) for p in proofs
+    ]
     data.pop("affiliation_id", None)
     data["license"] = data.pop("license_", None)
     data["expertise"] = list(md.expertise)
@@ -85,12 +92,12 @@ def metadata_payload_dict(prof: ResearcherProfile) -> dict[str, Any]:
     return data
 
 
-def profile_detail_dict(prof: ResearcherProfile) -> dict[str, Any]:
-    """Produce the dict matching ``ProfileDetail`` (GET /api/v1/profiles/{slug})."""
+def profile_detail_dict(prof: ResearcherProfile, viewer: ViewerTier) -> dict[str, Any]:
+    """Produce the dict matching ``ProfileDetail``: the static ``profile.json`` view."""
     return {
         "slug": prof.slug,
         "rid": getattr(prof, "rid", None),
-        "metadata": metadata_payload_dict(prof),
+        "metadata": metadata_payload_dict(prof, viewer),
         "expertise": prof.expertise,
         "soul": prof.soul,
         "manifest": [m.model_dump(mode="json") for m in prof.manifest()],
@@ -104,12 +111,10 @@ def paper_entries_list(
     exclude_contaminated: bool = False,
     exclude_untitled: bool = False,
 ) -> list[dict[str, Any]]:
-    """Produce the list matching ``PaperEntry[]`` (GET /profiles/{slug}/papers).
+    """Produce the list matching ``PaperEntry[]``: the static ``papers.json`` view.
 
     When ``exclude_contaminated`` is True, papers flagged in the build state
-    are silently dropped (the publisher's egress policy). The build state is
-    resolved only for that branch. The API path serves the full list and
-    would otherwise pay for a load it discards.
+    are dropped (the publisher's egress policy).
     """
     summaries = prof.summaries
     state = build_state

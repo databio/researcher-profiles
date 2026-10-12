@@ -1,11 +1,6 @@
 """``HttpProfileStore``: a published profile site, read over HTTP.
 
-The third store backend, and the one that makes :class:`VectorStore
-<researcher_profiles.store.protocol.VectorStore>` worth having: it serves a
-registry's vectors without a filesystem anywhere in the path.
-
-What it reads is exactly what ``rp publish`` writes (``publish/_site.py``,
-``publish/_centroids.py``)::
+Reads exactly what ``rp publish`` writes::
 
     index.json                                   ["profiles/<slug>/", ...]
     by-rid.json                                  {rid: "profiles/<slug>/profile.jsonld"}
@@ -16,26 +11,15 @@ What it reads is exactly what ``rp publish`` writes (``publish/_site.py``,
     collection/embeddings/index.json               the stacked centroid index
     collection/embeddings/<backend>.bin            every profile's centroid
 
-Two things follow from the published form, and both are by design rather than
-by omission:
+By design:
 
-* **Public subset only.** ``.cache/embeddings.sqlite`` never leaves the build
-  machine, so a chunk whose source is ``restricted`` has no row in any ``.bin``
-  here (spec section 6). Ranking through this store is ranking over what the
-  site publishes, which is the correct answer for a consumer that only ever had
-  the site.
+* **Public subset only.** A chunk whose source is ``private`` has no row in any
+  ``.bin`` (spec section 6).
 * **Read-only.** Every writer raises
-  :class:`~researcher_profiles.errors.ProfileWriteError`. A static host has no
-  write endpoint, and pretending otherwise would put the failure at the end of
-  a long ingest instead of at its first call.
-
-Embedding a *query* is a compute concern, not a storage one: this store hands
-back an index that knows its ``backend_spec``, and the caller supplies (or
-resolves) a backend in that space. ``index.json``'s ``probe`` is what verifies
-the two agree.
+  :class:`~researcher_profiles.errors.ProfileWriteError` at its first call.
 
 Requires the ``client`` extra (``httpx``), imported inside the methods that
-open a connection, exactly as :mod:`researcher_profiles.client` does.
+open a connection.
 """
 
 import json
@@ -64,14 +48,11 @@ class HttpProfileStore(_HookedStore, _AnalyticsAccessors):
     """A published profile site as a :class:`VectorStore`, over HTTP.
 
     ``base_url`` is the site root (the directory holding ``index.json``), not
-    one profile's directory and not an API prefix. For a live
-    ``researcher_profiles.api`` server use
+    an API prefix. For a live API server use
     :func:`researcher_profiles.client.list_registry` and
-    :meth:`ResearcherProfile.from_api` instead: that server speaks a different
-    contract and owns its own ranking.
+    :meth:`ResearcherProfile.from_api` instead.
 
-    Hooks register and never fire, which is the honest outcome: they run inside
-    a write, and there are no writes here.
+    Hooks register and never fire: there are no writes here.
     """
 
     def __init__(
@@ -119,7 +100,7 @@ class HttpProfileStore(_HookedStore, _AnalyticsAccessors):
 
     @property
     def root(self) -> None:
-        """``None``: there is no directory. See :mod:`researcher_profiles.store`."""
+        """``None``: there is no directory."""
         return None
 
     # --- fetching -----------------------------------------------------------
@@ -127,8 +108,7 @@ class HttpProfileStore(_HookedStore, _AnalyticsAccessors):
     def _get(self, relpath: str) -> Optional[bytes]:
         """GET ``<base_url>/<relpath>``; ``None`` on 404.
 
-        Bytes, not text: half of what this store fetches is a float32 blob, and
-        a reader that decoded it as UTF-8 would corrupt it silently.
+        Bytes, not text: some responses are float32 blobs.
         """
         import httpx
 
@@ -159,8 +139,7 @@ class HttpProfileStore(_HookedStore, _AnalyticsAccessors):
     def list_slugs(self) -> list[str]:
         """Every published slug, sorted. One fetch of ``index.json``, memoized.
 
-        The file lists directory prefixes (``"profiles/jane-doe/"``), which is
-        what a static consumer needs to join to; the slug is the last segment.
+        The file lists directory prefixes; the slug is the last segment.
         """
         if self._slugs is not None:
             return self._slugs
@@ -177,8 +156,7 @@ class HttpProfileStore(_HookedStore, _AnalyticsAccessors):
     def resolve_slug(self, ref: str) -> str:
         """Map a slug or a rid to the slug.
 
-        Slug first, like the filesystem backend: it is what humans type, and a
-        directory name can never be mistaken for a rid.
+        Slug first; a directory name can never be mistaken for a rid.
         """
         if ref in self.list_slugs():
             return ref
@@ -210,11 +188,7 @@ class HttpProfileStore(_HookedStore, _AnalyticsAccessors):
         return mapping
 
     def rid_for(self, ref: str) -> str:
-        """Map a slug or a rid to the rid, off the published ``by-rid.json``.
-
-        A bare ORCID resolves without any extra indexing: an ORCID rid *is* its
-        ORCID, so it is already a key of that file.
-        """
+        """Map a slug or a rid to the rid, off the published ``by-rid.json``."""
         slug = self.resolve_slug(ref)
         for rid, mapped in self._rid_lookup().items():
             if mapped == slug:
@@ -230,20 +204,29 @@ class HttpProfileStore(_HookedStore, _AnalyticsAccessors):
             return False
         return True
 
-    def write_lookup_index(self) -> None:
-        """``None``: there is nowhere to write, and the site already publishes one.
+    def rids_with_email(self, email: str) -> list[str]:  # noqa: ARG002
+        raise NotImplementedError("rids_with_email is not available over HTTP")
 
-        ``by-rid.json`` is the published form of exactly this mapping, written
-        by whoever built the site. This store reads it; it never writes back.
-        """
+    def successor_of(self, ref: str) -> Optional[str]:  # noqa: ARG002
+        """Always ``None``: a published site carries no alias table."""
+        return None
+
+    def alias_slugs(self) -> set[str]:
+        """Always empty: a published site carries no alias table."""
+        return set()
+
+    def merge_into(self, retired_ref: str, staging: Path, **kwargs) -> IngestResult:  # noqa: ARG002
+        raise NotImplementedError("merge needs the SQL store")
+
+    def write_lookup_index(self) -> None:
+        """``None``: nowhere to write. The site's ``by-rid.json`` is this mapping."""
         return None
 
     def get(self, ref: str) -> ResearcherProfile:
         """The profile as a lazy view over the published files.
 
-        Built on :class:`~researcher_profiles.client.StaticArtifactStorage`, so
-        each artifact costs one GET the first time it is touched and nothing
-        after. Shares this store's HTTP client.
+        Each artifact costs one GET on first touch. Shares this store's HTTP
+        client.
         """
         slug = self.resolve_slug(ref)
         cached = self._profiles.get(slug)
@@ -275,13 +258,19 @@ class HttpProfileStore(_HookedStore, _AnalyticsAccessors):
             )
         return raw
 
+    def held_artifacts(self, ref: str) -> dict[str, int | None]:
+        """Every manifest entry: a static host publishes what its manifest lists.
+
+        Not checked per body: a static site that lists a file and 404s on it
+        is broken, not withholding.
+        """
+        return {part.content_url: part.bytes for part in self.get(ref).manifest()}
+
     def artifact_bytes(self, ref: str, content_url: str) -> bytes:
         """One artifact's bytes, addressed by its ``contentUrl``.
 
-        The traversal guard is the same rule the filesystem backend enforces
-        with ``resolve()``, stated for a URL: a ``contentUrl`` that climbs out
-        of the profile prefix would let a manifest point this store at an
-        unrelated part of the host.
+        Refuses a ``contentUrl`` that climbs out of the profile prefix, so a
+        manifest cannot point this store at an unrelated part of the host.
         """
         slug = self.resolve_slug(ref)
         rel = content_url.lstrip("/")
@@ -297,8 +286,7 @@ class HttpProfileStore(_HookedStore, _AnalyticsAccessors):
     def content_hash(self, ref: str) -> str:
         """``"sha256:<hex>"`` over the fetched document and soul.
 
-        Recomputed per call from the same two artifacts every backend hashes,
-        so a published profile's hash is comparable to the source directory's.
+        Recomputed per call; comparable to the source directory's hash.
         """
         return self.get(ref).content_hash()
 
@@ -307,10 +295,8 @@ class HttpProfileStore(_HookedStore, _AnalyticsAccessors):
     def has_vector_index(self, ref: str) -> bool:
         """Whether the site publishes a centroid row for this profile.
 
-        The collection centroid index is one fetch for the whole roster, so this
-        answers for every profile at the cost of the first call. A profile with
-        a centroid row always has a flat index too: ``_collect_centroid`` only
-        looks at profiles that ship ``embeddings/index.json``.
+        One fetch answers for the whole roster. A profile with a centroid row
+        always has a flat index too.
         """
         try:
             slug = self.resolve_slug(ref)
@@ -324,9 +310,8 @@ class HttpProfileStore(_HookedStore, _AnalyticsAccessors):
     def vector_index(self, ref: str) -> "VectorIndex":
         """The profile's flat index, built from the three fetched files.
 
-        Three GETs, then pure numpy. The blob is verified against the declared
-        length and sha256 by :meth:`FlatEmbeddingIndex.from_bytes`, which is
-        the check that matters most here: these bytes crossed a network.
+        Three GETs. The blob is verified against the declared length and sha256
+        by :meth:`FlatEmbeddingIndex.from_bytes`, since it crossed a network.
         """
         slug = self.resolve_slug(ref)
         cached = self._vector_indexes.get(slug)
@@ -341,7 +326,7 @@ class HttpProfileStore(_HookedStore, _AnalyticsAccessors):
         if index_json is None:
             raise IndexNotBuiltError(
                 f"profile {slug!r} at {self.base_url} publishes no embeddings/index.json; "
-                "it was built without a searchable index, or every chunk was restricted"
+                "it was built without a searchable index, or every chunk was private"
             )
         index = json.loads(index_json)
         blob = self._get(f"{base}/{index['file']}")
@@ -359,11 +344,8 @@ class HttpProfileStore(_HookedStore, _AnalyticsAccessors):
     def centroid(self, ref: str) -> "np.ndarray":
         """The profile's centroid, from the stacked collection blob when there is one.
 
-        The stacked blob is the whole point of publishing it: one fetch answers
-        for every profile, so ranking a roster of 300 costs one request rather
-        than 900. The per-profile flat index is the fallback for a site
-        published before the collection blob existed, or one whose profile uses a
-        minority backend the blob dropped.
+        One fetch answers for every profile. Falls back to the per-profile flat
+        index when the blob is absent or dropped this profile's backend.
         """
         slug = self.resolve_slug(ref)
         matrix = self.centroids_matrix()
@@ -427,11 +409,7 @@ class HttpProfileStore(_HookedStore, _AnalyticsAccessors):
 
     @property
     def backend_spec(self) -> str | None:
-        """The embedding space this site's centroid blob lives in, or ``None``.
-
-        What a caller resolves a query backend against, so it does not have to
-        open a profile's index to learn which model the site was built with.
-        """
+        """The embedding space this site's centroid blob lives in, or ``None``."""
         if self.centroids_matrix() is None:
             return None
         assert self._centroid_index is not None
@@ -449,12 +427,21 @@ class HttpProfileStore(_HookedStore, _AnalyticsAccessors):
             f"use a FilesystemProfileStore to change them",
         )
 
-    # The signatures mirror ``ProfileStore`` exactly, arguments and all, so a
-    # caller that type-checks against the contract still type-checks here and
-    # learns at the call that this backend cannot write. Hence the unused
-    # arguments.
+    # Signatures mirror ``ProfileStore`` exactly so callers still type-check;
+    # hence the unused arguments.
     def create(self, document: "ProfileDocument", *, slug: str) -> NoReturn:  # noqa: ARG002
         self._read_only("create")
+
+    def create_bundle(
+        self,
+        document: "ProfileDocument",  # noqa: ARG002
+        *,
+        slug: str,  # noqa: ARG002
+        expertise: "str | None" = None,  # noqa: ARG002
+        soul: "str | None" = None,  # noqa: ARG002
+        artifacts: "dict[str, str] | None" = None,  # noqa: ARG002
+    ) -> NoReturn:
+        self._read_only("create_bundle")
 
     def put_document(self, slug: str, document: "ProfileDocument") -> NoReturn:  # noqa: ARG002
         self._read_only("put_document")
@@ -474,11 +461,8 @@ class HttpProfileStore(_HookedStore, _AnalyticsAccessors):
     def export_directory(self, ref: str, dest: Path) -> Path:
         """Download a published profile into ``dest``. Returns ``dest``.
 
-        A read, so it is supported: the document, every artifact its manifest
-        names, and the flat embedding form. What comes back is the published
-        record, which is the same thing
-        :meth:`FilesystemProfileStore.export_directory` produces and less than
-        the build directory held (no ``.cache/``, no restricted sources).
+        The document, every artifact its manifest names, and the flat embedding
+        form: the published record (no ``.cache/``, no private sources).
         """
         slug = self.resolve_slug(ref)
         out = Path(dest).expanduser()

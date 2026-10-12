@@ -1,8 +1,4 @@
-"""Multi-turn ``Chat`` wrapper around ``prof.persona.ask``.
-
-``ResearcherProfile.persona.chat(...)`` is the factory; importing this module
-has no side effect on the profile class.
-"""
+"""Multi-turn ``Chat`` wrapper around ``prof.persona.ask``."""
 
 import time
 from dataclasses import dataclass, field
@@ -74,7 +70,6 @@ class Chat:
 
     def _history_as_messages(self) -> list[dict]:
         msgs = [{"role": t.role, "content": t.content} for t in self.history]
-        # Trim from the head until we fit within the char budget.
         total = sum(len(m["content"]) for m in msgs)
         while msgs and total > self.max_history_chars:
             dropped = msgs.pop(0)
@@ -86,8 +81,7 @@ class Chat:
     # ------------------------------------------------------------------
 
     def send(self, message: str, k: Optional[int] = None) -> PersonaResponse:
-        # Snapshot history before appending the new user turn. That snapshot
-        # is what the LLM sees as prior context.
+        # Prior context, taken before the new user turn is appended.
         prior_messages = self._history_as_messages()
         self.history.append(Turn(role="user", content=message, citations=[], usage=None))
 
@@ -114,9 +108,8 @@ class Chat:
 
     def to_dict(self) -> dict:
         return {
-            # `rid` is what a reloaded session is validated against; `slug` is
-            # written for human readability only. Keying on the directory name
-            # meant a rename hard-broke every saved session.
+            # A reload validates against `rid`, so a rename does not break it;
+            # `slug` is for human readability only.
             "rid": getattr(self.profile, "rid", None),
             "slug": self.profile.slug,
             "k": self.k,
@@ -128,8 +121,7 @@ class Chat:
 
     @classmethod
     def from_dict(cls, data: dict, profile) -> "Chat":
-        # Validate on identity when the session carries one; fall back to the
-        # slug for sessions written before `rid` existed.
+        # Fall back to the slug for a session with no `rid`.
         saved_rid = data.get("rid")
         if saved_rid:
             current_rid = getattr(profile, "rid", None)

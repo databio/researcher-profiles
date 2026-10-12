@@ -1,9 +1,7 @@
 """``rp agent`` and ``rp profile``: the agent credential and profile-editing verbs.
 
-Both verbs resolve a credential from ``credentials.toml``, build a
-``ManagementClient`` from it, and dispatch on a subcommand. Everything here
-talks to a remote server, so every import of the client machinery is deferred
-into the handler that needs it.
+Everything here talks to a remote server, so client imports are deferred into
+the handlers.
 """
 
 import argparse
@@ -23,7 +21,6 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
         "agent",
         "Agent credential and identity commands",
         "rp agent whoami",
-        "rp agent scopes",
         "rp agent config",
     )
     agent_sub = p_agent.add_subparsers(dest="agent_cmd", metavar="<subcommand>")
@@ -31,22 +28,12 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
     p_agent_whoami = add_subcommand(
         agent_sub,
         "whoami",
-        "Show agent identity and scopes",
+        "Show the key's per-part access and the profiles it reaches",
         "rp agent whoami",
         "rp agent whoami --json",
     )
     add_json(p_agent_whoami, "JSON output")
     _add_host(p_agent_whoami)
-
-    p_agent_scopes = add_subcommand(
-        agent_sub,
-        "scopes",
-        "Show the scope catalog",
-        "rp agent scopes",
-        "rp agent scopes --json",
-    )
-    add_json(p_agent_scopes, "JSON output")
-    _add_host(p_agent_scopes)
 
     p_agent_config = add_subcommand(
         agent_sub,
@@ -107,10 +94,10 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
         "visibility",
         "Get or set profile visibility",
         "rp profile visibility get",
-        "rp profile visibility set --tier internal",
+        "rp profile visibility set --tier limited",
     )
     p_vis.add_argument("visibility_cmd", choices=["get", "set"], help="get or set")
-    p_vis.add_argument("--tier", help="Visibility tier (for set)")
+    p_vis.add_argument("--tier", help="Visibility tier (for set): public, limited, or private")
     _add_host(p_vis)
 
 
@@ -150,13 +137,15 @@ def _agent_config(cred) -> int:
         print(f"profile: {cred.profile}")
     if cred.owner:
         print(f"owner:   {cred.owner}")
-    if cred.scopes:
-        print(f"scopes:  {', '.join(cred.scopes)}")
     return EXIT_OK
 
 
 def _agent_whoami(client, args: argparse.Namespace) -> int:
-    """Print the agent's identity, tier, scopes and editable profiles."""
+    """Print the key's identity, its parts table, and what it may write where.
+
+    One level per part (``none``, ``read``, ``write``) plus the "Replace whole
+    profiles" switch. A part the server does not list is ``none``.
+    """
     from .auth.agent import AgentAPIError
 
     try:
@@ -168,39 +157,32 @@ def _agent_whoami(client, args: argparse.Namespace) -> int:
         print(json.dumps(result, indent=2))
         return EXIT_OK
     p = result.get("principal", {})
-    print(f"Agent:   {p.get('label', '?')} ({p.get('handle', '?')})")
+    print(f"Agent:   {p.get('label') or '?'} ({p.get('handle', '?')})")
     owner = result.get("owner")
     if owner:
-        print(f"Owner:   {owner.get('name', '?')} ({owner.get('orcid', '?')})")
-    print(f"Tier:    {result.get('tier', '?')}")
-    print(f"Scopes:  {', '.join(result.get('scopes', []))}")
-    not_granted = result.get("scopes_not_granted", [])
-    if not_granted:
-        print(f"Missing: {', '.join(not_granted)}")
-    for prof in result.get("profiles", []):
-        print(f"Profile: {prof.get('slug', '?')} ({prof.get('role', '?')})")
-    return EXIT_OK
-
-
-def _agent_scopes(client, args: argparse.Namespace) -> int:
-    """Print the server's scope catalog."""
-    from .auth.agent import AgentAPIError
-
-    try:
-        result = client.identity.scopes()
-    except AgentAPIError as e:
-        print(f"Error: {e.detail}", file=sys.stderr)
-        return EXIT_ERROR
-    if args.as_json:
-        print(json.dumps(result, indent=2))
-        return EXIT_OK
-    for name, info in result.items():
-        flag = " [DANGEROUS]" if info.get("dangerous") else ""
-        default = " (default)" if info.get("default_on") else ""
-        print(f"  {name}{default}{flag}")
-        print(f"    {info.get('description', '')}")
-        if info.get("fields"):
-            print(f"    Fields: {', '.join(info['fields'])}")
+        print(f"Owner:   {owner.get('name') or '?'} ({owner.get('orcid') or '?'})")
+    parts = result.get("parts") or {}
+    for level in ("write", "read"):
+        names = sorted(part for part, lvl in parts.items() if lvl == level)
+        print(f"{level.capitalize() + ':':<9}{', '.join(names) or '-'}")
+    print("None:    every other part")
+    replace = "on" if result.get("replace_profiles") else "off"
+    print(f"Replace whole profiles: {replace}")
+    profiles = result.get("profiles") or []
+    if profiles:
+        print("Profiles:")
+    for prof in profiles:
+        state = prof.get("role", "?")
+        if "published" in prof:
+            state += ", published" if prof["published"] else ", unpublished"
+        writes = ", ".join(prof.get("writes") or []) or "nothing"
+        name = prof.get("slug") or prof.get("rid") or "?"
+        print(f"  {name} ({state}): writes {writes}")
+    never = result.get("never_delegable") or []
+    if never:
+        print("Never allowed:")
+    for item in never:
+        print(f"  {item.get('act', '?')}: {item.get('why', '')}")
     return EXIT_OK
 
 
@@ -208,7 +190,6 @@ def _agent_scopes(client, args: argparse.Namespace) -> int:
 #: not, because it reports the credential itself and never calls the server.
 _AGENT_HANDLERS: dict[str, Callable[..., int]] = {
     "whoami": _agent_whoami,
-    "scopes": _agent_scopes,
 }
 
 
@@ -217,7 +198,7 @@ def _cmd_agent(args: argparse.Namespace) -> int:
     from .auth.agent import CredentialError, ManagementClient, resolve_credential
 
     if not args.agent_cmd:
-        print("rp agent: subcommand required (whoami, scopes, config)", file=sys.stderr)
+        print("rp agent: subcommand required (whoami, config)", file=sys.stderr)
         return EXIT_USAGE
 
     try:
@@ -236,43 +217,7 @@ def _cmd_agent(args: argparse.Namespace) -> int:
     return handler(ManagementClient(cred), args)
 
 
-def _fetch_soul(cred, slug: str, manifest: list) -> str:
-    """Fetch the profile's SOUL body, or warn and return an empty one.
-
-    The body is written into the round-trip document and a later ``rp profile
-    push`` writes it back, so a fetch that failed must say so: pushing an empty
-    SOUL that was never actually read would erase the real one.
-    """
-    soul_url = ""
-    for entry in manifest or []:
-        if entry.get("role") == "soul" or "SOUL" in entry.get("content_url", ""):
-            soul_url = entry.get("content_url", "")
-            break
-    if not soul_url or soul_url.startswith("http"):
-        return ""
-    try:
-        import httpx
-    except ImportError as e:
-        print(
-            f"warning: cannot fetch SOUL ({e}); the round-trip document's body will be empty",
-            file=sys.stderr,
-        )
-        return ""
-    url = f"{cred.url.rstrip('/')}/api/v1/profiles/{slug}/content/{soul_url}"
-    try:
-        resp = httpx.get(url, headers={"Authorization": f"Bearer {cred.key}"}, timeout=30.0)
-        resp.raise_for_status()
-    except httpx.HTTPError as e:
-        print(
-            f"warning: cannot fetch SOUL from {url}: {e}; "
-            "the round-trip document's body will be empty",
-            file=sys.stderr,
-        )
-        return ""
-    return resp.text
-
-
-def _profile_pull(client, cred, slug: str, args: argparse.Namespace) -> int:
+def _profile_pull(client, slug: str, args: argparse.Namespace) -> int:
     """Write the profile out as a round-trip document (frontmatter plus SOUL)."""
     import yaml
 
@@ -284,13 +229,21 @@ def _profile_pull(client, cred, slug: str, args: argparse.Namespace) -> int:
         print(f"Error: {e.detail}", file=sys.stderr)
         return EXIT_ERROR
     content_hash = data.get("content_hash")
-    soul = _fetch_soul(cred, slug, data.get("manifest") or [])
+    soul = data.get("soul")
+    if soul is None:
+        # A SOUL that was never read must say so, or a later push of the empty
+        # body would erase the real one.
+        print(
+            "warning: this key may not read the SOUL; the round-trip document's body is empty",
+            file=sys.stderr,
+        )
+        soul = ""
 
     front = {
         "slug": slug,
         "rid": data.get("rid"),
         "base_hash": content_hash,
-        **_editable_fields(data.get("metadata", {})),
+        **_editable_fields(data.get("fields", {})),
     }
 
     out = Path(args.output)
@@ -320,7 +273,7 @@ def _profile_diff(client, slug: str, args: argparse.Namespace) -> int:
     except AgentAPIError as e:
         print(f"Error: {e.detail}", file=sys.stderr)
         return EXIT_ERROR
-    remote_meta = remote.get("metadata", {})
+    remote_meta = remote.get("fields", {})
     changed = [
         name
         for name, value in _editable_fields(local["frontmatter"]).items()
@@ -337,7 +290,7 @@ def _profile_diff(client, slug: str, args: argparse.Namespace) -> int:
 
 def _profile_push(client, slug: str, args: argparse.Namespace) -> int:
     """Push the document's changed metadata fields, and its SOUL body if present."""
-    from .auth.agent import AgentAPIError
+    from .auth.agent import AgentAPIError, InsufficientAccessError
 
     path = Path(args.file)
     if not path.is_file():
@@ -356,14 +309,20 @@ def _profile_push(client, slug: str, args: argparse.Namespace) -> int:
             print("Would update soul.")
         return EXIT_OK
 
+    if local.get("body") is not None:
+        # The narrative rides the same patch: one write, one version move.
+        patch["soul"] = local["body"]
     try:
         if patch:
             result = client.profile.patch_metadata(slug, patch, base_hash=base_hash)
-            print(f"Metadata: updated {', '.join(result.get('updated', []))}")
-            base_hash = result.get("content_hash")
-        if local.get("body") is not None:
-            client.profile.put_soul(slug, local["body"], base_hash=base_hash)
-            print("Soul: updated")
+            print(f"Updated: {', '.join(result.get('updated', []))}")
+    except InsufficientAccessError as e:
+        print(f"Refused: this key needs Write on {', '.join(e.missing)}.", file=sys.stderr)
+        print(
+            "Ask the account holder to change this key's access on the Privacy page.",
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
     except AgentAPIError as e:
         print(f"Error: {e.detail}", file=sys.stderr)
         return EXIT_ERROR
@@ -380,7 +339,7 @@ def _profile_visibility(client, slug: str, args: argparse.Namespace) -> int:
         except AgentAPIError as e:
             print(f"Error: {e.detail}", file=sys.stderr)
             return EXIT_ERROR
-        print(f"visibility: {data.get('metadata', {}).get('visibility', '?')}")
+        print(f"visibility: {data.get('fields', {}).get('visibility', '?')}")
         return EXIT_OK
     if not args.tier:
         print("--tier required for set", file=sys.stderr)
@@ -415,7 +374,7 @@ def _cmd_profile(args: argparse.Namespace) -> int:
         return EXIT_ERROR
 
     if args.profile_cmd == "pull":
-        return _profile_pull(client, cred, slug, args)
+        return _profile_pull(client, slug, args)
     if args.profile_cmd == "diff":
         return _profile_diff(client, slug, args)
     if args.profile_cmd == "push":

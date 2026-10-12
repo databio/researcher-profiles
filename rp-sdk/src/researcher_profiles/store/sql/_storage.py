@@ -54,14 +54,9 @@ if TYPE_CHECKING:  # pragma: no cover
 class SqlArtifactStorage(ArtifactStorage):
     """One profile's ``rp_*`` rows.
 
-    Writes run in a real transaction: :attr:`session` is the SQLAlchemy
-    ``Session`` the unit opened, ``WriteContext.atomic`` is ``True``, and the
-    whole unit (every ``save_*`` call inside it, the derived-state refresh,
-    and every pre-commit hook) commits or rolls back together.
-
-    Nothing here ever touches a filesystem: :attr:`directory` is ``None`` and
-    the capabilities that need one refuse with a message naming
-    :meth:`SqlProfileStore.export_directory`.
+    The whole write unit (every ``save_*``, the derived-state refresh, and
+    every pre-commit hook) commits or rolls back together. :attr:`directory` is
+    ``None``; capabilities that need one refuse.
     """
 
     def __init__(self, store: "SqlProfileStore", rid: str, *, slug: str):
@@ -69,11 +64,12 @@ class SqlArtifactStorage(ArtifactStorage):
         self._rid = rid
         self._slug = slug
         #: The session of the open write unit, or ``None``. Every writer goes
-        #: through this; opening a second connection inside a unit would
-        #: deadlock against rows the unit already holds. Public because
-        #: ``SqlProfileStore.create`` inserts the bare row through the unit's
-        #: own session, via ``WriteContext.session``.
+        #: through this; a second connection inside a unit would deadlock
+        #: against rows the unit already holds.
         self.session: Optional[Session] = None
+        #: Extra :class:`WriteContext` fields for the next unit this storage
+        #: opens (``merge_into`` sets ``retired_rid`` / ``retired_slug``).
+        self.context_extra: dict[str, Any] = {}
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"SqlArtifactStorage(url={self._store.url!r}, rid={self._rid!r})"
@@ -94,9 +90,7 @@ class SqlArtifactStorage(ArtifactStorage):
     def rid_hint(self) -> str:
         """The row key, known without reading a document.
 
-        A stored profile is addressed by rid before it is loaded, which is
-        also what lets a write unit name the profile it is writing while the
-        document is being replaced.
+        Lets a write unit name the profile while its document is replaced.
         """
         return self._rid
 
@@ -119,9 +113,8 @@ class SqlArtifactStorage(ArtifactStorage):
     def _read(self) -> Iterator[Session]:
         """A session for a read. Joins the open write unit's session if any.
 
-        Joining matters: a read inside a write unit must observe that unit's
-        uncommitted rows, or :meth:`refresh_derived` would hash the pre-write
-        document and every hook would see stale content.
+        A read inside a unit must see its uncommitted rows, or
+        :meth:`refresh_derived` would hash the pre-write document.
         """
         if self.session is not None:
             yield self.session
@@ -154,19 +147,12 @@ class SqlArtifactStorage(ArtifactStorage):
     def load_persisted_document(self) -> dict[str, Any]:
         """The document currently in the store; ``{}`` when absent.
 
-        Comparison basis for ``dateModified``, not a load path: errors here
-        are swallowed, exactly as on the filesystem.
+        Comparison basis for ``dateModified``, not a load path: errors are
+        swallowed.
 
-        The stored document carries ``hasPart``/``subjectOf`` regenerated from
-        the artifact rows, so an empty manifest is persisted as ``[]`` here
-        while the canonical model dump the incoming write is compared against
-        omits those keys entirely. Left as-is, ``content_changed`` would read
-        the extra ``[]`` slots as a change on every write (including an
-        identical re-push) and churn ``dateModified`` and ``content_hash``,
-        which would make every re-push look like an edit and break ``If-Match``
-        sync. Empty manifest slots are dropped so this basis matches the model
-        dump; a genuinely non-empty slot is untouched, so removing real parts is
-        still seen as the content change it is.
+        Empty ``hasPart``/``subjectOf`` slots are dropped to match the model
+        dump, which omits them. Otherwise every identical re-push would look
+        like an edit and break ``If-Match`` sync.
         """
         try:
             with self._read() as s:
@@ -191,20 +177,14 @@ class SqlArtifactStorage(ArtifactStorage):
     def save_document(self, data: Mapping[str, Any]) -> None:
         """Persist the document, and keep it consistent with ``rp_artifacts``.
 
-        Three things happen here, in order, and the order is the contract:
+        In order (the order is the contract):
 
-        1. The incoming manifest is applied onto the artifact rows, so an
-           owner edit (``set_visibility``) reaches the rows rather than living
-           only in a JSON blob the rows disagree with.
-        2. ``hasPart`` / ``subjectOf`` are regenerated from the rows. The rows
-           are the manifest; the document's copy is a projection of them, which
-           is what makes "the document and the rows disagree" unrepresentable.
-        3. The regenerated document and every scalar projection are written
-           through the single writer, :meth:`ProfileRow.from_document`.
+        1. The incoming manifest is applied onto the artifact rows.
+        2. ``hasPart`` / ``subjectOf`` are regenerated from the rows, so the
+           document and the rows cannot disagree.
+        3. The result is written through :meth:`ProfileRow.from_document`.
 
-        ``data`` arrives already stamped, canonicalized and re-validated by
-        :meth:`ResearcherProfile.save_profile`, so nothing that would fail to
-        load reaches the store.
+        ``data`` arrives already stamped, canonicalized and re-validated.
         """
         s = self._require_session("profile.jsonld")
         row = self._profile_row(s)
@@ -248,11 +228,7 @@ class SqlArtifactStorage(ArtifactStorage):
         )
 
     def content_hash(self) -> str:
-        """The stored ``content_hash`` column: derived state, not recomputed.
-
-        The write unit refreshes it (:meth:`refresh_derived`) before the
-        pre-commit hooks run, so a hook reading this observes the new content.
-        """
+        """The stored ``content_hash`` column, refreshed by :meth:`refresh_derived`."""
         with self._read() as s:
             row = s.get(ProfileRow, self._rid)
             if row is None or not row.content_hash:
@@ -320,18 +296,22 @@ class SqlArtifactStorage(ArtifactStorage):
         )
         return {k: v for k, v in doc.model_dump(mode="json").items() if k != "hasPart"}
 
-    def _write_artifact(
+    def write_artifact(
         self,
         content_url: str,
         text: Optional[str],
         *,
         role: str,
         name: str,
-        encoding_format: str = "text/markdown",
+        encoding_format: str = "text/plain",
         manifest_slot: str = DEFAULT_MANIFEST_SLOT,
         paper_id: Optional[str] = None,
     ) -> None:
-        """Upsert one artifact row, creating its manifest entry when new."""
+        """Upsert one artifact row, creating its manifest entry when new.
+
+        The descriptive arguments become the manifest row, since rows cannot be
+        rediscovered by walking. ``paper_id`` is for summary rows.
+        """
         s = self._require_session(content_url)
         row = self._artifact_row(s, content_url)
         if row is None:
@@ -371,11 +351,12 @@ class SqlArtifactStorage(ArtifactStorage):
         return self.artifact_text(EXPERTISE_URL) or ""
 
     def save_expertise(self, text: str) -> None:
-        self._write_artifact(
+        self.write_artifact(
             EXPERTISE_URL,
             text,
             role="expertise",
             name="Expertise",
+            encoding_format="text/markdown",
             manifest_slot="subjectOf",
         )
 
@@ -383,7 +364,14 @@ class SqlArtifactStorage(ArtifactStorage):
         return self.artifact_text(SOUL_URL) or ""
 
     def save_soul(self, text: str) -> None:
-        self._write_artifact(SOUL_URL, text, role="soul", name="SOUL", manifest_slot="subjectOf")
+        self.write_artifact(
+            SOUL_URL,
+            text,
+            role="soul",
+            name="SOUL",
+            encoding_format="text/markdown",
+            manifest_slot="subjectOf",
+        )
 
     # --- collections -------------------------------------------------------
 
@@ -476,14 +464,12 @@ class SqlArtifactStorage(ArtifactStorage):
     def save_citations(self, data: Any) -> None:
         """Write the citation graph; ``None`` DELETES the artifact.
 
-        Same asymmetry the filesystem backend has: :meth:`load_citations`
-        already models "legitimately absent" as ``None``, so ``None`` here is a
-        delete rather than a stored JSON ``null``.
+        ``None`` means absent to :meth:`load_citations`, so it is not stored.
         """
         if data is None:
             self._delete_artifact(CITATIONS_URL)
             return
-        self._write_artifact(
+        self.write_artifact(
             CITATIONS_URL,
             json.dumps(data, indent=2),
             role="citations",
@@ -507,11 +493,12 @@ class SqlArtifactStorage(ArtifactStorage):
         return f"sources/summaries/{paper_id}{SUMMARY_SUFFIX}"
 
     def save_summary(self, paper_id: str, text: str) -> None:
-        self._write_artifact(
+        self.write_artifact(
             self._summary_url(paper_id),
             text,
             role="paper_summary",
             name=f"Summary: {paper_id}",
+            encoding_format="text/markdown",
             paper_id=paper_id,
         )
 
@@ -523,10 +510,8 @@ class SqlArtifactStorage(ArtifactStorage):
     def load_build_state(self) -> BuildState:
         """Build state from ``rp_build_state``; an empty state when absent.
 
-        Absent is normal: a published store legitimately has none, the
-        same contract a published directory has. A missing table is absent too:
-        ``DROP TABLE rp_build_state`` has to stay as free as ``rm -rf .build/``,
-        so a store published without that table must still serve every profile.
+        A missing table counts as absent, so dropping ``rp_build_state`` is
+        safe.
         """
         from sqlalchemy.exc import DatabaseError
 
@@ -556,10 +541,7 @@ class SqlArtifactStorage(ArtifactStorage):
     # ------------------------------------------------------------------
 
     def build_manifest(self) -> tuple[list[ArtifactRef], list[ArtifactRef]]:
-        """Generate the manifest from ``rp_artifacts``, not by walking a path.
-
-        The rows are the directory listing.
-        """
+        """Generate the manifest from ``rp_artifacts``."""
         with self._read() as s:
             return self._manifest_rows(s)
 
@@ -571,8 +553,7 @@ class SqlArtifactStorage(ArtifactStorage):
         """Open a transaction and hand it to the unit.
 
         ``atomic=True``: everything inside this unit, hooks included, commits
-        or rolls back together. That is the whole reason a hook is told to
-        branch on ``ctx.atomic`` rather than on ``session is None``.
+        or rolls back together.
         """
         self.session = Session(self._store.engine)
         return WriteContext(
@@ -582,14 +563,14 @@ class SqlArtifactStorage(ArtifactStorage):
             kind=kind,
             session=self.session,
             atomic=True,
+            **self.context_extra,
         )
 
     def refresh_derived(self, ctx: WriteContext) -> None:  # noqa: ARG002
         """Recompute ``content_hash`` inside the unit, before the hooks run.
 
-        The digest spans the document and the SOUL, so a soul-only write has to
-        refresh it too. That is why this is the write unit's job and
-        not :meth:`save_document`'s.
+        The write unit's job, not :meth:`save_document`'s, because a soul-only
+        write changes the digest too.
         """
         s = self.session
         if s is None:  # pragma: no cover - only reachable outside a unit
@@ -611,11 +592,7 @@ class SqlArtifactStorage(ArtifactStorage):
             self.session = None
 
     def rollback(self, ctx: WriteContext) -> None:  # noqa: ARG002
-        """A real rollback: nothing this unit wrote survives.
-
-        Contrast the filesystem backend, which can only issue a compensating
-        write for the profile document.
-        """
+        """A real rollback: nothing this unit wrote survives."""
         if self.session is None:  # pragma: no cover
             return
         try:

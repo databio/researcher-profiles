@@ -47,10 +47,7 @@ export function getGroups(): ComparisonGroup[] {
   return groups;
 }
 
-/**
- * Get centroids for a specific backend_spec group. Asserts matching
- * backend_spec and dim.
- */
+/** Centroids for one backend_spec group. Throws on a backend_spec or dim mismatch. */
 export function getCentroidsForGroup(
   backendSpec: string,
 ): { vectors: Float32Array; dim: number; order: string[] } | null {
@@ -58,7 +55,6 @@ export function getCentroidsForGroup(
   const data = state.centroids.get(backendSpec);
   if (!data) return null;
 
-  // Assert consistency
   const expectedBytes = data.order.length * data.dim * 4;
   if (data.vectors.byteLength !== expectedBytes) {
     throw new Error(

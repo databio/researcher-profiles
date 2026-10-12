@@ -1,17 +1,6 @@
 /**
- * Maps the works graph to PaperEntry[].
- *
- * The `works` manifest role resolves to a JSON-LD graph document: a schema.org
- * `Collection` whose `hasPart` array holds one `ScholarlyArticle`-shaped record
- * per paper (`name`/title, `datePublished`/year, `isPartOf`/journal,
- * `first_author`, `full_text_link`, …). The presentational `PapersList`
- * component, however, expects a flat `PaperEntry[]` (the wire contract this
- * library owns). This module bridges the two.
- *
- * The transform is pure and total: it never throws on malformed or
- * unexpected input and it skips any graph entry that is not paper-shaped (e.g. a
- * centroid/embedding record that slipped into a graph), so an unknown role or a
- * stray node renders nothing rather than crashing the viewer.
+ * Maps the `works` JSON-LD graph to the flat `PaperEntry[]` that `PapersList`
+ * takes. Pure and total: never throws on malformed input.
  */
 
 import type { PaperEntry } from "../types";
@@ -65,7 +54,6 @@ function paperIdOf(node: Record<string, unknown>): string | null {
   if (explicit) return explicit;
   const id = asString(node["@id"]);
   if (!id) return null;
-  // Strip a leading fragment prefix like "#paper/" to recover the bare id.
   const slash = id.lastIndexOf("/");
   return slash >= 0 ? id.slice(slash + 1) : id.replace(/^#/, "");
 }
@@ -91,8 +79,7 @@ function nodeToPaper(node: unknown): PaperEntry | null {
   if (!node || typeof node !== "object") return null;
   const record = node as Record<string, unknown>;
   const title = titleOf(record);
-  // A paper must have a title; skip embedding/centroid or otherwise non-article
-  // nodes so an unexpected graph member never breaks rendering.
+  // No title means not a paper (e.g. a stray embedding node); skip it.
   if (!title) return null;
 
   const entry: PaperEntry = { title };

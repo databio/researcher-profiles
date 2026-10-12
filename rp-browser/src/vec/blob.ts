@@ -1,15 +1,8 @@
-/**
- * Parse a centroid blob: assert byte length, construct Float32Array view,
- * verify little-endian platform, expose row accessor.
- */
+/** Centroid blob parsing. */
 
 /**
- * Parse a raw centroid blob into a structured accessor.
- *
- * @param buffer - The raw ArrayBuffer containing float32 centroid data
- * @param count - Expected number of centroid rows
- * @param dim - Dimensionality of each vector
- * @returns An object with a `row(i)` accessor for individual centroids
+ * Parse a raw little-endian float32 centroid blob of `count` rows by `dim`.
+ * Throws on a byte-length mismatch or a big-endian platform.
  */
 export function parseCentroidBlob(
   buffer: ArrayBuffer,
@@ -24,14 +17,12 @@ export function parseCentroidBlob(
     );
   }
 
-  // Assert little-endian platform. Float32Array uses the platform's native
-  // byte order, which must match the blob's little-endian encoding.
+  // Float32Array uses native byte order, which must match the blob's.
   assertLittleEndian();
 
   const vectors = new Float32Array(buffer);
 
-  // Defensively re-normalize each row to unit length. The Python side already
-  // normalizes in store.centroids, but a hand-published blob may not.
+  // Re-normalize each row: a hand-published blob may not be unit length.
   for (let i = 0; i < count; i++) {
     const offset = i * dim;
     let norm = 0;

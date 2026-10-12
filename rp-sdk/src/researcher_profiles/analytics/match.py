@@ -1,36 +1,58 @@
 """Cross-profile ranking: query -> ordered profiles, with evidence.
 
 The pipeline is centroid prefilter, per-profile chunk re-rank, calibration,
-then optional MMR diversification. Topic indexing and clustering live here too
-because both are ways of asking "which profiles go together", and both read the
-same centroid matrix ranking does.
-
-Reached as ``store.match``.
+then optional MMR diversification.
 """
 
 import json
 import logging
 import math
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 import numpy as np
+from pydantic import ValidationError
 
 from ..embeddings._sqlite import IndexNotBuiltError
 from ..embeddings.backends import MissingEmbeddingBackendError
 from ..embeddings.chunking import PAPER_CHUNK_TYPES
-from ..errors import CapabilityUnavailableError
+from ..errors import CapabilityUnavailableError, ProfileError
 from ..generative.calibration import ensure_calibration, normalize_score
 from ..models.results import Match, MatchEvidence
+from ..openalex import _TOPIC_ID_RE, topic_score
+from ..privacy import ViewerTier, chunk_source_tiers, tier_allows
 from ..profile import ResearcherProfile
+from ..schema import ResearchInterest, effective_interests
 from ..store._analytics import require_vector_store
 from ..utils.clock import now_iso
+from ..vocab import OPENALEX_SYSTEM
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from ..store.protocol import VectorStore
     from .roster import _Roster, _RosterCache
 
 logger = logging.getLogger(__name__)
+
+
+def _profile_topic_codes(prof: ResearcherProfile) -> set[str]:
+    """The OpenAlex topics a profile works on, from its typed interests.
+
+    Its inferred topics (counted from its papers) and any it weighs above 0;
+    a topic it weighs at 0 or below is not one it offers. A profile whose
+    document cannot be read offers none.
+    """
+    try:
+        entries = prof.metadata.research_interests
+    except (OSError, ProfileError, ValidationError):
+        return set()
+    return {
+        e.concept.code
+        for e in effective_interests(entries)
+        if not e.concept.unmapped
+        and e.concept.system == OPENALEX_SYSTEM
+        and (e.weight is None or e.weight > 0)
+    }
 
 
 class MatchManager:
@@ -45,12 +67,7 @@ class MatchManager:
 
     @property
     def topics_cache_path(self) -> Optional[Path]:
-        """``<root>/.cache/topics.json``, or ``None`` without a root.
-
-        A rendered view of :meth:`topics`, written for shell callers. The
-        in-memory index is built fresh either way, so a store with no directory
-        loses only the file.
-        """
+        """``<root>/.cache/topics.json`` (a view of :meth:`topics`), or ``None`` without a root."""
         from ..utils.paths import store_cache_dir
 
         d = store_cache_dir(self._store.root)
@@ -80,11 +97,31 @@ class MatchManager:
         diversify: bool = True,
         lambda_: float = 0.5,
         topk_chunks: int = 5,
+        interests: "Sequence[ResearchInterest] | None" = None,
+        topic_alpha: float = 0.2,
+        viewer: Callable[[ResearcherProfile], ViewerTier] | None = None,
     ) -> list[Match]:
-        """Rank every profile in the store against a free-text query."""
-        # Up front, before any work: ranking is the capability, and a store
-        # that cannot serve vectors should say so in one error rather than
-        # produce an empty ranking that reads like "nobody matched".
+        """Rank every profile in the store against a free-text query.
+
+        ``require_topics`` keeps only profiles claiming one of them: a topic
+        label (the cached topic index), or an OpenAlex topic id (``T10222``)
+        the profile's typed research interests carry.
+
+        ``interests`` are the query side's typed interests (a query profile's
+        ``research_interests``). After the chunk re-rank, each candidate's
+        OpenAlex topics are scored against them with
+        :func:`~researcher_profiles.openalex.topic_score`, and ``topic_alpha``
+        times that is added to its score. A candidate on a topic the query
+        declared -1 is dropped. The shared topics are reported in
+        ``evidence.matched_topics``.
+
+        ``viewer`` maps a profile to the tier the caller may see of it. When
+        given, chunks above that tier take no part in the score or the
+        evidence: the chunk half of the score, ``top_papers`` and
+        ``top_chunks`` are computed as if those chunks were not indexed.
+        ``None`` (in-process use) scores every chunk.
+        """
+        # Fail loudly up front, not with an empty ranking that reads like "nobody matched".
         require_vector_store(self._store)
         if not self._rostered().profiles:
             return []
@@ -96,15 +133,11 @@ class MatchManager:
 
         vectors = self._store.centroids
         qvec = vectors.embed_query(text)
-        # The roster and the matrix together, so row i is still slugs[i] even
-        # if a write lands between the two reads.
         roster, matrix = vectors.snapshot()
         sims = matrix @ qvec  # cosine to all, (n,)
         slugs = roster.slugs
 
-        # One memo per rank() call. Topic labels repeat heavily across
-        # profiles, so embedding each one once turns prefilter*topics query
-        # embeddings into the handful of distinct labels the survivors share.
+        # Per-call memo: topic labels repeat heavily across profiles.
         label_vecs: dict[str, "np.ndarray"] = {}
 
         matches = [
@@ -116,9 +149,12 @@ class MatchManager:
                 label_vecs=label_vecs,
                 topk_chunks=topk_chunks,
                 normalize=normalize,
+                viewer=viewer,
             )
             for i in self._survivors(sims, roster, candidate_slugs, prefilter=prefilter, k=k)
         ]
+        if interests:
+            matches = self._apply_topic_scores(matches, interests, topic_alpha)
 
         matches.sort(key=lambda m: -m.score)
         if diversify and len(matches) > k:
@@ -126,13 +162,48 @@ class MatchManager:
         return matches[:k]
 
     def _topic_allowed_slugs(self, require_topics: list[str]) -> set[str]:
-        """The slugs claiming at least one of ``require_topics``."""
-        idx = self.topics()
+        """The slugs claiming at least one of ``require_topics``.
+
+        An OpenAlex topic id matches the profiles whose typed interests carry
+        that topic (and do not weigh it at 0 or below); anything else is a
+        label looked up in the cached topic index.
+        """
+        ids = {m.group(1).upper() for t in require_topics if (m := _TOPIC_ID_RE.match(t.strip()))}
+        labels = [t for t in require_topics if not _TOPIC_ID_RE.match(t.strip())]
         allowed: set[str] = set()
-        for t in require_topics:
-            for p in idx.get(t.lower(), []):
-                allowed.add(p.slug)
+        if ids:
+            for prof in self._rostered().profiles:
+                if ids & _profile_topic_codes(prof):
+                    allowed.add(prof.slug)
+        if labels:
+            idx = self.topics()
+            for t in labels:
+                for p in idx.get(t.lower(), []):
+                    allowed.add(p.slug)
         return allowed
+
+    @staticmethod
+    def _apply_topic_scores(
+        matches: list[Match], interests: "Sequence[ResearchInterest]", alpha: float
+    ) -> list[Match]:
+        """Add ``alpha * topic_score`` to each match; drop hard-excluded ones."""
+        wanted = {
+            e.concept.code
+            for e in effective_interests(interests)
+            if not e.concept.unmapped
+            and e.concept.system == OPENALEX_SYSTEM
+            and (e.weight is None or e.weight > 0)
+        }
+        kept: list[Match] = []
+        for m in matches:
+            codes = _profile_topic_codes(m.profile)
+            ts = topic_score(codes, interests)
+            if ts is None:
+                continue
+            m.score += alpha * ts
+            m.evidence.matched_topics = sorted(codes & wanted)
+            kept.append(m)
+        return kept
 
     def _survivors(
         self,
@@ -143,11 +214,7 @@ class MatchManager:
         prefilter: int,
         k: int,
     ) -> list[int]:
-        """Matrix row indices that pass the filter, best-scoring first, capped.
-
-        A set membership test, not a scan per slug: this is the one step in
-        rank() that would otherwise grow quadratically with the corpus.
-        """
+        """Matrix row indices that pass the filter, best-scoring first, capped."""
         survivor_idx = [i for i, s in enumerate(roster.slugs) if s in candidate_slugs]
         survivor_idx.sort(key=lambda i: -float(sims[i]))
         return survivor_idx[: max(prefilter, k)]
@@ -162,9 +229,7 @@ class MatchManager:
     ) -> list[str]:
         """The profile's cached topic labels close enough to the query to be evidence.
 
-        ``label_vecs`` is the caller's memo of label -> unit vector, shared
-        across every profile in one rank() call. It is passed in rather than
-        held on the manager so it lives exactly as long as the query does.
+        ``label_vecs`` is the caller's per-query memo of label -> unit vector.
         """
         try:
             topics = prof.topics.get(method="cached")
@@ -186,9 +251,8 @@ class MatchManager:
             MissingEmbeddingBackendError,
             CapabilityUnavailableError,
         ):
-            # CapabilityUnavailableError: ``prof.topics`` reads the profile's
-            # ``.cache/topics.json``, which a remote profile does not have.
-            # Topic overlap is only supporting evidence for the score.
+            # A remote profile has no ``.cache/topics.json``; overlap is only
+            # supporting evidence.
             return []
 
     def _match_for(
@@ -201,14 +265,13 @@ class MatchManager:
         label_vecs: dict[str, "np.ndarray"],
         topk_chunks: int,
         normalize: bool,
+        viewer: Callable[[ResearcherProfile], ViewerTier] | None = None,
     ) -> Match:
         """Score one surviving profile and gather the evidence behind that score."""
         try:
-            hits = self._store.vector_index(prof.slug).search(text, k=topk_chunks)
+            hits = self._visible_top_hits(prof, text, topk_chunks, viewer)
         except (IndexNotBuiltError, MissingEmbeddingBackendError):
-            # A profile with no vectors contributes no chunk evidence and keeps
-            # its centroid score. Not a capability failure: the store proved it
-            # serves vectors before ranking started (``require_vector_store``).
+            # No vectors: no chunk evidence, centroid score only.
             hits = []
         mean_chunk_score = float(np.mean([h.score for h in hits])) if hits else 0.0
         raw = 0.5 * centroid_score + 0.5 * mean_chunk_score
@@ -229,16 +292,39 @@ class MatchManager:
         score = self._normalized_score(prof, raw) if normalize else raw
         return Match(profile=prof, score=score, evidence=evidence)
 
+    def _visible_top_hits(
+        self,
+        prof: ResearcherProfile,
+        text: str,
+        k: int,
+        viewer: Callable[[ResearcherProfile], ViewerTier] | None,
+    ) -> list:
+        """The top ``k`` chunk hits the viewer may see, best first.
+
+        Fetches wider until ``k`` visible hits are found or the index runs
+        out, so hidden chunks never displace visible ones from the top ``k``.
+        """
+        index = self._store.vector_index(prof.slug)
+        if viewer is None:
+            return list(index.search(text, k=k))
+        tier = viewer(prof)
+        md = getattr(prof, "metadata", None)
+        fetch = max(k, 1)
+        while True:
+            hits = list(index.search(text, k=fetch))
+            tiers = chunk_source_tiers(md, {(h.source_type, h.source_id) for h in hits})
+            visible = [h for h in hits if tier_allows(tier, tiers[(h.source_type, h.source_id)])]
+            if len(visible) >= k or len(hits) < fetch:
+                return visible[:k]
+            fetch *= 4
+
     def _normalized_score(self, prof: ResearcherProfile, raw: float) -> float:
         """``raw`` mapped through the profile's calibration, or ``raw`` if that fails."""
         try:
             return normalize_score(raw, ensure_calibration(prof))
-        # Boundary: every failure mode of an on-disk calibration artifact, from
-        # any of the readers behind ensure_calibration.
         except Exception:
-            # Fail soft (a broken calibration must not 500 /match) but never
-            # silently: an uncalibrated raw score ranked against normalized
-            # peers is a corrupt ordering, not a degraded one.
+            # Fail soft (a broken calibration must not 500 /match) but loudly:
+            # a raw score ranked against normalized peers is a corrupt ordering.
             logger.warning(
                 "calibration failed for %s; falling back to an UNCALIBRATED "
                 "raw score (this profile is not comparable to normalized peers)",
@@ -260,9 +346,7 @@ class MatchManager:
         """Re-order by maximal marginal relevance: relevant but not redundant."""
         if not matches:
             return []
-        # Lazy: the MMR helper pulls numpy-adjacent machinery the plain
-        # ranking path must not pay for. See
-        # tests/test_guardrails.py::test_match_path_does_not_pull_sklearn.
+        # Lazy; see tests/test_guardrails.py::test_match_path_does_not_pull_sklearn.
         from ..embeddings.rank import mmr_indices
 
         roster, centroids = self._store.centroids.snapshot()
@@ -281,7 +365,6 @@ class MatchManager:
     def topics(self) -> dict[str, list[ResearcherProfile]]:
         """Topic label -> the profiles claiming it. Also written to disk."""
         cache_path = self.topics_cache_path
-        # Build fresh in-memory; we still write a JSON view to disk.
         out: dict[str, list[ResearcherProfile]] = {}
         for p in self._rostered().profiles:
             try:
@@ -327,8 +410,7 @@ class MatchManager:
         if k is None:
             k = max(2, int(math.sqrt(len(profiles))))
         k = max(1, min(k, len(profiles)))
-        # Lazy: scikit-learn is a heavy optional extra and the ranking path
-        # must stay free of it.
+        # Lazy: scikit-learn is a heavy optional extra.
         try:
             from sklearn.cluster import KMeans
         except ImportError as e:

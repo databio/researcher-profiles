@@ -1,10 +1,6 @@
 /**
  * Profile conformance check suite.
  *
- * A published profile is a single `schema:Person` document (profile.jsonld).
- * Its file manifest is the `hasPart` + `subjectOf` arrays of typed entries
- * (ArtifactRefs), each pointing at a relative `contentUrl`.
- *
  * Checks run sequentially and stream live via the emit callback. Each check is
  * a pure function of FetchOutcomes so it is unit-testable without a network.
  */
@@ -15,8 +11,9 @@ import type { FetchOutcome } from "../net/fetchJson";
 import { fetchJson } from "../net/fetchJson";
 import { fetchBinary } from "../net/fetchBinary";
 import { getFix } from "./fixes";
-import { checkOrcidRoundTrip } from "./orcid";
 import { validateAgainstSchema, schemaIdForRole } from "./schemaValidation";
+import { TEXT_ARTIFACT_ROLES, textArtifactProblems } from "./textArtifact";
+import { orcidLoginChecks } from "./orcidLogin";
 
 type Emit = (check: CheckResult) => void;
 
@@ -36,8 +33,7 @@ interface Manifest {
 
 /**
  * The format IRI a conforming profile.jsonld must declare in `conformsTo`.
- * Mirrors PROFILE_FORMAT_IRI in the Python package (jsonld.py). This is the
- * format gate both validators enforce.
+ * Mirrors PROFILE_FORMAT_IRI in the Python package (jsonld.py).
  */
 const PROFILE_FORMAT_IRI = "https://profiles.databio.org/context/v1.jsonld";
 
@@ -49,7 +45,6 @@ const KNOWN_DIMS: Record<string, number> = {
   "openai:text-embedding-3-large": 3072,
 };
 
-/** Every manifest entry, across both `hasPart` and `subjectOf`. */
 function entriesOf(manifest: Manifest): ArtifactRef[] {
   return [...(manifest.hasPart ?? []), ...(manifest.subjectOf ?? [])];
 }
@@ -81,7 +76,6 @@ export async function profileChecks(
   if (!manifestOutcome.ok) return checks;
 
   // --- cors ---
-  // If we got here, CORS passed (we successfully fetched cross-origin)
   add({
     id: "cors",
     title: "CORS",
@@ -113,23 +107,19 @@ export async function profileChecks(
   });
 
   const manifest = manifestOutcome.value as Manifest;
-  // A profile.jsonld is a `schema:Person` whose `@id` is the researcher's
-  // canonical IRI (e.g. an ORCID URL), not its hosting location. Every relative
-  // `contentUrl` therefore resolves against the URL we actually fetched (`base`),
-  // never against `@id`. `base` is guaranteed absolute by normalizeBase().
+  // `@id` is the researcher's IRI, not the hosting location, so relative
+  // `contentUrl`s resolve against the fetched `base`, never against `@id`.
   const rawId = typeof manifest["@id"] === "string" ? manifest["@id"] : "";
 
-  // --- profile-schema (structural + format validation) ---
-  // Required identity fields (name, rid) plus the `conformsTo` format gate.
-  // `@id` is optional (nullable in the schema), so it is not required here.
+  // --- profile-schema ---
+  // `@id` is nullable in the schema, so it is not required here.
   const requiredFields = ["@context", "name", "rid"];
   const missingFields = requiredFields.filter((f) => !(f in manifest));
   const hasManifestArrays =
     Array.isArray(manifest.hasPart) || Array.isArray(manifest.subjectOf);
   if (!hasManifestArrays) missingFields.push("hasPart");
 
-  // `conformsTo` is a single IRI string (older bundles used an array); accept
-  // either shape and require the profile format IRI to be present.
+  // `conformsTo` may be a string or an array; either must hold the format IRI.
   const conformsRaw = manifest.conformsTo as unknown;
   const conformsList = Array.isArray(conformsRaw)
     ? (conformsRaw as unknown[]).map(String)
@@ -168,11 +158,10 @@ export async function profileChecks(
   add(validateAgainstSchema("profile_jsonld", manifest, "profile.jsonld"));
 
   // --- manifest-identity ---
-  // `@id` identifies the researcher, not the host. When it is an ORCID URL its
-  // ORCID must agree with `rid` (a copy-pasted document carrying someone else's
-  // identity is a real, silent failure mode). Any other absolute IRI, a bare
-  // relative id that is the tail of the fetched base, or an absent `@id` all
-  // pass. None of those misidentify the subject.
+  // An ORCID `@id` must agree with `rid`: a copy-pasted document carrying
+  // someone else's identity fails silently otherwise. Other absolute IRIs, a
+  // relative id that is the tail of the fetched base, a fragment id (`#me`),
+  // or no `@id` all pass.
   const orcidMatch = /orcid\.org\/([0-9]{4}-[0-9]{4}-[0-9]{4}-[0-9]{3}[0-9X])/i.exec(
     rawId,
   );
@@ -187,7 +176,7 @@ export async function profileChecks(
     identityMessage = identityPassed
       ? `@id ORCID matches rid (${rid}).`
       : `@id ORCID (${idOrcid}) does not match rid (${rid}). A copy-pasted document carrying someone else's identity is a real and silent failure mode.`;
-  } else if (rawId && !/^https?:\/\//i.test(rawId)) {
+  } else if (rawId && !/^https?:\/\//i.test(rawId) && !rawId.startsWith("#")) {
     // A relative @id must be the tail of the base we fetched.
     identityPassed = base.endsWith(rawId);
     identityMessage = identityPassed
@@ -203,11 +192,10 @@ export async function profileChecks(
     evidence: `@id: ${rawId || "(none)"}, base: ${base}`,
   });
 
-  // --- orcid-roundtrip badge ---
-  if (orcidMatch) {
-    const orcidBadge = await checkOrcidRoundTrip(orcidMatch[1], base);
-    add(orcidBadge);
-  }
+  // --- proof-orcid-login / orcid-verified ---
+  // A registry-issued ORCID login proof, trusted only from the origin that
+  // served this document. No proof, no check.
+  for (const c of orcidLoginChecks(manifest, manifestOutcome.finalUrl)) add(c);
 
   // --- required-roles ---
   const entries = entriesOf(manifest);
@@ -232,14 +220,14 @@ export async function profileChecks(
       : `Missing required manifest roles for level "${level}": ${missingRoles.join(", ")}`,
   });
 
-  // --- artifact-reachable (GET every declared file, resolved against base) ---
-  // A manifest entry that declares a `contentUrl` promises a fetchable file. Any
-  // entry whose file 404s is a dangling artifact. The browser's row for it
-  // dead-ends. Templated (`{...}`) and external (absolute) contentUrls are
-  // skipped: neither resolves under this profile's base.
+  // --- artifact-reachable ---
+  // Every declared `contentUrl` must fetch. Templated (`{...}`) and absolute
+  // contentUrls are skipped: neither resolves under this profile's base.
   const unreachable: Array<{ role: string; href: string; detail: string }> = [];
   const mismatches: string[] = [];
   const fetchedJson: Array<{ role: string; data: unknown }> = [];
+  let textChecked = 0;
+  const garbled: Array<{ href: string; problems: string[] }> = [];
   let corsFix: CheckResult["fix"] | undefined;
   for (const entry of entries.slice(0, 40)) {
     const contentUrl = entry.contentUrl || "";
@@ -261,6 +249,16 @@ export async function profileChecks(
     }
     if (isJsonPart && "value" in partOutcome && entry.role) {
       fetchedJson.push({ role: entry.role, data: partOutcome.value });
+    }
+    if (
+      !isJsonPart &&
+      entry.role &&
+      TEXT_ARTIFACT_ROLES.has(entry.role) &&
+      partOutcome.value instanceof ArrayBuffer
+    ) {
+      textChecked++;
+      const problems = textArtifactProblems(partOutcome.value);
+      if (problems.length > 0) garbled.push({ href: contentUrl, problems });
     }
     if (entry.encodingFormat && partOutcome.contentType) {
       const declared = entry.encodingFormat.split(";")[0].trim();
@@ -287,7 +285,26 @@ export async function profileChecks(
     fix: corsFix,
   });
 
-  // --- ajv schema validation of fetched auxiliary documents ---
+  // --- text-artifacts ---
+  // Same rule as `rp validate` (researcher_profiles.text_artifact), but only
+  // on the files fetched above, so a large profile is sampled.
+  if (textChecked > 0) {
+    add({
+      id: "text-artifacts",
+      title: "Paper Text Is Clean",
+      severity: "error",
+      passed: garbled.length === 0,
+      message:
+        garbled.length === 0
+          ? `${textChecked} paper text file(s) checked; all are clean text.`
+          : `${garbled.length} of ${textChecked} paper text file(s) are garbled: ${garbled
+              .map((g) => `${g.href} (${g.problems.join("; ")})`)
+              .join("; ")}.`,
+      evidence: garbled.length > 0 ? garbled.map((g) => g.href).join(", ") : undefined,
+    });
+  }
+
+  // --- schema validation of fetched auxiliary documents ---
   for (const { role, data } of fetchedJson) {
     const sid = schemaIdForRole(role);
     if (sid) {
@@ -304,7 +321,6 @@ export async function profileChecks(
     if (indexOutcome.ok) {
       const idx = indexOutcome.value;
 
-      // ajv schema validation of the embedding index
       add(validateAgainstSchema("embedding_index", idx, "embedding_index"));
 
       // backend-spec
@@ -343,7 +359,6 @@ export async function profileChecks(
           evidence: centroidUrl,
         });
 
-        // Cross-check dim against known model dimensions
         if (backendSpec && backendSpec in KNOWN_DIMS) {
           const knownDim = KNOWN_DIMS[backendSpec];
           add({
@@ -370,7 +385,7 @@ export async function profileChecks(
           : "Missing probe in embeddings/index.json. A published embeddings/index.json without a probe fails the Searchable class.",
       });
 
-      // vector-sanity (check centroid normalization)
+      // vector-sanity
       if (centroidEntry) {
         const centroidUrl = new URL(centroidEntry.contentUrl, base).href;
         const centroidOutcome = await fetchBinary(centroidUrl);
@@ -420,13 +435,12 @@ export async function profileChecks(
     }
   }
 
-  // --- paper-summary check ---
-  // Per-paper summaries are individual manifest entries (role `paper_summary`).
-  // Verify the first one resolves, so paper rows in the browser don't dead-end.
+  // --- paper-summary ---
+  // Only the first summary is checked.
   const summaryEntry = entries.find((e) => e.role === "paper_summary" && e.contentUrl);
   if (summaryEntry) {
     const summaryUrl = new URL(summaryEntry.contentUrl, base).href;
-    // Summaries are markdown, not JSON. Check reachability only.
+    // Markdown, so reachability only.
     const summaryOutcome = await fetchBinary(summaryUrl);
     add({
       id: "paper-summary",
@@ -438,12 +452,6 @@ export async function profileChecks(
         : `A paper_summary entry${summaryEntry.paperId ? ` for "${summaryEntry.paperId}"` : ""} 404s. This makes the browser's paper rows dead-end.`,
       evidence: summaryUrl,
     });
-  }
-
-  // --- orcid round-trip badge ---
-  if (manifest.orcid) {
-    const orcidResult = await checkOrcidRoundTrip(manifest.orcid, base);
-    add(orcidResult);
   }
 
   return checks;

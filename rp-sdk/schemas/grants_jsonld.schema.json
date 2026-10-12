@@ -2,7 +2,7 @@
   "$defs": {
     "GrantRecord": {
       "additionalProperties": true,
-      "description": "One award: a ``schema:MonetaryGrant`` node.\n\nschema.org has no crisp \"this person received this grant\" relation, so the\nperson->grant link is ``rp:heldGrant``. That is an ``rp:``\ndecision, not an oversight (see ``context/README.md``).",
+      "description": "One award: a ``schema:MonetaryGrant`` node.\n\nschema.org has no \"this person received this grant\" relation, so the\nperson->grant link is ``rp:heldGrant`` (see ``context/README.md``).",
       "properties": {
         "@context": {
           "anyOf": [
@@ -79,6 +79,22 @@
         "funder": {
           "anyOf": [
             {
+              "additionalProperties": true,
+              "description": "A Organization node.",
+              "properties": {
+                "@id": {
+                  "type": "string"
+                },
+                "@type": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            {
               "type": "string"
             },
             {
@@ -130,7 +146,7 @@
           "anyOf": [
             {
               "enum": [
-                "grants-data",
+                "mygrants",
                 "manual",
                 "reporter"
               ],
@@ -194,7 +210,7 @@
     }
   },
   "additionalProperties": true,
-  "description": "Top-level model for ``sources/grants.jsonld``.\n\nAny profile level may carry one: grant history feeds eligibility\nevaluation, which is not a deep-profile-only concern.",
+  "description": "Top-level model for ``sources/grants.jsonld``.\n\nAny profile level may carry one.",
   "properties": {
     "@context": {
       "anyOf": [
@@ -234,6 +250,15 @@
     },
     "about": {
       "anyOf": [
+        {
+          "additionalProperties": true,
+          "properties": {
+            "@id": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
         {
           "type": "string"
         },

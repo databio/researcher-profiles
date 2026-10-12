@@ -100,9 +100,7 @@ AddType application/ld+json .jsonld`,
 Content-Type: application/ld+json`,
 };
 
-/**
- * Get a copy-pasteable fix for a check failure.
- */
+/** A copy-pasteable fix for a check failure. */
 export function getFix(checkId: string, url: string): string | undefined {
   const host = detectHost(url);
 

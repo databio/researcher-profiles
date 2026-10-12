@@ -17,11 +17,7 @@ function sourceLabel(key: string): string {
   return SOURCE_LABELS[key] ?? key.replace(/_/g, " ");
 }
 
-/**
- * Shows what embedding vectors a profile publishes: the backend/model, vector
- * dimension, chunk count, and a breakdown of which parts of the profile were
- * embedded. Renders an honest empty state when a profile ships no vectors.
- */
+/** The embedding vectors a profile publishes: model, dimension, and chunk breakdown. */
 export function EmbeddingsPanel({ loading, error, data }: Props) {
   if (loading) return <p className="text-muted">Loading embeddings…</p>;
   if (error) return <p className="text-danger">{error}</p>;

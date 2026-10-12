@@ -9,10 +9,8 @@ Run with:
 The host surface
 ================
 
-A host is a service that serves these routes, mounts them under its own
-prefix and auth, or composes its own surface on top of the same projection.
 The names below are the stable surface a host builds against. Anything not
-listed here is internal to the route modules.
+listed here is internal.
 
 Application factory
     ``create_app`` builds the bare server: every router mounted, every
@@ -29,64 +27,84 @@ Routers
 Route handlers
     The read, search and generative handlers are exported so a host can
     re-declare them on its own ``APIRouter`` with its own dependencies:
-    ``list_profiles``, ``get_profile_detail``, ``list_papers``,
-    ``get_paper_summary``, ``search_profile``, ``ask_profile``,
-    ``review_profile``, ``innovate_profile``, ``riff_profile``. Each takes the
-    store and the viewer tier as arguments, and a host supplies them through
-    its own ``Depends``. ``list_profiles`` returns a ``Response`` carrying the
-    ``rp:profileList`` envelope, not a list of models.
+    see ``__all__``. The profile, paper, text and passage handlers take the
+    ``Service`` and a ``Caller`` (``deps.get_service``,
+    ``deps.get_read_caller``); the rest take the store and the viewer tier.
+    ``list_profiles`` returns a ``Response`` carrying the ``rp:profileList``
+    envelope, not a list of models.
+
+Service layer
+    ``Service`` and its functions (``api.service``) hold every permission
+    check; ``create_app`` builds one on ``app.state.service``.
+    ``service_error_response`` maps the typed errors to HTTP; a host that
+    re-declares the handlers on its own app calls
+    ``install_service_errors(app)``.
 
 Read projection
-    ``artifact_visible``, ``invalidate_after_write``, ``metadata_payload`` and
-    ``withheld`` are the functions the route modules project through. A host
-    that composes its own surface uses the same four, so it and the SDK cannot
-    disagree about what a viewer may see or about what a write invalidates.
+    ``artifact_visible``, ``metadata_payload`` and ``withheld``. A host that
+    composes its own surface uses the same three, so it and the SDK cannot
+    disagree about what a viewer may see. ``served_document`` and
+    ``served_document_bytes`` build the served ``profile.jsonld``.
 
 ``api.deps``
     The dependency callables a host reuses or wraps: ``get_store``,
-    ``get_viewer_tier``, ``get_registry``, ``require_scope``,
+    ``get_service``, ``get_caller``, ``get_viewer_tier``, ``require_scope``,
     ``ConsumerIdentity`` (what a ``consumer_verifier`` returns), ``TierFloor``
     (what a ``profile_tier_floor`` returns) and
     ``materialize_store_to_tempdir`` (how a store without a filesystem root is
     exported for the registry).
 
 ``api.upload``
-    The archive codec and its constants: ``build_profile_archive``,
-    ``extract_profile_archive``, ``ingest_archive``, ``PROFILE_TOP_LEVEL``,
-    ``SOURCES_MEMBERS``, ``CACHE_MEMBERS`` and ``DEFAULT_MAX_UPLOAD_BYTES``.
+    The archive codec and its constants: ``build_profile_archive`` (which
+    returns a ``ProfileArchive``: the bytes, its members, and what on disk did
+    not ship), ``extract_profile_archive``, ``ingest_archive``,
+    ``PROFILE_TOP_LEVEL``, ``SOURCES_MEMBERS``, ``CACHE_MEMBERS`` and
+    ``DEFAULT_MAX_UPLOAD_BYTES``.
 
-``app.state`` hooks
-    Every route reads its store from ``app.state.store``; a host that mounts
-    the routers or re-declares the handlers sets it to a ``ProfileStore``.
-    ``create_app`` sets the auth and policy hooks to ``None`` and a host
-    replaces them with callables: ``owner_verifier``, ``consumer_verifier``,
-    ``write_scope_verifier``, ``push_gate``, ``viewer_resolver`` and
-    ``profile_tier_floor``. A host that runs an embedding preflight reports it
-    through ``embedding_healthy`` and ``embedding_health_detail``. Each is
-    described where ``create_app`` sets it and in the root ``AGENTS.md``.
+``app.state.hooks``
+    A ``Hooks`` (see ``api.hooks``). Two request-shaped hooks stay on
+    ``app.state`` because they gate the push/search/match plane:
+    ``consumer_verifier`` and ``push_gate``. An embedding preflight reports
+    through ``app.state.embedding_healthy`` and ``embedding_health_detail``.
 """
 
+from ._errors import install_service_errors, service_error_response
 from ._projection import (
     artifact_visible,
-    invalidate_after_write,
     metadata_payload,
+    served_document,
+    served_document_bytes,
     withheld,
 )
 from .app import create_app
+from .caller import ANONYMOUS, Caller
+from .hooks import Hooks
 from .routers._routers import edit_router, public_router, router
 from .routers.generative import ask_profile, innovate_profile, review_profile, riff_profile
-from .routers.read import get_paper_summary, get_profile_detail, list_papers, list_profiles
+from .routers.read import (
+    get_paper,
+    get_profile_detail,
+    get_summaries,
+    list_papers,
+    list_profiles,
+)
 from .routers.search import search_profile
+from .service import Service
 
 __all__ = [
+    "ANONYMOUS",
+    "Caller",
+    "Hooks",
+    "Service",
     "artifact_visible",
     "ask_profile",
     "create_app",
     "edit_router",
-    "get_paper_summary",
+    "get_paper",
     "get_profile_detail",
+    "get_summaries",
+    "install_service_errors",
     "innovate_profile",
-    "invalidate_after_write",
     "list_papers",
     "list_profiles",
     "metadata_payload",
@@ -95,5 +113,8 @@ __all__ = [
     "riff_profile",
     "router",
     "search_profile",
+    "served_document",
+    "served_document_bytes",
+    "service_error_response",
     "withheld",
 ]

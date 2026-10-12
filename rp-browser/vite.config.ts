@@ -42,9 +42,13 @@ export default defineConfig(({ mode }) => {
       htmlAppName(appName),
       viteStaticCopy({
         targets: [
+          // The ORT runtime transformers.js loads (its onnxruntime-web/webgpu
+          // bundle wants the asyncify build), self-hosted at /ort/ so no CDN
+          // fetch. stripBase flattens node_modules/... away.
           {
-            src: "node_modules/onnxruntime-web/dist/*.{wasm,mjs}",
+            src: "node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.asyncify.{wasm,mjs}",
             dest: "ort",
+            rename: { stripBase: true },
           },
         ],
       }),

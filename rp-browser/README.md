@@ -52,8 +52,9 @@ clone:
 npm run fetch:model  # downloads model files into public/models/ (gitignored)
 ```
 
-ONNX runtime WASM files are copied to `public/ort/` during the build by
-`vite-plugin-static-copy`. This happens automatically; there is no manual step.
+The ONNX runtime WASM files (`ort-wasm-simd-threaded.asyncify.{wasm,mjs}`)
+are served from `/ort/` by `vite-plugin-static-copy`, in dev and in the build.
+This happens automatically; there is no manual step.
 
 Set `VITE_RP_ALLOW_REMOTE_MODELS=1` to pull from the Hub instead.
 `VITE_RP_APP_NAME` sets the title shown in the page shell (default

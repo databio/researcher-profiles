@@ -8,22 +8,22 @@ user_invocable: true
 
 ## What publishing means
 
-A researcher profile already *is* a directory of static files, so publishing
-one is a copy: serving the folder over HTTP. There is no `rp publish`
-transform, no application to run, no database to provision. The
-`researcher-profiles` package (installed from a checkout of the
-researcher-profiles monorepo; CLI `rp`) gives you two commands:
+Publishing is two steps: export, then upload. The `researcher-profiles`
+package (installed from a checkout of the researcher-profiles monorepo; CLI
+`rp`) does the first:
 
-- `rp render <profile>` writes `index.html` **into** the profile folder
-  (`index.html` is another public artifact, generated in place).
-- `rp site <profiles_root> --out <dir>` writes the **collection** files that
-  describe a *set* of profiles: `index.json`, `index.jsonld`, `by-rid.json`,
-  `SKILL.md`, `style.css`, `sitemap.xml`, `robots.txt`, hosting configs, and
-  `.well-known/`.
+- `rp publish <profiles_root> --out <dir> --who <tier>` writes the folder one
+  audience may see. Each visible profile lands in `profiles/<slug>/` with its
+  `profile.jsonld` trimmed to that audience, only the files that audience may
+  read, and its `index.html` and `embeddings/` rebuilt for that audience. The
+  collection files (`index.json`, `index.jsonld`, `by-rid.json`, `SKILL.md`,
+  `style.css`, `sitemap.xml`, `robots.txt`, hosting configs, `.well-known/`)
+  sit at the top.
 
-You then `rsync` each profile folder to the host, honouring the profile's own
-`.publishignore` (below). This skill assumes the profile directories already
-exist.
+The second step is any sync tool (`aws s3 sync`, `rclone`, `wrangler`,
+`rsync`) copying that folder as is. Never upload a profile folder directly:
+its `profile.jsonld` holds every section, whatever its tier. This skill assumes
+the profile directories already exist.
 
 ## Step 1: Pre-flight, per profile
 
@@ -39,45 +39,46 @@ exist.
   unless that round-trip is real.
 
 **Privacy tiers.** What may leave the machine is declared *in the profile*.
-Each artifact (and the profile as a whole) has a `public` / `internal` /
-`restricted` tier; `public` is the default for authored content. Hold a whole
-profile back by setting the document's `visibility` to `internal` or
-`restricted`. On every write, tooling regenerates `.publishignore` at the
-profile root: a plain, newline-delimited list of every artifact whose
-effective tier exceeds `public`. It is derived, never hand-edited.
+Each artifact (and the profile as a whole) has a `public` / `limited` /
+`private` tier; `public` is the default for authored content. Hold a whole
+profile back by setting the document's `visibility` to `limited` or
+`private`. Inline sections (summary, contact email, methods, ...) carry their
+own tiers too. `rp publish` applies all of them when it writes the export.
 
 Full text of copyrighted papers (`sources/papers/`), `sources/cv.md`, and
-scraped `sources/web/` are `restricted` by default and never reach the open
-web. `cache/` (serve-time derived caches) and `.keys/` are always excluded
+scraped `sources/web/` are `private` by default and never reach the open
+web. `.cache/` (serve-time derived caches) and `.keys/` are always excluded
 regardless of visibility; build bookkeeping lives outside the profile
 entirely, at `$RESEARCHER_PROFILES_ROOT/.build/<slug>/meta/`.
 
-## Step 2: Render, generate site files, and sync
+## Step 2: Export and upload
 
 ```bash
-# 1. Render index.html into each profile folder
-rp render <profiles_dir>/<slug>
+# 1. Preview what ships and what is held back, and why
+rp publish <profiles_dir> --out site/ --dry-run
 
-# 2. Write the collection files for the set
-rp site <profiles_dir> --out site/ --base-url https://profiles.example.org
+# 2. Write the folder for the open web
+rp publish <profiles_dir> --out site/ --base-url https://profiles.example.org
 
-# 3. Sync each profile folder, honouring its .publishignore
-rsync -a --exclude-from=<profiles_dir>/<slug>/.publishignore \
-  <profiles_dir>/<slug>/ site/profiles/<slug>/
+# 3. Upload it as is
+aws s3 sync site/ s3://my-bucket/ --delete
 ```
 
-Useful `rp site` flags:
+Useful `rp publish` flags:
 
 | Flag | Effect |
 |---|---|
-| `--base-url <url>` | Base URL for `sitemap.xml` and `robots.txt` |
+| `--who <tier>` | The audience: `public` (default), `limited`, or `private` |
+| `--base-url <url>` | Base URL for canonical links, `sitemap.xml` and `robots.txt` |
 | `--no-index` | Add noindex directives (for a personal/staging site) |
 | `--now <ISO8601>` | Pin timestamps for deterministic output |
 
-`rsync --exclude-from=<profile>/.publishignore` is the whole privacy story: a
-dumb copy that drops every `internal`/`restricted` artifact. An internal host
-uses a narrower (or empty) exclude list; nothing at tier `restricted` is ever
-synced anywhere.
+A static host serves one audience. A mirror for `limited` readers is a second
+export (`--who limited`) to a second, access-controlled host; it gets noindex
+pages and a disallow-all `robots.txt` automatically. A `--who private` export
+holds what only the owner may see and must never be uploaded where others can
+read it. Re-running into the same folder refreshes it and removes files that
+are no longer allowed.
 
 ## Step 3: Choose a host that meets the requirements
 
@@ -175,9 +176,9 @@ wrong content types, and manifest/schema errors.
 - [ ] `profile.jsonld` present; `conformsTo`, `provenance`, `license` set
 - [ ] `url` and `@id` point at the right places
 - [ ] manifest matches disk (`rp manifest <profile> --check`)
-- [ ] deployed with `rsync --exclude-from=<profile>/.publishignore`
-- [ ] no `restricted` artifact served: `sources/papers/` full text,
-      `sources/cv.md`, `sources/web/`, `cache/`, `.keys/` absent from the host
+- [ ] deployed from `rp publish` output, never from a profile folder
+- [ ] no `private` artifact served: `sources/papers/` full text,
+      `sources/cv.md`, `sources/web/`, `.cache/`, `.keys/` absent from the host
 - [ ] `.jsonld` served as `application/ld+json`
 - [ ] `Access-Control-Allow-Origin: *` on every response
 - [ ] missing paths return a real 404

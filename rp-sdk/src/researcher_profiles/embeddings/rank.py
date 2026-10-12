@@ -1,10 +1,4 @@
-"""Candidate works ranked against one profile, the mirror of ``match.rank``.
-
-``store.match.rank`` ranks profiles against a free-text query;
-:func:`rank_works_against_profile` ranks candidate works (e.g. new OpenAlex
-results from ``openalex.fetch_new_works``) against one profile's embedding
-vector. Both diversify through the shared :func:`mmr_indices` helper.
-"""
+"""Candidate works ranked against one profile's embedding vector."""
 
 import json
 import logging
@@ -12,6 +6,7 @@ import math
 
 import numpy as np
 
+from ..errors import CapabilityUnavailableError
 from ..models.results import RankedWork
 from ._sqlite import IndexNotBuiltError
 from .backends import MissingEmbeddingBackendError
@@ -83,7 +78,7 @@ def _topic_evidence(profile, backend, work_vecs: np.ndarray) -> list[list[str]]:
     empty: list[list[str]] = [[] for _ in range(len(work_vecs))]
     try:
         topics = profile.topics.get(method="cached")
-    except (IndexNotBuiltError, OSError, json.JSONDecodeError):
+    except (IndexNotBuiltError, OSError, json.JSONDecodeError, CapabilityUnavailableError):
         return empty
     labels = [t.label for t in topics if t.label]
     if not labels:
@@ -109,6 +104,7 @@ def rank_works_against_profile(
     k: int = 10,
     backend=None,
     kind: str = "centroid",
+    profile_vector=None,
     diversify: bool = True,
     lambda_: float = 0.5,
     threshold: float | None = None,
@@ -116,17 +112,19 @@ def rank_works_against_profile(
     """Rank candidate works against one profile's embedding vector.
 
     ``works`` are ``PaperRecord``-like objects (title + optional abstract).
-    The profile side is ``profile.index.embedding(kind)``: ``centroid`` by
-    default, ``summary``/``expertise`` as alternatives. Each candidate's
-    title+abstract is embedded with the same backend that built the profile's
-    index (or an explicit ``backend``), cosine-scored, optionally filtered by
-    ``threshold``, MMR-diversified, and returned best-first as
-    :class:`~researcher_profiles.models.results.RankedWork` with overlapping-topic
-    evidence.
+    Works are embedded with the profile index's backend unless ``backend`` is
+    given, filtered by ``threshold``, MMR-diversified, and returned best-first.
+
+    ``profile_vector`` is the vector to rank against, for a profile with no
+    directory (a SQL store's ``store.centroid``). Without it the vector comes
+    from ``profile.index.embedding(kind)``, which needs a directory; ``kind``
+    is ignored when ``profile_vector`` is given.
     """
     if not works:
         return []
-    pvec = np.asarray(profile.index.embedding(kind), dtype=np.float32)
+    if profile_vector is None:
+        profile_vector = profile.index.embedding(kind)
+    pvec = np.asarray(profile_vector, dtype=np.float32)
     pn = float(np.linalg.norm(pvec))
     if pn < 1e-12:
         return []

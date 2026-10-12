@@ -5,7 +5,6 @@ import styles from "./viewer.module.css";
 
 // Tighten DOMPurify: forbid dangerous tags and attributes, force safe links.
 DOMPurify.addHook("afterSanitizeAttributes", (node: Element) => {
-  // Force target="_blank" rel="noopener noreferrer" on external anchors
   if (node.tagName === "A" && node.getAttribute("href")) {
     const href = node.getAttribute("href") || "";
     if (href.startsWith("http://") || href.startsWith("https://")) {
@@ -24,13 +23,7 @@ const PURIFY_CONFIG = {
   ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto|tel):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i,
 };
 
-/**
- * Render a markdown string to sanitized HTML.
- *
- * Self-contained (marked + dompurify) so the canonical viewer works standalone
- * and behaves identically when vendored into another app. No global styles are
- * emitted. Output is scoped through the CSS module `prose` class.
- */
+/** Render a markdown string to sanitized HTML, scoped by the CSS module `prose` class. */
 export function Markdown({ source }: { source: string | null | undefined }) {
   const html = useMemo(() => {
     if (!source) return "";

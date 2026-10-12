@@ -8,7 +8,7 @@ Each skill is a self-contained instruction document: point an agent at it
 |---|---|
 | [`src/researcher_profiles/skill/`](../src/researcher_profiles/skill/SKILL.md) | Talk to a profile: read a published profile progressively and adopt the researcher's persona, grounded in their published work |
 | [`publish-profile/`](publish-profile/SKILL.md) | Publish profiles as a conformant static site |
-| [`profile-agent/`](profile-agent/SKILL.md) | Act as a researcher's agent against a profile service with a scoped `rpa_` key |
+| [`profile-agent/`](profile-agent/SKILL.md) | Act as a researcher's agent against a profile service with an `rpa_` API key and its per-part access table |
 
 The talk-to-a-profile skill lives *inside the importable package* because `rp
 skill --print|--install` reads it with `importlib.resources`; the others live

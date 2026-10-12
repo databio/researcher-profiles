@@ -1,22 +1,38 @@
 """Tests for the profile renderer and static-site builder.
 
-A profile directory is already its published form, so there is no separate
-publish transform. These tests exercise the two pieces that do exist:
-
-- ``render_profile``: refreshes one profile folder in place (manifest,
-  ``index.html``, ``.publishignore``).
-- ``build_site``: writes the collection files describing a set of profiles.
-
-Plus the framework-free helpers reused by both (markdown, hosting configs).
+A profile directory is already its published form. These tests cover the pieces that exist:
+``render_profile`` (refresh one folder in place), ``publish_collection`` (the tree one audience
+may see), ``build_site`` (the collection files), and the framework-free helpers they share.
 """
 
+import io
 import json
 import shutil
+import tarfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
+import numpy as np
 import pytest
 
-from researcher_profiles.publish import build_site, render_profile
+import researcher_profiles.publish as publish
+from researcher_profiles.api.upload import build_viewer_archive
+from researcher_profiles.cli import build_parser, main
+from researcher_profiles.embeddings import SqliteEmbeddingIndex
+from researcher_profiles.embeddings._sqlite import connect_vec
+from researcher_profiles.embeddings.flat import FlatEmbeddingIndex
+from researcher_profiles.profile import ResearcherProfile
+from researcher_profiles.publish import (
+    MARKER,
+    PublishError,
+    _publish,
+    build_site,
+    plan_profile_export,
+    publish_collection,
+    render_profile,
+)
 from researcher_profiles.publish._hosting import (
     cloudflare_headers,
     robots_txt,
@@ -25,14 +41,10 @@ from researcher_profiles.publish._hosting import (
 )
 from researcher_profiles.publish._jsonld import grant_node, paper_node
 from researcher_profiles.publish._markdown import md_to_html
-from researcher_profiles.schema import GrantRecord, PaperRecord
+from researcher_profiles.schema import GrantRecord, PaperRecord, SectionVisibility
 from researcher_profiles.utils.paths import cache_dir
 
-from .factories import FakeBackend, copy_fixture, sync_with_publishignore
-
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
+from .factories import FakeBackend, build_profile_dir, copy_fixture
 
 
 @pytest.fixture
@@ -41,22 +53,30 @@ def profiles_root(fixture_profiles_root) -> Path:
     return fixture_profiles_root("jane-doe", "john-smith")
 
 
-# ---------------------------------------------------------------------------
-# render_profile
-# ---------------------------------------------------------------------------
+def _read_doc(pdir: Path) -> dict:
+    return json.loads((pdir / "profile.jsonld").read_text())
 
 
 class TestRenderProfile:
-    def test_writes_index_html(self, jane_doe_dir):
-        render_profile(jane_doe_dir)
-        html = (jane_doe_dir / "index.html").read_text()
-        assert "<!DOCTYPE html>" in html
-        assert "Jane A. Doe" in html
+    @pytest.fixture(scope="class")
+    @classmethod
+    def rendered(cls, tmp_path_factory):
+        """jane-doe rendered once; read-only tests share it. Tests that mutate use ``jane_doe_dir``."""
+        pdir = copy_fixture("jane-doe", tmp_path_factory.mktemp("render"))
+        render_profile(pdir)
+        return SimpleNamespace(
+            dir=pdir, doc=_read_doc(pdir), html=(pdir / "index.html").read_text()
+        )
 
-    def test_refreshes_manifest_into_profile_jsonld(self, jane_doe_dir):
-        render_profile(jane_doe_dir)
-        doc = json.loads((jane_doe_dir / "profile.jsonld").read_text())
+    @pytest.mark.parametrize(
+        "fragment,present",
+        [("<!DOCTYPE html>", True), ("Jane A. Doe", True), ("#paper/", True), ("#paper-", False)],
+    )
+    def test_index_html(self, rendered, fragment, present):
+        assert (fragment in rendered.html) is present
 
+    def test_refreshes_manifest_into_profile_jsonld(self, rendered):
+        doc = rendered.doc
         has_part = {p["contentUrl"]: p for p in doc["hasPart"]}
         subject_of = {p["contentUrl"]: p for p in doc["subjectOf"]}
 
@@ -75,202 +95,167 @@ class TestRenderProfile:
         assert summary_parts
         assert all(p.get("paperId") for p in summary_parts)
 
-    def test_index_html_in_manifest_with_relative_url(self, jane_doe_dir):
-        render_profile(jane_doe_dir)
-        doc = json.loads((jane_doe_dir / "profile.jsonld").read_text())
+    def test_index_html_in_manifest_with_relative_url(self, rendered):
+        doc = rendered.doc
         parts = doc["hasPart"]
 
         html_entry = next(p for p in parts if p.get("role") == "html")
         assert html_entry["contentUrl"] == "index.html"
         assert html_entry["encodingFormat"] == "text/html"
 
-        # The external consumer-skill doc is not a manifest entry: manifest
-        # contentUrls are relative paths to the profile's own files.
+        # The external consumer-skill doc is not a manifest entry: contentUrls are relative.
         assert not any(p.get("role") == "consumer_skill" for p in parts)
         for p in [*parts, *doc.get("subjectOf", [])]:
             assert "://" not in p["contentUrl"], "manifest contentUrls must be relative"
 
-    def test_consumer_flags_recorded(self, jane_doe_dir):
-        render_profile(jane_doe_dir)
-        doc = json.loads((jane_doe_dir / "profile.jsonld").read_text())
-        # jane-doe ships a citations.json but no embedding index.
-        assert doc["hasCitationGraph"] is True
-        assert doc["hasEmbeddingIndex"] is False
-        # Her expertise.md cites published paper ids like [doe2016example].
-        assert doc["expertiseCitesPaperIds"] is True
+    @pytest.mark.parametrize(
+        "key,expected",
+        [
+            ("hasCitationGraph", True),
+            ("hasEmbeddingIndex", False),
+            ("expertiseCitesPaperIds", True),
+        ],
+        ids=["citations.json-shipped", "no-embedding-index", "expertise-cites-ids"],
+    )
+    def test_consumer_flags_recorded(self, rendered, key, expected):
+        assert rendered.doc[key] is expected
 
     def test_embedding_flag_true_iff_flat_form_exists(self, jane_doe_dir):
-        # hasEmbeddingIndex tracks the SERVED flat form, not the restricted
-        # sqlite. Building the sqlite and rendering self-heals the flat form.
-        from researcher_profiles.embeddings import SqliteEmbeddingIndex
-
+        # hasEmbeddingIndex tracks the SERVED flat form, not the private sqlite; rendering self-heals it.
         SqliteEmbeddingIndex(jane_doe_dir).build_index(backend=FakeBackend())
         render_profile(jane_doe_dir)
-        doc = json.loads((jane_doe_dir / "profile.jsonld").read_text())
+        doc = _read_doc(jane_doe_dir)
         assert (jane_doe_dir / "embeddings" / "index.json").is_file()
         assert doc["hasEmbeddingIndex"] is True
 
     def test_embedding_flag_false_without_flat_form(self, jane_doe_dir):
-        # A placeholder sqlite that is not a real index yields no flat form,
-        # so the profile does not advertise embeddings.
+        # A placeholder sqlite that is not a real index yields no flat form: no embeddings advertised.
         cache_dir(jane_doe_dir).mkdir(exist_ok=True)
         (cache_dir(jane_doe_dir) / "embeddings.sqlite").write_bytes(b"SQLite")
         render_profile(jane_doe_dir)
-        doc = json.loads((jane_doe_dir / "profile.jsonld").read_text())
+        doc = _read_doc(jane_doe_dir)
         assert not (jane_doe_dir / "embeddings" / "index.json").is_file()
         assert doc["hasEmbeddingIndex"] is False
-
-    def test_citation_flag_false_without_citations(self, jane_doe_dir):
-        (jane_doe_dir / "sources" / "citations.json").unlink()
-        render_profile(jane_doe_dir)
-        doc = json.loads((jane_doe_dir / "profile.jsonld").read_text())
-        assert doc["hasCitationGraph"] is False
 
     def test_no_index_meta_tag(self, jane_doe_dir):
         render_profile(jane_doe_dir, no_index=True)
         html = (jane_doe_dir / "index.html").read_text()
         assert 'name="robots" content="noindex"' in html
 
-    def test_rerender_is_idempotent(self, jane_doe_dir):
+    def test_rerender_is_idempotent_and_stamps_date_modified(self, jane_doe_dir):
         render_profile(jane_doe_dir)
         first = (jane_doe_dir / "profile.jsonld").read_text()
+        assert "dateModified" in json.loads(first)
         render_profile(jane_doe_dir)
         assert (jane_doe_dir / "profile.jsonld").read_text() == first
 
-    def test_render_stamps_date_modified(self, jane_doe_dir):
-        render_profile(jane_doe_dir)
-        doc = json.loads((jane_doe_dir / "profile.jsonld").read_text())
-        assert "dateModified" in doc
-        first_stamp = doc["dateModified"]
-        render_profile(jane_doe_dir)
-        doc2 = json.loads((jane_doe_dir / "profile.jsonld").read_text())
-        assert doc2["dateModified"] == first_stamp
-
     def test_render_advances_stamp_on_consumer_flag_change(self, jane_doe_dir):
-        from datetime import datetime, timedelta, timezone
-        from unittest.mock import patch
-
         t1 = datetime(2026, 1, 1, tzinfo=timezone.utc)
-        t2 = t1 + timedelta(days=90)
-        with patch("researcher_profiles.utils.clock.datetime") as mock_dt:
-            mock_dt.now.return_value = t1
-            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
-            render_profile(jane_doe_dir)
-        doc = json.loads((jane_doe_dir / "profile.jsonld").read_text())
-        first_stamp = doc["dateModified"]
+
+        def render_at(when):
+            with patch("researcher_profiles.utils.clock.datetime") as mock_dt:
+                mock_dt.now.return_value = when
+                mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+                render_profile(jane_doe_dir)
+            return _read_doc(jane_doe_dir)
+
+        doc = render_at(t1)
         assert doc["hasCitationGraph"] is True
         (jane_doe_dir / "sources" / "citations.json").unlink()
-        with patch("researcher_profiles.utils.clock.datetime") as mock_dt:
-            mock_dt.now.return_value = t2
-            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
-            render_profile(jane_doe_dir)
-        doc2 = json.loads((jane_doe_dir / "profile.jsonld").read_text())
+        doc2 = render_at(t1 + timedelta(days=90))
         assert doc2["hasCitationGraph"] is False
-        assert doc2["dateModified"] != first_stamp
+        assert doc2["dateModified"] != doc["dateModified"]
 
     def test_missing_profile_raises(self, tmp_path):
         with pytest.raises(FileNotFoundError):
             render_profile(tmp_path / "nope")
 
 
-# ---------------------------------------------------------------------------
-# .publishignore
-# ---------------------------------------------------------------------------
+_EMAIL = "secret-contact@example.org"
+_METHOD = "methodsonlyforgrantedreaders"
+_FULLTEXT = "fulltextnobodymaypublish"
 
 
-class TestPublishIgnore:
-    def _lines(self, profile_dir: Path) -> list[str]:
-        """The exclude PATTERNS only.
+def _audience_profile(root: Path, slug: str = "ada", **doc_fields) -> Path:
+    """A profile with something at every tier, plus a real local index.
 
-        Comments are allowed to name concepts (e.g. a ``# personality/`` note),
-        so they are never patterns and are dropped here.
-        """
-        render_profile(profile_dir)
-        body = (profile_dir / ".publishignore").read_text()
-        return [
-            ln.strip() for ln in body.splitlines() if ln.strip() and not ln.strip().startswith("#")
-        ]
+    ``sources/papers/p1.md`` is private (role default), ``sources/grants.jsonld`` is declared
+    ``limited``, the ``contact`` section (email) is private and ``methods`` is limited.
+    """
+    pdir = build_profile_dir(root / slug, grants=True, manifest=False)
+    (pdir / "sources" / "papers").mkdir(parents=True, exist_ok=True)
+    (pdir / "sources" / "papers" / "p1.md").write_text(f"{_FULLTEXT}\n", encoding="utf-8")
+    SqliteEmbeddingIndex(pdir).build_index(backend=FakeBackend())
+    render_profile(pdir)
 
-    @pytest.mark.parametrize(
-        "pattern, present",
-        [
-            (".cache/", True),
-            ("personality/", False),
-            ("sources/summaries/", False),
-            ("sources/papers.jsonld", False),
-            ("profile.jsonld", False),
-        ],
-        ids=[
-            "cache-excluded",
-            "personality-public",
-            "summaries-public",
-            "papers-jsonld-public",
-            "profile-jsonld-public",
-        ],
+    prof = ResearcherProfile.from_files(pdir)
+    doc = prof.metadata
+    doc.email = _EMAIL
+    doc.methodological_commitments = [_METHOD]
+    doc.section_visibility = [
+        SectionVisibility(section="contact", visibility="private"),
+        SectionVisibility(section="methods", visibility="limited"),
+    ]
+    for part in doc.has_part:
+        if part.content_url == "sources/grants.jsonld":
+            part.visibility = "limited"
+    for name, value in doc_fields.items():
+        setattr(doc, name, value)
+    prof.save_profile(doc)
+    return pdir
+
+
+def _set_part_tier(pdir: Path, content_url: str, tier: str) -> Path:
+    """Declare one manifest artifact of the profile at ``pdir`` at ``tier``."""
+    prof = ResearcherProfile.from_files(pdir)
+    doc = prof.metadata
+    (part,) = [p for p in [*doc.has_part, *doc.subject_of] if p.content_url == content_url]
+    part.visibility = tier
+    prof.save_profile(doc)
+    return pdir
+
+
+def _add_private_chunk(pdir: Path) -> None:
+    """Put one ``cv`` chunk (private by role) into the index; its far-off vector skews any centroid including it."""
+    conn = connect_vec(cache_dir(pdir) / "embeddings.sqlite")
+    dim = len(conn.execute("SELECT embedding FROM chunk_vec LIMIT 1").fetchone()[0]) // 4
+    cur = conn.execute(
+        "INSERT INTO chunks (source_type, source_id, chunk_index, text, text_hash, "
+        "section, char_count, indexed_at) VALUES ('cv', 'cv', 0, 'x', 'x', NULL, 1, '')"
     )
-    def test_pattern_presence(self, jane_doe_dir, pattern, present):
-        assert (pattern in self._lines(jane_doe_dir)) is present
-
-    def test_full_text_papers_excluded(self, jane_doe_dir):
-        # jane-doe carries sources/papers/*.md (restricted, copyright). The
-        # manifest lists each full-text file, so each is excluded by path.
-        assert (jane_doe_dir / "sources" / "papers").is_dir()
-        lines = self._lines(jane_doe_dir)
-        fulltext = [ln for ln in lines if ln.startswith("sources/papers/")]
-        assert fulltext, "expected full-text papers to be excluded by path"
-
-    def test_local_sqlite_index_is_never_served(self, jane_doe_dir):
-        # .cache/embeddings.sqlite is a derived index (tier restricted): it stays
-        # under the excluded .cache/ prefix and is not re-included. The servable
-        # embeddings are the flat embeddings/ files.
-        cache_dir(jane_doe_dir).mkdir(exist_ok=True)
-        (cache_dir(jane_doe_dir) / "embeddings.sqlite").write_bytes(b"SQLite")
-        lines = self._lines(jane_doe_dir)
-        assert ".cache/" in lines
-        assert not any(ln.startswith("!") for ln in lines)
+    vec = -np.ones(dim, dtype="<f4") * 50
+    conn.execute(
+        "INSERT INTO chunk_vec (id, embedding) VALUES (?, ?)", (cur.lastrowid, vec.tobytes())
+    )
+    conn.commit()
+    conn.close()
+    for cached in cache_dir(pdir).rglob("*.npz"):
+        cached.unlink()
 
 
-# ---------------------------------------------------------------------------
-# End-to-end: syncing with only .publishignore drops all restricted content
-# (plan step 19c: the invariant the tiered layout buys us)
-# ---------------------------------------------------------------------------
+def _tree_text(root: Path) -> str:
+    return "\n".join(
+        f.read_text(encoding="utf-8", errors="ignore") for f in root.rglob("*") if f.is_file()
+    )
 
 
-class TestPublishIgnoreEndToEnd:
-    def test_synced_tree_has_no_restricted_content(self, jane_doe_dir):
-        from researcher_profiles.privacy import effective_tiers
-        from researcher_profiles.profile import ResearcherProfile
-
-        render_profile(jane_doe_dir)
-        # A restricted local index must exist to make the test meaningful.
-        cache_dir(jane_doe_dir).mkdir(exist_ok=True)
-        (cache_dir(jane_doe_dir) / "embeddings.sqlite").write_bytes(b"SQLite")
-
-        dst = jane_doe_dir.parent / "published"
-        sync_with_publishignore(jane_doe_dir, dst)
-
-        prof = ResearcherProfile.from_files(jane_doe_dir)
-        eff = effective_tiers(prof.metadata)
-
-        # Every artifact above `public` is absent from the synced tree.
-        for url, tier in eff.items():
-            if tier != "public":
-                assert not (dst / url).exists(), f"{url} ({tier}) leaked into sync"
-
-        # And the always-restricted directories never appear at all.
-        assert not (dst / ".cache").exists()
-        assert not (dst / ".keys").exists()
-        assert not (dst / ".publishignore").exists()
-        assert not list(dst.glob("sources/papers/*.md"))
-
-        # Sanity: the sync is not trivially empty; public content survives.
-        assert (dst / "profile.jsonld").is_file()
-        assert (dst / "sources" / "papers.jsonld").is_file()
+@pytest.fixture(scope="module")
+def audience_template(tmp_path_factory) -> Path:
+    """The default ``_audience_profile``, built once; tests copy it rather than rebuild."""
+    return _audience_profile(tmp_path_factory.mktemp("audience"))
 
 
-# ---------------------------------------------------------------------------
-# build_site
-# ---------------------------------------------------------------------------
+@pytest.fixture
+def audience_root(tmp_path, audience_template) -> Path:
+    """A fresh profiles root holding a copy of the default ``ada`` audience profile."""
+    root = tmp_path / "profiles"
+    shutil.copytree(audience_template, root / "ada")
+    return root
+
+
+def _first_summary(out: Path) -> tuple[Path, str]:
+    summary = next((out / "profiles" / "ada" / "sources" / "summaries").iterdir())
+    return summary, summary.relative_to(out / "profiles" / "ada").as_posix()
 
 
 def _tree_snapshot(root: Path) -> dict[str, bytes | None]:
@@ -284,16 +269,241 @@ def _boom(*args, **kwargs):
     raise RuntimeError("writer exploded mid-build")
 
 
+class TestPublishCollection:
+    @pytest.mark.parametrize(
+        "who, shipped, withheld, present, absent, listed",
+        [
+            (
+                "public",
+                {"sources/summaries", "embeddings/index.json"},
+                {"sources/grants.jsonld", "sources/papers/p1.md"},
+                set(),
+                {_EMAIL, _METHOD, _FULLTEXT},
+                False,
+            ),
+            (
+                "limited",
+                {"sources/grants.jsonld", "embeddings/index.json"},
+                {"sources/papers/p1.md"},
+                {_METHOD},
+                {_EMAIL, _FULLTEXT},
+                True,
+            ),
+        ],
+        ids=["public-gets-only-public", "limited-adds-limited-not-private"],
+    )
+    def test_export_holds_exactly_what_the_audience_may_see(
+        self, tmp_path, audience_root, who, shipped, withheld, present, absent, listed
+    ):
+        root = audience_root
+        _audience_profile(root, "held", rid="0000-0002-1825-0097", visibility="limited")
+        out = tmp_path / "out"
+        result = publish_collection(root, out, viewer=who)
+
+        prof_out = out / "profiles" / "ada"
+        for rel in shipped:
+            assert (prof_out / rel).exists(), f"{rel} missing at --who {who}"
+        for rel in withheld:
+            assert not (prof_out / rel).exists(), f"{rel} leaked at --who {who}"
+        assert not list(out.rglob(".cache"))
+        assert not list(out.rglob("*.sqlite"))
+
+        # The projection reaches inside profile.jsonld and index.html.
+        document = (prof_out / "profile.jsonld").read_text(encoding="utf-8")
+        for marker in present:
+            assert marker in document, f"{marker} missing at --who {who}"
+        for name in ("profile.jsonld", "index.html"):
+            text = (prof_out / name).read_text(encoding="utf-8")
+            for marker in absent:
+                assert marker not in text, f"{marker} leaked into {name} at --who {who}"
+        everything = _tree_text(out)
+        for marker in absent:
+            assert marker not in everything
+
+        # Embeddings are exported at the audience's tier: grant, CV and web chunks are
+        # private, so neither audience gets them.
+        chunks_file = next((prof_out / "embeddings").glob("*.chunks.json"))
+        source_types = {c["source_type"] for c in json.loads(chunks_file.read_text())}
+        assert source_types
+        assert not source_types & {"grant", "cv", "web"}
+
+        # A limited profile reaches only a limited audience.
+        index = json.loads((out / "index.json").read_text())
+        by_rid = json.loads((out / "by-rid.json").read_text())
+        assert ("profiles/held/" in index) is listed
+        assert ("0000-0002-1825-0097" in by_rid) is listed
+        assert (out / "profiles" / "held").exists() is listed
+        assert ("held" in result.skipped) is not listed
+        if who != "public":
+            assert "Disallow: /" in (out / "robots.txt").read_text()
+            assert "noindex" in (prof_out / "index.html").read_text()
+
+    def test_refuses_a_folder_it_did_not_write(self, tmp_path, audience_root):
+        out = tmp_path / "out"
+        out.mkdir()
+        (out / "keep.txt").write_text("not ours", encoding="utf-8")
+        with pytest.raises(PublishError):
+            publish_collection(audience_root, out)
+        assert sorted(p.name for p in out.iterdir()) == ["keep.txt"]
+
+    @pytest.mark.parametrize("who", ["public", "limited", "private"])
+    def test_viewer_archive_ships_the_same_set_as_the_export(self, audience_root, who):
+        pdir = audience_root / "ada"
+        plan = plan_profile_export(pdir, who)
+        with tarfile.open(fileobj=io.BytesIO(build_viewer_archive(pdir, viewer=who))) as tf:
+            members = {m.name for m in tf.getmembers() if m.isfile()}
+            document = tf.extractfile("profile.jsonld").read()
+        assert members == {"profile.jsonld", *plan.files}
+        assert document == plan.document
+
+    def test_cli_refuses_a_broken_derivation_chain(self, tmp_path, audience_root, capsys):
+        prof = ResearcherProfile.from_files(audience_root / "ada")
+        doc = prof.metadata
+        doc.has_part[0].derived_from = ["no-such-artifact"]
+        prof.save_profile(doc)
+
+        out = tmp_path / "out"
+        assert main(["publish", str(audience_root), "--out", str(out)]) == 1
+        assert "derivedFrom" in capsys.readouterr().err
+        assert not out.exists()
+
+    def test_cli_dry_run_json_writes_nothing(self, tmp_path, audience_root, capsys):
+        out = tmp_path / "out"
+        assert main(["publish", str(audience_root), "-o", str(out), "--dry-run", "--json"]) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["who"] == "public"
+        (ada,) = payload["profiles"]
+        assert "profile.jsonld" in ada["files"]
+        assert ada["withheld"]["sources/papers/p1.md"].startswith("private")
+        assert not out.exists()
+
+    # embeddings follow their own artifact's tier
+
+    @pytest.mark.parametrize("who, ships", [("public", False), ("private", True)])
+    def test_withheld_embeddings_do_not_ship(self, tmp_path, audience_root, who, ships):
+        _set_part_tier(audience_root / "ada", "embeddings/index.json", "private")
+        out = tmp_path / "out"
+        result = publish_collection(audience_root, out, viewer=who)
+
+        prof_out = out / "profiles" / "ada"
+        assert (prof_out / "embeddings").exists() is ships
+        doc = json.loads((prof_out / "profile.jsonld").read_text())
+        assert doc.get("hasEmbeddingIndex", False) is ships
+        (export,) = result.profiles
+        assert any(f.startswith("embeddings/") for f in export.files) is ships
+        # The collection does not advertise a profile whose vectors it withheld.
+        bundle = json.loads((out / "collection.jsonld").read_text())
+        assert bool(bundle["artifacts"]) is ships
+        if not ships:
+            assert not (out / "collection" / "embeddings").exists()
+
+    def test_viewer_archive_drops_the_embedding_flag_with_the_embeddings(self, audience_root):
+        pdir = _set_part_tier(audience_root / "ada", "embeddings/index.json", "private")
+        public = json.loads(plan_profile_export(pdir, "public").document)
+        private = json.loads(plan_profile_export(pdir, "private").document)
+        assert public.get("hasEmbeddingIndex", False) is False
+        assert private["hasEmbeddingIndex"] is True
+
+    def test_collection_centroid_is_the_mean_of_what_ships(self, tmp_path, audience_root):
+        pdir = audience_root / "ada"
+        _add_private_chunk(pdir)
+        out = tmp_path / "out"
+        publish_collection(audience_root, out)
+
+        shipped = FlatEmbeddingIndex.load(out / "profiles" / "ada" / "embeddings").centroid()
+        index = json.loads((out / "collection" / "embeddings" / "index.json").read_text())
+        assert index["rows"] == ["ada"]
+        blob = (out / "collection" / "embeddings" / index["file"]).read_bytes()
+        row = np.frombuffer(blob, dtype="<f4")
+        np.testing.assert_allclose(row, shipped, atol=1e-6)
+        # The private chunk moves the all-chunk centroid, so equality above is not an
+        # accident of every chunk being public.
+        everything = ResearcherProfile.from_files(pdir).index.embedding("centroid")
+        assert not np.allclose(everything, shipped, atol=1e-4)
+
+    # a profile that will not load stops the publish
+
+    def test_a_profile_that_will_not_load_fails_the_publish(self, tmp_path, audience_root, capsys):
+        root = audience_root
+        bad = _audience_profile(root, "bob", rid="0000-0002-1825-0097")
+        out = tmp_path / "out"
+        publish_collection(root, out)
+        assert (out / "profiles" / "bob" / "index.html").is_file()
+        before = _tree_snapshot(out)
+
+        doc = json.loads((bad / "profile.jsonld").read_text())
+        doc["visibility"] = "restricted"
+        (bad / "profile.jsonld").write_text(json.dumps(doc), encoding="utf-8")
+
+        with pytest.raises(PublishError, match="bob"):
+            publish_collection(root, out)
+        assert _tree_snapshot(out) == before
+        assert main(["publish", str(root), "--out", str(out)]) != 0
+        assert "bob" in capsys.readouterr().err
+        assert _tree_snapshot(out) == before
+
+    # the marker
+
+    @pytest.mark.parametrize("marker", ["[]", '{"files": "x"}', '"x"', "{}"])
+    def test_refuses_a_marker_of_the_wrong_shape(self, tmp_path, audience_root, marker):
+        out = tmp_path / "out"
+        out.mkdir()
+        (out / MARKER).write_text(marker, encoding="utf-8")
+        with pytest.raises(PublishError, match="unreadable"):
+            publish_collection(audience_root, out)
+
+    def test_a_crash_before_pruning_is_cleaned_up_next_run(
+        self, tmp_path, audience_root, monkeypatch
+    ):
+        out = tmp_path / "out"
+        publish_collection(audience_root, out)
+        summary, rel = _first_summary(out)
+        _set_part_tier(audience_root / "ada", rel, "limited")
+
+        real = _publish._remove_stale
+        monkeypatch.setattr(_publish, "_remove_stale", _boom)
+        with pytest.raises(RuntimeError):
+            publish_collection(audience_root, out)
+        assert summary.exists()
+        monkeypatch.setattr(_publish, "_remove_stale", real)
+
+        result = publish_collection(audience_root, out)
+        assert not summary.exists()
+        assert f"profiles/ada/{rel}" in result.removed
+
+    def test_dry_run_reports_what_it_would_remove(self, tmp_path, audience_root, capsys):
+        out = tmp_path / "out"
+        publish_collection(audience_root, out)
+        summary, rel = _first_summary(out)
+        _set_part_tier(audience_root / "ada", rel, "limited")
+
+        result = publish_collection(audience_root, out, dry_run=True)
+        assert result.would_remove == [f"profiles/ada/{rel}"]
+        assert result.removed == []
+        assert summary.exists()
+
+        assert main(["publish", str(audience_root), "-o", str(out), "--dry-run", "--json"]) == 0
+        assert json.loads(capsys.readouterr().out)["would_remove"] == [f"profiles/ada/{rel}"]
+        assert main(["publish", str(audience_root), "-o", str(out), "--dry-run"]) == 0
+        assert f"would remove profiles/ada/{rel}" in capsys.readouterr().out
+        assert summary.exists()
+
+    @pytest.mark.parametrize("who, sitemap", [("public", True), ("limited", False)])
+    def test_sitemap_only_for_a_public_export(self, tmp_path, audience_root, who, sitemap):
+        out = tmp_path / "out"
+        publish_collection(audience_root, out, viewer=who, base_url="https://example.org")
+        assert (out / "sitemap.xml").exists() is sitemap
+        robots = (out / "robots.txt").read_text()
+        assert ("Disallow: /\n" in robots) is not sitemap
+
+
 class TestBuildSite:
     @pytest.fixture(scope="class")
     @classmethod
     def built_site(cls, tmp_path_factory) -> Path:
-        """One ``build_site`` run over the two-profile root, shared by the
-        read-only assertions below.
+        """One ``build_site`` run over the two-profile root, shared by the read-only assertions.
 
-        Class-scoped, so it cannot use ``fixture_profiles_root`` (function-scoped
-        via ``tmp_path``) and copies the fixtures itself. Tests that pass different
-        arguments or assert on the return value build their own.
+        Class-scoped, so it copies the fixtures itself instead of using ``fixture_profiles_root``.
         """
         root = tmp_path_factory.mktemp("build-site-root")
         for slug in ("jane-doe", "john-smith"):
@@ -326,15 +536,7 @@ class TestBuildSite:
 
     def test_by_rid_maps_identity_to_profile(self, built_site):
         by_rid = json.loads((built_site / "by-rid.json").read_text())
-        assert "0000-0002-1825-0097" in by_rid
         assert by_rid["0000-0002-1825-0097"] == "profiles/jane-doe/profile.jsonld"
-
-    def test_sitemap_and_robots_with_base_url(self, profiles_root, tmp_path):
-        out = tmp_path / "site"
-        build_site(profiles_root, out, base_url="https://profiles.example.com")
-        assert (out / "sitemap.xml").is_file()
-        assert (out / "robots.txt").is_file()
-        assert "profiles.example.com" in (out / "sitemap.xml").read_text()
 
     def test_no_sitemap_without_base_url(self, profiles_root, tmp_path):
         out = tmp_path / "site"
@@ -359,19 +561,13 @@ class TestBuildSite:
             build_site(tmp_path / "nope", tmp_path / "out")
 
     def test_failed_build_leaves_output_unchanged(self, profiles_root, tmp_path, monkeypatch):
-        """A build that raises must not disturb the site already served from ``out``.
-
-        Everything is staged off to one side and only moved in once the whole
-        build has succeeded, so a mid-build failure is invisible to readers.
-        """
-        import researcher_profiles.publish as publish
-
+        """A mid-build failure is invisible to readers: output is staged and moved in on success."""
         out = tmp_path / "site"
         build_site(profiles_root, out)
         before = _tree_snapshot(out)
 
-        # Change the inputs so a clobbered index.json would be detectable, then
-        # blow up on SKILL.md, after index.json and friends have been written.
+        # Change the inputs so a clobbered index.json would be detectable, then blow up on
+        # SKILL.md, after index.json and friends have been written.
         shutil.rmtree(profiles_root / "john-smith")
         monkeypatch.setattr(publish._site, "generate_skill_md", _boom)
 
@@ -383,8 +579,6 @@ class TestBuildSite:
     def test_failed_build_does_not_leave_an_output_dir_behind(
         self, profiles_root, tmp_path, monkeypatch
     ):
-        import researcher_profiles.publish as publish
-
         monkeypatch.setattr(publish._site, "generate_skill_md", _boom)
         out = tmp_path / "fresh" / "site"
         with pytest.raises(RuntimeError, match="exploded"):
@@ -392,11 +586,7 @@ class TestBuildSite:
         assert not (tmp_path / "fresh").exists()
 
     def test_preserves_sibling_trees_it_does_not_own(self, profiles_root, tmp_path):
-        """``profiles/`` and ``app/`` are rsynced in by the deploy script.
-
-        ``build_site`` owns only the collection files, so it must never swap or
-        clear the whole output directory.
-        """
+        """``profiles/`` and ``app/`` are rsynced in by deploy; build_site owns only collection files."""
         out = tmp_path / "site"
         (out / "profiles" / "jane-doe").mkdir(parents=True)
         (out / "profiles" / "jane-doe" / "index.html").write_text("rsynced profile page")
@@ -408,38 +598,19 @@ class TestBuildSite:
         assert (out / "profiles" / "jane-doe" / "index.html").read_text() == "rsynced profile page"
         assert (out / "app" / "index.html").read_text() == "explorer build"
         assert (out / "index.json").is_file()
-
-
-# ---------------------------------------------------------------------------
-# Markdown renderer
-# ---------------------------------------------------------------------------
+        assert (out / "robots.txt").is_file()
+        assert "profiles.example.com" in (out / "sitemap.xml").read_text()
 
 
 class TestMarkdownRenderer:
     @pytest.mark.parametrize(
         "source, expected",
         [
-            ("# Hello", ["<h1>Hello</h1>"]),
-            ("**bold**", ["<strong>bold</strong>"]),
-            (
-                "[click](http://example.com)",
-                ['href="http://example.com"', ">click</a>"],
-            ),
-            ("- item1\n- item2", ["<ul>", "<li>item1</li>"]),
-        ],
-        ids=["heading", "bold", "link", "list"],
-    )
-    def test_renders(self, source, expected):
-        result = md_to_html(source)
-        for fragment in expected:
-            assert fragment in result
-
-    def test_empty(self):
-        assert md_to_html("") == ""
-
-    @pytest.mark.parametrize(
-        "source, expected",
-        [
+            ("# Hello", "<h1>Hello</h1>"),
+            ("**bold**", "<p><strong>bold</strong></p>"),
+            ("[click](http://example.com)", '<p><a href="http://example.com">click</a></p>'),
+            ("- item1\n- item2", "<ul><li>item1</li><li>item2</li></ul>"),
+            ("", ""),
             ("a <b> & c", "<p>a &lt;b&gt; &amp; c</p>"),
             ("# R&D <lab>", "<h1>R&amp;D &lt;lab&gt;</h1>"),
             ("- <script>x</script>", "<ul><li>&lt;script&gt;x&lt;/script&gt;</li></ul>"),
@@ -450,29 +621,44 @@ class TestMarkdownRenderer:
             ),
             ("**x & y**", "<p><strong>x &amp; y</strong></p>"),
         ],
-        ids=["paragraph", "heading", "list", "code", "link", "bold"],
+        ids=[
+            "heading",
+            "bold",
+            "link",
+            "list",
+            "empty",
+            "escape-paragraph",
+            "escape-heading",
+            "escape-list",
+            "escape-code",
+            "escape-link",
+            "escape-bold",
+        ],
     )
-    def test_escapes_html_in_plain_text(self, source, expected):
+    def test_md_to_html(self, source, expected):
         assert md_to_html(source) == expected
-
-
-# ---------------------------------------------------------------------------
-# Embedded JSON-LD graph
-# ---------------------------------------------------------------------------
 
 
 class TestEmbeddedGraphNodes:
     """The index.html graph carries the same ids and terms as the collections."""
 
-    def test_paper_fragment_matches_papers_jsonld(self):
-        paper = PaperRecord(title="T", paper_id="doe2020x")
-        assert paper_node(paper)["@id"] == paper.resolve_id() == "#paper/doe2020x"
-
-    def test_paper_doi_wins_over_fragment(self):
-        paper = PaperRecord(title="T", paper_id="doe2020x", doi="https://doi.org/10.1/ABC")
+    @pytest.mark.parametrize(
+        "kwargs, expected_id, expected_identifier",
+        [
+            ({"paper_id": "doe2020x"}, "#paper/doe2020x", None),
+            (
+                {"paper_id": "doe2020x", "doi": "https://doi.org/10.1/ABC"},
+                "https://doi.org/10.1/ABC",
+                "https://doi.org/10.1/ABC",
+            ),
+        ],
+        ids=["fragment-matches-papers-jsonld", "doi-wins-over-fragment"],
+    )
+    def test_paper_node_id(self, kwargs, expected_id, expected_identifier):
+        paper = PaperRecord(title="T", **kwargs)
         node = paper_node(paper)
-        assert node["@id"] == "https://doi.org/10.1/ABC"
-        assert node["identifier"] == "https://doi.org/10.1/ABC"
+        assert node["@id"] == paper.resolve_id() == expected_id
+        assert node.get("identifier") == expected_identifier
 
     def test_grant_node_uses_collection_terms(self):
         grant = GrantRecord(id="nih-r01", name="Atlas", role="pi", status="funded")
@@ -481,17 +667,6 @@ class TestEmbeddedGraphNodes:
         assert node["role"] == "pi"
         assert node["status"] == "funded"
         assert "rp:role" not in node and "rp:status" not in node
-
-    def test_rendered_page_embeds_collection_ids(self, jane_doe_dir):
-        render_profile(jane_doe_dir)
-        html = (jane_doe_dir / "index.html").read_text()
-        assert "#paper/" in html
-        assert "#paper-" not in html
-
-
-# ---------------------------------------------------------------------------
-# Hosting configs
-# ---------------------------------------------------------------------------
 
 
 class TestHostingConfigs:
@@ -515,3 +690,21 @@ class TestHostingConfigs:
         data = json.loads(well_known_json(base_url="https://example.com"))
         assert data["version"] == 1
         assert data["base_url"] == "https://example.com"
+
+
+class TestChangeAudience:
+    """Re-publishing into a folder must not silently widen its audience."""
+
+    def test_widening_refused_unless_flagged_and_narrowing_allowed(self, tmp_path, audience_root):
+        out = tmp_path / "out"
+        publish_collection(audience_root, out, viewer="public")
+        with pytest.raises(PublishError, match="widen"):
+            publish_collection(audience_root, out, viewer="limited")
+        publish_collection(audience_root, out, viewer="limited", change_audience=True)
+        # Narrowing needs no flag.
+        publish_collection(audience_root, out, viewer="public")
+        assert json.loads((out / ".rp-publish.json").read_text())["who"] == "public"
+
+    def test_cli_flag_is_registered(self):
+        args = build_parser().parse_args(["publish", "x", "-o", "y", "--change-audience"])
+        assert args.change_audience is True

@@ -1,11 +1,7 @@
 """The knowledge-base export surface: the blob, the selection, the bundle.
 
-Everything here pins something a downstream connector would break by accident.
-The load-bearing claim is **determinism**: ``render_export_text`` has no clock,
-no counter and no host-dependent value in it, which is the only reason
-``content_hash`` can be an idempotency key at all. If a test in this file fails,
-a knowledge base is about to either re-ingest every profile on every run or
-miss a real change.
+Determinism is the contract the content hash rests on: a failure here means a knowledge base
+re-ingests every profile on every run or misses a real change.
 """
 
 import json
@@ -51,11 +47,8 @@ def _paper(pid: str, title: str, **kw) -> dict:
     return row
 
 
-#: Six papers: two near-duplicates on one topic and four on distinct ones, with
-#: citation counts tuned so the duplicates are the top two scorers. The corpus
-#: stopword pass drops a token present in more than 60% of the papers, so the
-#: shared chromatin vocabulary has to sit in 2 of 6 to still be measurable,
-#: which is why this table is six rows and not three.
+#: Six rows, not three: the corpus stopword pass drops a token in over 60% of papers, so the
+#: shared chromatin vocabulary must sit in 2 of 6 to stay measurable.
 _DIVERSITY_PAPERS = [
     _paper(
         "dup1",
@@ -124,12 +117,9 @@ def _ids(papers) -> list[str]:
 class TestRenderExportText:
     """The blob itself: stable bytes, clean prose, honest headings."""
 
-    def test_two_renders_are_byte_identical(self, jane_doe_readonly):
-        """Determinism is the whole contract the content hash rests on."""
-        assert render_export_text(jane_doe_readonly) == render_export_text(jane_doe_readonly)
-
-    def test_blob_carries_no_timestamp_and_no_hash(self, jane_doe_readonly):
+    def test_blob_is_deterministic(self, jane_doe_readonly):
         text = render_export_text(jane_doe_readonly)
+        assert text == render_export_text(jane_doe_readonly)
         assert not _TIMESTAMP_RE.search(text)
         assert "sha256:" not in text
 
@@ -301,12 +291,7 @@ class TestExportBundle:
         assert len(bundle.papers) == 1
 
     def test_summary_round_trips_and_is_covered_by_the_hash(self, tmp_path):
-        """``summary`` is content, not decoration: editing it must refresh the KB.
-
-        A connector uses this as its document description, so it has to arrive
-        on the bundle (rp-sdk owns profile reading; nobody downstream reopens
-        ``profile.jsonld``) AND has to sit inside the hash coverage.
-        """
+        """``summary`` is content, not decoration: it must reach the bundle and sit inside the hash."""
         path = tmp_path / "p"
         prof = _profile(
             path,
@@ -316,9 +301,7 @@ class TestExportBundle:
         bundle = build_export_bundle(prof)
         assert bundle.summary == "Studies widgets and their kinetics."
 
-        # Pin the coverage directly, not only the consequence: `summary` is in
-        # the hashed payload, so it cannot later be excluded while the rest of
-        # this test keeps passing on the rendered text alone.
+        # Pin hash coverage directly, not only its consequence on the rendered text.
         payload = bundle.model_dump(mode="json")
         payload.pop("built_at")
         payload.pop("content_hash")
@@ -334,32 +317,38 @@ class TestExportBundle:
         assert revised.summary == "Studies gadgets and their thermodynamics."
         assert revised.content_hash != bundle.content_hash
 
-    def test_explore_url_is_the_shape_the_browser_app_parses(self):
-        assert explore_url(
-            "https://profiles.example.org/profiles/jane-doe/profile.jsonld",
-            explore_base="https://explore.example.org",
-        ) == (
-            "https://explore.example.org/#/p?u="
-            "https%3A%2F%2Fprofiles.example.org%2Fprofiles%2Fjane-doe%2F"
-        )
-        assert explore_url(None) is None
-        assert explore_url("https://profiles.example.org/profiles/jane-doe/") is None
+    @pytest.mark.parametrize(
+        "url,kwargs,expected",
+        [
+            (
+                "https://profiles.example.org/profiles/jane-doe/profile.jsonld",
+                {"explore_base": "https://explore.example.org"},
+                "https://explore.example.org/p?u="
+                "https%3A%2F%2Fprofiles.example.org%2Fprofiles%2Fjane-doe%2F",
+            ),
+            (None, {}, None),
+            ("https://profiles.example.org/profiles/jane-doe/", {}, None),
+        ],
+        ids=["profile-url", "no-url", "not-a-profile-document-url"],
+    )
+    def test_explore_url_is_the_shape_the_browser_app_parses(self, url, kwargs, expected):
+        assert explore_url(url, **kwargs) == expected
 
     def test_nonpublic_profile_refuses_until_the_caller_opts_in(self, tmp_path):
         prof = _profile(
             tmp_path / "p",
-            visibility="internal",
+            visibility="limited",
             papers=[_paper("p1", "A study", abstract="Internal prose.")],
         )
         with pytest.raises(ExportVisibilityError):
             build_export_bundle(prof)
 
         bundle = build_export_bundle(prof, ExportOptions(allow_nonpublic=True))
-        assert bundle.visibility == "internal"
+        assert bundle.visibility == "limited"
         assert "Internal prose." in bundle.text
 
-    def test_restricted_sources_never_reach_the_text(self, tmp_path):
-        """``cv``/``web``/``grant`` are restricted by role, not by allowlist."""
+    def test_private_sources_never_reach_the_text(self, tmp_path):
+        """``cv``/``web``/``grant`` are private by role, not by allowlist."""
         prof = _profile(
             tmp_path / "p",
             level="deep",
@@ -389,6 +378,6 @@ class TestExportCli:
         assert bundle.text_chars == len(bundle.text)
 
     def test_nonpublic_profile_exits_four(self, tmp_path, capsys):
-        path = build_profile_dir(tmp_path / "p", visibility="internal")
+        path = build_profile_dir(tmp_path / "p", visibility="limited")
         assert main(["export", str(path)]) == 4
         assert "--allow-nonpublic" in capsys.readouterr().err

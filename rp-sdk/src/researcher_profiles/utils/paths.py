@@ -10,16 +10,10 @@ A profile has two roots:
   *outside* the content root that holds one build session's disposable
   bookkeeping (``meta/``) and append-only operational logs (``logs/``).
 
-The build root is a pure function of the content root, so no code has to thread
-a second path argument around. Every consumer derives one from the other with
-:func:`build_dir_for`.
+The build root is a pure function of the content root (:func:`build_dir_for`).
 
 No durable fact about a profile is derived from the build root. ``rm -rf
-$RESEARCHER_PROFILES_ROOT/.build/`` loses only resume hints and usage logs: every
-profile keeps its state and every cached audit verdict stays valid. See
-:func:`researcher_profiles.validate.validate_profile_dir`, which decides a
-profile's conformance from durable content-root artifacts and never reads this
-tree.
+$RESEARCHER_PROFILES_ROOT/.build/`` loses only resume hints and usage logs.
 
 Why the disposable files split three ways:
 
@@ -47,6 +41,7 @@ from typing import Optional
 __all__ = [
     "BUILD_ROOT_DIRNAME",
     "CACHE_DIRNAME",
+    "LEGACY_CACHE_DIRNAME",
     "REBUILT_DERIVED_CACHES",
     "STORE_CACHE_DIRNAME",
     "build_dir_for",
@@ -64,6 +59,10 @@ BUILD_ROOT_DIRNAME = ".build"
 
 #: Profile-adjacent directory for serve-time derived caches.
 CACHE_DIRNAME = ".cache"
+
+#: Old spelling of :data:`CACHE_DIRNAME`. Nothing reads it; files found under
+#: it are reported rather than dropped in silence.
+LEGACY_CACHE_DIRNAME = "cache"
 
 #: Store-wide directory (at the profiles root) for cross-profile derived
 #: caches: the ``rid <-> slug`` index, stacked centroids, the co-authorship
@@ -90,11 +89,7 @@ def build_meta_dir(profile_dir: str | Path) -> Path:
 
 
 def build_logs_dir(profile_dir: str | Path) -> Path:
-    """``$RESEARCHER_PROFILES_ROOT/.build/<slug>/logs/``: append-only operational logs.
-
-    Records, not caches: deleting one loses information. They live in the build
-    root, outside the content tree, so they are never published or pushed.
-    """
+    """``$RESEARCHER_PROFILES_ROOT/.build/<slug>/logs/``: append-only operational logs."""
     return build_dir_for(profile_dir) / "logs"
 
 

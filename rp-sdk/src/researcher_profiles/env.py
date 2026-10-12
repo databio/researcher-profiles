@@ -1,31 +1,16 @@
-"""Retired environment-variable names: the ``RETIRED_TERMS`` idiom, for env vars.
+"""Refuse to start when a retired environment-variable name is set.
 
-The SDK settled on one prefix, ``RESEARCHER_PROFILES_``, for every environment
-variable it reads. The older ``RP_*`` names (and one same-concept alias,
-``RESEARCHER_PROFILES_DIR``) are gone, with no dual-read shim: an operator who
-still exports an old name would otherwise see it silently ignored, the setting
-quietly reverting to its Python default. For a database URL that means a
-`RuntimeError` naming what *is* missing, which is at least loud. For a
-credential (``RP_AGENT_KEY`` / ``RP_API_URL``) or a host selector
-(``RP_HOST``), silent fallthrough to the *next* item in the resolution
-order (a ``.env`` file, a stored login, a different ``[hosts.*]`` block) is
-worse: the process starts fine and quietly authenticates as someone else.
-
-This mirrors :data:`researcher_profiles.validate.RETIRED_TERMS` /
-:func:`researcher_profiles.validate.retired_terms`: one dict of old name ->
-replacement, checked unconditionally, independent of whether the old name
-happens to still "mean" something to the code that reads it. Called once at
-each real process start (``rp`` CLI's :func:`researcher_profiles.cli.main`,
-the API's ``python -m researcher_profiles.api``, and the ``uvicorn``
-module-import default app), not from inside every individual resolver.
+Every variable the SDK reads uses the ``RESEARCHER_PROFILES_`` prefix. An old
+name would otherwise be silently ignored. For a credential or host selector
+that is a security problem: resolution falls through to the next source (a
+``.env`` file, a stored login) and the process quietly authenticates as
+someone else. Checked once at each process start.
 """
 
 import os
 
-#: Old env var name -> its replacement under the ``RESEARCHER_PROFILES_``
-#: prefix. ``RP_TEST_DATABASE_URL`` (a pytest-only integration-test gate, never
-#: read by any shipped process) is deliberately absent: nothing "starts" for
-#: it to guard.
+#: Old env var name -> its replacement. ``RP_TEST_DATABASE_URL`` is a
+#: test-only gate, so it is deliberately absent.
 RETIRED_ENV_VARS: dict[str, str] = {
     "RP_PROFILES_ROOT": "RESEARCHER_PROFILES_ROOT",
     "RESEARCHER_PROFILES_DIR": "RESEARCHER_PROFILES_ROOT",
@@ -43,13 +28,7 @@ class RetiredEnvVarError(Exception):
 
 
 def check_retired_env_vars() -> None:
-    """Refuse to proceed if any retired env var name (see :data:`RETIRED_ENV_VARS`)
-    is set.
-
-    Raises :class:`RetiredEnvVarError`, naming every retired variable found and
-    its replacement, so a startup failure points at the fix instead of leaving
-    the operator to guess why a value they *did* export was ignored.
-    """
+    """Raise :class:`RetiredEnvVarError` naming every retired variable set and its replacement."""
     hits = [name for name in RETIRED_ENV_VARS if os.environ.get(name)]
     if not hits:
         return

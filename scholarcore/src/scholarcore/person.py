@@ -130,11 +130,6 @@ class CareerEntry(ScholarModel):
 class Researcher(Person):
     """A researcher: a person with research-specific biographical fields.
 
-    Extends :class:`Person` with fields specific to someone who does research:
-    training history, career trajectory, research field. This is the base class
-    for researcher-profiles' ProfileDocument and for any downstream person
-    model that needs training and career history.
-
     Attributes:
         training: Education and training history (degrees, postdocs, clinical training).
         career: Employment and appointment history.

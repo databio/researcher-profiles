@@ -1,10 +1,6 @@
 /**
- * The app's entry point, as a function.
- *
- * `main.tsx` calls it with no options, which is the standalone app. A host
- * application calls it with its own routes and its own providers, so one
- * bundle can be both the plain static-host browser and the front end of a
- * larger service. Everything a host may add is declared in `slots.tsx`.
+ * The app's entry point, as a function. No options is the standalone app; a
+ * host passes its own routes and providers (see `slots.tsx`).
  */
 import React, { type ReactNode } from "react";
 import ReactDOM from "react-dom/client";

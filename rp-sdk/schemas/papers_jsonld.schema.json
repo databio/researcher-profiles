@@ -2,7 +2,7 @@
   "$defs": {
     "PaperRecord": {
       "additionalProperties": true,
-      "description": "One work: a ``schema:ScholarlyArticle`` node.\n\nA paper IS a research output, so this is a specialization of\n:class:`~.ResearchOutput`: it inherits the shared core (``name``,\n``type``, ``description``, ``url``, plus ``@id`` / ``@type``) and adds the\nbibliographic, authorship and access fields a scholarly work needs.\n\nPapers live in ``sources/papers.jsonld``, not in the profile's\n``researchOutputs`` list; the shared lineage is about the schema, not the\nstorage location.\n\n``type`` here is the OpenAlex work type (``article``, ``review``, ...),\nwhich narrows the base class's output-kind meaning; it is optional because\nnot every source reports one.\n\nEvery *build* field (``status``, ``download_attempts``, ``contaminated``,\n``identity_verified``, ...) lives in ``.build/<slug>/meta/build_state.json``\ninstead. Publishing a profile publishes the bibliographic record, not the\nbuild's dirty laundry.",
+      "description": "One work: a ``schema:ScholarlyArticle`` node.\n\nA specialization of :class:`~.ResearchOutput` that adds bibliographic,\nauthorship and access fields. Papers live in ``sources/papers.jsonld``,\nnot in the profile's ``researchOutputs`` list.\n\n``type`` here is the optional OpenAlex work type (``article``,\n``review``, ...). Build state is never part of the published record.",
       "properties": {
         "@context": {
           "anyOf": [
@@ -68,7 +68,27 @@
           "anyOf": [
             {
               "items": {
-                "type": "string"
+                "anyOf": [
+                  {
+                    "additionalProperties": true,
+                    "description": "A Person node.",
+                    "properties": {
+                      "@id": {
+                        "type": "string"
+                      },
+                      "@type": {
+                        "type": "string"
+                      },
+                      "name": {
+                        "type": "string"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  {
+                    "type": "string"
+                  }
+                ]
               },
               "type": "array"
             },
@@ -130,6 +150,10 @@
         "datePublished": {
           "anyOf": [
             {
+              "pattern": "^\\s*\\d+\\s*$",
+              "type": "string"
+            },
+            {
               "type": "integer"
             },
             {
@@ -190,6 +214,22 @@
         "isPartOf": {
           "anyOf": [
             {
+              "additionalProperties": true,
+              "description": "A Periodical node.",
+              "properties": {
+                "@id": {
+                  "type": "string"
+                },
+                "@type": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            {
               "type": "string"
             },
             {
@@ -198,6 +238,18 @@
           ],
           "default": null,
           "title": "Ispartof"
+        },
+        "isVersionOf": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Isversionof"
         },
         "is_corresponding": {
           "anyOf": [
@@ -359,6 +411,14 @@
           "default": null,
           "title": "Summary"
         },
+        "topics": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Topics",
+          "type": "array"
+        },
         "total_authors": {
           "anyOf": [
             {
@@ -456,6 +516,15 @@
     },
     "about": {
       "anyOf": [
+        {
+          "additionalProperties": true,
+          "properties": {
+            "@id": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
         {
           "type": "string"
         },

@@ -21,6 +21,7 @@ fixtures below.
 | Directory | What it is |
 |---|---|
 | `published/` | The consumer-skill corpus: broken, hostile, bracket-free and open-vocab published directories (`broken-artifacts`, `hostile`, `not-a-profile`, …). Exercises a *consumer* against documents that lie. Reached as `tests/test_spec_docs.py::FIXTURES_ROOT`. |
+| `text_artifacts/` | Real garbled paper downloads (PDF bytes decoded as text) from a published profile. The "no garbage characters" rule must fail every one. Reached as `tests/test_text_artifact.py::GARBLED_DIR`. |
 | `openalex/` | Raw OpenAlex work records paired with their expected `PaperRecord` output (`*.work.json` / `*.golden.json`). Pins the parser's output contract. Reached as `tests/test_openalex_parser.py::_OPENALEX_FIXTURES`. |
 
 `published/` is a different corpus from `spec/conformance/`
@@ -31,7 +32,7 @@ suite shared with rp-browser's TypeScript validator. Do not merge them.
 
 Most tests do not need a committed fixture at all; they need a profile of a
 known shape. That comes from `tests/factories.build_profile_dir` (or the
-`synthetic_profile` / `indexed_profile` / `flat_indexed_profile`
-fixtures in `tests/test_embeddings.py`), not
+`synthetic_profile` / `indexed_profile` / `shared_indexed`
+fixtures in `tests/test_embeddings.py`; both indexed ones include the flat export), not
 from a new directory here. Add a fixture directory only when the *committed
 bytes* are the thing under test.

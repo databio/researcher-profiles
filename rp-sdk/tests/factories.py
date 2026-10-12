@@ -29,8 +29,10 @@ deviation visible in the test body.
 """
 
 import hashlib
+import io
 import json
 import shutil
+import tarfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
@@ -146,7 +148,7 @@ def write_papers(profile_dir: Path, papers: list[dict], *, about: str | None = N
 
 
 def write_grants(profile_dir: Path, grants: list[dict] | None = None) -> Path:
-    """Write ``sources/grants.jsonld``: a deep-level, restricted source."""
+    """Write ``sources/grants.jsonld``: a deep-level, private source."""
     doc = GrantsDocument.model_validate({"hasPart": grants or DEFAULT_GRANTS})
     path = profile_dir / "sources" / "grants.jsonld"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -208,7 +210,7 @@ def write_summaries(profile_dir: Path, mapping: Mapping[str, str]) -> Path:
 
 
 def write_cv(profile_dir: Path, text: str = DEFAULT_CV) -> Path:
-    """Write ``sources/cv.md``: a deep-level, restricted source."""
+    """Write ``sources/cv.md``: a deep-level, private source."""
     path = profile_dir / "sources" / "cv.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
@@ -216,7 +218,7 @@ def write_cv(profile_dir: Path, text: str = DEFAULT_CV) -> Path:
 
 
 def write_web(profile_dir: Path, mapping: Mapping[str, str] | None = None) -> Path:
-    """Write ``sources/web/<page_id>.md``: deep-level, restricted sources."""
+    """Write ``sources/web/<page_id>.md``: deep-level, private sources."""
     d = profile_dir / "sources" / "web"
     d.mkdir(parents=True, exist_ok=True)
     for page_id, body in (mapping or DEFAULT_WEB).items():
@@ -349,6 +351,16 @@ def copy_fixture(
     return dest
 
 
+def tree_digest(root: Path) -> str:
+    """A digest of every file under ``root``: path and bytes."""
+    h = hashlib.sha256()
+    for f in sorted(p for p in root.rglob("*") if p.is_file()):
+        h.update(str(f.relative_to(root)).encode("utf-8"))
+        h.update(b"\0")
+        h.update(hashlib.sha256(f.read_bytes()).digest())
+    return h.hexdigest()
+
+
 # ---------------------------------------------------------------------------
 # Test doubles
 # ---------------------------------------------------------------------------
@@ -374,6 +386,69 @@ class FakeBackend:
             mag = sum(x * x for x in vals) ** 0.5 or 1.0
             out.append([x / mag for x in vals])
         return out
+
+
+#: Word -> concept dimension for :class:`ConceptBackend`. Dimension 7 is a
+#: small constant so no text embeds to the zero vector.
+CONCEPT_WORDS = {
+    0: "chromatin accessibility atac nucleosome nucleosomes open",
+    1: "transcription transcriptional enhancer enhancers regulation regulatory switched genes",
+    2: "methylation epigenetic",
+    3: "metadata standards reproducible",
+    4: "region enrichment sets lola",
+    5: "nuclei intact lysis membrane",
+    6: "protein folding",
+}
+
+
+class ConceptBackend:
+    """A tiny meaning-aware encoder: embeds by counting concept words.
+
+    Two texts that share no word but name the same concept ("how genes get
+    switched on", "transcriptional regulation") point the same way, and a
+    symbol outside the vocabulary (``GATA1``) points nowhere in particular.
+    That is what a paraphrase-versus-keyword search test needs and
+    :class:`FakeBackend`'s hash vectors cannot give.
+    """
+
+    def __init__(self, name: str = "fake:concept"):
+        import re
+
+        self.name = name
+        self.dim = 8
+        self._word = {w: d for d, ws in CONCEPT_WORDS.items() for w in ws.split()}
+        self._tok = re.compile(r"\w+")
+
+    def embed(self, texts):
+        out = []
+        for t in texts:
+            v = [0.0] * 8
+            v[7] = 0.1
+            for w in self._tok.findall(t.lower()):
+                if w in self._word:
+                    v[self._word[w]] += 1.0
+            n = sum(x * x for x in v) ** 0.5
+            out.append([x / n for x in v])
+        return out
+
+
+def patch_embedding_backends(mp, backend):
+    """Route every embedding-backend lookup in the SDK to ``backend``.
+
+    ``mp`` is a ``pytest.MonkeyPatch`` (a fixture's, or ``MonkeyPatch.context()``).
+    """
+    import researcher_profiles.analytics.centroids as centroids
+    import researcher_profiles.api._semantic as semantic
+    import researcher_profiles.embeddings as embeddings
+    import researcher_profiles.embeddings.backends as backends
+    import researcher_profiles.embeddings.cache as cache
+    import researcher_profiles.embeddings.profile_vec as profile_vec
+
+    mp.delenv("RESEARCHER_PROFILES_EMBEDDING_BACKEND", raising=False)
+    for mod in (backends, embeddings, cache, centroids, profile_vec):
+        mp.setattr(mod, "get_backend", lambda spec=None, **kw: backend)
+    mp.setattr(semantic, "_query_backend", lambda store: backend)
+    return backend
 
 
 def fake_llm_response(
@@ -423,36 +498,64 @@ def stub_llm(profile, response_text: str | None = None):
 
 
 # ---------------------------------------------------------------------------
+# Archives and the HTTP client
+# ---------------------------------------------------------------------------
+
+
+def add_fulltext_pdf(profile_dir: Path) -> Path:
+    """Plant a publisher-copyrighted PDF the archive boundary must withhold."""
+    papers = profile_dir / "sources" / "papers"
+    papers.mkdir(parents=True, exist_ok=True)
+    path = papers / "paper-001.pdf"
+    path.write_bytes(b"%PDF-1.4 fake fulltext")
+    return path
+
+
+def tar_names(data: bytes) -> set[str]:
+    """The member names of a gzipped tarball."""
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tf:
+        return {m.name for m in tf.getmembers()}
+
+
+def tar_gz_of_dir(src: Path) -> bytes:
+    """A gzipped tarball of a directory's contents, ``profile.jsonld`` at the root."""
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+        for child in sorted(src.iterdir()):
+            tf.add(child, arcname=child.name)
+    return buf.getvalue()
+
+
+def remote_from_app(app, slug: str = "jane-doe"):
+    """Build an ``ApiArtifactStorage``-backed profile that talks to the in-process app
+    using a starlette TestClient (which is itself an httpx.Client)."""
+    from fastapi.testclient import TestClient
+
+    from researcher_profiles import ResearcherProfile
+    from researcher_profiles.client import ApiArtifactStorage
+
+    http = TestClient(app)
+    return ResearcherProfile(
+        ApiArtifactStorage(slug=slug, base_url="http://testserver", client=http)
+    )
+
+
+# ---------------------------------------------------------------------------
 # Publish / serve
 # ---------------------------------------------------------------------------
 
 
-def sync_with_publishignore(src: Path, dst: Path) -> None:
-    """Copy ``src`` -> ``dst`` honoring only ``.publishignore``.
+def new_sql_store(url: str = "sqlite://"):
+    """A ``SqlProfileStore`` with its tables created (in-memory by default)."""
+    from researcher_profiles.store.sql import SqlProfileStore
 
-    Mirrors ``rsync -a --exclude-from=<src>/.publishignore`` for the pattern
-    forms this project emits: a line ending in ``/`` excludes that directory
-    subtree; any other line excludes that exact relative path.
-    """
-    patterns = [
-        ln.strip()
-        for ln in (src / ".publishignore").read_text().splitlines()
-        if ln.strip() and not ln.strip().startswith("#")
-    ]
-    dir_prefixes = tuple(p for p in patterns if p.endswith("/"))
-    exact = {p for p in patterns if not p.endswith("/")}
+    store = SqlProfileStore(url)
+    store.create_all()
+    return store
 
-    def excluded(rel: str) -> bool:
-        if rel in exact:
-            return True
-        return any(rel == d.rstrip("/") or rel.startswith(d) for d in dir_prefixes)
 
-    for f in src.rglob("*"):
-        if not f.is_file():
-            continue
-        rel = f.relative_to(src).as_posix()
-        if excluded(rel):
-            continue
-        out = dst / rel
-        out.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(f, out)
+def tier_from_header(request):
+    """Caller resolver: the caller's tier comes from the ``X-Tier`` header."""
+    from researcher_profiles.api.caller import Caller
+
+    return Caller(tier=request.headers.get("X-Tier", "public"))

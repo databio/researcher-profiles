@@ -1,27 +1,7 @@
 """Utilities to create and use embeddings of researcher profile components.
 
-An embedding turns a piece of a profile (an abstract, a summary, an expertise
-statement) into a numeric vector, so the profile can be searched by meaning
-rather than by keyword and any document can be ranked against it. The index
-lives inside the profile directory at ``<profile>/.cache/embeddings.sqlite``,
-so the profile stays self-contained and portable.
-
-Public API
-----------
-
-- :class:`SqliteEmbeddingIndex`: per-profile sqlite-vec store
-- :func:`build_index`: function-level entry point that the
-  create/update pipeline can lazy-import without circular imports
-- :class:`SearchHit`, :class:`IndexReport`: result dataclasses
-- :class:`MissingEmbeddingBackendError`, :class:`IndexBackendMismatchError`,
-  :class:`IndexNotBuiltError`
-
-The manager ``ResearcherProfile.index`` hands back is
-:class:`researcher_profiles.profile.index.IndexManager`; it lives in
-``profile/`` alongside the other capability managers and imports
-:func:`build_index` / :func:`_index_root` from here.
-
-Importing this subpackage has no side effect on the profile class.
+The index lives at ``<profile>/.cache/embeddings.sqlite``, so the profile
+stays self-contained.
 """
 
 from ._sqlite import IndexNotBuiltError

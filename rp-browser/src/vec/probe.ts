@@ -1,11 +1,7 @@
 /**
- * Probe self-test: verify that the local model produces compatible embeddings
- * for a given group's backend_spec.
- *
- * Before a group's centroids are used with a locally-embedded query, run the
- * probe once per group:
- * - Embed index.json's probe.text locally
- * - Cosine it against probe.vector
+ * Probe self-test: does the local model embed compatibly with a group's
+ * backend_spec? Cosine of the local embedding of probe.text against
+ * probe.vector:
  * - Above 0.99: verified
  * - 0.9 to 0.99: degraded (usable but flagged)
  * - Below 0.9: incompatible (free-text disabled for that group)
@@ -22,16 +18,9 @@ export interface ProbeResult {
   backendSpec: string;
 }
 
-// Cache probe results per backend_spec
 const probeCache = new Map<string, ProbeResult>();
 
-/**
- * Run the probe self-test for a given backend_spec.
- *
- * @param backendSpec - The embedding backend specification string
- * @param probeText - The fixed probe sentence from index.json
- * @param probeVector - The publisher's embedding of the probe sentence
- */
+/** Run the probe self-test for a backend_spec. */
 export async function runProbe(
   backendSpec: string,
   probeText: string,

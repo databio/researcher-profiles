@@ -1,9 +1,4 @@
-"""Persona system-prompt builder shared by ``.ask`` / ``.review``.
-
-Renders expertise + SOUL into a list of Anthropic system content blocks
-with a cache_control breakpoint after the stable persona prefix so
-repeat calls on the same profile hit the prompt cache.
-"""
+"""Persona system-prompt builder shared by ``.ask`` / ``.review``."""
 
 from typing import Literal
 
@@ -81,10 +76,8 @@ def build_persona_system_blocks(
 ) -> list[dict]:
     """Build the list of system content blocks for an ``.ask``/``.review`` call.
 
-    The persona block (preamble + EXPERTISE + SOUL) is byte-identical across
-    all calls for a given profile + mode pair; the ``cache_control`` is
-    attached to it so the prefix can be cached. Volatile mode-specific
-    instructions follow the cache boundary.
+    The persona block is byte-identical per profile and mode and carries the
+    ``cache_control``; volatile instructions follow the cache boundary.
     """
     persona_block = (
         f"{PERSONA_PREAMBLE}\n\n"

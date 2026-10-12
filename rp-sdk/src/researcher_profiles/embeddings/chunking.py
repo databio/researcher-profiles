@@ -3,20 +3,23 @@
 import re
 from dataclasses import dataclass, field
 
-# Heading detection
 _H2_RE = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
 _H3_RE = re.compile(r"^###\s+(.+?)\s*$", re.MULTILINE)
-# Citation tags like [foo2024bar] or [foo2024bar, baz2025qux]
-_CITATION_RE = re.compile(r"\[(?:[a-z][a-z0-9]*\d{4}[a-z0-9]+(?:,\s*)?)+\]")
+# Citation tags like [foo2024bar] or [foo2024bar, baz2025qux]. A paper id
+# holds a 4-digit year and may end there (live2005), carry a numbered suffix
+# (extracellular2023_2), start with the year (2016activation), or be all
+# digits (20261062, 8+ so a bracketed year never matches). Keep in step with
+# agent-runners pipelines/rprofiles/summaries.py PAPER_ID_PATTERN.
+_PAPER_ID = r"(?:[^\W\d_A-Z][\w-]*?\d{4}[\w-]*|\d{4}[^\W\d_A-Z]{2,}[\w-]*|\d{8,})"
+_CITATION_RE = re.compile(rf"\[(?:{_PAPER_ID}(?:,\s*)?)+\]")
 _ABSTRACT_ONLY_RE = re.compile(r"\[abstract-only\]\s*", re.IGNORECASE)
 
 MAX_CHUNK_CHARS = 8000
 SECTION_SPLIT_THRESHOLD = 2000
 
-#: Chunk source types that represent a paper. ``lite`` profiles index paper
-#: abstracts; ``full``/``deep`` profiles index LLM-written paper summaries.
-#: Anything counting or citing "papers" must consider both, otherwise lite
-#: profiles silently report zero papers and zero paper evidence.
+#: Chunk source types that represent a paper: abstracts (``lite``) and
+#: summaries (``full``/``deep``). Anything counting papers must use both, or
+#: lite profiles report zero papers.
 PAPER_CHUNK_TYPES = ("paper_summary", "paper_abstract")
 
 
@@ -139,11 +142,9 @@ def chunk_soul(text: str) -> list[Chunk]:
 
 
 def chunk_summary(text: str, paper_id: str) -> list[Chunk]:
-    """Chunk a single paper summary.
+    """Chunk a single paper summary, paragraph-split when long.
 
-    Summaries are typically short; default is a whole-document chunk.
-    Longer ones get paragraph-split. Strip the ``[abstract-only]`` marker
-    from the embedded text but keep a meta flag.
+    The ``[abstract-only]`` marker is stripped and kept as a meta flag.
     """
     is_abstract_only = bool(_ABSTRACT_ONLY_RE.search(text))
     body = _ABSTRACT_ONLY_RE.sub("", text).strip()
@@ -170,13 +171,7 @@ def chunk_summary(text: str, paper_id: str) -> list[Chunk]:
 
 
 def chunk_abstract(text: str, paper_id: str) -> list[Chunk]:
-    """Chunk a single paper abstract for a ``lite`` profile index.
-
-    Produces ``source_type="paper_abstract"`` chunks. Abstracts are short,
-    so this reuses the ``chunk_summary`` paragraph-splitting logic. Unlike
-    summaries there is no ``[abstract-only]`` marker to strip. The input is
-    a raw abstract string straight from ``PaperRecord.abstract``.
-    """
+    """Chunk a single paper abstract for a ``lite`` profile index."""
     body = (text or "").strip()
     if not body:
         return []
@@ -200,12 +195,7 @@ def chunk_abstract(text: str, paper_id: str) -> list[Chunk]:
 
 
 def chunk_grant(title: str, abstract: str | None, grant_id: str) -> list[Chunk]:
-    """Chunk a single grant record for a ``deep`` profile index.
-
-    Produces ``source_type="grant"`` chunks from the grant's title plus
-    abstract (when present). Grants are short; the combined text is
-    paragraph-split like abstracts.
-    """
+    """Chunk a grant's title plus abstract for a ``deep`` profile index."""
     parts = [p for p in ((title or "").strip(), (abstract or "").strip()) if p]
     body = "\n\n".join(parts)
     if not body:
@@ -234,9 +224,163 @@ def chunk_cv(text: str) -> list[Chunk]:
 
 
 def chunk_web(text: str, page_id: str) -> list[Chunk]:
-    """Chunk one extracted web page (sources/web/<page>.md) for a ``deep`` index.
-
-    ``page_id`` is the page's filename stem. Pages are markdown-ish extracted
-    text; split on H2/H3 boundaries like other markdown docs, keyed per page.
-    """
+    """Chunk one web page (``sources/web/<page_id>.md``) for a ``deep`` index."""
     return _chunk_markdown_doc(text, "web", page_id)
+
+
+# ---------------------------------------------------------------------------
+# Enumeration through ArtifactStorage
+# ---------------------------------------------------------------------------
+
+#: Every chunk ``source_type`` the enumerator can produce.
+ALL_SOURCE_TYPES = frozenset(
+    {"expertise", "soul", "paper_summary", "paper_abstract", "grant", "cv", "web"}
+)
+
+_SUMMARY_SUFFIX = ".summary.md"
+
+
+def strip_frontmatter(text: str) -> str:
+    """Drop a leading ``---`` YAML frontmatter block, if present."""
+    if not text.startswith("---"):
+        return text
+    end = text.find("\n---", 3)
+    if end == -1:
+        return text
+    return text[end + len("\n---") :].lstrip("\n")
+
+
+def _collection_entries(storage, content_url: str) -> list:
+    """The raw ``hasPart`` entries of a collection artifact, ``[]`` when absent."""
+    import json
+
+    raw = storage.artifact_text(content_url)
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return []
+    if not isinstance(data, dict):
+        return []
+    return data.get("hasPart", []) or []
+
+
+def _corpus_ids(storage) -> set[str] | None:
+    """Paper ids in ``sources/papers.jsonld``; None when the profile has none.
+
+    None means "no corpus to filter against" (an interview-built profile),
+    not "an empty corpus".
+    """
+    if not storage.artifact_text("sources/papers.jsonld"):
+        return None
+    return {
+        str(e["paper_id"])
+        for e in _collection_entries(storage, "sources/papers.jsonld")
+        if isinstance(e, dict) and e.get("paper_id")
+    }
+
+
+def _web_page_ids(storage) -> list[str]:
+    """Stems of ``sources/web/*.md`` the storage holds, sorted."""
+    try:
+        parts, subjects = storage.build_manifest()
+    # A backend that cannot enumerate has no web pages.
+    except Exception:
+        return []
+    ids = set()
+    for ref in [*parts, *subjects]:
+        url = getattr(ref, "content_url", "") or ""
+        if url.startswith("sources/web/") and url.endswith(".md") and url.count("/") == 2:
+            ids.add(url[len("sources/web/") : -len(".md")])
+    return sorted(ids)
+
+
+def enumerate_source_chunks(
+    source,
+    *,
+    source_types=None,
+    level: str | None = None,
+    build_state=None,
+    corpus_only: bool = False,
+) -> list[Chunk]:
+    """Every chunk a profile's index is built over, read through ``ArtifactStorage``.
+
+    The indexer and serve-time text recovery both use this, so a vector row's
+    ``(source_type, source_id, chunk_index)`` names the same text on both sides.
+
+    ``source`` is a :class:`~researcher_profiles.profile.ResearcherProfile`
+    (its storage, level and build state are used) or an ``ArtifactStorage``
+    (pass ``level`` and ``build_state``). ``source_types`` limits the work to
+    those types; ``None`` means all of them.
+
+    A ``lite`` profile is indexed over paper abstracts only (contaminated
+    papers skipped); ``full`` and ``deep`` over expertise, SOUL and summaries,
+    and ``deep`` adds grants, the CV and web pages.
+
+    ``corpus_only`` skips a summary whose paper is not in
+    ``sources/papers.jsonld``. Off by default: the format does not require
+    summary names to match the corpus.
+    """
+    storage = getattr(source, "storage", source)
+    if level is None:
+        try:
+            level = str(getattr(source.metadata, "level", None) or "full")
+        except Exception:  # noqa: BLE001 - an unreadable document indexes as full
+            level = "full"
+    if build_state is None:
+        try:
+            build_state = source.build_state
+        except Exception:  # noqa: BLE001
+            build_state = None
+    want = ALL_SOURCE_TYPES if source_types is None else frozenset(source_types)
+
+    out: list[Chunk] = []
+    if level == "lite":
+        if "paper_abstract" not in want:
+            return out
+        for i, entry in enumerate(_collection_entries(storage, "sources/papers.jsonld")):
+            if not isinstance(entry, dict):
+                continue
+            paper_id = entry.get("paper_id") or entry.get("openalex_id") or f"paper-{i}"
+            if build_state is not None and build_state.is_contaminated(entry.get("paper_id")):
+                continue
+            abstract = (entry.get("abstract") or "").strip()
+            if abstract:
+                out.extend(chunk_abstract(abstract, str(paper_id)))
+        return out
+
+    if "expertise" in want:
+        text = storage.load_expertise()
+        if text:
+            out.extend(chunk_expertise(text))
+    if "soul" in want:
+        text = storage.load_soul()
+        if text:
+            out.extend(chunk_soul(text))
+    if "paper_summary" in want:
+        summaries = storage.load_summaries()
+        corpus = _corpus_ids(storage) if corpus_only else None
+        for paper_id in sorted(summaries):
+            if corpus is not None and paper_id not in corpus:
+                continue
+            out.extend(chunk_summary(summaries[paper_id], paper_id))
+    if level == "deep":
+        if "grant" in want:
+            for i, entry in enumerate(_collection_entries(storage, "sources/grants.jsonld")):
+                if not isinstance(entry, dict):
+                    continue
+                grant_id = str(entry.get("id") or f"grant-{i}")
+                out.extend(
+                    chunk_grant(str(entry.get("name") or ""), entry.get("abstract"), grant_id)
+                )
+        if "cv" in want:
+            cv = storage.artifact_text("sources/cv.md")
+            if cv:
+                out.extend(chunk_cv(strip_frontmatter(cv)))
+        if "web" in want:
+            for page_id in _web_page_ids(storage):
+                body = storage.artifact_text(f"sources/web/{page_id}.md")
+                if body:
+                    out.extend(chunk_web(strip_frontmatter(body), page_id))
+    return out

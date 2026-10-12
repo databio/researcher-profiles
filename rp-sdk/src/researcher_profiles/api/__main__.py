@@ -43,10 +43,7 @@ def main(argv: list[str] | None = None) -> int:
 
     configure_logging(verbose=args.verbose)
     token = os.environ.get("RESEARCHER_PROFILES_TOKEN") or None
-    # build_store() is the one place the flag-then-env, database-over-directory
-    # composition rule lives (see its docstring); a bare CLI flag left unset
-    # here falls through to it reading the environment itself, so this and
-    # `create_app`'s own env-driven default can never disagree.
+    # Unset flags fall through to build_store() reading the environment.
     try:
         store = build_store(database_url=args.database_url, profiles_dir=args.profiles_dir)
     except (ValueError, RetiredEnvVarError) as e:

@@ -1,11 +1,8 @@
 """Minimal markdown to HTML converter for a fixed subset of the syntax.
 
-Handles: headings, paragraphs, bold, italic, links, lists (unordered and
-ordered), code spans, blockquotes, and code blocks.  Anything else degrades
-gracefully. The ``.md`` and JSON-LD carry the authoritative content, so
-perfect fidelity is not required.
-
-No external dependencies.
+Handles headings, paragraphs, bold, italic, links, lists, code spans,
+blockquotes, and code blocks. Anything else degrades gracefully; the ``.md``
+and JSON-LD carry the authoritative content.
 """
 
 import html

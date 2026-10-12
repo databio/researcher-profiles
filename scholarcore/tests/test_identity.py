@@ -16,9 +16,6 @@ VALID_ORCID = "0000-0002-1825-0097"
 VALID_LOCAL_RID = "local:carberry-josiah-a1b2c3"
 
 
-# --- rid validation -------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     "rid",
     [
@@ -74,26 +71,24 @@ def test_validate_rid_rejects_non_strings(bad):
         validate_rid(bad)  # type: ignore[arg-type]
 
 
-def test_is_rid_never_raises():
-    assert is_rid(VALID_ORCID) is True
-    assert is_rid(VALID_LOCAL_RID) is True
-    assert is_rid("garbage") is False
-    assert is_rid("") is False
-    assert is_rid(12345) is False  # type: ignore[arg-type]
-
-
-def test_is_local():
-    assert is_local(VALID_LOCAL_RID) is True
-    assert is_local(VALID_ORCID) is False
-
-
-def test_orcid_of():
-    assert orcid_of(VALID_ORCID) == VALID_ORCID
-    assert orcid_of(VALID_LOCAL_RID) is None
-    assert orcid_of(None) is None
-
-
-# --- minting --------------------------------------------------------------
+@pytest.mark.parametrize(
+    "fn,arg,expected",
+    [
+        (is_rid, VALID_ORCID, True),
+        (is_rid, VALID_LOCAL_RID, True),
+        (is_rid, "garbage", False),
+        (is_rid, "", False),
+        (is_rid, 12345, False),
+        (is_local, VALID_LOCAL_RID, True),
+        (is_local, VALID_ORCID, False),
+        (orcid_of, VALID_ORCID, VALID_ORCID),
+        (orcid_of, VALID_LOCAL_RID, None),
+        (orcid_of, None, None),
+    ],
+    ids=lambda v: v.__name__ if callable(v) else repr(v),
+)
+def test_rid_predicates(fn, arg, expected):
+    assert fn(arg) == expected
 
 
 @pytest.mark.parametrize(
@@ -116,9 +111,6 @@ def test_mint_local_rid_slugifies_the_name_and_stays_valid(name, expected_prefix
 def test_mint_local_rid_is_unique_across_calls():
     """The random suffix is what keeps two same-named people distinguishable."""
     assert len({mint_local_rid("Josiah Carberry") for _ in range(10)}) == 10
-
-
-# --- DOI / PMID normalization ---------------------------------------------
 
 
 @pytest.mark.parametrize(

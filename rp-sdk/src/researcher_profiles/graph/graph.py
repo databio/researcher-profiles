@@ -1,12 +1,4 @@
-"""``ProfileGraph``: the query object over the derived profile graph.
-
-Sits over a profiles root the way the vector analytics accessors sit over a
-store: it loads (or builds) a derived cross-profile artifact, caches it on disk
-under ``<root>/.cache/``, and answers relation queries. Where ``store.match``
-answers "how well does this profile match a query", the graph answers "who is
-related to whom, and how": the substrate for COI checks, COI-filtered reviewer
-matching, and neighborhood/team-assembly queries.
-"""
+"""``ProfileGraph``: who is related to whom, and how (COI checks, neighborhoods)."""
 
 import os
 from dataclasses import dataclass, field
@@ -72,7 +64,6 @@ class ProfileGraph:
         self._edges: list[GraphEdge] = list(edges)
         self.meta: dict = dict(meta or {})
 
-        # Indexes.
         self._by_slug: dict[str, str] = {}
         self._name_index = NameIndex()
         for n in self._nodes.values():
@@ -99,9 +90,7 @@ class ProfileGraph:
     ) -> "ProfileGraph":
         """Load ``<root>/.cache/graph.sqlite``, or build and persist it.
 
-        When ``profiles`` is given it is used for the build; otherwise the
-        profiles under ``root`` are loaded fresh. The built graph is written back
-        to the store so the next query is warm.
+        ``profiles``, when given, are used for the build instead of loading ``root``.
         """
         from . import cache as _store
 
@@ -158,9 +147,7 @@ class ProfileGraph:
     def resolve(self, ref: str) -> str:
         """Resolve a slug or rid to a node key, or raise ``KeyError``.
 
-        Uses the same boundary contract (:func:`validate_ref`) as the rest of the
-        API. A rid resolves to itself (it is the node key); a slug resolves
-        through the slug index; an ORCID resolves as a rid.
+        Validated with :func:`validate_ref`, like the rest of the API.
         """
         ref = validate_ref(ref)
         if ref in self._nodes:
@@ -210,8 +197,7 @@ class ProfileGraph:
                     return False
             return True
 
-        # BFS. Track the fewest hops to each node and the edges that connect it
-        # to the previous frontier.
+        # BFS, keeping the fewest hops to each node.
         best_hops: dict[str, int] = {origin: 0}
         conn_edges: dict[str, list[GraphEdge]] = {}
         frontier = {origin}
@@ -260,11 +246,7 @@ class ProfileGraph:
         orcid: Optional[str] = None,
         name: Optional[str] = None,
     ) -> tuple[str, str]:
-        """Resolve an inbound author descriptor to ``(node_key, kind)``.
-
-        Delegates to the shared resolver so an incoming author is folded exactly
-        the way the builder folded the corpus.
-        """
+        """Resolve an inbound author descriptor to ``(node_key, kind)``."""
         return resolve_descriptor(self._name_index, rid=rid, orcid=orcid, name=name)
 
     def coi_edges(
@@ -279,12 +261,10 @@ class ProfileGraph:
         ``author_descriptors`` is a list of ``{name?, orcid?, rid?, affiliation?,
         affiliation_id?}`` dicts (the manuscript's authors, who may or may not have
         profiles). ``candidate`` is a slug or rid. ``years`` is the coauthor
-        window in years. Returns a structured verdict.
+        window.
 
-        A same-institution conflict is caught for an external author (no profile)
-        by comparing the affiliation passed inline against the candidate's own
-        institution history. So a manuscript author with no profile in the registry
-        still trips a shared-institution COI.
+        An author with no profile still trips a shared-institution COI when the
+        affiliation passed inline is in the candidate's institution history.
         """
         candidate_key = self.resolve(candidate)
         cutoff = _current_year() - years
@@ -298,7 +278,6 @@ class ProfileGraph:
             except ValueError:
                 continue
             if author_key == candidate_key:
-                # Self-conflict is not a reviewer COI question; skip.
                 continue
             reasons.extend(self._coi_reasons_for_author(candidate_key, author_key, desc, cutoff))
 
@@ -343,7 +322,7 @@ class ProfileGraph:
                     )
                 )
             elif e.type == EdgeType.advised:
-                # Directed advisee -> advisor. src is the advisee.
+                # src is the advisee.
                 direction = (
                     "candidate_advised_by_author"
                     if e.src == candidate_key
@@ -353,9 +332,7 @@ class ProfileGraph:
                     CoiReason(**who, type="advised", direction=direction, confidence=e.confidence)
                 )
 
-        # An author with no shared-institution edge (typically one with no
-        # profile) still trips a shared-institution COI if the affiliation
-        # passed inline is one the candidate holds.
+        # Inline affiliation check; see coi_edges.
         if not any(r.type == "shared_institution" for r in reasons):
             inst = normalize_institution(
                 affiliation_id=desc.get("affiliation_id"), name=desc.get("affiliation")

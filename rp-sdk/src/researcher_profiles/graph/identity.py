@@ -1,9 +1,7 @@
 """Person-identity resolution for the profile graph.
 
-The hard part of building the graph is turning per-paper author *name strings*
-into person nodes. This is the one place that decision is made, so the builder
-and the query layer (COI check) fold names exactly the same way. Divergence
-here is the classic COI false-negative.
+The builder and the COI check must fold names identically; any divergence is
+a COI false negative.
 
 Resolution priority (highest confidence first):
 
@@ -14,9 +12,6 @@ Resolution priority (highest confidence first):
    resolves to that profile's ``rid`` (``medium`` confidence).
 3. External node: a name matching no profile becomes an ``external`` node
    keyed by its folded name (``low`` confidence).
-
-The public entry point is :func:`normalize_name`, the single name-fold both
-sides use, plus :class:`NameIndex`, which maps folded names to ``rid``.
 """
 
 import re
@@ -43,12 +38,9 @@ def normalize_name(name: Optional[str]) -> Optional[str]:
     ``"J. Doe"`` and ``"Doe, Jane"`` all fold to ``"doe j"``. Single-token names
     fold to the token itself. Returns ``None`` for empty input.
 
-    This loses the middle name and the rest of the given name: a
-    corpus lists the same coauthor as "Jane Doe" on one paper and "J.A. Doe" on
-    the next, and an identity key that distinguished them would split one person
-    into two nodes. The cost is that two people who share a surname and initial
-    collide, which is why a name match is only ``medium`` confidence and the
-    cross-corpus paper join (which needs no name) is preferred.
+    Dropping the rest of the given name keeps "Jane Doe" and "J.A. Doe" as one
+    person. The cost is that people sharing a surname and initial collide,
+    which is why a name match is only ``medium`` confidence.
     """
     if not name:
         return None
@@ -63,8 +55,7 @@ def normalize_name(name: Optional[str]) -> Optional[str]:
         given = given_part.strip()
     else:
         tokens = [t for t in re.split(r"\s+", raw) if t]
-        # Drop trailing generational/degree suffixes so they never become the
-        # surname ("Jane Doe Jr" -> surname "doe").
+        # "Jane Doe Jr" -> surname "doe".
         while len(tokens) > 1 and _fold(tokens[-1]) in _SUFFIXES:
             tokens.pop()
         if not tokens:
@@ -94,8 +85,7 @@ def paper_identity_key(
 ) -> Optional[str]:
     """A cross-corpus join key for one work: DOI -> OpenAlex id -> paper_id.
 
-    Returns ``None`` when a work carries none of the three, so the caller can
-    fall back to a per-profile-unique key and not collapse two unrelated works.
+    ``None`` when a work carries none of the three.
     """
     doi_n = normalize_doi(doi)
     if doi_n:
@@ -119,8 +109,7 @@ def normalize_institution(
     """Return ``(key, display_name)`` for an institution, or ``None``.
 
     A ROR IRI (``affiliation_id``) is the join key when present; otherwise the
-    folded institution name is. The display name is the human-readable label
-    (the raw ``name``), used in COI reasons.
+    folded name is.
     """
     if affiliation_id:
         rid = str(affiliation_id).strip()
@@ -136,10 +125,8 @@ def normalize_institution(
 class NameIndex:
     """Maps a folded author name to the ``rid`` of the profile that owns it.
 
-    Built once from the profile set. A folded name that two profiles share is
-    ambiguous and is dropped (mapped to ``None`` internally) rather than binding
-    an author to an arbitrary one of them. A name match must not silently pick
-    the wrong human.
+    A folded name two profiles share is ambiguous and resolves to ``None``,
+    so a name match never silently picks the wrong person.
     """
 
     def __init__(self) -> None:
@@ -151,7 +138,6 @@ class NameIndex:
             return
         if key in self._by_name:
             if self._by_name[key] != rid:
-                # Collision across two distinct rids: poison the key.
                 self._by_name[key] = None
         else:
             self._by_name[key] = rid
@@ -177,9 +163,7 @@ def resolve_descriptor(
     a name match against the profile set; otherwise an external node keyed by the
     folded name. Raises ``ValueError`` when nothing usable is supplied.
 
-    ``kind`` is ``"profiled"`` when the key is an rid and ``"external"`` when it
-    is a folded name. Note a supplied rid is trusted as profiled even if it has
-    no node in the graph: the caller still wants edges looked up against it.
+    A supplied rid counts as ``"profiled"`` even with no node in the graph.
     """
     if rid and is_rid(rid):
         return (rid, "profiled")

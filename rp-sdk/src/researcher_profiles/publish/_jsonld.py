@@ -38,7 +38,6 @@ def paper_node(paper: PaperRecord, *, person_id: str = "#person") -> dict[str, A
         node["identifier"] = f"https://doi.org/{doi}"
     if paper.paper_id:
         node["paper_id"] = paper.paper_id
-    # Authorship link back to person
     node["author"] = {"@id": person_id}
 
     return {k: v for k, v in node.items() if v is not None}
@@ -81,15 +80,10 @@ def profile_jsonld_graph(
     *,
     include_grant_abstracts: bool = False,
 ) -> dict[str, Any]:
-    """Build the self-contained JSON-LD document for a profile.
-
-    Returns a dict with ``@context`` and ``@graph`` containing the Person
-    node plus all inlined ScholarlyArticle and MonetaryGrant nodes.
-    """
+    """Build the self-contained JSON-LD document for a profile."""
     md = profile_data.get("metadata", {})
     rid = profile_data.get("rid")
 
-    # Person node
     person: dict[str, Any] = {
         "@type": "Person",
         "@id": "#person",
@@ -150,10 +144,8 @@ def profile_jsonld_graph(
     if grant_refs:
         person["rp:heldGrant"] = grant_refs
 
-    # Conformance
     person["conformsTo"] = CONTEXT_URL
 
-    # Build the graph
     graph = [person] + paper_nodes + grant_nodes
 
     return {
@@ -169,10 +161,8 @@ def catalog_jsonld(
 ) -> dict[str, Any]:
     """Build the root ``index.jsonld`` DataCatalog.
 
-    With ``base_url`` set, every entry carries the absolute ``@id`` of its
-    ``profile.jsonld`` and the ``url`` of its folder, so a consumer can get from
-    the catalog to a profile without re-deriving paths by convention. Without
-    it, not one key is added.
+    With ``base_url`` set, every entry also carries the absolute ``@id`` of
+    its ``profile.jsonld`` and the ``url`` of its folder.
     """
     base = base_url.rstrip("/") if base_url else None
     datasets = []

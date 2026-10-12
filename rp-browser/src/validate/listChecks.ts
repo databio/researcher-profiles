@@ -45,10 +45,8 @@ export async function listChecks(
     emit(check);
   }
 
-  // JSON Schema validation against published schema
   add(validateAgainstSchema("profile_list", data, "Profile List"));
 
-  // Entry format check: each must be a string, {url}, or {list}
   const invalidEntries = data
     .map((entry, i) => ({ entry, i }))
     .filter(({ entry }) => !isValidEntry(entry));
@@ -68,10 +66,8 @@ export async function listChecks(
 
   if (invalidEntries.length > 0) return checks;
 
-  // Extract profile URLs (skip nested list entries)
   const profileUrls = data.map(entryUrl).filter((u): u is string => u !== null);
 
-  // Check all URLs are absolute and use http(s)
   const invalidUrls = profileUrls.filter((u) => {
     try {
       const parsed = new URL(u);

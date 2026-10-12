@@ -1,13 +1,11 @@
-"""Everything under ``embeddings/``: chunking, the sqlite index, the vectors a
-profile derives from it, and the public flat export a consumer actually sees.
+"""Everything under ``embeddings/``: chunking, the sqlite index, profile-level vectors, flat export.
 
-Text becomes chunks, chunks become a searchable index, and the profile-level
-vectors (centroid, topics, relevance) are built on top of it. ``embeddings/``
-is the only part of any of it a consumer ever sees: no ``meta/``, no sqlite,
-no chunk text.
+``embeddings/`` is all a consumer ever sees: no ``meta/``, no sqlite, no chunk text.
 """
 
+import hashlib
 import json
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -34,44 +32,35 @@ from researcher_profiles.utils.paths import cache_dir
 
 from .factories import FakeBackend, build_profile_dir, write_profile
 
-# --------------------------------------------------------------------------
-# Fixtures
-# --------------------------------------------------------------------------
-
 
 @pytest.fixture
 def synthetic_profile(tmp_path: Path) -> Path:
-    """The standard built profile: document, papers, persona, two summaries.
-
-    Manifest refreshed, no embedding index.
-    """
+    """Document, papers, persona, two summaries; manifest refreshed, no embedding index."""
     return build_profile_dir(tmp_path / "tester-one", name="Tester One")
 
 
+@pytest.fixture(scope="module")
+def _built_tree(tmp_path_factory) -> Path:
+    """One indexed + flat-exported profile; never handed to a test directly."""
+    p = build_profile_dir(tmp_path_factory.mktemp("built") / "tester-one", name="Tester One")
+    SqliteEmbeddingIndex(p).build_index(backend=FakeBackend())
+    write_flat_export(p)
+    return p
+
+
+@pytest.fixture(scope="module")
+def shared_indexed(_built_tree) -> Path:
+    """Read-only: tests using this must not write to the profile tree."""
+    return _built_tree
+
+
 @pytest.fixture
-def indexed_profile(synthetic_profile: Path) -> Path:
-    """``synthetic_profile`` with a real sqlite index built by ``FakeBackend``."""
-    from researcher_profiles.embeddings import SqliteEmbeddingIndex
-
-    SqliteEmbeddingIndex(synthetic_profile).build_index(backend=FakeBackend())
-    return synthetic_profile
-
-
-@pytest.fixture
-def flat_indexed_profile(indexed_profile: Path) -> Path:
-    """``indexed_profile`` plus its public flat export under ``embeddings/``."""
-    from researcher_profiles.embeddings import write_flat_export
-
-    write_flat_export(indexed_profile)
-    return indexed_profile
-
-
-# --------------------------------------------------------------------------
-# Chunking and the sqlite index
-# --------------------------------------------------------------------------
-
-
-# ---- Chunking ----
+def indexed_profile(_built_tree, tmp_path) -> Path:
+    """A private, writable copy of the built tree (cheap copytree, no re-embed)."""
+    dest = tmp_path / "tester-one"
+    # Readers of the shared tree cache the centroid there; a copy starts without it.
+    shutil.copytree(_built_tree, dest, ignore=shutil.ignore_patterns("profile_vec.npz"))
+    return dest
 
 
 def test_chunk_expertise_splits_on_h2():
@@ -92,9 +81,6 @@ def test_chunk_summary_handles_abstract_only():
     assert "[abstract-only]" not in chunks[0].embed_text
 
 
-# ---- Schema bootstrap ----
-
-
 def test_build_index_creates_db(synthetic_profile):
     report = build_index(synthetic_profile, backend=FakeBackend())
     db = cache_dir(synthetic_profile) / "embeddings.sqlite"
@@ -102,27 +88,14 @@ def test_build_index_creates_db(synthetic_profile):
     assert report.added > 0
     assert report.backend_name == "fake:tiny"
 
-    # Check tables exist
-    import sqlite3
-
-    import sqlite_vec
-
-    conn = sqlite3.connect(str(db))
-    conn.enable_load_extension(True)
-    sqlite_vec.load(conn)
-    conn.enable_load_extension(False)
+    conn = connect_vec(db)
     names = {
         r[0]
         for r in conn.execute("SELECT name FROM sqlite_master WHERE type IN ('table','virtual')")
     }
-    assert "chunks" in names
-    assert "index_meta" in names
-    # vec0 table is a virtual table
-    assert any("chunk_vec" in n for n in names)
     conn.close()
-
-
-# ---- Idempotency, change and deletion detection ----
+    assert {"chunks", "index_meta"} <= names
+    assert any("chunk_vec" in n for n in names)  # vec0 is a virtual table
 
 
 def _leave_unchanged(profile_dir):
@@ -156,27 +129,16 @@ def test_build_index_change_detection(synthetic_profile, mutate, expected_delta)
     assert report.skipped > 0
 
 
-# ---- Search filter ----
-
-
-def test_search_filter_source_type(synthetic_profile):
-    idx = SqliteEmbeddingIndex(synthetic_profile)
-    idx.build_index(backend=FakeBackend())
+def test_search_filter_source_type(shared_indexed):
+    idx = SqliteEmbeddingIndex(shared_indexed)
+    idx._cached_backend = FakeBackend()
     hits = idx.search("anything", k=10, filter={"source_type": "paper_summary"})
     assert hits
     assert all(h.source_type == "paper_summary" for h in hits)
 
 
-# ---- Few-chunk search returns all rows (no silent drops on NULL distance) ----
-
-
 def test_search_returns_all_chunks_when_k_exceeds_count(tmp_path):
-    """With fewer chunks than k, search should return all of them.
-
-    Regression: rows where vec0 returns a NULL distance must not be silently
-    dropped (which would yield fewer than k results with no indication why).
-    NULL-distance rows are recomputed in Python.
-    """
+    """Regression: vec0 rows with a NULL distance must not be silently dropped."""
     p = tmp_path / "tiny-profile"
     (p / "personality").mkdir(parents=True)
     (p / "sources" / "summaries").mkdir(parents=True)
@@ -201,25 +163,25 @@ def test_search_returns_all_chunks_when_k_exceeds_count(tmp_path):
     assert len(hits) == n_chunks
 
 
-# ---- Backend mismatch ----
-
-
-def test_backend_mismatch_raises(synthetic_profile):
+@pytest.mark.parametrize("force", [False, True], ids=["mismatch-raises", "force-rebuild"])
+def test_backend_mismatch(synthetic_profile, force):
     build_index(synthetic_profile, backend=FakeBackend(name="fake:a", dim=16))
-    with pytest.raises(IndexBackendMismatchError):
-        build_index(synthetic_profile, backend=FakeBackend(name="fake:b", dim=8))
-
-
-def test_backend_mismatch_force_rebuild(synthetic_profile):
-    build_index(synthetic_profile, backend=FakeBackend(name="fake:a", dim=16))
-    report = build_index(synthetic_profile, backend=FakeBackend(name="fake:b", dim=8), force=True)
+    # A cached centroid exists before the second build, so the rebuild must invalidate it.
+    assert ResearcherProfile.from_files(synthetic_profile).index.embedding("centroid").shape == (
+        16,
+    )
+    second = FakeBackend(name="fake:b", dim=8)
+    if not force:
+        with pytest.raises(IndexBackendMismatchError):
+            build_index(synthetic_profile, backend=second)
+        return
+    report = build_index(synthetic_profile, backend=second, force=True)
     assert report.added > 0
     assert report.backend_name == "fake:b"
-
-    # Confirm dim is now 8 by reading meta
     meta = read_index_meta_path(cache_dir(synthetic_profile) / "embeddings.sqlite")
-    assert meta["backend_name"] == "fake:b"
-    assert meta["embedding_dim"] == "8"
+    assert (meta["backend_name"], meta["embedding_dim"]) == ("fake:b", "8")
+    fresh = ResearcherProfile.from_files(synthetic_profile)
+    assert fresh.index.embedding("centroid").shape == (8,)
 
 
 def test_disable_env(synthetic_profile, monkeypatch):
@@ -229,55 +191,123 @@ def test_disable_env(synthetic_profile, monkeypatch):
     assert not (cache_dir(synthetic_profile) / "embeddings.sqlite").exists()
 
 
-# --------------------------------------------------------------------------
-# get_backend("fastembed:...") / FastEmbedBackend
-#
-# Construction and spec-parsing must not require fastembed to be installed.
-# CI does not have it, since FastEmbedBackend._load() imports it lazily.
-# --------------------------------------------------------------------------
+class _RecordingModel:
+    """A fastembed model double that records the kwargs ``embed`` receives."""
+
+    def __init__(self):
+        self.kwargs = []
+
+    def embed(self, texts, **kw):
+        self.kwargs.append(kw)
+        return [[0.0] * 384 for _ in texts]
 
 
 class TestFastEmbedBackend:
-    def test_string_spec_returns_backend(self):
-        from researcher_profiles.embeddings.backends import FastEmbedBackend, get_backend
+    """Spec parsing must not need fastembed installed: ``_load()`` imports it lazily."""
 
-        backend = get_backend("fastembed:all-MiniLM-L6-v2")
-        assert isinstance(backend, FastEmbedBackend)
-        assert backend.name == "fastembed:all-MiniLM-L6-v2"
-        assert backend.dim == 384
-
-    def test_dict_spec_returns_backend_and_allows_dim_override(self):
-        from researcher_profiles.embeddings.backends import FastEmbedBackend, get_backend
-
-        backend = get_backend({"backend": "fastembed", "model": "all-MiniLM-L6-v2"})
-        assert isinstance(backend, FastEmbedBackend)
-        assert backend.name == "fastembed:all-MiniLM-L6-v2"
-        assert backend.dim == 384
-
-        overridden = get_backend({"backend": "fastembed", "model": "all-MiniLM-L6-v2", "dim": 999})
-        assert overridden.dim == 999
-
-    def test_bare_kind_with_no_colon_raises(self):
+    @pytest.mark.parametrize(
+        ("spec", "name", "dim"),
+        [
+            ("fastembed:all-MiniLM-L6-v2", "fastembed:all-MiniLM-L6-v2", 384),
+            (
+                {"backend": "fastembed", "model": "all-MiniLM-L6-v2"},
+                "fastembed:all-MiniLM-L6-v2",
+                384,
+            ),
+            (
+                {"backend": "fastembed", "model": "all-MiniLM-L6-v2", "dim": 999},
+                "fastembed:all-MiniLM-L6-v2",
+                999,
+            ),
+            ({"backend": "fastembed"}, "fastembed:all-MiniLM-L6-v2", 384),
+        ],
+        ids=["string", "dict", "dict-dim-override", "dict-defaults-to-minilm"],
+    )
+    def test_spec_resolves(self, spec, name, dim):
         from researcher_profiles.embeddings.backends import get_backend
 
-        with pytest.raises(ValueError, match="kind:model"):
-            get_backend("fastembed")
-
-    def test_dict_spec_defaults_to_minilm(self):
-        from researcher_profiles.embeddings.backends import get_backend
-
-        backend = get_backend({"backend": "fastembed"})
+        backend = get_backend(spec)
+        assert (backend.name, backend.dim) == (name, dim)
         assert backend.model_name == "all-MiniLM-L6-v2"
 
-    def test_model_map_translates_short_names_and_passes_through_unknown(self):
-        from researcher_profiles.embeddings.backends import FastEmbedBackend
+    @pytest.mark.parametrize(
+        ("spec", "kwargs", "match"),
+        [
+            ("fastembed", {}, "kind:model"),
+            (
+                "openai:text-embedding-3-small",
+                {"batch_size": 16},
+                "only supported by the fastembed",
+            ),
+        ],
+        ids=["bare-kind-no-colon", "batch-size-for-other-backend"],
+    )
+    def test_spec_refused(self, spec, kwargs, match):
+        from researcher_profiles.embeddings.backends import get_backend
 
-        assert (
-            FastEmbedBackend._MODEL_MAP["all-MiniLM-L6-v2"]
-            == "sentence-transformers/all-MiniLM-L6-v2"
+        with pytest.raises(ValueError, match=match):
+            get_backend(spec, **kwargs)
+
+    def test_process_wide_batch_size_must_be_positive(self, monkeypatch):
+        from researcher_profiles.embeddings import backends
+
+        monkeypatch.setattr(backends, "_FASTEMBED_BATCH_SIZE", None)
+        with pytest.raises(ValueError, match="positive"):
+            backends.set_fastembed_batch_size(0)
+
+    @pytest.mark.parametrize(
+        ("process_wide", "spec", "kwargs", "expected"),
+        [
+            (None, "fastembed:all-MiniLM-L6-v2", {}, {}),
+            (None, "fastembed:all-MiniLM-L6-v2", {"batch_size": 16}, {"batch_size": 16}),
+            (None, {"backend": "fastembed", "batch_size": 8}, {}, {"batch_size": 8}),
+            (16, "fastembed:all-MiniLM-L6-v2", {}, {"batch_size": 16}),
+            (16, "fastembed:all-MiniLM-L6-v2", {"batch_size": 4}, {"batch_size": 4}),
+        ],
+        ids=["unset", "explicit", "from-dict", "process-wide", "explicit-beats-process-wide"],
+    )
+    def test_batch_size_reaches_embed_only_when_set(
+        self, monkeypatch, process_wide, spec, kwargs, expected
+    ):
+        from researcher_profiles.embeddings import backends
+
+        monkeypatch.setattr(backends, "_FASTEMBED_BATCH_SIZE", None)
+        if process_wide:
+            backends.set_fastembed_batch_size(process_wide)
+        backend = backends.get_backend(spec, **kwargs)
+        backend._model = _RecordingModel()
+        backend.embed(["a"])
+        assert backend._model.kwargs == [expected]
+
+    @pytest.mark.parametrize(
+        ("model", "expected"),
+        [
+            ("all-MiniLM-L6-v2", "sentence-transformers/all-MiniLM-L6-v2"),
+            ("some/custom-model", "some/custom-model"),
+        ],
+        ids=["short-name-mapped-to-hf-path", "unknown-name-passed-through"],
+    )
+    def test_fastembed_receives_the_full_model_path(self, monkeypatch, model, expected):
+        import sys
+        import types
+
+        from researcher_profiles.embeddings.backends import FastEmbedBackend, get_backend
+
+        seen = []
+
+        class TextEmbedding:
+            def __init__(self, model_name):
+                seen.append(model_name)
+
+            def embed(self, texts, **kw):
+                return [[0.0] * 384 for _ in texts]
+
+        monkeypatch.setitem(
+            sys.modules, "fastembed", types.SimpleNamespace(TextEmbedding=TextEmbedding)
         )
-        backend = FastEmbedBackend("some/custom-model")
-        assert backend._MODEL_MAP.get(backend.model_name, backend.model_name) == "some/custom-model"
+        monkeypatch.setattr(FastEmbedBackend, "_MODEL_CACHE", {})  # isolate the session cache
+        get_backend(f"fastembed:{model}").embed(["a"])
+        assert seen == [expected]
 
     def test_missing_fastembed_raises_with_extra_name(self, monkeypatch):
         import builtins
@@ -297,7 +327,7 @@ class TestFastEmbedBackend:
         monkeypatch.setattr("builtins.__import__", fake_import)
         backend = FastEmbedBackend()
         with pytest.raises(MissingEmbeddingBackendError, match=r"'fastembed' extra"):
-            backend._load()
+            backend.embed(["a"])
 
     @pytest.mark.integration
     def test_real_embed_roundtrip(self):
@@ -311,96 +341,54 @@ class TestFastEmbedBackend:
         assert backend.dim == 384
 
 
-# --------------------------------------------------------------------------
-# ResearcherProfile.profile_embedding()
-# --------------------------------------------------------------------------
-
-
 class TestProfileCentroid:
-    """Tests for ResearcherProfile.profile_embedding()."""
-
-    @pytest.mark.parametrize("kind", ["centroid", "expertise"], ids=["centroid", "expertise"])
-    def test_centroid_basic(self, monkeypatch, synthetic_profile, kind):
-        build_index(synthetic_profile, backend=FakeBackend())
-        p = ResearcherProfile.from_files(synthetic_profile)
+    @pytest.mark.parametrize("kind", ["centroid", "expertise"])
+    def test_centroid_basic(self, monkeypatch, indexed_profile, kind):
+        # A private copy: the first-ever read (no cache yet) is the branch under test.
+        p = ResearcherProfile.from_files(indexed_profile)
 
         # Force backend resolution to FakeBackend regardless of config
         import researcher_profiles.embeddings.profile_vec as pv
 
         monkeypatch.setattr(pv, "_resolve_backend", lambda profile: FakeBackend())
         vec = p.index.embedding(kind)
-        assert isinstance(vec, np.ndarray)
         assert vec.shape == (16,)
-        # unit-normalized
-        assert abs(float(np.linalg.norm(vec)) - 1.0) < 1e-4
+        assert abs(float(np.linalg.norm(vec)) - 1.0) < 1e-4  # unit-normalized
 
-    def test_centroid_cached_on_disk(self, synthetic_profile):
-        build_index(synthetic_profile, backend=FakeBackend())
-        p = ResearcherProfile.from_files(synthetic_profile)
+    def test_centroid_cached_on_disk(self, indexed_profile):
+        p = ResearcherProfile.from_files(indexed_profile)
         _ = p.index.embedding("centroid")
-        cache = cache_dir(synthetic_profile) / "profile_vec.npz"
-        assert cache.exists()
-        # Second call returns same vector without recomputing
-        p2 = ResearcherProfile.from_files(synthetic_profile)
-        v2 = p2.index.embedding("centroid")
+        assert (cache_dir(indexed_profile) / "profile_vec.npz").exists()
+        # A second profile reads the cached vector
+        v2 = ResearcherProfile.from_files(indexed_profile).index.embedding("centroid")
         assert v2.shape == (16,)
-
-    def test_backend_mismatch_invalidates(self, synthetic_profile):
-        build_index(synthetic_profile, backend=FakeBackend(name="fake:a", dim=16))
-        p = ResearcherProfile.from_files(synthetic_profile)
-        v1 = p.index.embedding("centroid")
-        assert v1.shape == (16,)
-        # Now rebuild with different backend
-        build_index(synthetic_profile, backend=FakeBackend(name="fake:b", dim=8), force=True)
-        p2 = ResearcherProfile.from_files(synthetic_profile)
-        v2 = p2.index.embedding("centroid")
-        assert v2.shape == (8,)
-
-
-# --------------------------------------------------------------------------
-# ResearcherProfile.topics() and .relevance()
-# --------------------------------------------------------------------------
 
 
 class TestTopicsAndRelevance:
-    """Tests for ResearcherProfile.topics() and .relevance()."""
-
-    def test_topics_cluster(self, monkeypatch, synthetic_profile):
+    def test_topics_cluster(self, indexed_profile):
         pytest.importorskip("sklearn")  # clustering needs the [topics] extra
-        build_index(synthetic_profile, backend=FakeBackend())
-        p = ResearcherProfile.from_files(synthetic_profile)
+        p = ResearcherProfile.from_files(indexed_profile)
 
         topics = p.topics.get(n=3, method="cluster")
-        assert isinstance(topics, list)
-        # We have 4 chunks (2 expertise + 1 soul + 2 summaries minus stripping)
-        # KMeans yields up to n clusters
-        assert 1 <= len(topics) <= 3
+        assert 1 <= len(topics) <= 3  # KMeans yields up to n clusters
         for t in topics:
             assert t.label
             assert 0.0 <= t.weight <= 1.0
 
-        # Cluster topics are a precomputation: they land in the cache, and
-        # never in the content tree.
-        assert (cache_dir(synthetic_profile) / "topics.json").is_file()
-        assert not (synthetic_profile / "personality" / "topics.json").exists()
+        # Cluster topics are a precomputation: they land in the cache, never in the content tree.
+        assert (cache_dir(indexed_profile) / "topics.json").is_file()
+        assert not (indexed_profile / "personality" / "topics.json").exists()
 
-    def test_topics_cached_roundtrip(self, synthetic_profile):
+    def test_topics_cached_roundtrip(self, indexed_profile):
         pytest.importorskip("sklearn")  # clustering needs the [topics] extra
-        build_index(synthetic_profile, backend=FakeBackend())
-        p = ResearcherProfile.from_files(synthetic_profile)
+        p = ResearcherProfile.from_files(indexed_profile)
         first = p.topics.get(n=3, method="cluster")
         second = p.topics.get(n=3, method="cached")
         assert [t.label for t in first] == [t.label for t in second]
 
-    def test_llm_topics_are_content_not_cache(self, monkeypatch, synthetic_profile):
-        """LLM-labeled topics are generated content, so they go in ``personality/``.
-
-        Rerunning gives different topics; deleting the file loses information.
-        That makes it the same kind of artifact as ``personality/expertise.md``,
-        and it must not sit in a directory advertised as safe to delete.
-        """
-        build_index(synthetic_profile, backend=FakeBackend())
-        p = ResearcherProfile.from_files(synthetic_profile)
+    def test_llm_topics_are_content_not_cache(self, monkeypatch, indexed_profile):
+        """LLM topics are generated content (``personality/``): deleting them loses information."""
+        p = ResearcherProfile.from_files(indexed_profile)
 
         monkeypatch.setattr(
             topics_mod,
@@ -410,24 +398,18 @@ class TestTopicsAndRelevance:
         got = p.topics.get(n=3, method="llm")
         assert [t.label for t in got] == ["Quantum widgets"]
 
-        content = synthetic_profile / "personality" / "topics.json"
+        content = indexed_profile / "personality" / "topics.json"
         assert content.is_file()
         assert json.loads(content.read_text())["method"] == "llm"
-        assert not (cache_dir(synthetic_profile) / "topics.json").exists()
+        assert not (cache_dir(indexed_profile) / "topics.json").exists()
 
         # ``cached`` prefers the content copy over any cache copy.
         assert [t.label for t in p.topics.get(n=3, method="cached")] == ["Quantum widgets"]
 
-    def test_llm_fallback_to_cluster_persists_as_a_cache(self, monkeypatch, synthetic_profile):
-        """A failed LLM call downgrades to clustering, and the result is a cache.
-
-        The downgrade is the whole reason ``_topics_llm`` reports the method it
-        actually used: persisting cluster output as ``personality/topics.json``
-        would file a precomputation as generated content.
-        """
+    def test_llm_fallback_to_cluster_persists_as_a_cache(self, monkeypatch, indexed_profile):
+        """A failed LLM call downgrades to clustering; persisting that as content would be wrong."""
         pytest.importorskip("sklearn")
-        build_index(synthetic_profile, backend=FakeBackend())
-        p = ResearcherProfile.from_files(synthetic_profile)
+        p = ResearcherProfile.from_files(indexed_profile)
 
         monkeypatch.setattr(
             topics_mod,
@@ -436,27 +418,16 @@ class TestTopicsAndRelevance:
         )
         p.topics.get(n=3, method="llm")
 
-        assert (cache_dir(synthetic_profile) / "topics.json").is_file()
-        assert not (synthetic_profile / "personality" / "topics.json").exists()
-
-
-# --------------------------------------------------------------------------
-# The public flat form: what the exporter writes, what a reader reconstructs
-# --------------------------------------------------------------------------
+        assert (cache_dir(indexed_profile) / "topics.json").is_file()
+        assert not (indexed_profile / "personality" / "topics.json").exists()
 
 
 class TestFlatExport:
-    """The flat embedding exporter: sqlite in, public flat form out.
-
-    The load-bearing property: rows drop out of the public export by the GENERAL
-    derivation rule (a chunk's tier is its source's tier), not a hand-rolled
-    ``PUBLISHED_SOURCE_TYPES`` allowlist. cv/web/grant chunks are ``restricted``
-    and never reach the blob or the chunks file.
-    """
+    """Rows drop from the public export by the derivation rule (a chunk's tier is its source's), not an allowlist."""
 
     @pytest.fixture
     def deep_profile(self, tmp_path: Path) -> Path:
-        """A deep profile whose sqlite mixes public and restricted (cv/web/grant) chunks."""
+        """A deep profile whose sqlite mixes public and private (cv/web/grant) chunks."""
         return build_profile_dir(
             tmp_path / "tester-deep",
             name="Tester Deep",
@@ -466,59 +437,39 @@ class TestFlatExport:
             web=True,
         )
 
-    # ----------------------------------------------------------------------
-    # Basic shape / spec conformance
-    # ----------------------------------------------------------------------
-
-    def test_export_writes_three_files_and_matches_spec(self, synthetic_profile: Path):
-        idx = SqliteEmbeddingIndex(synthetic_profile)
-        report = idx.build_index(backend=FakeBackend())
-        assert report.added > 0
-
-        result = write_flat_export(synthetic_profile)
-        assert result is not None
-
-        emb = synthetic_profile / "embeddings"
-        index_path = emb / "index.json"
-        assert index_path.is_file()
-        index = json.loads(index_path.read_text())
+    def test_export_writes_three_files_and_matches_spec(self, shared_indexed: Path):
+        emb = shared_indexed / "embeddings"
+        index = json.loads((emb / "index.json").read_text())
 
         # Spec section 3 fields.
-        assert index["backend_spec"] == "fake:tiny"
-        assert index["dtype"] == "float32"
-        assert index["byte_order"] == "little"
-        assert index["layout"] == "row_major"
-        assert index["metric"] == "cosine"
-        assert index["normalized"] is False
-        assert index["row_key"] == "chunk_index"
-        assert index["dim"] == 16
-        assert index["rows"] == list(range(index["count"]))
+        expected = {
+            "backend_spec": "fake:tiny",
+            "dtype": "float32",
+            "byte_order": "little",
+            "layout": "row_major",
+            "metric": "cosine",
+            "normalized": False,
+            "row_key": "chunk_index",
+            "dim": 16,
+            "rows": list(range(index["count"])),
+        }
+        assert {k: index[k] for k in expected} == expected
 
-        blob_path = emb / index["file"]
-        assert blob_path.is_file()
-        raw = blob_path.read_bytes()
+        raw = (emb / index["file"]).read_bytes()
         assert len(raw) == index["count"] * index["dim"] * 4
-
-        import hashlib
-
         assert hashlib.sha256(raw).hexdigest() == index["sha256"]
 
-        chunks_path = emb / (Path(index["file"]).stem + ".chunks.json")
-        chunks = json.loads(chunks_path.read_text())
+        chunks = json.loads((emb / (Path(index["file"]).stem + ".chunks.json")).read_text())
         assert len(chunks) == index["count"]
         # No chunk text is ever exposed.
         for c in chunks:
-            assert "text" not in c
-            assert "embed_text" not in c
             assert set(c) == {"source_type", "source_id", "chunk_index", "section", "char_count"}
 
     def test_backend_filename_is_colon_free(self, tmp_path: Path):
         p = build_profile_dir(tmp_path / "tester-slug", name="Tester Slug")
         idx = SqliteEmbeddingIndex(p)
-        # A realistic model name with a colon.
-        idx.build_index(backend=FakeBackend(name="st:all-MiniLM-L6-v2"))
-        result = write_flat_export(p)
-        assert result is not None
+        idx.build_index(backend=FakeBackend(name="st:all-MiniLM-L6-v2"))  # a colon, like real names
+        write_flat_export(p)
 
         index = json.loads((p / "embeddings" / "index.json").read_text())
         assert index["backend_spec"] == "st:all-MiniLM-L6-v2"
@@ -527,22 +478,17 @@ class TestFlatExport:
         # The recorded filename is the actual file on disk.
         assert (p / "embeddings" / index["file"]).is_file()
 
-    # ----------------------------------------------------------------------
-    # Privacy filtering: the derivation rule, not an allowlist
-    # ----------------------------------------------------------------------
-
-    def test_restricted_source_chunks_are_dropped(self, deep_profile: Path):
+    def test_private_source_chunks_are_dropped(self, deep_profile: Path):
         idx = SqliteEmbeddingIndex(deep_profile)
         idx.build_index(backend=FakeBackend())
 
-        # The sqlite contains restricted chunk types.
+        # The sqlite contains private chunk types.
         conn = connect_vec(idx.db_path)
         sqlite_types = {r[0] for r in conn.execute("SELECT DISTINCT source_type FROM chunks")}
         conn.close()
         assert {"cv", "web", "grant"} <= sqlite_types
 
         result = write_flat_export(deep_profile)
-        assert result is not None
         assert result.dropped > 0
 
         chunks = json.loads(
@@ -551,73 +497,49 @@ class TestFlatExport:
             ).read_text()
         )
         exported_types = {c["source_type"] for c in chunks}
-        # Only public source types survive.
         assert exported_types <= {"expertise", "soul", "paper_summary", "paper_abstract"}
-        assert not ({"cv", "web", "grant"} & exported_types)
-        # Count matches surviving rows.
         index = json.loads((deep_profile / "embeddings" / "index.json").read_text())
         assert index["count"] == len(chunks)
 
     def test_internal_profile_exports_nothing(self, tmp_path: Path):
         p = build_profile_dir(
-            tmp_path / "tester-internal", name="Tester Internal", visibility="internal"
+            tmp_path / "tester-limited", name="Tester Limited", visibility="limited"
         )
         SqliteEmbeddingIndex(p).build_index(backend=FakeBackend())
 
-        result = write_flat_export(p)
-        assert result is None
+        write_flat_export(p)
         # No flat form advertised.
         assert not (p / "embeddings" / "index.json").is_file()
 
-    def test_contaminated_summary_rows_are_dropped(self, synthetic_profile: Path):
-        SqliteEmbeddingIndex(synthetic_profile).build_index(backend=FakeBackend())
-
-        # Mark paperA contaminated in build state.
-        bs = BuildState.load(synthetic_profile)
+    def test_contaminated_summary_rows_are_dropped(self, indexed_profile: Path):
+        bs = BuildState.load(indexed_profile)
         bs.paper("paperA").contaminated = True
-        bs.save(synthetic_profile)
+        bs.save(indexed_profile)
 
-        result = write_flat_export(synthetic_profile)
-        assert result is not None
+        result = write_flat_export(indexed_profile)
         chunks = json.loads(
             (
-                synthetic_profile
-                / "embeddings"
-                / (Path(result.blob_path.name).stem + ".chunks.json")
+                indexed_profile / "embeddings" / (Path(result.blob_path.name).stem + ".chunks.json")
             ).read_text()
         )
         summary_ids = {c["source_id"] for c in chunks if c["source_type"] == "paper_summary"}
         assert "paperA" not in summary_ids
 
-    def test_export_is_content_addressed_and_idempotent(self, synthetic_profile: Path):
-        SqliteEmbeddingIndex(synthetic_profile).build_index(backend=FakeBackend())
-        r1 = write_flat_export(synthetic_profile)
-        assert r1 is not None
-        r2 = write_flat_export(synthetic_profile)
-        assert r2 is not None
-        # An unchanged sqlite yields an identical blob digest.
-        assert r1.sha256 == r2.sha256
+    def test_export_is_content_addressed_and_idempotent(self, indexed_profile: Path):
+        r1 = write_flat_export(indexed_profile)
+        r2 = write_flat_export(indexed_profile)
+        assert r1.sha256 == r2.sha256  # an unchanged sqlite yields an identical blob digest
 
     def test_no_sqlite_means_no_flat_form(self, synthetic_profile: Path):
-        # No build_index call: no meta/embeddings.sqlite.
-        assert write_flat_export(synthetic_profile) is None
+        write_flat_export(synthetic_profile)
         assert not (synthetic_profile / "embeddings" / "index.json").is_file()
 
 
 class TestFlatReader:
-    """Readers that reconstruct a usable index from the public flat form.
+    """What an external consumer has: ``embeddings/`` but no ``meta/``, no sqlite."""
 
-    ``FlatEmbeddingIndex`` is what an external consumer has: ``embeddings/`` but no
-    ``meta/``, pure numpy, no sqlite. ``rebuild_sqlite_from_flat`` is the offline
-    optimization that avoids re-embedding.
-    """
-
-    # ----------------------------------------------------------------------
-    # Round-trip
-    # ----------------------------------------------------------------------
-
-    def test_load_roundtrips_vectors(self, flat_indexed_profile: Path):
-        emb = flat_indexed_profile / "embeddings"
+    def test_load_roundtrips_vectors(self, shared_indexed: Path):
+        emb = shared_indexed / "embeddings"
         index = json.loads((emb / "index.json").read_text())
 
         flat = FlatEmbeddingIndex.load(emb)
@@ -632,43 +554,30 @@ class TestFlatReader:
         expected = np.frombuffer(raw, dtype="<f4").reshape(index["count"], 16)
         assert np.allclose(flat.vectors, expected, atol=1e-6)
 
-    def test_search_returns_ordered_hits_without_text(self, flat_indexed_profile: Path):
-        flat = FlatEmbeddingIndex.load(flat_indexed_profile / "embeddings")
-        q = flat.vectors[0]
-        hits = flat.search_vector(q, k=3)
+    def test_search_returns_ordered_hits_without_text(self, shared_indexed: Path):
+        flat = FlatEmbeddingIndex.load(shared_indexed / "embeddings")
+        hits = flat.search_vector(flat.vectors[0], k=3)
         assert hits
-        # Descending score order.
         scores = [h.score for h in hits]
         assert scores == sorted(scores, reverse=True)
-        # Top hit is the vector we queried with.
-        assert hits[0].score >= scores[-1]
-        # FlatHit carries no text.
-        for h in hits:
-            assert not hasattr(h, "text")
+        assert not any(hasattr(h, "text") for h in hits)  # the public form carries no text
 
-    def test_search_text_refuses_mismatched_backend(self, flat_indexed_profile: Path):
-        flat = FlatEmbeddingIndex.load(flat_indexed_profile / "embeddings")
+    def test_search_text_refuses_mismatched_backend(self, shared_indexed: Path):
+        flat = FlatEmbeddingIndex.load(shared_indexed / "embeddings")
         with pytest.raises(ValueError, match="backend"):
             flat.search_text("anything", FakeBackend(name="other:model"))
-        # A matching backend works.
-        hits = flat.search_text("ATAC-seq", FakeBackend(name="fake:tiny"), k=2)
-        assert hits
+        assert flat.search_text("ATAC-seq", FakeBackend(name="fake:tiny"), k=2)
 
-    # ----------------------------------------------------------------------
-    # Corruption detection
-    # ----------------------------------------------------------------------
-
-    def test_truncated_blob_raises(self, flat_indexed_profile: Path):
-        emb = flat_indexed_profile / "embeddings"
+    def test_truncated_blob_raises(self, indexed_profile: Path):
+        emb = indexed_profile / "embeddings"
         index = json.loads((emb / "index.json").read_text())
         blob_path = emb / index["file"]
-        raw = blob_path.read_bytes()
-        blob_path.write_bytes(raw[:-4])  # drop one float
+        blob_path.write_bytes(blob_path.read_bytes()[:-4])  # drop one float
         with pytest.raises(ValueError, match="byte length"):
             FlatEmbeddingIndex.load(emb)
 
-    def test_tampered_byte_fails_sha256(self, flat_indexed_profile: Path):
-        emb = flat_indexed_profile / "embeddings"
+    def test_tampered_byte_fails_sha256(self, indexed_profile: Path):
+        emb = indexed_profile / "embeddings"
         index = json.loads((emb / "index.json").read_text())
         blob_path = emb / index["file"]
         raw = bytearray(blob_path.read_bytes())
@@ -677,37 +586,25 @@ class TestFlatReader:
         with pytest.raises(ValueError, match="sha256"):
             FlatEmbeddingIndex.load(emb)
 
-    # ----------------------------------------------------------------------
-    # Local sqlite rebuild
-    # ----------------------------------------------------------------------
-
-    def test_rebuild_sqlite_from_flat_matches_original_top_hit(self, flat_indexed_profile: Path):
-        # Original top hit for a fixed query.
-        original = SqliteEmbeddingIndex(flat_indexed_profile)
+    def test_rebuild_sqlite_from_flat_matches_original_top_hit(self, indexed_profile: Path):
+        original = SqliteEmbeddingIndex(indexed_profile)
         original._cached_backend = FakeBackend()
         orig_hits = original.search("region universes", k=1)
         assert orig_hits
         orig_top = (orig_hits[0].source_type, orig_hits[0].source_id, orig_hits[0].chunk_index)
 
         # Blow away the sqlite; rebuild from the flat form (no re-embedding).
-        (cache_dir(flat_indexed_profile) / "embeddings.sqlite").unlink()
-        report = rebuild_sqlite_from_flat(flat_indexed_profile)
+        (cache_dir(indexed_profile) / "embeddings.sqlite").unlink()
+        report = rebuild_sqlite_from_flat(indexed_profile)
         assert report.added > 0
-        assert (cache_dir(flat_indexed_profile) / "embeddings.sqlite").is_file()
+        assert (cache_dir(indexed_profile) / "embeddings.sqlite").is_file()
 
-        rebuilt = SqliteEmbeddingIndex(flat_indexed_profile)
+        rebuilt = SqliteEmbeddingIndex(indexed_profile)
         rebuilt._cached_backend = FakeBackend()
         new_hits = rebuilt.search("region universes", k=1)
         assert new_hits
-        new_top = (new_hits[0].source_type, new_hits[0].source_id, new_hits[0].chunk_index)
-        assert new_top == orig_top
-        # Recovered text is present (needed to display a hit).
-        assert new_hits[0].text
-
-
-# --------------------------------------------------------------------------
-# rank_works_against_profile: candidate works against one profile
-# --------------------------------------------------------------------------
+        assert (new_hits[0].source_type, new_hits[0].source_id, new_hits[0].chunk_index) == orig_top
+        assert new_hits[0].text  # recovered text is needed to display a hit
 
 
 def _candidate(title, abstract=None, year=2026):
@@ -717,11 +614,11 @@ def _candidate(title, abstract=None, year=2026):
 
 
 class TestRankWorksAgainstProfile:
-    """The inverse ranking direction: works scored against a profile vector."""
+    """The inverse direction: works scored against a profile vector."""
 
     @pytest.fixture
-    def profile(self, indexed_profile: Path) -> ResearcherProfile:
-        return ResearcherProfile.from_files(indexed_profile)
+    def profile(self, shared_indexed: Path) -> ResearcherProfile:
+        return ResearcherProfile.from_files(shared_indexed)
 
     @pytest.fixture
     def candidates(self):
@@ -784,16 +681,11 @@ class TestMMRIndices:
         assert mmr_indices([0.9, 0.85, 0.8], vecs, k=2, lambda_=0.5) == [0, 2]
 
 
-# --------------------------------------------------------------------------
-# recompute_centroid: the relevance-feedback path
-# --------------------------------------------------------------------------
-
-
 class TestRecomputeCentroid:
-    def test_recompute_matches_and_is_stable(self, indexed_profile: Path):
+    def test_recompute_matches_and_is_stable(self, shared_indexed: Path):
         from researcher_profiles.embeddings.profile_vec import recompute_centroid
 
-        prof = ResearcherProfile.from_files(indexed_profile)
+        prof = ResearcherProfile.from_files(shared_indexed)
         baseline = prof.index.embedding("centroid")
         first = recompute_centroid(prof)
         second = recompute_centroid(prof)
@@ -818,42 +710,28 @@ class TestRecomputeCentroid:
         assert np.array_equal(recompute_centroid(prof), truth)
 
 
-# --------------------------------------------------------------------------
-# Probe presence and schema conformance
-# --------------------------------------------------------------------------
-
-
 class TestProbeAndSchema:
-    """A freshly written index.json must carry a probe and validate against
-    the committed embedding_index schema."""
+    """A fresh index.json carries a probe and validates against the committed schema."""
 
-    def test_flat_export_includes_probe(self, flat_indexed_profile: Path):
-        index = json.loads((flat_indexed_profile / "embeddings" / "index.json").read_text())
-        assert "probe" in index, "index.json must include a probe object"
+    def test_flat_export_includes_probe(self, shared_indexed: Path):
+        index = json.loads((shared_indexed / "embeddings" / "index.json").read_text())
         probe = index["probe"]
-        assert isinstance(probe["text"], str) and len(probe["text"]) > 0
-        assert isinstance(probe["vector"], list) and len(probe["vector"]) > 0
-        assert all(isinstance(v, float) for v in probe["vector"])
+        assert probe["text"]
+        assert len(probe["vector"]) == index["dim"]
+        assert probe["vector"] == pytest.approx(FakeBackend().embed([probe["text"]])[0], abs=1e-6)
 
-    def test_flat_export_validates_against_schema(self, flat_indexed_profile: Path):
+    def test_flat_export_validates_against_schema(self, shared_indexed: Path):
         import jsonschema
 
-        # rp-sdk/schemas/ is the one tracked copy, generated by `rp schema
-        # export` from this package's own models. It ships in the wheel, so its
-        # absence is a packaging failure, not a reason to skip.
+        # rp-sdk/schemas/ ships in the wheel: its absence is a packaging failure, not a skip.
         schema_path = (
             Path(__file__).resolve().parents[1] / "schemas" / "embedding_index.schema.json"
         )
         assert schema_path.is_file(), f"missing generated schema: {schema_path}"
 
         schema = json.loads(schema_path.read_text())
-        index = json.loads((flat_indexed_profile / "embeddings" / "index.json").read_text())
+        index = json.loads((shared_indexed / "embeddings" / "index.json").read_text())
         jsonschema.validate(index, schema)
-
-
-# --------------------------------------------------------------------------
-# Index facts: SqliteEmbeddingIndex.stats() and friends
-# --------------------------------------------------------------------------
 
 
 def _write_bare_index(
@@ -863,12 +741,7 @@ def _write_bare_index(
     meta: dict[str, str] | None = None,
     with_meta_table: bool = True,
 ) -> Path:
-    """A minimal ``embeddings.sqlite`` holding ``(source_type, source_id)`` chunks.
-
-    Hand-built with plain sqlite3 so these tests need neither an embedding
-    backend nor the sqlite-vec extension, the same contract the accessors
-    themselves promise.
-    """
+    """A minimal ``embeddings.sqlite`` of ``(source_type, source_id)`` chunks, plain sqlite3 (no vec)."""
     import sqlite3
 
     cache = cache_dir(profile_dir)
@@ -892,11 +765,9 @@ def _write_bare_index(
 
 
 class TestProfileIndexStats:
-    """``SqliteEmbeddingIndex`` answers questions about its own file.
+    """``SqliteEmbeddingIndex`` answers questions about its own file, without sqlite-vec.
 
-    These accessors replace raw ``sqlite3.connect`` calls in the registry.
-    They must never require sqlite-vec, and a missing
-    file or a missing table degrades to zeros rather than raising.
+    A missing file or a missing table degrades to zeros rather than raising.
     """
 
     def test_stats_on_a_real_index(self, tmp_path: Path):
@@ -926,49 +797,52 @@ class TestProfileIndexStats:
         assert idx.index_meta()["backend_name"] == "fake:tiny"
         assert stats.to_dict()["n_papers"] == 2
 
-    def test_stats_when_the_file_is_absent(self, tmp_path: Path):
+    @pytest.mark.parametrize(
+        ("rows", "with_meta_table", "level", "expected"),
+        [
+            (
+                None,
+                True,
+                "full",
+                {
+                    "exists": False,
+                    "n_chunks": 0,
+                    "n_papers": 0,
+                    "backend_name": "",
+                    "last_built_at": None,
+                },
+            ),
+            (
+                [("paper_summary", "paperA")],
+                False,
+                "full",
+                {"exists": True, "n_chunks": 1, "backend_name": "", "last_built_at": None},
+            ),
+            # Abstract-only chunks are papers: a lite profile is not paperless.
+            (
+                [("paper_abstract", "paper2020a"), ("paper_abstract", "paper2021b")] * 2,
+                True,
+                "lite",
+                {"n_papers": 2},
+            ),
+        ],
+        ids=["file-absent", "no-meta-table", "lite-reports-papers"],
+    )
+    def test_stats_degrade_gracefully(self, tmp_path: Path, rows, with_meta_table, level, expected):
         prof = tmp_path / "someone"
         prof.mkdir()
-        write_profile(prof, name="Someone")
+        write_profile(prof, name="Someone", level=level)
+        if rows is not None:
+            _write_bare_index(prof, rows, with_meta_table=with_meta_table)
         idx = SqliteEmbeddingIndex(prof)
-        assert idx.exists() is False
-        assert idx.mtime() is None
-        assert idx.index_meta() == {}
-        assert idx.counts() == (0, 0)
         stats = idx.stats()
-        assert stats.exists is False
-        assert stats.n_chunks == 0
-        assert stats.n_papers == 0
-        assert stats.backend_name == ""
-        assert stats.last_built_at is None
-
-    def test_stats_when_index_meta_table_is_missing(self, tmp_path: Path):
-        prof = tmp_path / "someone"
-        prof.mkdir()
-        write_profile(prof, name="Someone")
-        _write_bare_index(prof, [("paper_summary", "paperA")], with_meta_table=False)
-        idx = SqliteEmbeddingIndex(prof)
-        assert idx.index_meta() == {}
-        stats = idx.stats()
-        assert stats.exists is True
-        assert stats.n_chunks == 1
-        assert stats.backend_name == ""
-        assert stats.last_built_at is None
-
-    def test_lite_index_reports_papers(self, tmp_path: Path):
-        """Abstract-only chunks are papers: a lite profile is not paperless."""
-        prof = tmp_path / "lite-one"
-        prof.mkdir()
-        write_profile(prof, name="Lite One", level="lite")
-        _write_bare_index(
-            prof,
-            [
-                ("paper_abstract", "paper2020a"),
-                ("paper_abstract", "paper2021b"),
-                ("paper_abstract", "paper2021b"),
-            ],
-        )
-        assert SqliteEmbeddingIndex(prof).stats().n_papers == 2
+        assert {k: getattr(stats, k) for k in expected} == expected
+        if rows is None:
+            assert idx.exists() is False
+            assert idx.mtime() is None
+            assert idx.counts() == (0, 0)
+        if not with_meta_table or rows is None:
+            assert idx.index_meta() == {}
 
     def test_index_backend_name_from_a_path(self, tmp_path: Path):
         prof = tmp_path / "someone"
@@ -977,3 +851,86 @@ class TestProfileIndexStats:
         assert index_backend_name(prof) == ""
         _write_bare_index(prof, [("soul", "SOUL")], meta={"backend_name": "fake:tiny"})
         assert index_backend_name(prof) == "fake:tiny"
+
+
+class TestChunkEnumeration:
+    """Indexing and serve-time text recovery share one enumerator; a stored vector row names its text by these keys."""
+
+    DEEP_KEYS = [
+        ("cv", "cv", 0),
+        ("cv", "cv", 1),
+        ("expertise", "expertise", 0),
+        ("expertise", "expertise", 1),
+        ("expertise", "expertise", 2),
+        ("grant", "grantX", 0),
+        ("paper_summary", "paperA", 0),
+        ("paper_summary", "paperB", 0),
+        ("soul", "soul", 0),
+        ("soul", "soul", 1),
+        ("web", "1-lab", 0),
+        ("web", "1-lab", 1),
+    ]
+
+    def test_keys_are_stable_and_shared_with_the_sql_store(self, tmp_path):
+        from researcher_profiles.embeddings.cache import SqliteEmbeddingIndex
+        from researcher_profiles.embeddings.chunking import enumerate_source_chunks
+        from researcher_profiles.store.sql import SqlProfileStore
+
+        d = build_profile_dir(tmp_path / "p", level="deep", grants=True, cv=True, web=True)
+        indexed = sorted(
+            (c.source_type, c.source_id, c.chunk_index)
+            for c in SqliteEmbeddingIndex(d)._enumerate_chunks()
+        )
+        assert indexed == self.DEEP_KEYS
+
+        store = SqlProfileStore("sqlite://")
+        store.create_all()
+        store.put(ResearcherProfile.from_files(d))
+        served = enumerate_source_chunks(store.get("p"))
+        assert sorted((c.source_type, c.source_id, c.chunk_index) for c in served) == indexed
+
+    def test_lite_profiles_enumerate_abstracts(self, tmp_path):
+        from researcher_profiles.embeddings.cache import SqliteEmbeddingIndex
+
+        d = build_profile_dir(
+            tmp_path / "p",
+            level="lite",
+            personality=False,
+            summaries=False,
+            papers=[
+                {"paper_id": "a2020x", "title": "T", "abstract": "Para one.\n\nPara two."},
+                {"paper_id": "b2021y", "title": "U"},
+            ],
+        )
+        keys = [
+            (c.source_type, c.source_id, c.chunk_index)
+            for c in SqliteEmbeddingIndex(d)._enumerate_chunks()
+        ]
+        assert keys == [("paper_abstract", "a2020x", 0)]
+
+
+def test_corpus_only_leaves_out_summaries_of_papers_not_in_the_corpus(tmp_path):
+    """The builder's corpus filter is opt-in: off, every summary is indexed."""
+    from researcher_profiles.embeddings.cache import SqliteEmbeddingIndex
+
+    d = build_profile_dir(
+        tmp_path / "p",
+        papers=[{"paper_id": "paperA", "title": "A", "year": 2020}],
+    )
+
+    def summary_ids(idx):
+        return {c.source_id for c in idx._enumerate_chunks() if c.source_type == "paper_summary"}
+
+    assert summary_ids(SqliteEmbeddingIndex(d)) == {"paperA", "paperB"}
+    assert summary_ids(SqliteEmbeddingIndex(d, corpus_only=True)) == {"paperA"}
+
+
+def test_citation_tags_of_every_paper_id_shape_are_stripped():
+    """Ids ending at the year (live2005) or with a numbered suffix (extracellular2023_2) were left in."""
+    from researcher_profiles.embeddings.chunking import _strip_citations
+
+    text = (
+        "A [live2005, gi2007] B [extracellular2023_2] C [2016activation] "
+        "D [corces2016lineage] E [20261062] F [2005] G [interview]"
+    )
+    assert _strip_citations(text) == "A  B  C  D  E  F [2005] G [interview]"

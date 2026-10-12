@@ -1,18 +1,9 @@
-"""The ratified text, checked against what the implementation actually emits.
+"""The ratified text, checked against what the implementation emits: pure text, no network or LLM.
 
-Three bodies of frozen text live here. The packaged consumer skill tree
-(``src/researcher_profiles/skill/``), the one copy that ships and the one the
-browser app publishes; the spec prose in ``docs/rp-spec/`` (which lives OUTSIDE
-this component, one level up), whose fenced examples must validate against the
-schemas GENERATED from the models; and the published fixture corpus in
-``tests/fixtures/published/``, which must still be on disk and still lying in
-the specific ways a consumer has to cope with.
-
-All of it is pure text and structure: no network, no LLM calls. Prose quality
-is not tested here.
-
-Sibling modules: ``test_guardrails.py`` (the package's runtime shape) and
-``test_packaging.py`` (what the built wheel and sdist contain).
+Three bodies of frozen text: the packaged consumer skill tree, the spec prose in ``docs/rp-spec/``
+(one level up, outside this component) whose fenced examples must validate against the generated
+schemas, and the published fixture corpus in ``tests/fixtures/published/``.
+Siblings: ``test_guardrails.py`` (runtime shape), ``test_packaging.py`` (wheel and sdist contents).
 """
 
 import json
@@ -28,38 +19,34 @@ from researcher_profiles.validate import validate_artifact, validate_profile_dir
 
 from .factories import CONTEXT_IRI, FIXTURE_DIR, MONOREPO_ROOT, REPO_ROOT
 
-#: The canonical consumer skill: the tree that ships in the wheel, that
-#: `rp skill --install` writes, and that rp-browser publishes.
+#: The packaged consumer skill: ships in the wheel, `rp skill --install` writes it, rp-browser publishes it.
 SKILL_TREE = REPO_ROOT / "src" / "researcher_profiles" / "skill"
 SKILL_MD = SKILL_TREE / "SKILL.md"
+SKILL_TEXT = SKILL_MD.read_text(encoding="utf-8")
 
-#: The spec prose lives at the monorepo root under docs/rp-spec/. It is
-#: implementation-independent, consumed by both the Python and TS validators.
+#: Implementation-independent spec prose at the monorepo root, consumed by both validators.
 SPEC_DIR = MONOREPO_ROOT / "docs" / "rp-spec"
 
-#: The shared conformance corpus (test fixtures) stays under spec/.
+#: The shared conformance corpus stays under spec/.
 CORPUS_DIR = MONOREPO_ROOT / "spec" / "conformance" / "valid"
 
 SCHEMA_DIR = REPO_ROOT / "schemas"
 
-#: The consumer-skill corpus: broken, hostile and open-vocab
-#: published directories. Ratified: asserted against, never constructed.
+#: Broken, hostile and open-vocab published directories: asserted against, never constructed.
 FIXTURES_ROOT = FIXTURE_DIR / "published"
 
 LOSING_CONTEXT_IRI = "rp/v1"
 
 ABANDONED_IRI = "w3id.org/rp/v1"
 
-#: The ratified manifest `role` vocabulary (consumer-interface-contract.md;
-#: the tokens `manifest.py` emits). The skill's own usage of this vocabulary is
-#: closed even though the published format's vocabulary is open to publisher
-#: extension. `expertise`/`soul` live in `subjectOf`; the rest in `hasPart`.
+#: The ratified manifest `role` vocabulary; the skill uses it closed, the format leaves it open.
 RATIFIED_ROLES = {
     "agent_entry_point",
     "works",
     "grants",
     "citations",
     "cv",
+    "interview",
     "paper_summary",
     "paper_fulltext",
     "web",
@@ -70,11 +57,7 @@ RATIFIED_ROLES = {
     "html",
 }
 
-#: Top-level `profile.jsonld` keys a conforming consumer already knows
-#: about: the SDK's Pydantic-modeled fields (schemas/profile_jsonld.schema.json)
-#: plus the consumer-contract's ratified conformance flags. Used only to
-#: detect the unknown keys planted in the open-vocab fixture; this is not a
-#: validator for the format's open vocabulary.
+#: Top-level keys a consumer knows (modeled fields plus ratified flags); only detects the open-vocab fixture's unknowns.
 KNOWN_TOP_LEVEL_KEYS = {
     "@context",
     "@id",
@@ -102,6 +85,7 @@ KNOWN_TOP_LEVEL_KEYS = {
     "not_interests",
     "paper_stats",
     "provenance",
+    "provenanceNote",
     "recurring_positions",
     "researchOutputs",
     "rid",
@@ -117,8 +101,7 @@ KNOWN_TOP_LEVEL_KEYS = {
     "hasEmbeddingIndex",
 }
 
-#: The published trees, each a minimal static directory servable by
-#: `python -m http.server`. Named for the one thing a consumer must cope with.
+#: Minimal static published trees, each named for the one thing a consumer must cope with.
 FIXTURE_DIRS = [
     "current-gen",
     "legacy-nobrackets",
@@ -146,11 +129,7 @@ def _frontmatter(text: str) -> str:
 
 
 def _tree_bytes(root: Path) -> dict[str, bytes]:
-    """Every file under ``root``, keyed by its root-relative POSIX path.
-
-    The suite imports nothing from outside the package, so this walks the tree
-    itself rather than reaching for a helper elsewhere in the repo.
-    """
+    """Every file under ``root``, keyed by its root-relative POSIX path."""
     return {
         path.relative_to(root).as_posix(): path.read_bytes()
         for path in sorted(root.rglob("*"))
@@ -159,8 +138,7 @@ def _tree_bytes(root: Path) -> dict[str, bytes]:
 
 
 def _spec_docs() -> list[Path]:
-    """The spec prose documents. The conformance corpus (spec/conformance/) is
-    fixtures, not prose; its files are owned by the corpus tests."""
+    """The spec prose documents (the conformance corpus is owned by the corpus tests)."""
     return sorted(
         p for p in SPEC_DIR.rglob("*.md") if "conformance" not in p.relative_to(SPEC_DIR).parts
     )
@@ -223,21 +201,14 @@ def _schema_for(block) -> str | None:
     return None
 
 
-class TestSkillDocs:
-    """Structural tests for the published-profile consumer skill and its docs.
+SPEC_EXAMPLES = _collect(_schema_for)
 
-    Pure text/structure checks: no network access, no LLM calls. These tests
-    guard the shape of `src/researcher_profiles/skill/SKILL.md` and the spec
-    prose in `docs/rp-spec/`, not their prose quality.
-    """
+
+class TestSkillDocs:
+    """Structural checks on the consumer skill and spec docs; not prose quality."""
 
     def test_the_packaged_skill_tree_is_not_empty(self):
-        """The shipped skill tree still carries all of its parts.
-
-        Sibling of `test_spec_examples_cover_the_profile_document`: a guard
-        against a vacuous pass, where a tree emptied by a bad move would let
-        every downstream check succeed against nothing.
-        """
+        """The shipped skill tree still carries all of its parts (guards a vacuous pass on an emptied tree)."""
         found = set(_tree_bytes(SKILL_TREE))
         required = {"SKILL.md", "reference/read-order.md", "reference/failure-modes.md"}
         assert required <= found, f"packaged skill tree is missing {sorted(required - found)}"
@@ -246,22 +217,18 @@ class TestSkillDocs:
         )
 
     def test_skill_frontmatter(self):
-        text = SKILL_MD.read_text(encoding="utf-8")
-        front = yaml.safe_load(_frontmatter(text))
-        assert isinstance(front, dict), "frontmatter did not parse to a mapping"
+        front = yaml.safe_load(_frontmatter(SKILL_TEXT))
         assert front.get("name") == "researcher-profile", front.get("name")
-        description = front.get("description")
-        assert description and isinstance(description, str) and description.strip(), (
-            "frontmatter must carry a non-empty description"
-        )
+        assert front["description"].strip(), "frontmatter must carry a non-empty description"
 
     def test_skill_line_budget(self):
-        lines = SKILL_MD.read_text(encoding="utf-8").splitlines()
+        lines = SKILL_TEXT.splitlines()
         assert len(lines) < 300, f"SKILL.md is {len(lines)} lines; keep it under 300"
 
     def test_artifact_roles_in_skill(self):
-        text = SKILL_MD.read_text(encoding="utf-8")
-        match = re.search(r"The `role` tokens you will use[\s\S]*?:\s*\n+((?:\|[^\n]*\n)+)", text)
+        match = re.search(
+            r"The `role` tokens you will use[\s\S]*?:\s*\n+((?:\|[^\n]*\n)+)", SKILL_TEXT
+        )
         assert match, (
             "expected a markdown table after 'The `role` tokens you will use' "
             "in SKILL.md enumerating the manifest role vocabulary"
@@ -280,7 +247,7 @@ class TestSkillDocs:
         assert not missing, f"SKILL.md role table missing consumer-path role(s): {sorted(missing)}"
 
     def test_context_iri(self):
-        text = SKILL_MD.read_text(encoding="utf-8")
+        text = SKILL_TEXT
         assert CONTEXT_IRI in text, f"SKILL.md never mentions the context IRI {CONTEXT_IRI}"
         assert LOSING_CONTEXT_IRI not in text, (
             f"SKILL.md must not reference the abandoned context IRI form {LOSING_CONTEXT_IRI!r}"
@@ -288,15 +255,7 @@ class TestSkillDocs:
 
 
 class TestSpecExamples:
-    """Validate the spec docs against the generated schemas and the real corpus.
-
-    The spec documents what the implementation emits, so these tests check the
-    prose against generated artifacts rather than against hand-written schema
-    copies: fenced examples must parse, profile documents (``schema:Person``) must
-    validate against the *generated* ``profile_jsonld.schema.json`` (there is one
-    document shape, no separate published manifest), and no document may
-    reintroduce the abandoned ``w3id.org/rp/v1`` identity.
-    """
+    """Spec prose against the generated artifacts, not hand-written schema copies."""
 
     def test_all_spec_json_blocks_parse(self):
         """Every complete fenced json/jsonld block in the spec is valid JSON."""
@@ -310,7 +269,7 @@ class TestSpecExamples:
         if failures:
             pytest.fail("JSON parse failures:\n" + "\n".join(failures))
 
-    @pytest.mark.parametrize("block,schema_name", _collect(_schema_for))
+    @pytest.mark.parametrize("block,schema_name", SPEC_EXAMPLES)
     def test_spec_example_validates(self, block, schema_name):
         """Spec examples validate against the schemas generated from the models."""
         schema = _load_schema(schema_name)
@@ -320,19 +279,6 @@ class TestSpecExamples:
         if errors:
             msg = "\n".join(e.message for e in errors[:5])
             pytest.fail(f"Validation errors against {schema_name}:\n{msg}")
-
-    def test_spec_examples_cover_the_profile_document(self):
-        """A profile-document example in the spec is actually being checked.
-
-        Guards against the parametrization silently collecting nothing (which
-        would make the validation test above vacuously pass).
-        """
-        collected = _collect(_schema_for)
-        names = {p.values[1] for p in collected}
-        assert "profile_jsonld.schema.json" in names, (
-            "no profile-document (schema:Person) example found in spec/; "
-            "profile-document.md should carry one"
-        )
 
     def test_spec_uses_the_canonical_context_iri(self):
         """No spec document reintroduces the never-registered w3id identity."""
@@ -346,22 +292,18 @@ class TestSpecExamples:
         )
 
     def test_profile_example_manifest_uses_the_role_vocabulary(self):
-        """A spec profile example's manifest speaks hasPart/subjectOf + role.
+        """A spec profile example's manifest uses hasPart/subjectOf + role tokens a real profile emits.
 
-        There is no separate `artifacts`/`rel`/`href` manifest vocabulary; a
-        spec example that carries a manifest must use the single-document form and
-        its `role` tokens must be ones a real profile emits.
+        Also guards against an empty example collection.
         """
         fixtures = sorted(CORPUS_DIR.glob("*/profile.jsonld"))
         examples = [
             block
-            for block, schema_name in ((p.values[0], p.values[1]) for p in _collect(_schema_for))
+            for block, schema_name in ((p.values[0], p.values[1]) for p in SPEC_EXAMPLES)
             if schema_name == "profile_jsonld.schema.json"
         ]
         with_manifest = [e for e in examples if e.get("hasPart") or e.get("subjectOf")]
-        # Both corpora are committed, so an empty one is a repo bug, not a
-        # reason to stop checking. `pytest.skip` and a bare `return` both made
-        # this test pass while checking nothing.
+        # Both corpora are committed, so an empty one is a repo bug; skip or return would check nothing.
         assert fixtures, f"no conformance profiles under {CORPUS_DIR}"
         assert with_manifest, (
             "no spec profile example carries a hasPart/subjectOf manifest; "
@@ -376,9 +318,7 @@ class TestSpecExamples:
                 assert "contentUrl" in entry and "rel" not in entry and "href" not in entry, (
                     "manifest entries must use contentUrl/role, not the retired rel/href"
                 )
-        # The vocabulary is the union across the whole corpus, not whatever
-        # fixtures[0] happens to sort first. ada-lovelace-cited adds `citations`,
-        # and picking one file made the check depend on filename order.
+        # The union across the whole corpus (ada-lovelace-cited adds `citations`), not filename order.
         real_roles = set()
         for fixture in fixtures:
             real = json.loads(fixture.read_text())
@@ -389,9 +329,7 @@ class TestSpecExamples:
             ex_roles = {
                 e.get("role") for e in [*example.get("hasPart", []), *example.get("subjectOf", [])]
             }
-            # Subset only. An `or real_roles <= ex_roles` escape hatch would let
-            # an example introduce any role at all as long as it introduced
-            # enough of them.
+            # Subset only: an `or real_roles <= ex_roles` escape hatch would admit any role.
             assert ex_roles <= real_roles, (
                 f"spec example roles {sorted(ex_roles - real_roles)} are not in the "
                 f"real profile role vocabulary {sorted(real_roles)}"
@@ -399,13 +337,10 @@ class TestSpecExamples:
 
 
 class TestPublishedFixtureTree:
-    """The `tests/fixtures/published/` corpus is still on disk and still lying
-    in the specific ways a consumer has to cope with.
+    """The `published/` corpus is on disk and still lying in the ways a consumer must cope with.
 
-    This is a DIFFERENT corpus from `spec/conformance/`, which
-    `tests/test_validate.py::TestConformanceCorpus` owns. Do not merge the two: this one
-    exists to exercise a *consumer* against broken, hostile, and open-vocab
-    documents; that one is the format's conformance suite.
+    A DIFFERENT corpus from `spec/conformance/` (owned by `test_validate.py::TestConformanceCorpus`);
+    do not merge the two.
     """
 
     @pytest.mark.parametrize("fixture_name", [f for f in FIXTURE_DIRS if f != "not-a-profile"])
@@ -420,12 +355,7 @@ class TestPublishedFixtureTree:
         ["current-gen", "legacy-nobrackets", "lite", "deep", "synthetic", "historical", "hostile"],
     )
     def test_well_formed_trees_validate(self, fixture_name):
-        """The trees whose lie is not a format defect speak the current format.
-
-        `hostile` lies in its prose, `legacy-nobrackets` in its citation
-        convention, and the tier and provenance trees do not lie at all; none
-        of them may drift from the vocabulary `manifest.py` emits.
-        """
+        """The trees whose lie is not a format defect must not drift from the vocabulary `manifest.py` emits."""
         report = validate_profile_dir(FIXTURES_ROOT / fixture_name)
         assert report.ok, [v.message for a in report.artifacts for v in a.violations] + [
             v.message for v in report.cross_artifact
@@ -467,12 +397,7 @@ class TestPublishedFixtureTree:
         assert unknown_roles, "open-vocab profile.jsonld has no unrecognized artifact role"
 
     def test_broken_context_is_read_by_key_name(self):
-        """A dead `@context` IRI is a warning, not a load failure.
-
-        The skill's rule is to read the document by key name and never
-        dereference `@context`. The SDK agrees: the document validates, loads,
-        and is persona-ready while its context points somewhere dead.
-        """
+        """A dead `@context` IRI is a warning, not a load failure: read by key name, never dereferenced."""
         tree = FIXTURES_ROOT / "broken-context"
         assert validate_artifact(tree / "profile.jsonld", "profile_jsonld").ok
         prof = ResearcherProfile.from_files(tree)
@@ -495,12 +420,7 @@ class TestPublishedFixtureTree:
         ids=["listed-summaries-missing", "full-without-persona-files"],
     )
     def test_dangling_manifest_entries_are_reported(self, fixture_name, missing):
-        """Every manifest entry with no file behind it is named in the report.
-
-        Both trees declare `level: full` with a persona document missing, so
-        neither is persona-ready: the skill degrades such a profile to `lite`
-        and the SDK's predicate says the same.
-        """
+        """Every manifest entry with no file is named; both trees declare `full` without persona files."""
         report = validate_profile_dir(FIXTURES_ROOT / fixture_name)
         found = {v.found for v in report.cross_artifact if v.keyword == "content_url_missing"}
         assert found == missing
@@ -514,12 +434,7 @@ class TestPublishedFixtureTree:
         ids=["current-gen-cites", "legacy-nobrackets-does-not"],
     )
     def test_expertise_cites_paper_ids_tells_the_truth(self, fixture_name, cites):
-        """`expertiseCitesPaperIds` matches what `expertise.md` contains.
-
-        The skill navigates by `[paper_id]` only when the flag is true. On the
-        current-generation tree every cited id resolves to a summary; on the
-        no-brackets tree there is no bracket to follow and the flag says so.
-        """
+        """`expertiseCitesPaperIds` matches what `expertise.md` contains (the skill follows `[paper_id]` only when true)."""
         prof = ResearcherProfile.from_files(FIXTURES_ROOT / fixture_name)
         cited = set(re.findall(r"\[([A-Za-z0-9]+)\]", prof.expertise))
         assert prof.metadata.expertise_cites_paper_ids is cites
@@ -527,8 +442,7 @@ class TestPublishedFixtureTree:
         assert cited <= set(prof.summaries)
 
     def test_deep_tree_ships_the_deep_only_parts(self):
-        """`deep` adds grants, a CV and web pages to `full`. The one deep tree
-        declares that level and every listed part is on disk."""
+        """`deep` adds grants, a CV and web pages to `full`, and every listed part is on disk."""
         tree = FIXTURES_ROOT / "deep"
         prof = ResearcherProfile.from_files(tree)
         assert prof.level == "deep"
@@ -539,8 +453,7 @@ class TestPublishedFixtureTree:
         assert not [v for v in report.cross_artifact if v.keyword == "content_url_missing"]
 
     def test_lite_tree_has_no_persona(self):
-        """`lite` is identity plus works: it loads at that level with no persona
-        documents and no `subjectOf` entries."""
+        """`lite` is identity plus works: no persona documents, no `subjectOf` entries."""
         prof = ResearcherProfile.from_files(FIXTURES_ROOT / "lite")
         assert prof.level == "lite"
         assert not prof.has_persona
@@ -548,8 +461,7 @@ class TestPublishedFixtureTree:
 
     @pytest.mark.parametrize("fixture_name", ["synthetic", "historical"])
     def test_persona_provenance_trees_carry_a_local_rid(self, fixture_name):
-        """A `synthetic` or `historical` profile is a persona, not a record of a
-        living researcher: it loads with that provenance and a minted rid."""
+        """A `synthetic` or `historical` profile is a persona with a minted rid, not a living researcher."""
         prof = ResearcherProfile.from_files(FIXTURES_ROOT / fixture_name)
         assert prof.provenance == fixture_name
         assert prof.rid.startswith("local:")

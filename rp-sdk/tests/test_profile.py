@@ -1,61 +1,57 @@
-"""A profile directory and the object that loads it.
+"""A profile directory and the object that loads it, plus the sidecars it reads or writes."""
 
-``ResearcherProfile`` is the front door; everything else here is a sidecar it
-reads or writes: the manifest of what the directory contains, the build-state
-bookkeeping kept out of the published record, the curation overrides, the
-coverage/staleness cache, citations, and the optional SQL mirror.
-"""
-
+import hashlib
 import json
+import os
 import time
 from datetime import datetime, timezone
 
 import pytest
 
-from researcher_profiles import (
-    Citation,
-    Coverage,
-    ProfileLoadError,
-    ResearcherProfile,
-)
+from researcher_profiles import ProfileLoadError, ResearcherProfile
 from researcher_profiles.build_state import (
     BUILD_STATE_PAPER_FIELDS,
     BuildState,
     PaperBuildState,
 )
+from researcher_profiles.errors import ProfileWriteError, WriteHookError
+from researcher_profiles.profile.cite import _paper_to_citation
 from researcher_profiles.profile.storage import ArtifactStorage
-from researcher_profiles.schema import PaperRecord
+from researcher_profiles.profile.write_unit import WriteContext
+from researcher_profiles.publish import plan_profile_export
+from researcher_profiles.schema import GrantRecord, PaperRecord, ProfileDocument
+from researcher_profiles.schema.jsonld import canonical_dumps
 from researcher_profiles.schema.manifest import build_manifest, manifest_drift
 from researcher_profiles.utils.paths import build_meta_dir, cache_dir
 
 from .factories import write_papers, write_profile
 
-# --------------------------------------------------------------------------
-# The ResearcherProfile core class
-# --------------------------------------------------------------------------
+JANE_SUMMARY_IDS = [
+    "doe2016example",
+    "doe2019methods",
+    "doe2021widgets",
+    "doe2023framework",
+    "doe2024atlas",
+]
 
 
 def test_doe_basic_fields(jane_doe_readonly):
     p = jane_doe_readonly
     assert p.slug == "jane-doe"
-    assert p.name
-    assert "Doe" in p.name
-    assert p.orcid is not None
-    assert p.affiliation
-    assert p.field
-    # papers present
-    assert len(p.papers) > 0
-    first = p.papers[0]
-    assert first.title
-    assert first.paper_id
+    assert p.name == "Jane A. Doe"
+    assert p.orcid == "0000-0002-1825-0097"
+    assert p.affiliation == "Example University"
+    assert p.field == "Computational Biology"
+    assert len(p.papers) == 8
+    assert p.papers[0].title == "ExampleOverlap: enrichment analysis of example region sets"
+    assert p.papers[0].paper_id == "doe2016example"
 
 
 def test_smith_loads(fixture_profile):
     p = ResearcherProfile.from_files(fixture_profile("john-smith"))
     assert p.slug == "john-smith"
-    assert p.name
-    # exercise schema variation
-    assert isinstance(p.metadata.career, list)
+    assert p.name == "John B. Smith"
+    assert len(p.metadata.career) == 2
 
 
 def _plain_file(tmp_path):
@@ -92,8 +88,7 @@ def test_to_dict_json_roundtrip(jane_doe_readonly):
     parsed = json.loads(s)
     assert parsed["slug"] == "jane-doe"
     assert "metadata" in parsed
-    assert "summary_ids" in parsed
-    assert isinstance(parsed["summary_ids"], list)
+    assert sorted(parsed["summary_ids"]) == JANE_SUMMARY_IDS
 
 
 def test_to_dict_include_summaries(jane_doe_readonly):
@@ -103,13 +98,7 @@ def test_to_dict_include_summaries(jane_doe_readonly):
     assert "summary_ids" not in d
     summaries = d["summaries"]
     # jane-doe carries exactly these five summary files.
-    assert set(summaries) == {
-        "doe2016example",
-        "doe2019methods",
-        "doe2021widgets",
-        "doe2023framework",
-        "doe2024atlas",
-    }
+    assert sorted(summaries) == JANE_SUMMARY_IDS
     # Bodies, not paths or ids: every value is non-empty markdown text.
     assert all(body.strip() for body in summaries.values())
 
@@ -123,9 +112,8 @@ def test_to_agent_seed_shape(jane_doe_readonly):
     assert seed["affiliation"] == p.metadata.affiliation
     assert seed["field"] == p.metadata.field
     assert seed["summary"] == p.metadata.summary
-    assert isinstance(seed["expertise_md"], str)
-    assert isinstance(seed["soul_md"], str)
-    assert isinstance(seed["n_papers"], int)
+    assert seed["expertise_md"] == p.expertise
+    assert seed["soul_md"] == p.soul
     assert seed["n_papers"] == len(p.papers)
     # JSON-serializable
     json.dumps(seed)
@@ -139,22 +127,12 @@ def test_equality_and_hash(jane_doe_readonly_dir):
     assert {p1, p2} == {p1}
 
 
-# --------------------------------------------------------------------------
-# meta/manifest.json: what the directory contains
-# --------------------------------------------------------------------------
-
-
 def _roles(parts):
     return {p.role for p in parts}
 
 
 class TestManifest:
-    """The manifest: what a profile contains, stated rather than guessed at.
-
-    Without it, an agent landing on a published directory has to guess at
-    ``personality/SOUL.md``, ``sources/summaries/*.md``, ``.cache/embeddings.sqlite``.
-    The manifest replaces guessing with typed, relatively-linked entries.
-    """
+    """The manifest states what a profile contains, so an agent need not guess at its files."""
 
     def test_generation_covers_every_documented_member(self, tmp_path):
         p = tmp_path / "researcher"
@@ -170,6 +148,7 @@ class TestManifest:
         (p / "sources" / "web").mkdir(parents=True)
         (p / "sources" / "web" / "1-lab.md").write_text("w")
         (p / "sources" / "cv.md").write_text("cv")
+        (p / "sources" / "interview.md").write_text("digest")
         (p / "sources" / "citations.json").write_text("{}")
         (p / "embeddings").mkdir()
         (p / "embeddings" / "index.json").write_text("{}")
@@ -184,11 +163,12 @@ class TestManifest:
             "works",
             "citations",
             "cv",
+            "interview",
             "paper_summary",
             "paper_fulltext",
             "web",
             "embedding_index",  # flat servable embeddings/index.json (public)
-            "embedding_index_sqlite",  # profile-adjacent .cache/embeddings.sqlite (restricted)
+            "embedding_index_sqlite",  # profile-adjacent .cache/embeddings.sqlite (private)
         }
 
     def test_build_state_is_never_in_the_manifest(self, tmp_path):
@@ -246,11 +226,8 @@ class TestManifest:
         drift = manifest_drift(prof.directory, prof.manifest())
         assert drift == {"missing": [], "stale": []}
 
-    def test_flat_embeddings_are_manifested_and_not_publishignored(self, tmp_path):
-        """embeddings/index.json is a public manifest entry; the sibling blob and
-        chunks files ship by default (they are not excluded by .publishignore)."""
-        from researcher_profiles import privacy
-
+    def test_flat_embeddings_are_manifested_and_ship_publicly(self, tmp_path):
+        """embeddings/index.json is a public manifest entry; its sibling files ship by default."""
         p = tmp_path / "researcher"
         write_profile(p, name="Researcher")
         emb = p / "embeddings"
@@ -264,30 +241,19 @@ class TestManifest:
         assert embedding_entry.content_url == "embeddings/index.json"
         assert embedding_entry.visibility == "public"
 
-        # Write the manifest back so effective_tiers sees it, then check the
-        # deny-list excludes none of the flat embedding files.
-        prof = ResearcherProfile.from_files(p)
-        prof.build_manifest(write=True)
-        prof = ResearcherProfile.from_files(p)
-        ignore = set(privacy.publishignore_lines(prof.metadata))
-        assert "embeddings/index.json" not in ignore
-        assert "embeddings/st-all-minilm-l6-v2.bin" not in ignore
-        assert "embeddings/st-all-minilm-l6-v2.chunks.json" not in ignore
-
-
-# --------------------------------------------------------------------------
-# meta/build_state.json: the build's bookkeeping
-# --------------------------------------------------------------------------
+        # Write the manifest back so effective_tiers sees it, then check a
+        # public export ships every flat embedding file.
+        ResearcherProfile.from_files(p).build_manifest(write=True)
+        shipped = set(plan_profile_export(p, "public").files)
+        assert {
+            "embeddings/index.json",
+            "embeddings/st-all-minilm-l6-v2.bin",
+            "embeddings/st-all-minilm-l6-v2.chunks.json",
+        } <= shipped
 
 
 class TestBuildState:
-    """`meta/build_state.json`: the build's bookkeeping, kept out of the record.
-
-    Publishing a profile must not publish the build's dirty laundry: download
-    attempts, rejection reasons, contamination flags, verification bookkeeping.
-    These tests pin the split in both directions: the sidecar round-trips, and no
-    published paper record carries a single one of the migrated field names.
-    """
+    """The sidecar round-trips, and no published paper record carries a migrated field name."""
 
     def test_absent_sidecar_is_not_an_error(self, tmp_path):
         """A published profile legitimately has no build state."""
@@ -365,13 +331,8 @@ class TestBuildState:
         assert BuildState.load(p).is_contaminated("paper1") is True
 
 
-# --------------------------------------------------------------------------
-# Coverage: last_updated, staleness, recent work
-# --------------------------------------------------------------------------
-
-
 class TestCoverage:
-    """Tests for the coverage module: last_updated, staleness, recent_work, get()."""
+    """last_updated, staleness, recent_work, get()."""
 
     def test_staleness_returns_keys(self, jane_doe):
         s = jane_doe.coverage.staleness()
@@ -402,8 +363,7 @@ class TestCoverage:
 
     def test_coverage_returns_coverage(self, jane_doe):
         s = jane_doe.coverage.get()
-        assert isinstance(s, Coverage)
-        assert s.name
+        assert s.name == "Jane A. Doe"
         assert s.paper_count == len(jane_doe.papers)
         assert s.staleness_label in ("fresh", "aging", "stale")
 
@@ -418,8 +378,6 @@ class TestCoverage:
         assert s2.one_liner == "CACHED_SENTINEL"
 
     def test_coverage_cache_busts_on_mtime_change(self, jane_doe):
-        import os
-
         jane_doe.coverage.get()
         cache = cache_dir(jane_doe.directory) / "coverage.json"
         data = json.loads(cache.read_text())
@@ -432,20 +390,14 @@ class TestCoverage:
         assert s.one_liner != "OLD_SENTINEL"
 
 
-# --------------------------------------------------------------------------
-# Citations
-# --------------------------------------------------------------------------
-
-
 class TestCitations:
-    """Tests for citations module (cite, cite_many, verify, export)."""
+    """cite, cite_many, verify, export."""
 
     def test_cite_returns_citation(self, jane_doe):
         pid = jane_doe.papers[0].paper_id
         c = jane_doe.cite.get(pid)
-        assert isinstance(c, Citation)
         assert c.paper_id == pid
-        assert c.title
+        assert c.title == jane_doe.papers[0].title
 
     def test_cite_unknown_raises_keyerror(self, jane_doe):
         with pytest.raises(KeyError):
@@ -476,11 +428,7 @@ class TestCitations:
         ids=["doi-first", "full-text-link-fallback", "pdf-link"],
     )
     def test_cite_canonical_url(self, paper_fields, expected_url_attrs):
-        """If paper has a DOI, url should be the doi.org URL; otherwise it
-        falls back to the full-text link, and a ``.pdf`` link also sets
-        ``pdf_url``."""
-        from researcher_profiles.profile.cite import _paper_to_citation
-
+        """A DOI wins; else the full-text link; a ``.pdf`` link also sets ``pdf_url``."""
         p = PaperRecord(paper_id="x", title="t", **paper_fields)
         c = _paper_to_citation(p)
         for attr, expected in expected_url_attrs.items():
@@ -531,18 +479,8 @@ class TestCitations:
             jane_doe.cite.export([], "xml")
 
 
-# ---------------------------------------------------------------------------
-# The storage layer: the public write surface
-# ---------------------------------------------------------------------------
-
-
 class TestSaveProfileStamps:
-    """``save_profile()`` stamps ``dateModified``.
-
-    Without that stamp, ``build_manifest(write=True)`` could move manifest
-    ``sha256`` entries (a content change by ``date_modified``'s own doctrine)
-    and leave the vintage stale.
-    """
+    """``save_profile()`` stamps ``dateModified``, so a manifest ``sha256`` move never leaves it stale."""
 
     def test_a_content_change_advances_the_stamp(self, jane_doe_dir):
         prof = ResearcherProfile.from_files(jane_doe_dir)
@@ -569,8 +507,6 @@ class TestSaveProfileStamps:
         assert (jane_doe_dir / "profile.jsonld").read_text() == raw
 
     def test_an_invalid_document_never_reaches_the_store(self, jane_doe_dir):
-        from researcher_profiles.errors import ProfileWriteError
-
         prof = ResearcherProfile.from_files(jane_doe_dir)
         before = (jane_doe_dir / "profile.jsonld").read_text()
         with pytest.raises(ProfileWriteError):
@@ -584,17 +520,18 @@ class TestPublicWritersRoundTrip:
     def _reload(self, d):
         return ResearcherProfile.from_files(d)
 
-    def test_save_expertise(self, jane_doe_dir):
-        ResearcherProfile.from_files(jane_doe_dir).save_expertise("# Expertise\n\nATAC-seq.\n")
-        assert self._reload(jane_doe_dir).expertise == "# Expertise\n\nATAC-seq.\n"
-
-    def test_save_soul(self, jane_doe_dir):
-        ResearcherProfile.from_files(jane_doe_dir).save_soul("# Soul\n")
-        assert self._reload(jane_doe_dir).soul == "# Soul\n"
+    @pytest.mark.parametrize(
+        "writer,attr,value",
+        [
+            ("save_expertise", "expertise", "# Expertise\n\nATAC-seq.\n"),
+            ("save_soul", "soul", "# Soul\n"),
+        ],
+    )
+    def test_save_text(self, jane_doe_dir, writer, attr, value):
+        getattr(ResearcherProfile.from_files(jane_doe_dir), writer)(value)
+        assert getattr(self._reload(jane_doe_dir), attr) == value
 
     def test_save_grants(self, jane_doe_dir):
-        from researcher_profiles.schema import GrantRecord
-
         prof = ResearcherProfile.from_files(jane_doe_dir)
         prof.save_grants([GrantRecord(id="https://reporter.nih.gov/R01HG000000", name="A grant")])
         reloaded = self._reload(jane_doe_dir)
@@ -625,14 +562,7 @@ class TestPublicWritersRoundTrip:
 
 
 class DictStorage(ArtifactStorage):
-    """A profile's artifacts in a plain dict. The proof the storage layer is real.
-
-    Implements the whole of :class:`ArtifactStorage` over a dict, with a fake
-    session and ``atomic=True``, so the suite exercises the atomic branch of
-    the hook contract without a database. Small and test-only:
-    this is not SDK API, and it has exactly one consumer, so it stays here
-    rather than moving to ``factories.py``.
-    """
+    """A profile's artifacts in a plain dict, with ``atomic=True``: the atomic hook branch without a database."""
 
     def __init__(self, store: dict):
         self.store = store
@@ -667,18 +597,12 @@ class DictStorage(ArtifactStorage):
         return dict(self.store.get("document") or {})
 
     def load_document(self):
-        from researcher_profiles.schema import ProfileDocument
-
         return ProfileDocument.model_validate(self.store["document"])
 
     def save_document(self, data):
         self.store["document"] = dict(data)
 
     def content_hash(self):
-        import hashlib
-
-        from researcher_profiles.schema.jsonld import canonical_dumps
-
         h = hashlib.sha256()
         h.update(canonical_dumps(self.load_persisted_document()).encode("utf-8"))
         h.update(b"\x00")
@@ -732,6 +656,18 @@ class DictStorage(ArtifactStorage):
 
     # Raw bodies
 
+    def write_artifact(
+        self,
+        content_url,
+        text,
+        *,
+        role,
+        name,
+        encoding_format="text/plain",
+        manifest_slot="hasPart",
+    ):
+        self.store.setdefault("artifacts", {})[content_url] = text
+
     def artifact_text(self, content_url):
         return (self.store.get("artifacts") or {}).get(content_url)
 
@@ -749,8 +685,6 @@ class DictStorage(ArtifactStorage):
     # Transaction
 
     def new_write_context(self, profile, kind):
-        from researcher_profiles.profile.write_unit import WriteContext
-
         return WriteContext(
             profile=profile,
             slug=self.slug,
@@ -790,12 +724,12 @@ class TestNonFilesystemBackend:
         dict_profile.add_pre_commit_hook(lambda ctx: seen.append(ctx.profile.metadata))
         with dict_profile.write_unit("owner-edit"):
             dict_profile.edit.patch_metadata({"field": "Systems Biology"})
-            dict_profile.edit.set_visibility(profile_visibility="internal")
+            dict_profile.edit.set_visibility(profile_visibility="limited")
 
         assert dict_profile.metadata.field == "Systems Biology"
-        assert dict_profile.metadata.visibility == "internal"
+        assert dict_profile.metadata.visibility == "limited"
         assert seen[0].field == "Systems Biology"
-        assert seen[0].visibility == "internal"
+        assert seen[0].visibility == "limited"
 
     def test_post_commit_hook_sees_the_committed_cache(self, dict_profile):
         seen = []
@@ -832,8 +766,6 @@ class TestNonFilesystemBackend:
         assert seen[0].session is dict_profile.storage.session
 
     def test_a_raising_hook_rolls_back_and_does_not_commit(self, dict_profile):
-        from researcher_profiles.errors import WriteHookError
-
         dict_profile.add_pre_commit_hook(lambda ctx: (_ for _ in ()).throw(RuntimeError("no")))
         with pytest.raises(WriteHookError):
             dict_profile.save_soul("# soul\n")

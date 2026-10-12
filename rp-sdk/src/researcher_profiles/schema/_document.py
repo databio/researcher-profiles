@@ -7,13 +7,31 @@ from typing import Any
 
 from pydantic import Field, field_validator, model_validator
 
-# Shared biographical types from scholarcore.
 from scholarcore import CareerEntry, Training
 from scholarcore.identity import is_local, orcid_of
 
-from ._common import FORMAT_HINT, KNOWN_PROVENANCE, ProfileLevel, Provenance, Visibility
+from ._common import (
+    FORMAT_HINT,
+    KNOWN_PROVENANCE,
+    OrganizationName,
+    ProfileLevel,
+    Provenance,
+    Visibility,
+)
 from ._identity import validate_rid
-from ._parts import Anchor, ArtifactRef, CareerStage, Identifier, PaperStats, ResearchOutput
+from ._parts import (
+    Anchor,
+    ArtifactRef,
+    CareerStage,
+    ConceptReference,
+    Identifier,
+    PaperStats,
+    ResearchInterest,
+    ResearchOutput,
+    SectionVisibility,
+    SiteCapabilities,
+    project_interests,
+)
 from ._proof import Proof
 from .jsonld import CONTEXT_URL, PROFILE_FORMAT_IRI, JsonLdModel
 
@@ -34,9 +52,13 @@ class ProfileDocument(JsonLdModel):
     rid: str = Field(..., description="Researcher id: a canonical ORCID or a local: id")
     #: Who asserted this and on what basis. No default; see :data:`Provenance`.
     provenance: Provenance
+    #: A human sentence saying how this document was produced when the answer is
+    #: not obvious from ``provenance`` alone (e.g. "self-reported via a
+    #: structured interview; unverified"). Consumers SHOULD display it next to
+    #: the summary.
+    provenance_note: str | None = Field(default=None, alias="provenanceNote")
     #: ISO-8601 timestamp of the ORCID round-trip check. Required by, and only
-    #: meaningful for, ``provenance == "orcid_verified"``. Retained as the
-    #: ``orcid_roundtrip`` proof's timestamp under the multi-proof model.
+    #: meaningful for, ``provenance == "orcid_verified"``.
     verified_at: str | None = Field(default=None, alias="verifiedAt")
     #: Verification proofs (``rp:proof``). Optional and multi-proof: a
     #: profile may carry zero, one, or many. See :class:`Proof`.
@@ -48,30 +70,27 @@ class ProfileDocument(JsonLdModel):
     date_modified: str | None = Field(default=None, alias="dateModified")
 
     #: Profile-level default privacy tier. Artifacts inherit it when they do not
-    #: declare their own ``visibility``. Set to ``internal``/``restricted`` to
-    #: hold a whole profile back. This replaces the ``.visibility.json`` sidecar.
+    #: declare their own ``visibility``. Set to ``limited``/``private`` to
+    #: hold a whole profile back.
     visibility: Visibility = "public"
 
     #: Consumer-interface flags: read once at stage 1 so a consumer picks a
-    #: navigation path without probing for artifacts. Carried over from the
-    #: former published manifest.
+    #: navigation path without probing for artifacts.
     has_citation_graph: bool | None = Field(default=None, alias="hasCitationGraph")
     has_embedding_index: bool | None = Field(default=None, alias="hasEmbeddingIndex")
     #: True when expertise.md cites published paper_ids in square brackets.
     expertise_cites_paper_ids: bool | None = Field(default=None, alias="expertiseCitesPaperIds")
 
     level: ProfileLevel = "full"
-    affiliation: str | None = None
+    affiliation: OrganizationName = None
     #: A ROR IRI for :attr:`affiliation`. Not an on-disk key of its own: when
     #: set, ``affiliation`` serializes as an ``Organization`` node carrying it.
     affiliation_id: str | None = None
     job_title: str | None = Field(default=None, alias="jobTitle")
     email: str | None = None
     field: str | None = None
-    #: Free-text descriptive labels, not slugs: case and punctuation carry
-    #: meaning ("COVID-19", "C. elegans systems biology", "ATAC-seq"). These
-    #: are display strings everywhere they are consumed; derive a slug at
-    #: index time if one is ever needed, and leave the label alone.
+    #: Free-text display labels, not slugs: case and punctuation carry
+    #: meaning ("COVID-19", "ATAC-seq").
     subfields: list[str] = []
     summary: str | None = None
 
@@ -83,6 +102,14 @@ class ProfileDocument(JsonLdModel):
     expertise: list[str] = []
     interests: list[str] = []
     not_interests: list[str] = []
+    #: The canonical interest record. When non-empty, ``interests`` and
+    #: ``not_interests`` are rebuilt from it on every load (see
+    #: :func:`~.project_interests`).
+    research_interests: list[ResearchInterest] = Field(default=[], alias="rp:researchInterests")
+    section_visibility: list[SectionVisibility] = Field(default=[], alias="rp:sectionVisibility")
+    therapeutic_areas: list[ConceptReference] = Field(default=[], alias="rp:therapeuticAreas")
+    site_capabilities: SiteCapabilities | None = Field(default=None, alias="rp:siteCapabilities")
+    regulatory_experience: list[str] = Field(default=[], alias="rp:regulatoryExperience")
     methodological_commitments: list[str] = []
     recurring_positions: list[str] = []
     intellectual_lineage: list[str] = []
@@ -93,9 +120,11 @@ class ProfileDocument(JsonLdModel):
     collaborators: list[str | dict] = []
     anchor: Anchor | None = None
     paper_stats: PaperStats | None = None
-    #: Date-anchored eligibility facts. LLM-synthesized (requires judgment
-    #: over CV/ORCID/web); ``None`` on profiles not yet re-synthesized.
+    #: Date-anchored eligibility facts. LLM-synthesized; may be ``None``.
     career_stage: CareerStage | None = None
+    #: Digest of the inputs the LLM-synthesized fields were written from, so a
+    #: builder can tell current from stale.
+    synthesis_inputs_digest: str | None = Field(default=None, alias="synthesisInputsDigest")
 
     #: The manifest. Every artifact in the profile, typed and relatively
     #: linked, so an agent landing on a published directory never has to guess.
@@ -124,14 +153,7 @@ class ProfileDocument(JsonLdModel):
     @field_validator("provenance")
     @classmethod
     def _warn_unknown_provenance(cls, v: str) -> str:
-        """Tolerate an unknown headline label; warn rather than reject.
-
-        ``provenance`` is an OPEN set (see :data:`KNOWN_PROVENANCE`). Rejecting
-        an unrecognized value would violate the consumer rule in
-        docs/rp-spec/index.md, so a stranger's newer label must load. It is
-        still non-empty and structural constraints still bind for the values
-        this version *does* understand (see :meth:`_check_provenance`).
-        """
+        """Tolerate an unknown headline label; warn rather than reject (see :data:`Provenance`)."""
         if v not in KNOWN_PROVENANCE:
             warnings.warn(
                 f"provenance {v!r} is not one of the known values "
@@ -194,10 +216,27 @@ class ProfileDocument(JsonLdModel):
                     "historical figure holds an ORCID."
                 )
         if self.id_ is None:
-            # The classic self-referential fragment: resolves against wherever
-            # the document is served, so an unpublished profile still has a
-            # well-formed subject IRI.
+            # A self-referential fragment, so an unpublished profile still has
+            # a well-formed subject IRI.
             self.id_ = self.url or "#me"
+        if self.research_interests:
+            self.interests, self.not_interests = project_interests(self.research_interests)
+        return self
+
+    @model_validator(mode="after")
+    def _check_orcid_login_proof(self) -> "ProfileDocument":
+        """An ``orcid_login`` proof is unique and names this profile's ORCID."""
+        logins = [p for p in self.proof if p.kind == "orcid_login"]
+        if len(logins) > 1:
+            raise ValueError(
+                "a document carries at most one orcid_login proof: it is served by one registry"
+            )
+        for p in logins:
+            if p.orcid != self.orcid:
+                raise ValueError(
+                    f"orcid_login proof names ORCID iD {p.orcid} but this "
+                    f"profile's rid is {self.rid}"
+                )
         return self
 
     # --- derived ------------------------------------------------------
@@ -206,11 +245,7 @@ class ProfileDocument(JsonLdModel):
     def orcid(self) -> str | None:
         """The profile's ORCID, derived from ``rid``; ``None`` when local.
 
-        Read-only and derived, so the "two identity fields disagree" failure
-        mode is structurally impossible. Not serialized: the
-        published document already carries the ORCID twice (as ``rid`` and, for
-        an ORCID identity, as ``@id``), and a third copy on disk is exactly the
-        drift ``rid`` was invented to eliminate.
+        Derived and not serialized, so it can never disagree with ``rid``.
         """
         return orcid_of(self.rid)
 
@@ -253,8 +288,7 @@ class ProfileDocument(JsonLdModel):
 #   anchor      Python-owned identity. Set by the build tool, never LLM-writable.
 #   synthesized The LLM's output surface. These are the only fields the LLM
 #               is asked to produce; the generator enforces that.
-#   derived     Python-computed from the corpus. The LLM must never author these:
-#               LLM-authored statistics are actively wrong, not merely redundant.
+#   derived     Python-computed from the corpus. The LLM must never author these.
 #   document    JSON-LD infrastructure, document metadata, manifest, and
 #               externally-assembled identifiers. Managed by the build tool and the format.
 
@@ -276,13 +310,18 @@ DERIVED_FIELDS: frozenset[str] = frozenset(
 
 #: JSON-LD infrastructure, document metadata, manifest, external identifiers,
 #: and fields assembled from ORCID by the build tool (not LLM-written).
+#: ``research_interests`` is here too: the build writes it in Python (topic
+#: counts, and the LLM's free-text lists converted to typed entries).
 DOCUMENT_FIELDS: frozenset[str] = frozenset(
     {
+        "research_interests",
+        "synthesis_inputs_digest",
         "context",
         "id_",
         "type_",
         "conforms_to",
         "provenance",
+        "provenance_note",
         "verified_at",
         "proof",
         "license_",
@@ -299,5 +338,10 @@ DOCUMENT_FIELDS: frozenset[str] = frozenset(
         "affiliation_id",
         "job_title",
         "email",
+        # Owner-edited through the profile editor, never LLM-written.
+        "section_visibility",
+        "therapeutic_areas",
+        "site_capabilities",
+        "regulatory_experience",
     }
 )

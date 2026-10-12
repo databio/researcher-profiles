@@ -32,6 +32,18 @@ The package also exports the types `ResearcherProfileViewerProps`,
 `LoadSummary`, `ProfileDetail`, `ProfileMetadataPayload`, `ProfileSummary`,
 `PaperEntry`, and `PaperSummary`.
 
+`ProfileDetail` and `PaperEntry[]` are display shapes: what the static site
+writes and what the components render. The HTTP API answers with smaller,
+sized shapes, and `types.ts` carries those too: `ProfileRecord` (`GET
+/api/v1/profiles/{slug}`, with `fields`, `parts`, `withheld`, `view`),
+`PaperPage` and `PaperRow` (`GET .../papers`, where `summary` is a `Size`
+such as `{available, bytes, approx_tokens}`), `PaperRecordView`,
+`SummaryBatch` (`GET .../summaries?ids=`), `FileList` (`GET .../files`),
+`TextPage`, and `PassageList`. A host that calls the API converts these to
+the display shapes at its boundary. `PaperRow` (the type) is only in
+`types.ts`, since the `PaperRow` component already uses that name in the
+package index.
+
 ## Typed contract and regeneration
 
 `src/types.ts` is generated from the pydantic wire models in

@@ -1,13 +1,4 @@
-"""``prof.cite``: the profile's papers as formatted citations.
-
-Defines :class:`CitationManager`, the object ``ResearcherProfile.cite`` hands
-back (``prof.cite.get(...)`` / ``.many(...)`` / ``.verify(...)`` /
-``.export(...)``), together with the functions behind it: converting a
-:class:`~researcher_profiles.schema.PaperRecord` into a
-:class:`~researcher_profiles.models.results.Citation`, and the bibtex / CSL-JSON /
-plain / RIS formatters. Importing this module has no side effect on the
-profile class.
-"""
+"""``prof.cite``: the profile's papers as formatted citations (bibtex, CSL-JSON, plain, RIS)."""
 
 import json
 import re
@@ -211,8 +202,7 @@ def _export_citations(
     if format == "csl-json":
         return _format_csl_json(citations)
     if format == "plain":
-        # Build a lookup from on-disk citation strings (paper.citation) so
-        # plain formatter prefers the pre-rendered human-readable string.
+        # The plain formatter prefers each paper's stored citation string.
         fallback_map: dict[str, str | None] = {}
         for p in self.papers:
             pid = getattr(p, "paper_id", None)

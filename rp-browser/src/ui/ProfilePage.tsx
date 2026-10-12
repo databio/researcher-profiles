@@ -6,7 +6,12 @@ import {
   PapersList,
 } from "@rp/ui-lib";
 import type { ProfileDetail, PaperEntry } from "@rp/ui-lib/types";
-import { loadManifest, profileFiles, type ResolvedProfile } from "../model/manifest";
+import {
+  fulltextUrl,
+  loadManifest,
+  profileFiles,
+  type ResolvedProfile,
+} from "../model/manifest";
 import {
   getProfileDetail,
   getProfilePapers,
@@ -21,7 +26,7 @@ import { FilesPanel } from "./FilesPanel";
 import { Copyable } from "./Copyable";
 import { useShellSlots } from "../slots";
 import { Link, useSearchParams } from "react-router";
-import { navigate, buildPath } from "../router";
+import { navigate, buildPath, resolveProfileRef } from "../router";
 
 /**
  * The built-in tabs, plus whatever a host application adds through the
@@ -38,17 +43,35 @@ type TabId =
 
 interface ProfilePageProps {
   url?: string;
+  /** Controlled active sub-tab. When set (with onTabChange), the URL owns the tab. */
+  activeTab?: TabId;
+  /** Called when the user selects a tab. Its presence makes the component controlled. */
+  onTabChange?: (id: TabId) => void;
 }
 
-export function ProfilePage({ url: urlProp }: ProfilePageProps = {}) {
+export function ProfilePage({ url: urlProp, activeTab, onTabChange }: ProfilePageProps = {}) {
   const [searchParams] = useSearchParams();
-  const url = urlProp ?? searchParams.get("u") ?? "";
+  const ref = urlProp ?? searchParams.get("u") ?? "";
+  const { centroids, cards: allCards, sources } = useStore();
+  // `u` may be a slug; it resolves once the sources holding it have loaded.
+  const target = useMemo(() => resolveProfileRef(ref, allCards, sources), [ref, allCards, sources]);
+  const url = target.kind === "url" ? target.url : "";
+  const refError = target.kind === "error" ? target.message : null;
   const [detail, setDetail] = useState<ProfileDetail | null>(null);
   const [papers, setPapers] = useState<PaperEntry[]>([]);
   const [resolved, setResolved] = useState<ResolvedProfile | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [active, setActive] = useState<TabId>("overview");
+  const controlled = activeTab !== undefined && onTabChange !== undefined;
+  const [internalActive, setInternalActive] = useState<TabId>("overview");
+  const requestedTab = controlled ? activeTab! : internalActive;
+  const setTab = useCallback(
+    (id: TabId) => {
+      onTabChange?.(id);
+      if (!controlled) setInternalActive(id);
+    },
+    [onTabChange, controlled],
+  );
 
   const [emb, setEmb] = useState<ProfileEmbeddings | null>(null);
   const [embLoading, setEmbLoading] = useState(false);
@@ -71,11 +94,18 @@ export function ProfilePage({ url: urlProp }: ProfilePageProps = {}) {
     let cancelled = false;
     setLoading(true);
     setError(null);
-    setActive("overview");
+    if (!controlled) setInternalActive("overview");
     setResolved(null);
     setEmb(null);
     setEmbError(null);
     setEmbRequested(false);
+    if (!url) {
+      // Still waiting on a source to resolve a slug, or nothing to resolve.
+      setDetail(null);
+      setError(refError);
+      setLoading(refError === null);
+      return;
+    }
 
     (async () => {
       try {
@@ -97,7 +127,7 @@ export function ProfilePage({ url: urlProp }: ProfilePageProps = {}) {
     })();
 
     return () => { cancelled = true; };
-  }, [url]);
+  }, [url, refError]);
 
   const loadSummary = useCallback(
     (paperId: string) =>
@@ -105,8 +135,35 @@ export function ProfilePage({ url: urlProp }: ProfilePageProps = {}) {
     [url],
   );
 
+  const fullTextHref = useCallback(
+    (paperId: string) => (resolved ? fulltextUrl(resolved.manifest, paperId) : null),
+    [resolved],
+  );
+
+  const tabs = useMemo(() => {
+    if (!detail) return [] as { id: TabId; label: string }[];
+    const t: { id: TabId; label: string }[] = [{ id: "overview", label: "Overview" }];
+    // Content tabs always render, empty or not, so the structure stays legible.
+    t.push({ id: "expertise", label: "Expertise" });
+    t.push({ id: "soul", label: "Research Identity" });
+    t.push({ id: "papers", label: `Publications (${papers.length})` });
+    t.push({ id: "embeddings", label: "Embeddings" });
+    t.push({ id: "files", label: "Files" });
+    for (const e of extraTabs) t.push({ id: e.id, label: e.label });
+    return t;
+  }, [detail, papers.length, extraTabs]);
+
+  /**
+   * The tab actually displayed. A linked extra tab can be absent, so fall back
+   * to overview without rewriting the URL.
+   */
+  const resolvedActive = useMemo(
+    () => (tabs.some((t) => t.id === requestedTab) ? requestedTab : "overview"),
+    [tabs, requestedTab],
+  );
+
   useEffect(() => {
-    if (active !== "embeddings" || embRequested) return;
+    if (resolvedActive !== "embeddings" || embRequested) return;
     setEmbRequested(true);
     let cancelled = false;
     setEmbLoading(true);
@@ -123,26 +180,13 @@ export function ProfilePage({ url: urlProp }: ProfilePageProps = {}) {
       }
     })();
     return () => { cancelled = true; };
-  }, [active, embRequested, url]);
-
-  const tabs = useMemo(() => {
-    if (!detail) return [] as { id: TabId; label: string }[];
-    const t: { id: TabId; label: string }[] = [{ id: "overview", label: "Overview" }];
-    if (detail.expertise) t.push({ id: "expertise", label: "Expertise" });
-    if (detail.soul) t.push({ id: "soul", label: "Research Identity" });
-    if (papers.length) t.push({ id: "papers", label: `Publications (${papers.length})` });
-    t.push({ id: "embeddings", label: "Embeddings" });
-    t.push({ id: "files", label: "Files" });
-    for (const e of extraTabs) t.push({ id: e.id, label: e.label });
-    return t;
-  }, [detail, papers.length, extraTabs]);
+  }, [resolvedActive, embRequested, url]);
 
   const files = useMemo(
     () => (resolved ? profileFiles(resolved) : []),
     [resolved],
   );
 
-  const { centroids, cards: allCards } = useStore();
   const similarProfiles = useMemo(() => {
     const results: { name: string; base: string; score: number }[] = [];
     for (const [, data] of centroids) {
@@ -167,21 +211,17 @@ export function ProfilePage({ url: urlProp }: ProfilePageProps = {}) {
     return results;
   }, [url, centroids, allCards]);
 
-  useEffect(() => {
-    if (tabs.length && !tabs.some((t) => t.id === active)) setActive("overview");
-  }, [tabs, active]);
-
   return (
     <div>
       <div className="profile-chrome">
         <span className="profile-chrome__origin">
-          <Copyable value={url} title="Copy profile URL">
-            {url}
+          <Copyable value={url || ref} title="Copy profile URL">
+            {url || ref}
           </Copyable>
         </span>
         <button
           className="btn btn--ghost"
-          onClick={() => navigate({ page: "validate", url })}
+          onClick={() => navigate({ page: "validate", url: url || ref })}
         >
           Validate this profile
         </button>
@@ -197,9 +237,9 @@ export function ProfilePage({ url: urlProp }: ProfilePageProps = {}) {
               <button
                 key={t.id}
                 role="tab"
-                aria-selected={active === t.id}
-                className={`tab-bar__tab ${active === t.id ? "tab-bar__tab--active" : ""}`}
-                onClick={() => setActive(t.id)}
+                aria-selected={resolvedActive === t.id}
+                className={`tab-bar__tab ${resolvedActive === t.id ? "tab-bar__tab--active" : ""}`}
+                onClick={() => setTab(t.id)}
               >
                 {t.label}
               </button>
@@ -207,7 +247,7 @@ export function ProfilePage({ url: urlProp }: ProfilePageProps = {}) {
           </div>
 
           <div className="tab-bar__panel" role="tabpanel">
-            {active === "overview" && (
+            {resolvedActive === "overview" && (
               <>
                 <MetadataPanel metadata={detail.metadata} />
                 {similarProfiles.length > 0 && (
@@ -232,16 +272,30 @@ export function ProfilePage({ url: urlProp }: ProfilePageProps = {}) {
                 )}
               </>
             )}
-            {active === "expertise" && <MarkdownSection title="Expertise narrative" body={detail.expertise} />}
-            {active === "soul" && <MarkdownSection title="Narrative voice (SOUL)" body={detail.soul} />}
-            {active === "papers" && (
-              <PapersList papers={papers} loadSummary={loadSummary} />
+            {resolvedActive === "expertise" &&
+              (detail.expertise?.trim() ? (
+                <MarkdownSection title="Expertise narrative" body={detail.expertise} />
+              ) : (
+                <p className="text-muted">No expertise narrative yet.</p>
+              ))}
+            {resolvedActive === "soul" &&
+              (detail.soul?.trim() ? (
+                <MarkdownSection title="Narrative voice (SOUL)" body={detail.soul} />
+              ) : (
+                <p className="text-muted">No research identity (SOUL) written yet.</p>
+              ))}
+            {resolvedActive === "papers" && (
+              <PapersList
+                papers={papers}
+                loadSummary={loadSummary}
+                fullTextHref={fullTextHref}
+              />
             )}
-            {active === "embeddings" && (
+            {resolvedActive === "embeddings" && (
               <EmbeddingsPanel loading={embLoading} error={embError} data={emb} />
             )}
-            {active === "files" && <FilesPanel files={files} />}
-            {extraTabs.find((t) => t.id === active)?.render(tabCtx)}
+            {resolvedActive === "files" && <FilesPanel files={files} />}
+            {extraTabs.find((t) => t.id === resolvedActive)?.render(tabCtx)}
           </div>
         </div>
       )}

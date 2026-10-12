@@ -1,24 +1,14 @@
 import { describe, it, expect } from "vitest";
-import { normalizeBase, linkFor, summaryUrl, profileFiles } from "../src/model/manifest";
+import { normalizeBase, linkFor, summaryUrl, fulltextUrl, profileFiles } from "../src/model/manifest";
 import type { Manifest, ResolvedProfile } from "../src/model/manifest";
 
 describe("normalizeBase", () => {
-  it("adds trailing slash", () => {
-    expect(normalizeBase("https://example.com/profiles/alice")).toBe(
-      "https://example.com/profiles/alice/"
-    );
-  });
-
-  it("strips trailing profile.jsonld", () => {
-    expect(
-      normalizeBase("https://example.com/profiles/alice/profile.jsonld")
-    ).toBe("https://example.com/profiles/alice/");
-  });
-
-  it("preserves already-normalized URL", () => {
-    expect(normalizeBase("https://example.com/profiles/alice/")).toBe(
-      "https://example.com/profiles/alice/"
-    );
+  it.each([
+    { name: "adds trailing slash", input: "https://example.com/profiles/alice" },
+    { name: "strips trailing profile.jsonld", input: "https://example.com/profiles/alice/profile.jsonld" },
+    { name: "preserves already-normalized URL", input: "https://example.com/profiles/alice/" },
+  ])("$name", ({ input }) => {
+    expect(normalizeBase(input)).toBe("https://example.com/profiles/alice/");
   });
 
   it("rejects non-http URLs", () => {
@@ -114,6 +104,40 @@ describe("summaryUrl", () => {
   });
 });
 
+describe("fulltextUrl", () => {
+  const manifest: Manifest = {
+    "@id": "https://example.com/profiles/alice/",
+    name: "Alice",
+    rid: "0000-0000-0000-0001",
+    hasPart: [
+      {
+        role: "paper_summary",
+        contentUrl: "sources/summaries/smith2024foo.summary.md",
+        paperId: "smith2024foo",
+      },
+      {
+        role: "paper_fulltext",
+        contentUrl: "sources/papers/smith2024foo.md",
+        paperId: "smith2024foo",
+      },
+    ],
+  };
+
+  it("resolves the paper_fulltext entry for a paperId", () => {
+    expect(fulltextUrl(manifest, "smith2024foo")).toBe(
+      "https://example.com/profiles/alice/sources/papers/smith2024foo.md"
+    );
+  });
+
+  it("returns null when the paper has only a summary", () => {
+    const summaryOnly: Manifest = {
+      ...manifest,
+      hasPart: manifest.hasPart!.filter((e) => e.role !== "paper_fulltext"),
+    };
+    expect(fulltextUrl(summaryOnly, "smith2024foo")).toBeNull();
+  });
+});
+
 describe("URL resolution with relative @id (the doubled-path bug)", () => {
   it("linkFor with absolute @id produces correct single path", () => {
     const manifest: Manifest = {
@@ -147,7 +171,7 @@ describe("profileFiles carries the declared tier", () => {
     rid: "0000-0000-0000-0001",
     level: "full",
     hasPart: [
-      { contentUrl: "sources/cv.md", role: "cv", visibility: "restricted" },
+      { contentUrl: "sources/cv.md", role: "cv", visibility: "private" },
       { contentUrl: "sources/papers.jsonld", role: "works", visibility: "public" },
       { contentUrl: "sources/notes.md", role: "notes" },
     ],
@@ -156,7 +180,7 @@ describe("profileFiles carries the declared tier", () => {
   it("keeps each entry's visibility instead of dropping it on the floor", () => {
     const files = profileFiles({ manifest, base: manifest["@id"] } as ResolvedProfile);
     const byRole = Object.fromEntries(files.map((f) => [f.role, f.visibility]));
-    expect(byRole.cv).toBe("restricted");
+    expect(byRole.cv).toBe("private");
     expect(byRole.works).toBe("public");
   });
 

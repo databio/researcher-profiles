@@ -1,36 +1,24 @@
 """The slug rule: the one place that decides a profile directory's name.
 
-Everything downstream treats a slug as an opaque, already-valid string. When
-the slug scheme changes, it replaces exactly one function body here and nothing
-else moves.
+Everything downstream treats a slug as an opaque, already-valid string.
 
-Two rules make that possible:
+Two rules:
 
 1. An existing linkage is durable: if a caller already carries an
    ``rp_slug`` for this person, that is the slug. It is returned unchanged,
-   no matter what the current derivation rule would produce. A sync
-   therefore never renames a live directory as a side effect of a policy
-   change; a rename is a separate operation.
+   no matter what the derivation rule would produce. A sync never renames a
+   live directory; a rename is a separate operation.
 2. Directory names are arbitrary: a profile directory may be a raw ORCID
    (``0000-0002-1825-0097``), a ``lastname-firstname`` pair, or anything else
-   satisfying the grammar. Nothing here inspects a slug's shape to infer
-   meaning, and nothing renames one.
-
-The grammar is ``SLUG_RE``, defined here as the single canonical copy:
-``^[a-z0-9][a-z0-9-]*$``. ``schema`` and the serving side's
-``researcher_profiles.api.upload`` import this same object rather than retyping
-it, so every consumer of the grammar shares one object and the copies cannot
-drift.
+   satisfying the grammar. Nothing here infers meaning from a slug's shape.
 """
 
 import re
 
 #: Directory-name grammar. Applies only to display handles (profile directory
 #: names, the ``slug``). Never apply it to a ``rid``: it forbids uppercase and
-#: would reject every ``X``-suffixed ORCID. This is the single canonical copy;
-#: ``schema/`` and ``api/upload.py`` import it rather than redefining it. This
-#: module stays stdlib-only, so the definition lives here (a leaf) and callers
-#: that need the grammar depend on ``utils.slug`` rather than the reverse.
+#: would reject every ``X``-suffixed ORCID. The single canonical copy: import
+#: it, never retype it.
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
 __all__ = ["SLUG_RE", "SlugError", "resolve_slug"]
@@ -57,23 +45,15 @@ def resolve_slug(
     The derivation is ``lastname-firstname`` from the display name, falling back
     to the lowercased ORCID when there is no usable name.
 
-    Why not just the ORCID
-    ----------------------
+    Why not the ORCID: hundreds of directories named ``0000-0002-1825-0097``
+    are unreadable to a person browsing them. Naming by name is safe because
+    identity is the rid; ``<root>/.cache/index.json`` maps between them, so a
+    wrong name is a rename, not a data migration.
 
-    ORCID was the initial rule because the one pre-existing bundle used it. It
-    does not survive contact with a campaign: 300 directories named
-    ``0000-0002-1825-0097`` are unreadable to the person who has to browse them,
-    and this cache is browsed by hand. Deriving from the name is safe *because*
-    identity is the rid and the directory name is only a display handle.
-    ``<root>/.cache/index.json`` maps between them, so a name that later turns out
-    wrong is a rename, not a data migration.
-
-    The rule is the crudest one that works: last token as surname,
-    first token as given name. On the profiles built before it existed, it
-    reproduces every single directory name, including compound surnames such as
-    ``vale-ortiz-robin``. A cleverer parser would be a liability: it would
-    disagree with those names somewhere, and every disagreement orphans a
-    directory.
+    The rule is deliberately crude (last token, first token). It matches every
+    existing directory name, including compound surnames such as
+    ``vale-ortiz-robin``; a cleverer parser would disagree somewhere and
+    orphan a directory.
     """
     if existing_rp_slug:
         return _validated(existing_rp_slug.strip(), source="rp_slug")

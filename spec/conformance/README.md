@@ -71,6 +71,9 @@ validator:
 
 `expect_fail` is an optional hint: for the CLI it matches against Pydantic error
 types / schema names / JSON pointers; for the explorer it matches a check `id`.
+`expect_pass` (explorer only, optional) lists check `id`s that must be present
+and passing, for example `["orcid-verified"]` for the badge a registry-issued
+ORCID login proof earns.
 
 ## Two kinds of rule (why some cases pass one validator, fail the other)
 
@@ -106,6 +109,9 @@ The `valid/` fixtures are hand-authored source-layout profiles whose
 match the files present. The `invalid/` cases are derived by copying a valid
 case and mutating one thing (dropping `name`, breaking `conformsTo`, removing a
 paper node's `name`, or adding a manifest entry with no file).
+`valid/orcid-login-proof` and `invalid/orcid-login-proof-mismatch` are copies of
+`valid/ada-lovelace` with an `orcid_login` proof added: one that names the rid's
+ORCID iD, and one that names a different ORCID iD.
 
 When adding a case, put the directory under `valid/` or `invalid/` and add an
 entry to `cases.json` with the expected verdict for each validator. Verify the

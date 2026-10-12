@@ -1,15 +1,9 @@
 """The three cross-profile analytics accessors every store carries.
 
-``store.centroids``, ``store.match`` and ``store.indexes`` are the same idiom
-:class:`~researcher_profiles.profile.ResearcherProfile` uses one level down for
-``prof.cite`` / ``prof.topics`` / ``prof.edit``: one sub-object per concern,
-built on first access, each living in its own module. There is no aggregate
-object over a store any more; a "collection of profiles" is the store itself.
-
-Everything here is deliberately lazy. This module sits on the core import path
-(every backend mixes it in) and all three managers pull numpy, so the imports
-live inside the property bodies. A guardrail asserts the store contract stays
-importable without the vector extras.
+``store.centroids``, ``store.match`` and ``store.indexes``, each built on first
+access. Imports live inside the property bodies because this module is on the
+core import path and the managers pull numpy; a guardrail asserts the store
+contract imports without the vector extras.
 """
 
 from typing import TYPE_CHECKING, Any
@@ -22,10 +16,8 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from ..analytics.match import MatchManager
     from ..analytics.roster import _RosterCache
 
-#: The :class:`~researcher_profiles.store.VectorStore` surface, as names. Used
-#: for a duck check rather than ``isinstance``: the capability protocol now
-#: also declares the accessors below, so an ``isinstance`` here would invoke
-#: the very property doing the checking.
+#: The :class:`~researcher_profiles.store.VectorStore` surface, as names. A duck
+#: check, not ``isinstance``, which would invoke the accessors below.
 _VECTOR_METHODS = (
     "backend_spec",
     "has_vector_index",
@@ -36,11 +28,10 @@ _VECTOR_METHODS = (
 
 
 def require_vector_store(store: Any) -> Any:
-    """``store``, proved to serve vectors. Raises when it does not.
+    """``store``, proved to serve vectors.
 
-    The single up-front check behind ranking and centroids. It replaces the
-    per-analytic degradation the SDK used to do, where each feature discovered
-    separately that there was no directory and turned that into its own 503.
+    Raises ``CapabilityUnavailableError`` when it does not. The single up-front
+    check behind ranking and centroids.
     """
     if any(not hasattr(store, name) for name in _VECTOR_METHODS):
         raise CapabilityUnavailableError(
@@ -56,14 +47,11 @@ class _AnalyticsAccessors:
     """Mixed into every backend to supply the three analytics accessors.
 
     The managers share one :class:`~researcher_profiles.analytics.roster._RosterCache`
-    per store, so a rank() and the centroid matrix behind it always see the
-    same roster, and both drop it the moment the store's write generation
-    moves. That is the whole reason analytics can live directly on a live,
-    mutable store: the snapshot they compute over can never outlast a write.
+    per store, which drops its snapshot when the write generation moves, so no
+    analytic serves a roster older than the last write.
 
-    The accessors themselves never raise. A store that cannot serve vectors is
-    told so where the vectors are actually needed
-    (``match.rank``, ``centroids.matrix``), in one actionable error.
+    The accessors never raise; a store without vectors is told so where vectors
+    are needed (``match.rank``, ``centroids.matrix``).
     """
 
     _centroid_mgr: Any = None
@@ -82,7 +70,7 @@ class _AnalyticsAccessors:
 
     @property
     def centroids(self) -> "CentroidManager":
-        """``store.centroids``: the centroid matrix, its cache, the query backend."""
+        """See :attr:`~.protocol.VectorStore.centroids`."""
         if self._centroid_mgr is None:
             from ..analytics.centroids import CentroidManager
 
@@ -91,7 +79,7 @@ class _AnalyticsAccessors:
 
     @property
     def match(self) -> "MatchManager":
-        """``store.match``: ranking, MMR diversification, topics, clustering."""
+        """See :attr:`~.protocol.VectorStore.match`."""
         if self._match_mgr is None:
             from ..analytics.match import MatchManager
 
@@ -100,7 +88,7 @@ class _AnalyticsAccessors:
 
     @property
     def indexes(self) -> "IndexFleetManager":
-        """``store.indexes``: build and report on every profile's index."""
+        """See :attr:`~.protocol.VectorStore.indexes`."""
         if self._index_fleet_mgr is None:
             from ..analytics.indexes import IndexFleetManager
 

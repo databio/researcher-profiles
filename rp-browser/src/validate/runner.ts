@@ -1,9 +1,6 @@
 /**
- * Conformance validation runner.
- *
- * Accepts any URL (profile base, profile.jsonld, list document, or registry).
- * Normalizes, sniffs the document kind, and runs the matching check suite.
- * Checks stream live into the UI via the onCheck callback.
+ * Conformance validation runner. Accepts a profile base, profile.jsonld, list
+ * document, or registry URL and runs the matching check suite.
  */
 
 import type { CheckResult, ValidationRun } from "./types";
@@ -16,9 +13,7 @@ import { validateAgainstSchema } from "./schemaValidation";
 
 export type OnCheck = (check: CheckResult) => void;
 
-/**
- * Run validation against a URL. Streams check results via onCheck.
- */
+/** Run validation against a URL, streaming each check to `onCheck`. */
 export async function runValidation(
   rawUrl: string,
   onCheck: OnCheck,
@@ -31,11 +26,9 @@ export async function runValidation(
     onCheck(check);
   }
 
-  // First, try to fetch the URL to sniff its kind
   const outcome = await fetchJson<unknown>(rawUrl);
 
   if (!outcome.ok) {
-    // Try normalizing as a profile base and fetching manifest
     try {
       const base = normalizeBase(rawUrl);
       const manifestUrl = `${base}profile.jsonld`;
@@ -53,7 +46,6 @@ export async function runValidation(
         return { target: rawUrl, startedAt, conformanceClass: "invalid", checks };
       }
 
-      // It's a profile base URL: run profile checks
       return await runProfileChecks(base, manifestOutcome, emit, startedAt);
     } catch {
       emit({
@@ -69,13 +61,12 @@ export async function runValidation(
 
   const data = outcome.value;
 
-  // Sniff document kind
   if (Array.isArray(data)) {
     // Bare-array profile list
     return await runListChecks(rawUrl, data, outcome, emit, startedAt);
   } else if (typeof data === "object" && data !== null) {
     if ("rp:profileList" in data) {
-      // rp:profileList envelope: extract the profiles array
+      // rp:profileList envelope
       const rec = data as Record<string, unknown>;
       const profiles = Array.isArray(rec.profiles) ? rec.profiles : [];
       return await runListChecks(rawUrl, profiles, outcome, emit, startedAt);
@@ -85,16 +76,13 @@ export async function runValidation(
       return await runRegistryChecks(rawUrl, data as Record<string, unknown>, outcome, emit, startedAt);
     }
     if ("hasPart" in data || "subjectOf" in data) {
-      // Single profile document (schema:Person). Derive the base from the URL
-      // we actually fetched, not the document's `@id`: a published `@id` is
-      // relative (e.g. "profiles/x/") and `new URL()` throws on a bare relative
-      // string.
+      // Single profile document. Base comes from the fetched URL, not the
+      // relative `@id` (see ingestSingleManifest).
       const base = normalizeBase(rawUrl);
       return await runProfileChecks(base, outcome, emit, startedAt);
     }
   }
 
-  // URL looks like a profile base: try fetching manifest
   try {
     const base = normalizeBase(rawUrl);
     const manifestUrl = `${base}profile.jsonld`;
@@ -180,10 +168,8 @@ async function runRegistryChecks(
   emit: OnCheck,
   startedAt: string,
 ): Promise<ValidationRun> {
-  // Registry validation combines list-like checks with additional bundle checks
   const checks: CheckResult[] = [];
 
-  // JSON Schema validation against published schema
   const ajvCheck = validateAgainstSchema("collection", data, "Collection Bundle");
   checks.push(ajvCheck);
   emit(ajvCheck);
@@ -208,7 +194,6 @@ async function runRegistryChecks(
   checks.push(schemaCheck);
   emit(schemaCheck);
 
-  // Check cards count matches
   if (Array.isArray(data.cards) && typeof data.count === "number") {
     const countCheck: CheckResult = {
       id: "registry-count",
@@ -223,7 +208,6 @@ async function runRegistryChecks(
     emit(countCheck);
   }
 
-  // Check centroids if present
   if (data.dim && data.count && data.artifacts) {
     const artifacts = data.artifacts as Array<{ rel: string; href: string }>;
     const centroidArtifact = artifacts.find((a) => a.rel === "centroids");
@@ -248,7 +232,6 @@ async function runRegistryChecks(
     }
   }
 
-  // Validate topics.json if present alongside the collection bundle
   try {
     const topicsUrl = new URL("collection/topics.json", url).href;
     const topicsOutcome = await fetchJson<unknown>(topicsUrl);
@@ -258,7 +241,7 @@ async function runRegistryChecks(
       emit(topicsCheck);
     }
   } catch {
-    // topics.json is optional; skip if unreachable
+    // topics.json is optional.
   }
 
   // Sample member URLs

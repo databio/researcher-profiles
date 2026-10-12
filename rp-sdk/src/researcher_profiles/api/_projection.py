@@ -1,165 +1,122 @@
-"""The read projection every route module shares.
+"""The read projection shared by the routes: visibility gates and wire payloads.
 
-The projection is the gates that decide whether a viewer may see a profile and
-which of its pieces, and the functions that turn a loaded profile into a wire
-payload. The three ``APIRouter`` objects the route modules attach to live
-beside this, in :mod:`.routers._routers`.
-
-Four of these are the hooks a hosting service composes against, and they are
-re-exported without an underscore from ``researcher_profiles.api``:
-``artifact_visible``, ``invalidate_after_write``, ``metadata_payload`` and
-``withheld``. Everything else here is internal to the route modules.
+The public names are re-exported from ``researcher_profiles.api`` so a host
+projects through the same code as the SDK.
 """
 
+import json
 import logging
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from email.utils import format_datetime
-
-from fastapi import HTTPException, Request
 
 from ..models.api import (
     ProfileMetadataPayload,
     ProfileSummary,
 )
 from ..privacy import (
-    ALWAYS_RESTRICTED_PREFIXES,
+    ALWAYS_PRIVATE_PREFIXES,
     CHUNK_SOURCE_TYPE_ROLE,
     TierExplanation,
     ViewerTier,
     chunk_source_tiers,
-    profile_visible,
+    label_access_rights,
+    project_document,
     tier_allows,
 )
 from ..profile.payloads import metadata_payload_dict, profile_summary_dict
 from ..schema import (
-    ALWAYS_RESTRICTED_ROLES,
+    REGISTRY_ISSUED_PROOF_KINDS,
+    ProfileDocument,
+    Proof,
     most_restrictive,
     role_default_visibility,
+    strip_registry_issued_proofs,
 )
+from ..schema.jsonld import canonical_dumps
 from ..store import ProfileStore
-from ..utils.paths import STORE_CACHE_DIRNAME
-from .deps import (
-    get_profile_tier_floor,
-    viewer_tier_for,
-)
 
 logger = logging.getLogger(__name__)
 
 
-def invalidate_after_write(request: Request, store: ProfileStore, slug: str) -> None:
-    """Drop every cache that could still reflect the pre-edit profile.
-
-    The cached profile object and the store's on-disk ``.cache`` memos
-    (centroids/topics/graph): the exact set ``put_profile`` invalidates after a
-    tarball push, factored out so the granular edit endpoints stay consistent
-    with it. ``store.evict`` also bumps the store's write generation, which is
-    the whole in-process invalidation for ranking: the analytics snapshot is
-    stamped with that generation and rebuilds itself.
-
-    **Cache invalidation only.** Dependent-state maintenance does not belong
-    here: this function runs after the write is durable, inside a swallowing
-    ``try/except``, and only for routes that call it. That job lives on the
-    write hooks, ``ResearcherProfile.add_pre_commit_hook``
-    (see :meth:`researcher_profiles.profile.ResearcherProfile.write_unit`),
-    where it runs inside the write, before commit, and is not swallowed.
-
-    Failures here stay swallowed: a stale-cache rebuild is cheap and
-    re-eviction is idempotent.
-    """
-    store.evict(slug)
-    # The derived graph follows the same rule: drop the in-process snapshot and the
-    # on-disk cache so the next graph query rebuilds over the new corpus. A full
-    # rebuild (not an incremental patch) is the source of truth, so a stale
-    # graph can never survive a push, metadata patch, or visibility change.
-    request.app.state.graph = None
-    # A rootless store materializes into a temp directory that `get_graph`
-    # (see api/deps.py `materialize_store_to_tempdir`) caches on
-    # `_registry_tempdir` and reuses across requests. Dropping the graph
-    # snapshot above is not enough on such a store: the next rebuild would
-    # re-read the same stale temp dir and never see this write. Drop it so the
-    # next graph query re-exports the live corpus. /match no longer needs this:
-    # it ranks over the store's own vector rows, which this write already
-    # updated.
-    tempdir = getattr(request.app.state, "_registry_tempdir", None)
-    if tempdir is not None:
-        cleanup = getattr(tempdir, "cleanup", None)
-        if callable(cleanup):
-            try:
-                cleanup()
-            except OSError:
-                pass
-        request.app.state._registry_tempdir = None
-    # This loop needs a filesystem root. The serve-time derived caches under
-    # the profile's ``.cache/`` and the store's ``.cache/`` are not covered by ``ArtifactStorage``
-    # (regenerable binary artifacts, sqlite handles: different semantics), so
-    # they are not fixed here. A store that is not a directory has none of
-    # them, which is what ``root is None`` means.
-    root = store.root
-    if root is None:
-        return
-    # These names are defined by ``analytics.centroids.CentroidManager.cache_path``,
-    # ``analytics.match.MatchManager.topics_cache_path``, and ``graph.cache.graph_db_path``;
-    # kept literal here because this path must work without importing them.
-    for cache_name in ("centroids.npz", "topics.json", "graph.sqlite"):
-        fp = root / STORE_CACHE_DIRNAME / cache_name
-        if fp.exists():
-            try:
-                fp.unlink()
-            except OSError:
-                pass
+def _profile_summary(prof, viewer: ViewerTier) -> ProfileSummary:
+    """Validate ``payloads.profile_summary_dict`` (shared with the static publisher) into the wire model."""
+    return ProfileSummary.model_validate(profile_summary_dict(prof, viewer))
 
 
-def _profile_summary(prof) -> ProfileSummary:
-    """Validate the shared summary projection into the wire model.
-
-    The projection itself lives in ``payloads.profile_summary_dict``, which the
-    static publisher renders from too, so a profile looks the same over HTTP as
-    in the published site.
-    """
-    return ProfileSummary.model_validate(profile_summary_dict(prof))
-
-
-def metadata_payload(prof) -> ProfileMetadataPayload:
+def metadata_payload(
+    prof, viewer: ViewerTier, *, proofs: Sequence[Proof] = ()
+) -> ProfileMetadataPayload:
     """Validate the shared metadata projection into the wire model.
 
-    Part of the read-projection hooks re-exported from
-    ``researcher_profiles.api``: a hosting service composing its own surface
-    projects a profile's metadata through this, so its answer and the SDK's
-    cannot drift. The projection is ``payloads.metadata_payload_dict``.
+    ``proofs`` are the registry-issued proofs to attach to this read; any
+    stored copy of such a proof is dropped.
     """
-    return ProfileMetadataPayload.model_validate(metadata_payload_dict(prof))
+    return ProfileMetadataPayload.model_validate(metadata_payload_dict(prof, viewer, proofs=proofs))
+
+
+# Registry-issued proofs are computed per read, never stored.
+
+
+def _served(prof, viewer: ViewerTier, proofs: Sequence[Proof]) -> ProfileDocument:
+    md = prof.metadata
+    doc = project_document(md, viewer)
+    return doc.model_copy(update={"proof": strip_registry_issued_proofs(doc.proof) + list(proofs)})
+
+
+def served_document(service, prof, viewer: ViewerTier) -> ProfileDocument:
+    """The document a registry serves: the stored record plus its registry proofs.
+
+    Projected for ``viewer``. Stored registry-issued proofs are replaced by the
+    hook's. Never mutates ``prof.metadata``, which the store caches.
+    """
+    return _served(prof, viewer, service.proofs(prof.metadata.rid))
+
+
+def served_document_bytes(
+    service, store: ProfileStore, prof, viewer: ViewerTier, slug: str
+) -> bytes:
+    """The ``profile.jsonld`` bytes to serve for ``prof`` to ``viewer``.
+
+    When nothing needs projecting, the stored JSON comes back as written plus
+    ``accessRights`` labels; otherwise the served document is re-serialized.
+    Raises what ``store.document_bytes`` raises.
+    """
+    proofs = service.proofs(prof.metadata.rid)
+    stored_registry_proof = any(p.kind in REGISTRY_ISSUED_PROOF_KINDS for p in prof.metadata.proof)
+    if not prof.metadata.section_visibility and not proofs and not stored_registry_proof:
+        # Re-dumping the model would reshape untouched fields.
+        stored = json.loads(store.document_bytes(slug))
+        label_access_rights(stored, prof.metadata)
+        return canonical_dumps(stored).encode()
+    doc = _served(prof, viewer, proofs)
+    return canonical_dumps(doc.model_dump(mode="json")).encode()
 
 
 # ---------------------------------------------------------------------------
 # The two gates
 #
-# Every read on ``public_router`` passes through these, in this order:
+# Every read passes through these, in this order:
 #
-#   1. the profile gate: whether this viewer may see this profile at all.
+#   1. the profile gate (``Service.visible``): whether this viewer may see
+#      this profile at all.
 #   2. the artifact gate: which of its pieces they may see.
 #
 # Failing the profile gate is a 404 with the same body a genuinely nonexistent
 # slug produces. Never a 403: a 403 tells the caller the profile exists, which
 # is the one bit a held-back profile is trying not to disclose.
 #
-# Both gates are projections of ``privacy.explain_tiers`` / ``privacy.tier_allows``.
-# Nothing here compares two tiers itself.
+# Both gates defer to ``privacy``; nothing here compares tiers itself.
 # ---------------------------------------------------------------------------
 
 
-#: Every tier-projected response is a function of the caller's credentials, not
-#: only of its URL. Without this a shared cache that stored one caller's copy
-#: would serve it to the next caller, which on the one route with a TTL means
-#: handing a stranger an owner's view.
+#: Tier-projected responses depend on credentials, not only the URL. Without
+#: this a shared cache could hand a stranger an owner's view.
 VARY_ON_CREDENTIALS = "Authorization, Cookie"
 
 
-#: How long a shared cache may hold the anonymous rendering of a public
-#: profile document. This is the bound on unpublishing: an owner who withdraws
-#: consent is invisible to the origin on the next request, and to a shared
-#: cache within this many seconds. Sixty is the number we are choosing; it is
-#: short enough that "I unpublished and it is still up" is not a support
-#: question, and long enough to absorb a crawl.
+#: Seconds a shared cache may hold the anonymous rendering of a public profile
+#: document. This bounds how long an unpublished profile stays visible in caches.
 PUBLIC_DOCUMENT_MAX_AGE = 60
 
 
@@ -176,27 +133,9 @@ def _http_date(iso: str | None) -> str | None:
         return None
 
 
-def _profile_missing(ref: str) -> HTTPException:
-    """The 404 for "no such profile" and for "not for you": byte-identical."""
-    return HTTPException(status_code=404, detail=f"profile {ref!r} not found")
-
-
-def _gate_profile(request: Request, prof, viewer: ViewerTier, ref: str) -> None:
-    """Raise the not-found 404 unless ``viewer`` may see this profile."""
-    floor = get_profile_tier_floor(request, prof, ref)
-    if not profile_visible(prof.metadata, viewer, floor=floor.tier):
-        raise _profile_missing(ref)
-
-
-def _is_hard_floor(content_url: str, role: str | None) -> bool:
-    """Withheld from every viewer, owner included (spec section 4).
-
-    Copyrighted full text is a legal floor; ``.cache/``/``.keys/`` is build-local
-    derived state and key material, not a servable artifact.
-    """
-    if role in ALWAYS_RESTRICTED_ROLES:
-        return True
-    return any(content_url.startswith(prefix) for prefix in ALWAYS_RESTRICTED_PREFIXES)
+def _is_hard_floor(content_url: str) -> bool:
+    """Withheld from every viewer, owner included (spec section 4): build state and keys."""
+    return any(content_url.startswith(prefix) for prefix in ALWAYS_PRIVATE_PREFIXES)
 
 
 def artifact_visible(
@@ -208,13 +147,11 @@ def artifact_visible(
 ) -> bool:
     """Whether ``viewer`` receives the body backing ``content_url``.
 
-    An artifact absent from the manifest has declared no tier of its own, so
-    the profile default and its role default govern it (spec section 2): the
-    same answer ``explain_tiers`` would give if it were listed. Treating an
-    unlisted artifact as invisible instead would make a profile built before
-    manifests were written look empty rather than public.
+    An artifact absent from the manifest takes the profile and role defaults
+    (spec section 2), not invisibility, so a manifest-less profile does not look
+    empty.
     """
-    if _is_hard_floor(content_url, role):
+    if _is_hard_floor(content_url):
         return False
     entry = explain.get(content_url)
     if entry is not None:
@@ -226,24 +163,21 @@ def artifact_visible(
 def withheld(explain: dict[str, TierExplanation], viewer: ViewerTier) -> list[str]:
     """The ``contentUrl``s this viewer did not receive.
 
-    Named, not silently absent: a client has to be able to tell "withheld" from
-    "does not exist", and an owner previewing as a stranger has to be able to
-    see the shape of what the stranger is missing.
+    Named, not silently absent, so a client can tell "withheld" from "does not
+    exist".
     """
     return sorted(
         url
         for url, entry in explain.items()
-        if _is_hard_floor(url, entry.role) or not tier_allows(viewer, entry.effective)
+        if _is_hard_floor(url) or not tier_allows(viewer, entry.effective)
     )
 
 
 def _allowed_source_types(prof_md, viewer: ViewerTier) -> list[str] | None:
     """Embedding-chunk ``source_type``s this viewer may be quoted, or ``None``.
 
-    ``None`` means "no restriction" (every known source type is allowed), so
-    the search path is byte-identical to the unfiltered one for a viewer
-    entitled to everything. Resolved with :func:`privacy.chunk_source_tiers`,
-    the same function the flat exporter uses; there is no second allowlist.
+    ``None`` means no restriction, so the search path is unfiltered for a
+    viewer entitled to everything.
     """
     tiers = chunk_source_tiers(prof_md, [(st, "") for st in CHUNK_SOURCE_TYPE_ROLE])
     allowed = [st for (st, _), tier in tiers.items() if tier_allows(viewer, tier)]
@@ -252,29 +186,11 @@ def _allowed_source_types(prof_md, viewer: ViewerTier) -> list[str] | None:
     return allowed
 
 
-def _ranked_visible(request: Request, prof, viewer: ViewerTier) -> tuple[bool, ViewerTier]:
-    """``(may this viewer be told about it, their tier for it)``. Fail-closed.
-
-    ``viewer`` is the caller's baseline; the tier that governs is resolved per
-    profile, because a grant is held on one profile and not on the rest.
-    """
-    md = getattr(prof, "metadata", None)
-    if md is None:
-        return False, viewer
-    slug = getattr(prof, "slug", None)
-    per_profile = viewer_tier_for(request, slug)
-    floor = get_profile_tier_floor(request, prof, slug)
-    return profile_visible(md, per_profile, floor=floor.tier), per_profile
-
-
 def _visible_hits(prof_md, viewer: ViewerTier, hits) -> list:
     """Drop every chunk whose source tier exceeds ``viewer``.
 
-    A chunk is derived from a document, so it carries that document's tier.
-    This is the general derivation rule, applied to the served sqlite index exactly as
-    ``embeddings/flat.py`` applies it to the exported one. Without this a
-    ``match``-scoped consumer reads a researcher's CV back verbatim, chunk by
-    chunk, from a profile whose CV is ``restricted``.
+    A chunk carries its source document's tier. Without this a ``match``
+    consumer could read a ``private`` CV back chunk by chunk.
     """
     hits = list(hits or [])
     if not hits:
@@ -284,21 +200,13 @@ def _visible_hits(prof_md, viewer: ViewerTier, hits) -> list:
     return [h for h in hits if tier_allows(viewer, tiers[(h.source_type, h.source_id)])]
 
 
-# ---------------------------------------------------------------------------
-# Owner-scoped interactive edits (edit_router; gated by require_owner)
-# ---------------------------------------------------------------------------
-
-
 def _content_hash(store: ProfileStore, ref: str) -> str | None:
     """This profile's ``content_hash``, or ``None`` if the store cannot say.
 
-    Never raises. A store that cannot produce the digest is a store that cannot
-    detect a conflict, and that is a reason to serve the profile without a
-    concurrency token, not a reason to fail the read.
+    Never raises: a missing digest means no concurrency token, not a failed read.
     """
     try:
         return store.content_hash(ref)
-    # Boundary: a store that cannot digest is a store that cannot detect a conflict.
     except Exception:  # pragma: no cover - defensive; every shipped store answers
         logger.debug("content_hash unavailable for %r", ref, exc_info=True)
         return None

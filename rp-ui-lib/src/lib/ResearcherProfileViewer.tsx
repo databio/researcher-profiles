@@ -16,12 +16,8 @@ export interface ResearcherProfileViewerProps {
 }
 
 /**
- * Canonical, data-agnostic shell that composes every profile section. Does no
- * fetching and knows nothing about auth. The host supplies already-fetched
- * data and (optionally) a `loadSummary` callback for lazy per-paper summaries.
- *
- * This is the single component a host app (and any other consumer) vendors and
- * wraps with its own data layer + design-system chrome.
+ * Data-agnostic shell composing every profile section. No fetching, no auth:
+ * the host supplies fetched data and an optional `loadSummary` callback.
  */
 export function ResearcherProfileViewer({
   detail,
@@ -32,10 +28,8 @@ export function ResearcherProfileViewer({
     <div className={styles.viewer}>
       <ProfileHeader metadata={detail.metadata} />
       <MetadataPanel metadata={detail.metadata} />
-      {/* `expertise` and `soul` are null when the viewer's privacy tier does
-          not reach the backing artifact. Withheld and empty are different
-          things on the wire; both render as "no section" here, and a host that
-          wants to say "withheld from this viewer" reads `detail.withheld`. */}
+      {/* `expertise` and `soul` are null both when withheld by privacy tier and
+          when empty. A host that wants to say "withheld" reads `detail.withheld`. */}
       <MarkdownSection title="Expertise narrative" body={detail.expertise} />
       <MarkdownSection title="Narrative voice (SOUL)" body={detail.soul} />
       <PapersList papers={papers} loadSummary={loadSummary} />

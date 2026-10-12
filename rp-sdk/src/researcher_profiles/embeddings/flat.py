@@ -1,6 +1,6 @@
-"""The public form of a profile's embeddings: the private sqlite index projected to portable files, with restricted rows dropped.
+"""The servable form of a profile's embeddings: the private sqlite index projected to portable files for one audience.
 
-``.cache/embeddings.sqlite`` is a build-local index at tier ``restricted``; it
+``.cache/embeddings.sqlite`` is a build-local index at tier ``private``; it
 never leaves the machine. The servable form lives in the profile as public
 artifacts (see ``docs/rp-spec/embeddings.md``)::
 
@@ -9,18 +9,10 @@ artifacts (see ``docs/rp-spec/embeddings.md``)::
       <backend>.bin            # raw little-endian float32, row-major, headerless
       <backend>.chunks.json    # one metadata entry per row, blob order, no text
 
-The exporter reads the sqlite and writes those three files, dropping every row
-whose effective privacy tier exceeds ``public`` through the general derivation
-rule (:func:`researcher_profiles.privacy.chunk_source_tiers` /
-:func:`researcher_profiles.privacy.drop_above_public`). There is no
-``PUBLISHED_SOURCE_TYPES`` allowlist. Embeddings are partially invertible, so a
-row built from a ``restricted`` source (a grant, a CV, a scraped web page) must
-not appear in a public ``.bin`` (spec section 6).
-
-The readers reconstruct a usable index from the flat form: :class:`FlatEmbeddingIndex`
-for an external consumer that has ``embeddings/`` but no ``meta/`` (pure numpy,
-no sqlite), and :func:`rebuild_sqlite_from_flat` as an offline optimization that
-rebuilds ``.cache/embeddings.sqlite`` without re-embedding.
+The exporter drops every row whose effective tier exceeds the audience's.
+Embeddings are partially invertible, so a row built from a ``private`` source
+(a grant, a CV, a scraped web page) must not appear in a public ``.bin``
+(spec section 6).
 """
 
 import hashlib
@@ -34,7 +26,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from ..build_state import BuildState
-from ..privacy import chunk_source_tiers, drop_above_public
+from ..privacy import ViewerTier, chunk_source_tiers, tier_allows
 from ..schema import ProfileDocument
 from ..schema.jsonld import canonical_dumps
 from ..utils.clock import now_iso
@@ -68,6 +60,12 @@ class FlatExportResult:
     index_path: Path
     blob_path: Path
     chunks_path: Path
+    #: L2-normalized mean of the rows written, computed as
+    #: :meth:`FlatEmbeddingIndex.centroid` would from these files: the
+    #: profile's vector at this export's tier, never one that saw a dropped row.
+    centroid: np.ndarray
+    #: The ``probe`` written into ``index.json``.
+    probe: dict[str, Any]
 
 
 @dataclass
@@ -116,9 +114,8 @@ def slugify_backend(backend_spec: str) -> str:
 def _load_profile_document(profile_dir: Path) -> ProfileDocument | None:
     """Parse ``profile.jsonld`` for tier resolution; ``None`` if unavailable.
 
-    Mirrors ``SqliteEmbeddingIndex._level``: the CLI entry point does not hand us a
-    loaded document, so fall back to a direct read. When it cannot be parsed the
-    profile default is treated as ``public`` and only the role defaults filter.
+    With ``None`` the profile default is treated as ``public`` and only the
+    role defaults filter.
     """
     path = profile_dir / "profile.jsonld"
     if not path.is_file():
@@ -162,27 +159,22 @@ def _read_rows(db_path: Path) -> tuple[list[tuple], int, str]:
     return rows, dim, backend_spec
 
 
-def _public_rows(
+def _servable_rows(
     rows: list[tuple],
     profile_document: ProfileDocument | None,
     build_state: BuildState,
+    viewer: ViewerTier = "public",
 ) -> list[tuple]:
-    """Filter sqlite rows to those safe to publish, in blob order.
+    """Filter sqlite rows to those ``viewer`` may receive, in blob order.
 
-    Two independent gates:
-
-    1. Tier: drop any row whose effective tier exceeds ``public``, via the
-       general derivation rule (never an allowlist). Restricted rows never reach
-       the blob or the chunks file.
-    2. Contamination: drop ``paper_summary`` / ``paper_abstract`` rows for
-       contaminated papers. Contamination is build bookkeeping, orthogonal to
-       tier, and contaminated papers must never be published.
+    Two independent gates: the row's effective tier, and contamination
+    (contaminated papers' summary and abstract rows are never published,
+    whatever their tier).
     """
     tiers = chunk_source_tiers(profile_document, [(r[0], r[1]) for r in rows])
-    public_idx = set(drop_above_public((i, tiers[(r[0], r[1])]) for i, r in enumerate(rows)))
     kept: list[tuple] = []
-    for i, r in enumerate(rows):
-        if i not in public_idx:
+    for r in rows:
+        if not tier_allows(viewer, tiers[(r[0], r[1])]):
             continue
         source_type, source_id = r[0], r[1]
         if source_type in ("paper_summary", "paper_abstract") and build_state.is_contaminated(
@@ -198,9 +190,7 @@ def public_chunk_keys(
 ) -> list[tuple[str, str, int]]:
     """The ``(source_type, source_id, chunk_index)`` of rows the export keeps.
 
-    Used by the build postcondition to know how many rows the served form must
-    carry, without re-writing the files. Returns an empty list when there is no
-    sqlite index.
+    Empty when there is no sqlite index.
     """
     profile_dir = Path(profile_dir)
     db_path = cache_dir(profile_dir) / "embeddings.sqlite"
@@ -209,7 +199,7 @@ def public_chunk_keys(
     rows, _dim, _backend = _read_rows(db_path)
     if profile_document is None:
         profile_document = _load_profile_document(profile_dir)
-    kept = _public_rows(rows, profile_document, BuildState.load(profile_dir))
+    kept = _servable_rows(rows, profile_document, BuildState.load(profile_dir))
     return [(r[0], r[1], r[2]) for r in kept]
 
 
@@ -219,7 +209,7 @@ def public_chunk_keys(
 
 
 def _remove_flat_files(embeddings_dir: Path) -> None:
-    """Delete any prior flat form so an all-restricted profile stops advertising it."""
+    """Delete any prior flat form so an all-private profile stops advertising it."""
     if not embeddings_dir.is_dir():
         return
     for name in ("index.json",):
@@ -235,17 +225,19 @@ def write_flat_export(
     *,
     profile_document: ProfileDocument | None = None,
     backend: "EmbeddingBackend | None" = None,
+    viewer: ViewerTier = "public",
+    out_dir: str | Path | None = None,
 ) -> FlatExportResult | None:
-    """Write the flat servable form from ``.cache/embeddings.sqlite``.
+    """Write the flat form for ``viewer`` from ``.cache/embeddings.sqlite``.
 
-    sqlite in, public flat form out. Returns a :class:`FlatExportResult`, or
-    ``None`` when there is no sqlite index, no backend metadata, or no public
-    row survives filtering (in which case any stale flat form is removed and
-    ``hasEmbeddingIndex`` stays false).
+    ``out_dir`` defaults to the profile's own ``embeddings/``, which is always
+    the ``public`` copy. Returns ``None`` when there is no sqlite index, no
+    backend metadata, or no row survives filtering (then any stale flat form in
+    ``out_dir`` is removed).
     """
     profile_dir = Path(profile_dir)
     db_path = cache_dir(profile_dir) / "embeddings.sqlite"
-    embeddings_dir = profile_dir / "embeddings"
+    embeddings_dir = Path(out_dir) if out_dir is not None else profile_dir / "embeddings"
     if not db_path.is_file():
         return None
 
@@ -253,7 +245,6 @@ def write_flat_export(
     if not backend_spec or dim <= 0:
         return None
 
-    # Read probe from the sqlite meta; generate on the fly if absent.
     try:
         conn = connect_vec(db_path)
         meta = read_index_meta(conn)
@@ -286,14 +277,13 @@ def write_flat_export(
     if profile_document is None:
         profile_document = _load_profile_document(profile_dir)
 
-    kept = _public_rows(rows, profile_document, BuildState.load(profile_dir))
+    kept = _servable_rows(rows, profile_document, BuildState.load(profile_dir), viewer)
     dropped = len(rows) - len(kept)
 
     if not kept:
         _remove_flat_files(embeddings_dir)
         return None
 
-    # Blob: float32 (count, dim), row-major, little-endian, headerless.
     mat = np.zeros((len(kept), dim), dtype=_F32_LE)
     for i, r in enumerate(kept):
         vec = np.frombuffer(r[5], dtype=_F32_LE)
@@ -355,6 +345,8 @@ def write_flat_export(
         index_path=index_path,
         blob_path=blob_path,
         chunks_path=chunks_path,
+        centroid=_unit_mean(mat),
+        probe=index["probe"],
     )
 
 
@@ -366,9 +358,7 @@ def write_flat_export(
 class FlatEmbeddingIndex:
     """Read the flat form back into a searchable index: pure numpy, no sqlite.
 
-    A profile downloaded from the web has ``embeddings/`` but no ``meta/``. This
-    reconstructs a usable index from the three public files and verifies the
-    blob against the index (spec section 4).
+    The blob is verified against the index (spec section 4).
     """
 
     def __init__(
@@ -382,9 +372,7 @@ class FlatEmbeddingIndex:
         self._index = index
         self._vectors = vectors
         self._chunks = chunks
-        # Bound at construction by a caller that already holds one (a store
-        # serving many profiles builds it once); otherwise resolved from
-        # ``backend_spec`` on the first text query and kept.
+        # Resolved from ``backend_spec`` on the first text query when None.
         self._backend = backend
 
     @classmethod
@@ -398,12 +386,8 @@ class FlatEmbeddingIndex:
     ) -> "FlatEmbeddingIndex":
         """Build an index from the three published files' bytes.
 
-        The verification (declared length, declared sha256) is here rather than
-        in :meth:`load` because it is a property of the *bytes*, not of where
-        they came from. A store that fetched them over HTTP gets the same
-        tamper check a directory read does, which is the point: the flat form
-        is designed to be served, and a served blob is the one most worth
-        checking.
+        Raises ``ValueError`` when the blob's length or sha256 does not match
+        the index. The check lives here so bytes fetched over HTTP get it too.
         """
         index = json.loads(index_json)
         dim = int(index["dim"])
@@ -483,9 +467,8 @@ class FlatEmbeddingIndex:
     def search_vector(self, query_vec, k: int = 5) -> list[FlatHit]:
         """Cosine top-``k`` over the stored vectors, most similar first.
 
-        The vector-level primitive. Rows are normalized on the fly when
-        ``normalized`` is false (spec section 4). Returns :class:`FlatHit`s
-        carrying no text.
+        Rows are normalized on the fly when ``normalized`` is false (spec
+        section 4).
         """
         q = np.asarray(query_vec, dtype=np.float32).reshape(-1)
         if q.shape[0] != self.dim:
@@ -525,12 +508,7 @@ class FlatEmbeddingIndex:
         return mat / norms
 
     def search(self, query: str, k: int = 5) -> list[FlatHit]:
-        """Embed ``query`` with this index's own backend, then search.
-
-        The :class:`~researcher_profiles.embeddings.protocol.VectorIndex`
-        entry point: text in, hits out, with the backend resolved from
-        ``backend_spec`` so a caller cannot accidentally compare across models.
-        """
+        """Embed ``query`` with this index's own backend, then search."""
         return self.search_text(query, self.backend, k=k)
 
     @property
@@ -564,21 +542,23 @@ class FlatEmbeddingIndex:
     def centroid(self) -> np.ndarray:
         """The L2-normalized mean of every row.
 
-        The same quantity ``.cache/embeddings.sqlite`` yields, computed the same
-        way (mean of the stored vectors, then normalize) so a centroid read
-        through this index is comparable to one read through the sqlite. It is
-        *not* the same number when the sqlite held restricted rows: those are
-        dropped at export by design, so this is the public subset's centroid.
+        Computed as the sqlite index computes it, but over the exported rows
+        only, so it differs when private rows were dropped.
         """
         from ._sqlite import IndexNotBuiltError
 
         if self._vectors.shape[0] == 0:
             raise IndexNotBuiltError("flat index has no vectors")
-        mean = self._vectors.astype(np.float32).mean(axis=0)
-        n = float(np.linalg.norm(mean))
-        if n < 1e-12:
-            return mean.astype(np.float32)
-        return (mean / n).astype(np.float32)
+        return _unit_mean(self._vectors)
+
+
+def _unit_mean(vectors: np.ndarray) -> np.ndarray:
+    """The L2-normalized mean of ``vectors``' rows (the unnormalized mean if ~0)."""
+    mean = vectors.astype(np.float32).mean(axis=0)
+    n = float(np.linalg.norm(mean))
+    if n < 1e-12:
+        return mean.astype(np.float32)
+    return (mean / n).astype(np.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -589,16 +569,11 @@ class FlatEmbeddingIndex:
 def rebuild_sqlite_from_flat(profile_dir: str | Path, *, backend=None):
     """Rebuild ``.cache/embeddings.sqlite`` from the flat form without re-embedding.
 
-    The flat form is a lossy public projection (no text, public rows only), so
-    the *authoritative* rebuild is still ``build_index`` (re-chunk + re-embed).
-    This is an offline optimization for a host where the embedding model cannot
-    run: it re-chunks the on-disk source docs to recover chunk ``text`` (the
-    sqlite needs it to display search hits) and loads the *vectors* from the
-    ``.bin`` by matching ``(source_type, source_id, chunk_index)``.
-
-    Rows present in sources but absent from the flat form (restricted chunks the
-    public export dropped) are re-embedded when ``backend`` is given, else
-    skipped, so a flat-only rebuild yields a public-subset index.
+    The flat form is lossy (no text, public rows only), so ``build_index``
+    stays the authoritative rebuild. Text comes from re-chunking the on-disk
+    sources; vectors come from the ``.bin`` by ``(source_type, source_id,
+    chunk_index)``. Rows missing from the flat form are re-embedded when
+    ``backend`` is given, else skipped.
     """
     from .cache import IndexReport, SqliteEmbeddingIndex, _sha256
 

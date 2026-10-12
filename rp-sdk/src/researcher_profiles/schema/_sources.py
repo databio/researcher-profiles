@@ -15,7 +15,7 @@ from pydantic import (
     model_validator,
 )
 
-from ._common import FORMAT_HINT
+from ._common import FORMAT_HINT, GYear, IdRef, OrganizationName, PeriodicalName, PersonList
 from ._identity import _slugify, normalize_doi
 from ._parts import ResearchOutput
 from .jsonld import CONTEXT_URL, PROFILE_FORMAT_IRI, JsonLdModel
@@ -28,35 +28,22 @@ from .jsonld import CONTEXT_URL, PROFILE_FORMAT_IRI, JsonLdModel
 class PaperRecord(ResearchOutput):
     """One work: a ``schema:ScholarlyArticle`` node.
 
-    A paper IS a research output, so this is a specialization of
-    :class:`~.ResearchOutput`: it inherits the shared core (``name``,
-    ``type``, ``description``, ``url``, plus ``@id`` / ``@type``) and adds the
-    bibliographic, authorship and access fields a scholarly work needs.
+    A specialization of :class:`~.ResearchOutput` that adds bibliographic,
+    authorship and access fields. Papers live in ``sources/papers.jsonld``,
+    not in the profile's ``researchOutputs`` list.
 
-    Papers live in ``sources/papers.jsonld``, not in the profile's
-    ``researchOutputs`` list; the shared lineage is about the schema, not the
-    storage location.
-
-    ``type`` here is the OpenAlex work type (``article``, ``review``, ...),
-    which narrows the base class's output-kind meaning; it is optional because
-    not every source reports one.
-
-    Every *build* field (``status``, ``download_attempts``, ``contaminated``,
-    ``identity_verified``, ...) lives in ``.build/<slug>/meta/build_state.json``
-    instead. Publishing a profile publishes the bibliographic record, not the
-    build's dirty laundry.
+    ``type`` here is the optional OpenAlex work type (``article``,
+    ``review``, ...). Build state is never part of the published record.
     """
 
     type_: str | None = Field(default="ScholarlyArticle", alias="@type")
 
-    # Bibliographic core. The on-disk key is ``name`` (inherited from
-    # ``ResearchOutput``); ``title`` stays accepted on input and readable as a
-    # property, because that is what a paper's name is called everywhere else
-    # in this package.
+    # The on-disk key is ``name``; ``title`` is accepted on input and readable
+    # as a property.
     name: str = Field(validation_alias=AliasChoices("name", "title"))
-    year: int | None = Field(default=None, alias="datePublished")
-    journal: str | None = Field(default=None, alias="isPartOf")
-    authors: list[str] | None = Field(default=None, alias="author")
+    year: GYear = Field(default=None, alias="datePublished")
+    journal: PeriodicalName = Field(default=None, alias="isPartOf")
+    authors: PersonList = Field(default=None, alias="author")
 
     # Identity
     paper_id: str | None = None
@@ -64,6 +51,11 @@ class PaperRecord(ResearchOutput):
     pmid: str | None = None
     pmcid: str | None = None
     openalex_id: str | None = None
+    #: ``@id`` of the record this one is another version of
+    #: (``dcterms:isVersionOf``): a preprint names its journal article here.
+    #: The study is the target; this record is kept for completeness and is
+    #: not counted or summarized a second time.
+    is_version_of: str | None = Field(default=None, alias="isVersionOf")
 
     # Bibliographic detail
     venue: str | None = None
@@ -74,6 +66,9 @@ class PaperRecord(ResearchOutput):
     cited_by_count: int | None = None
     abstract: str | None = None
     summary: str | None = None
+    #: OpenAlex topic ids (``T…``) the work is tagged with, primary topic
+    #: first, each once. What an inferred interest counts over.
+    topics: list[str] = []
 
     # Authorship (researcher-profiles specific)
     author_position: str | None = None
@@ -131,8 +126,7 @@ class PaperRecord(ResearchOutput):
     def resolve_id(self) -> str:
         """The node ``@id``: DOI IRI -> OpenAlex IRI -> relative fragment.
 
-        A relative fragment is a legitimate answer, not a degraded one: it
-        resolves against wherever the document is served.
+        A relative fragment resolves against wherever the document is served.
         """
         if self.id_:
             return self.id_
@@ -168,16 +162,9 @@ class PaperRecord(ResearchOutput):
 class _CollectionDocument(JsonLdModel):
     """Shared shape of the two ``Collection`` sidecars.
 
-    ``sources/papers.jsonld`` and ``sources/grants.jsonld`` are the same
-    document with a different payload: a ``Collection`` node that declares the
-    format it conforms to, names the person it is ``about``, and carries a
-    ``hasPart`` array. Everything except that array (and papers' own
-    ``dateModified``) is here, once.
-
-    A subclass supplies :attr:`_FILE_LABEL` so the bare-list rejection names
-    the file the caller actually passed, and declares its own ``has_part``
-    element type and its own read-through alias property (``papers`` /
-    ``grants``), which are the public API and differ by name.
+    A ``Collection`` node that declares its format, names the person it is
+    ``about``, and carries a ``hasPart`` array. A subclass sets
+    :attr:`_FILE_LABEL` and its own ``has_part`` element type.
     """
 
     #: Filename this document is read from, used in the bare-list error.
@@ -187,7 +174,7 @@ class _CollectionDocument(JsonLdModel):
     type_: str | None = Field(default="Collection", alias="@type")
     conforms_to: str = Field(default=PROFILE_FORMAT_IRI, alias="conformsTo")
     #: The person this collection is about (their profile ``@id``).
-    about: str | None = None
+    about: IdRef = None
 
     @model_validator(mode="before")
     @classmethod
@@ -240,29 +227,27 @@ class PapersDocument(_CollectionDocument):
 class GrantRecord(JsonLdModel):
     """One award: a ``schema:MonetaryGrant`` node.
 
-    schema.org has no crisp "this person received this grant" relation, so the
-    person->grant link is ``rp:heldGrant``. That is an ``rp:``
-    decision, not an oversight (see ``context/README.md``).
+    schema.org has no "this person received this grant" relation, so the
+    person->grant link is ``rp:heldGrant`` (see ``context/README.md``).
     """
 
     type_: str | None = Field(default="MonetaryGrant", alias="@type")
 
     id: str
     title: str = Field(alias="name")
-    funder: str | None = None
+    funder: OrganizationName = None
     number: str | None = Field(default=None, alias="identifier")
-    #: NIH activity code (e.g. "R01", "K99", "U01"), recoverable without
-    #: parsing the free-text ``identifier``. Feeds eligibility evaluation
-    #: (R01-equivalent history for ESI/NI determinations).
+    #: NIH activity code (e.g. "R01", "K99", "U01"), so eligibility evaluation
+    #: need not parse the free-text ``identifier``.
     activity_code: str | None = None
     role: Literal["pi", "co_pi", "co_i", "other"] | None = None
     status: Literal["funded", "pending", "completed"] | None = None
     start: str | None = None
     end: str | None = None
     abstract: str | None = None
-    #: Where the record came from: ``grants-data`` (lab service), ``manual``
+    #: Where the record came from: ``mygrants`` (MyGrants service), ``manual``
     #: (hand-supplied), or ``reporter`` (NIH RePORTER supplement).
-    source: Literal["grants-data", "manual", "reporter"] | None = None
+    source: Literal["mygrants", "manual", "reporter"] | None = None
     url: str | None = None
 
     @field_validator("funder", mode="before")
@@ -285,8 +270,7 @@ class GrantRecord(JsonLdModel):
 class GrantsDocument(_CollectionDocument):
     """Top-level model for ``sources/grants.jsonld``.
 
-    Any profile level may carry one: grant history feeds eligibility
-    evaluation, which is not a deep-profile-only concern.
+    Any profile level may carry one.
     """
 
     _FILE_LABEL: ClassVar[str] = "grants.jsonld"
@@ -299,6 +283,95 @@ class GrantsDocument(_CollectionDocument):
         return self.has_part
 
 
+class TrialRecord(JsonLdModel):
+    """A confirmed researcher-to-clinical-trial relationship.
+
+    Part of the optional clinical extension (``docs/rp-spec/index.md``). Only
+    confirmed relationships belong here. ``researcher_role`` stays absent when
+    unknown rather than claiming a role nobody stated. ``nct_id`` is the
+    record's identity and its ``@id`` is derived from it.
+    """
+
+    type_: str | None = Field(default="MedicalTrial", alias="@type")
+    nct_id: str = Field(pattern=r"^NCT\d{8}$")
+    title: str = Field(alias="name")
+    #: ``principal_investigator``, ``co_investigator``, ``sub_investigator``,
+    #: ``site_pi``, or any other label the source uses. Absent = unknown.
+    researcher_role: str | None = Field(default=None, alias="rp:researcherRole")
+    phase: str | None = None
+    status: str | None = None
+    therapeutic_area: str | None = None
+    conditions: list[str] = Field(default=[])
+    sponsor: str | None = None
+    sponsor_type: str | None = None
+    #: Participants enrolled. ``None`` is unknown and must never be read as 0.
+    enrollment: int | None = Field(default=None, ge=0)
+    start_date: str | None = None
+    completion_date: str | None = None
+    sites: int | None = Field(default=None, ge=0)
+
+    def _jsonld_node(self, data: dict[str, Any]) -> dict[str, Any]:
+        data["@id"] = f"https://clinicaltrials.gov/study/{self.nct_id}"
+        return data
+
+
+class TrialStats(BaseModel):
+    """Counts derived from a :class:`TrialsDocument`, never authored.
+
+    Derived so a total can never disagree with the records under it.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    total_trials: int = 0
+    #: Records whose ``researcher_role`` names a principal-investigator role.
+    as_pi: int = 0
+    industry_sponsored: int = 0
+    completed: int = 0
+    #: Total enrollment, or ``None`` when any record's enrollment is unknown,
+    #: so a partial sum is never reported as a total.
+    total_enrollment: int | None = None
+
+
+#: ``researcher_role`` values that count as leading a trial. Compared
+#: case-insensitively; anything else (including an absent role) does not count.
+_PI_ROLES: frozenset[str] = frozenset({"principal_investigator", "site_pi"})
+
+
+class TrialsDocument(_CollectionDocument):
+    """Top-level model for ``sources/trials.jsonld`` (a ``Collection``).
+
+    Optional. An empty ``papers.jsonld`` alongside a populated trials
+    collection is a complete profile.
+    """
+
+    _FILE_LABEL: ClassVar[str] = "trials.jsonld"
+    has_part: list[TrialRecord] = Field(default=[], alias="hasPart")
+
+    @property
+    def trials(self) -> list[TrialRecord]:
+        """Alias for :attr:`has_part`: the trials in this collection."""
+        return self.has_part
+
+    @property
+    def stats(self) -> TrialStats:
+        """Counts over the confirmed records in this collection."""
+        enrollments = [t.enrollment for t in self.has_part]
+        return TrialStats(
+            total_trials=len(self.has_part),
+            as_pi=sum(1 for t in self.has_part if (t.researcher_role or "").lower() in _PI_ROLES),
+            industry_sponsored=sum(
+                1 for t in self.has_part if (t.sponsor_type or "").lower() == "industry"
+            ),
+            completed=sum(1 for t in self.has_part if (t.status or "").lower() == "completed"),
+            total_enrollment=(
+                sum(e for e in enrollments if e is not None)
+                if enrollments and all(e is not None for e in enrollments)
+                else None
+            ),
+        )
+
+
 # ---------------------------------------------------------------------------
 # Non-JSON-LD sidecar artifacts (markdown frontmatter, question queue)
 # ---------------------------------------------------------------------------
@@ -307,8 +380,7 @@ class GrantsDocument(_CollectionDocument):
 class SummaryFile(BaseModel):
     """Frontmatter shape for sources/summaries/<paper_id>.summary.md.
 
-    On-disk file is markdown with a YAML frontmatter block. This model
-    validates the frontmatter only - the body is plain markdown.
+    Validates the YAML frontmatter only; the body is plain markdown.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -321,8 +393,7 @@ class SummaryFile(BaseModel):
     @field_validator("written_at", mode="before")
     @classmethod
     def _coerce_written_at(cls, v: Any) -> Any:
-        """An unquoted ISO-8601 timestamp in YAML frontmatter parses as a
-        ``date``/``datetime`` object, not a string; this normalizes it back."""
+        """Normalize an unquoted YAML timestamp (parsed as a datetime) back to a string."""
         if hasattr(v, "isoformat"):
             return v.isoformat()
         return v

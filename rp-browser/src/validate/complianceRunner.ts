@@ -1,9 +1,4 @@
-/**
- * Compliance validation runner.
- *
- * Accepts a profile base URL (static API) and/or an API root (dynamic API).
- * Runs the matching check suites and streams results via onCheck.
- */
+/** Compliance runner for a profile base URL (static API) and/or an API root (dynamic API). */
 
 import type { CheckResult } from "./types";
 import { staticApiChecks, dynamicApiChecks } from "./complianceChecks";

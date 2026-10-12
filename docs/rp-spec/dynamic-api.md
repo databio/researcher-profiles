@@ -29,9 +29,10 @@ The dynamic API categorizes routes by authentication requirement:
 | Route category | Token required |
 |----------------|----------------|
 | Health check | No |
-| Read endpoints (list, detail, papers, summaries, content, registry) | No |
+| Read endpoints (list, record, files, papers, summaries, text, passages, content, collection) | No |
 | Search, match, persona, upload, archive, identity resolution | Yes |
 | Owner edit endpoints | Yes (owner-level) |
+| Command-line login (`/api/auth/*`) | No (see [section 14.2](#142-command-line-login)) |
 | Management endpoints (`/api/manage/*`) | Varies by endpoint (see [section 14](#14-management-api)) |
 
 A server MAY run in **open mode** (no token configured), in which case all
@@ -41,7 +42,7 @@ Read endpoints resolve a [viewer tier](authentication.md#viewer-tiers) from
 the caller's credentials and project each response accordingly.
 
 A read endpoint MAY accept a preview query parameter `?as=anonymous|lab|owner`
-that caps the resolved tier at `public`, `internal`, or `restricted`
+that caps the resolved tier at `public`, `limited`, or `private`
 respectively. The cap MUST only narrow the caller's tier, never widen it. An
 unknown value returns `400`.
 
@@ -126,7 +127,7 @@ Nested lists (`{list: ...}`) are also valid entries, per the
 
 ### GET /profiles/{slug}
 
-Full profile detail.
+One profile, sized for the caller. `view=record` (default) or `view=full`.
 
 **Response 200:**
 
@@ -134,12 +135,18 @@ Full profile detail.
 |-------|------|-------------|
 | `slug` | string | |
 | `rid` | string \| null | The researcher ID this profile describes |
-| `metadata` | object | See [Profile metadata](#profile-metadata) |
-| `expertise` | string \| null | Raw `personality/expertise.md` content. `null` when the viewer's tier does not reach that artifact (its `contentUrl` then appears in `withheld`); `""` when the file is empty |
-| `soul` | string \| null | Raw `personality/SOUL.md` content. `null` when withheld, as for `expertise` |
-| `manifest` | list[object] | The profile manifest entries (`hasPart` plus `subjectOf`) as a flat list, each with an added `effective_visibility` key, so a client knows what the profile contains without walking the directory. Not an envelope: there is no `entries` key. |
-| `withheld` | list[string] | The `contentUrl`s this viewer's tier did not reach |
 | `content_hash` | string \| null | `"sha256:<hex>"` for optimistic concurrency (see [Owner edit endpoints](#11-owner-edit-endpoints)) |
+| `view` | string | `record` or `full` |
+| `fields` | object | The [profile metadata](#profile-metadata). In `record` view, long lists are `{"top": [...], "total": n}` and the response stays under 8 KB. `full` carries every field. Neither carries the manifest. |
+| `parts` | object | For `soul`, `expertise`, `papers`: `{available, bytes, approx_tokens}` or `{available: false, reason}`, where `reason` is `not_permitted`, `none` or `not_uploaded`. `available` describes what this caller may fetch. Also `files_withheld`: `{role: count}`. |
+| `withheld` | list[string] | Field names this viewer's tier does not reach; each is `null` in `fields`, never `""` |
+| `soul`, `expertise` | string \| null | `full` only: raw `personality/SOUL.md` and `personality/expertise.md`. `null` when withheld, `""` when empty |
+
+### GET /profiles/{slug}/files
+
+The profile manifest entries (`hasPart` plus `subjectOf`) as `files`, each
+with an added `effective_visibility` and `slot`, plus `withheld`: the
+`contentUrl`s this viewer's tier does not reach.
 
 ### GET /profiles/{slug}/profile.jsonld
 
@@ -158,6 +165,11 @@ Serve one manifest artifact, projected through the caller's viewer tier.
 `profile.jsonld` itself. Any other path returns `404`. Path traversals return
 `404`.
 
+`/profiles/{slug}/` MUST also be a base URL: since
+`/profiles/{slug}/profile.jsonld` serves the document, each of its relative
+`contentUrl`s MUST resolve under `/profiles/{slug}/` exactly as under
+`/profiles/{slug}/content/`.
+
 The response body is the artifact's raw bytes. The `Content-Type` header
 matches the manifest entry's `encodingFormat`. The `X-RP-Effective-Tier`
 header reports the artifact's effective privacy tier.
@@ -167,41 +179,54 @@ header reports the artifact's effective privacy tier.
 - `200`: artifact served
 - `404`: profile not visible, artifact not in manifest, or artifact's
   effective tier is above the caller's viewer tier
-- `403`: hard-floor artifacts (`paper_fulltext`, `.cache/`, `.keys/`) that are
+- `403`: build-local hard-floor artifacts (`.cache/`, `.keys/`) that are
   withheld from all callers
 
 ### GET /profiles/{slug}/papers
 
-List all papers attached to a profile.
+One page of the profile's papers. Query: `limit` (default 20, at most 100),
+`cursor`, `q`, `year_min`, `missing_ids`, `has_text`, `ids`. A server MUST
+clamp an oversized `limit` and report `limit_applied`, not refuse it.
 
-**Response 200:** array of paper entries:
+**Response 200:** `{items, total, limit_applied, next_cursor, has_more,
+filters_applied}`, plus `search_mode_used` and `note` when `q` was given. Each
+item:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `paper_id` | string \| null | Citation key |
+| `paper_id` | string | Citation key |
 | `title` | string | |
-| `year` | integer \| null | |
-| `journal` | string \| null | |
-| `first_author` | string \| null | |
-| `authors` | list[string] \| null | Full author list when the record carries one |
-| `doi` | string \| null | |
-| `pmid` | string \| null | |
-| `openalex_id` | string \| null | |
-| `full_text_link` | string \| null | |
-| `summary_available` | boolean | Whether a summary exists for this paper and the caller's tier may fetch it |
+| `year`, `journal`, `first_author`, `doi`, `openalex_id` | | |
+| `summary_short` | string \| null | Start of the summary (or abstract) |
+| `summary`, `text` | object | Sizes for this caller, as in `parts` above |
+| `version` | string | The paper's version token for edits |
 
-### GET /profiles/{slug}/summary/{paper_id}
+A `cursor` is bound to the filters it was made under; reusing it with others
+returns `400`.
 
-Fetch the markdown summary for one paper.
+### GET /profiles/{slug}/papers/{paper_id}
 
-**Response 200:**
+One paper: `fields`, the `summary` inline, `parts` (`summary` and `text`
+sizes), `sections` of the full text, and `version`.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `paper_id` | string | Echoes the request |
-| `summary` | string | Full summary markdown |
+### GET /profiles/{slug}/summaries
 
-Returns `404` if the profile or paper summary does not exist.
+`?ids=` (at most 20): `{summaries: {paper_id: markdown}, unavailable:
+{paper_id: reason}, limit_applied, not_processed}`.
+
+### GET /profiles/{slug}/papers/{paper_id}/text, GET /profiles/{slug}/text
+
+A paper's full text, or the narrative (`section=soul|expertise`), in bounded
+pages: `{text, section, offset, returned_chars, total_chars, has_more,
+next_offset, sections}`. Whole up to 80,000 characters by default. `offset` is
+an index into the whole text.
+
+### POST /profiles/{slug}/papers/{paper_id}/passages, POST /profiles/{slug}/passages
+
+`{query, k}` (k at most 10): the passages that best answer the query, from
+sources this caller may read: `{passages, k_applied, search_mode_used,
+searched, note}`. The server MUST report in `search_mode_used` and `note` when
+it searched by keyword only.
 
 ### GET /collection.json
 
@@ -255,8 +280,49 @@ visible to all read endpoints.
 - The staged profile must load successfully before the swap
 - Maximum archive size: 50 MB (configurable)
 
-By default, `sources/papers/` (full paper text) is stripped on ingest. The
-server may be configured to accept it.
+**Full text policy.** Accepting paper full text (`sources/papers/`) is a
+server policy. A server that does not accept it MUST drop every
+`sources/papers/` member of an incoming archive before staging, whatever the
+client sent. Dropping incoming full text does not delete full text the server
+already holds: what happens to live files the archive omits is governed by
+`mode` (below). Full text the server keeps that way is its own copy, already
+admitted under its policy.
+
+**Query parameter `mode`:** what happens to the files the server already
+holds for this profile that the archive does not carry. Values:
+
+| `mode` | Live files the archive omits |
+|---|---|
+| `replace` (default) | Deleted, except for a *withheld class* the archive carried no member of: that whole class is kept. |
+| `merge` | Kept, all of them. A file the archive carries always overwrites the live copy. |
+| `prune` | Deleted, all of them. The archive is the whole profile. |
+
+The withheld classes are files a client may legitimately leave out of a push:
+
+- `fulltext`: everything under `sources/papers/`;
+- `index`: the search index, `.cache/embeddings.sqlite`.
+
+Under `replace`, one member of a class anywhere in the archive makes the
+archive authoritative for that whole class, and the live files of that class
+it omits are deleted. A class counts as carried when the client sent it, even
+if the server's full text policy then dropped it. So a default push of a
+normal build, which leaves out full text, keeps the server's full text and,
+when it ships no index, the server's index. Deleting them takes `prune`.
+`merge` is how a client sends one or two files without restating the rest.
+
+When the profile does not exist yet, there is nothing to keep and every mode
+behaves the same. Any other `mode` value is a `400`. `mode` applies to archive
+uploads only.
+
+**Manifest splicing.** A kept file is reachable only if the manifest
+(`hasPart` / `subjectOf` in `profile.jsonld`) lists it. Under `replace` and
+`merge`, for every kept file that the incoming manifest does not list but the
+live manifest does, the server MUST add the live manifest entry to the
+committed document, in the same slot (`hasPart` or `subjectOf`) it had. The
+incoming entries keep their order; spliced entries follow, sorted by
+`contentUrl`. A server that does this advertises the `manifest_splice` feature
+(see [GET /capabilities](#get-capabilities)). Under `prune` nothing is kept, so
+nothing is spliced and the incoming manifest stands alone.
 
 **Response 200:**
 
@@ -267,9 +333,42 @@ server may be configured to accept it.
 | `name` | string | From the uploaded `profile.jsonld` |
 | `level` | string | Profile depth tier |
 | `indexed` | boolean | Whether the upload included a search index (always `false` for a JSON body) |
+| `kept` | object | Live files carried over rather than deleted, as `{class: count}` (e.g. `{"fulltext": 53, "index": 1}`). Classes are the withheld classes, plus `other` for unclassed files kept under `merge`. Empty for a new profile, under `prune`, or when nothing was kept |
+| `spliced` | integer | Manifest entries the server added back for kept files (see Manifest splicing). Nonzero means the uploaded `profile.jsonld` was not the whole index |
+| `manifest_counts` | object | `{role: count}` over the manifest the server holds after the commit (`other` for entries with no role): what the profile now contains, not what the upload offered |
+| `mode` | string | The `mode` the upload ran under |
 
-**Status codes:** `200`, `400` (validation failure), `401`, `413` (size cap
-exceeded).
+The last four fields describe archive uploads; a JSON upload returns their
+defaults.
+
+**Status codes:** `200`, `400` (validation failure), `401`, `403` (see
+below), `413` (size cap exceeded).
+
+**Uploads by an app or account key.** A caller holding `push`, or `push_own`
+on a profile its person may write, replaces the profile outright. A server
+implementing [per-part access](authentication.md#per-part-access) MUST also
+accept an upload from an app or account key that holds neither, when the
+target profile exists, the caller may write it, and the caller's table holds
+`write` on at least one part. Such an upload:
+
+- MUST NOT create a profile;
+- MUST be compared with the profile it would replace, part by part, before
+  anything is written: a document field changed counts against the part that
+  governs it, and a file added, removed, or whose bytes changed counts against
+  its role's part (so does a change to its manifest entry). A file with no
+  bytes on either side (full text the server never held) is unchanged. A
+  change of what the public sees, a field no part covers, or an
+  infrastructure file counts against no part;
+- lands only if every part it changes is `write` and nothing it changes is
+  outside every part. Otherwise the server MUST return `403` with the
+  [`insufficient_access`](authentication.md#insufficient-access) body,
+  `needs_replace` included, and MUST change nothing.
+
+To change one file without restating the rest, the caller sends only that file
+with `?mode=merge` (see `mode` above). The document still travels, so its sections must match the
+server's. A caller that may write nothing of the target gets
+[`insufficient_scope`](authentication.md#insufficient-scope) for `push`, the
+same answer whether or not the profile exists.
 
 **Request (JSON document):** `Content-Type: application/json`
 
@@ -292,12 +391,35 @@ upload or a build.
 **Status codes:** `200`, `400` (invalid JSON, a body that is not an object, a
 missing `rid` without minting, or a minting conflict), `401`, `403`, `409`
 (`If-Match` mismatch, or the store refused the write), `422` (the body is not
-a valid profile document).
+a valid profile document). The part-by-part rule above applies to a JSON
+upload too; a file it does not carry keeps the bytes it has.
+
+### GET /capabilities
+
+What this server accepts, for a client to check before it writes.
+Unauthenticated: it says nothing about any profile.
+
+**Response 200:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `version` | string | API version served, e.g. `v1` |
+| `push_modes` | array of string | The `mode` values `PUT /profiles/{slug}` accepts, e.g. `["replace", "merge", "prune"]` |
+| `features` | array of string | Named push behaviours a client can require. `manifest_splice`: the server splices kept files back into the manifest as described above |
+
+A server that implements `mode` MUST serve this endpoint and list the modes it
+accepts. A client SHOULD read it before a push that asks for `merge` or
+`prune`, and SHOULD refuse to push when that mode is not listed, or when the
+endpoint is missing (`404`) or lists no modes: an older server ignores `mode`
+and runs a `replace`, answering `200` with a smaller profile. A plain
+`replace` needs no check, since it is what such a server does anyway.
 
 ### GET /profiles/{slug}/archive
 
 Download a profile as a gzipped tar archive, projected through the caller's
-privacy tier. Full text is never included in the download regardless of caller.
+privacy tier. Paper full text is an ordinary artifact governed by its
+effective tier: it is included for a caller entitled to that tier and withheld
+from one who is not. Build-local files (`.cache/`, `.keys/`) are never included.
 
 ---
 
@@ -385,6 +507,10 @@ Each `evidence` object:
 | `overlapping_topics` | list[string] | Topic overlap with query |
 | `top_chunks` | list | Populated only when `include_chunks=true` |
 
+The score, `top_papers` and `top_chunks` are computed only from chunks the
+caller may read under the chunk tier rule ([Embeddings §6](embeddings.md#6-privacy)),
+as if the other chunks were not indexed.
+
 **Status codes:** `200`, `401`, `500`, `503` (no profiles indexed, search not
 available, or the ranked fraction fell below a server-configured floor).
 
@@ -431,6 +557,10 @@ At least one of `rid`/`name` MUST be supplied.
 
 `201` on a true miss (a new identity was minted); `200` otherwise, including a
 deferral.
+
+A rid that a registry retired by merging two profiles about one person
+resolves to its successor: the response carries the successor's `rid`, and the
+server MUST NOT mint a stub for a retired rid.
 
 **Status codes:** `200`, `201`, `400` (neither `rid` nor `name`, a malformed
 rid, or an unknown `local:` rid), `401`, `403`.
@@ -542,12 +672,14 @@ Generate divergent brainstorm fragments.
 
 These endpoints let a profile's owner, or an agent acting for them, edit the
 profile. They require owner-level authorization. A server MAY satisfy that with
-an operator bearer token, a signed-in person's session, or a scoped agent key
-(see [Management API](#14-management-api)). When a scoped key is used, each
-endpoint requires the scope named in the
-[scope catalog](authentication.md#agent-scopes), and a request whose key lacks
-it returns `403` with the
-[`insufficient_scope` body](authentication.md#insufficient-scope).
+an operator bearer token, a signed-in person's session, or an app or account
+key whose [parts table](authentication.md#per-part-access) holds `write` on
+every part the edit touches: each metadata field's part, `soul` for the SOUL,
+`works` for a works edit. A key missing one gets `403` with the
+[`insufficient_access` body](authentication.md#insufficient-access). A metadata
+field no part covers, and every visibility change, is
+[not delegable](authentication.md#acts-no-app-or-key-may-hold): `403` with
+`detail.error` `"not_delegable"`.
 
 ### PATCH /profiles/{slug}/metadata
 
@@ -555,22 +687,27 @@ Patch owner-editable metadata fields.
 
 **Editable fields:** `name`, `affiliation`, `job_title`, `field`, `subfields`,
 `summary`, `expertise` (the label list), `interests`, `not_interests`,
-`training`, `career`, `same_as`.
+`research_interests`, `training`, `career`, `same_as`, and `soul` (replaces
+`personality/SOUL.md` in the same write; part `soul`). A patch to `interests`
+or `not_interests` is recorded as declared `research_interests` entries.
 
 A key outside this set returns `400`. Fields like `rid`, `provenance`,
 `collaborators`, and `visibility` are not editable through this endpoint.
 
 **Optimistic concurrency:** Send `base_hash` (from the `content_hash` returned
 by `GET /profiles/{slug}`) to detect concurrent edits. If the profile changed
-since the hash was read, the server returns `409` with the current hash.
+since the hash was read, the server returns `409` with
+`{"detail": {"error": "conflict", "current": "<hash>", "message": ...}}` and the
+`X-RP-Content-Hash` header.
 Omitting `base_hash` is last-writer-wins. Successful edits return the new
 `content_hash`.
 
-### PUT /profiles/{slug}/soul
+### POST /profiles/{slug}/works, PATCH and DELETE /profiles/{slug}/works/{paper_id}
 
-Replace `personality/SOUL.md` entirely. Supports the same `base_hash`
-optimistic concurrency as metadata edits (the hash spans both the document and
-the SOUL).
+Add one work (`409` when its `paper_id` exists; it never overwrites), patch
+one work's editable fields, or remove one. `PATCH` and `DELETE` take
+`base_version` (the paper's `version`); a stale one is `409` with the current
+version in `X-RP-Paper-Version`.
 
 ### GET /profiles/{slug}/visibility
 
@@ -598,9 +735,7 @@ Each `artifacts` entry:
 | `name` | string \| null | Display name |
 | `paper_id` | string \| null | Set for per-paper artifacts |
 | `declared` | string | The tier written on the manifest entry |
-| `effective` | string | What governs after the legal floor, the profile default, and the derivation rule |
-| `locked` | boolean | A legal floor nobody, owner included, may raise |
-| `lock_reason` | string \| null | Full sentence to show when `locked` |
+| `effective` | string | What governs after the profile default and the derivation rule |
 | `raised_by` | list[string] | Causes holding `effective` above `declared` |
 | `visible_to` | list[string] | Subset of `["anonymous", "lab", "you"]` |
 
@@ -623,7 +758,7 @@ Each `artifacts` entry supplies exactly one selector plus the target tier:
 | `content_url` | string \| null | Selector: one artifact |
 | `paper_id` | string \| null | Selector: every artifact for one paper |
 | `role` | string \| null | Selector: every artifact with this manifest role |
-| `visibility` | string | REQUIRED. `public`, `internal`, or `restricted` |
+| `visibility` | string | REQUIRED. `public`, `limited`, or `private` |
 
 Artifacts not selected keep their current tier. Supports the same `base_hash`
 optimistic concurrency as metadata edits.
@@ -638,9 +773,9 @@ optimistic concurrency as metadata edits.
 | `artifacts_changed` | integer | How many manifest artifacts were re-tiered |
 | `content_hash` | string \| null | The hash AFTER this write, usable as the next `base_hash` |
 
-A caller holding an agent key with `profile:visibility` may only NARROW a tier.
-An attempt to widen one returns `403` naming the artifact, its current tier, and
-the requested tier.
+No app or account key may call this endpoint: it answers `403` with
+`detail.error` `"not_delegable"`, whatever the key's table. What the public
+sees is the owner's decision alone.
 
 ---
 
@@ -664,8 +799,9 @@ The following fields appear in profile detail responses (e.g. `GET /profiles/{sl
 | `summary` | string \| null | |
 | `job_title` | string \| null | |
 | `expertise` | list[string] | Topic labels (distinct from the `expertise` markdown) |
-| `interests` | list[string] | |
-| `not_interests` | list[string] | Authoritative non-interests |
+| `interests` | list[string] | Rebuilt from `research_interests` (positive weights) when that is set |
+| `not_interests` | list[string] | Authoritative non-interests; rebuilt from `research_interests` (negative weights) when that is set |
+| `research_interests` | list[object] | Typed, weighted interests (see [spec](index.md#research-interests)) |
 | `training` | list[object] | Educational history |
 | `career` | list[object] | Career history |
 | `collaborators` | list[string \| object] | Declared connections (see [spec](index.md#the-collaborators-array)) |
@@ -701,13 +837,18 @@ Each citation:
 ## 13. Error format
 
 Errors use the format `{"detail": "<message>"}` with the appropriate HTTP
-status code. There is no machine-readable error code beyond the status.
+status code. Two exceptions: the command-line login endpoints use the OAuth
+error body of [section 14.2](#142-command-line-login), and a `403` refusing an
+app or key carries an object in `detail` whose `error` is
+`"insufficient_access"`, `"insufficient_scope"`, or `"not_delegable"` (see
+[refusal bodies](authentication.md#refusal-bodies)). Elsewhere there is no
+machine-readable error code beyond the status.
 
 | Status | Meaning |
 |--------|---------|
 | `400` | Bad request (invalid slug or ref, unreadable archive, unknown metadata field, unknown `?as=` value) |
 | `401` | Invalid or missing bearer token |
-| `403` | Hard-floor artifact (withheld from all callers), or a credential that lacks the required scope |
+| `403` | Hard-floor artifact (withheld from all callers), a credential that lacks the required scope, a key without `write` on a part the write touches, or an act no key may perform |
 | `404` | Profile not found, artifact not in manifest, or access denied (indistinguishable) |
 | `409` | Profile not persona-ready (persona endpoints), concurrent edit detected (owner endpoints), or `If-Match` mismatch (JSON upload) |
 | `413` | Archive exceeds size cap |
@@ -723,135 +864,184 @@ status code. There is no machine-readable error code beyond the status.
 
 An OPTIONAL tier for servers that host profiles on behalf of the people they
 describe. It covers three things a file server has no need of: getting a
-credential onto a command line, telling a caller what their credential is, and
-publishing the vocabulary of write scopes.
+credential onto a command line, and telling a caller what their credential is
+and what it may read and write.
 
 A server MAY implement the management tier without the dynamic API, and vice
-versa. A server MAY offer further management endpoints beyond these five; they
+versa. A server MAY offer further management endpoints beyond these four; they
 are outside this specification.
 
-### 14.1. The prefix is normative
+### 14.1. The paths are normative
 
-Unlike the `/api/v1/` prefix in [section 1](#1-url-prefix), the management
-prefix is fixed at `/api/manage/`. A client discovers whether a server offers
-this tier by calling `POST /api/manage/cli-auth` and reading the status; there
-is no discovery document to carry a configurable prefix. A server that mounts
-these endpoints elsewhere is not conforming.
+Unlike the `/api/v1/` prefix in [section 1](#1-url-prefix), the paths in this
+section are fixed. Login endpoints live under `/api/auth/`; everything else
+lives under `/api/manage/`. A client discovers whether a server offers
+command-line login by calling `POST /api/auth/device` and reading the status.
+A server that mounts these endpoints elsewhere is not conforming.
 
-Absence is the signal. A server that does not implement the tier MUST let
-`POST /api/manage/cli-auth` answer `404`. Clients treat `404` there as "this
-server offers no command-line login" and MUST NOT retry.
+The fixed `/api/auth/` segment lets an operator protect every login route with
+one proxy rule (for example a rate limit). A server SHOULD keep any other route
+that signs a person in, such as its browser login, under the same prefix.
+
+Absence is the signal. A server that does not implement command-line login MUST
+let `POST /api/auth/device` answer `404`. A client that gets `404` there treats
+the server as offering no command-line login, reports that, and MUST NOT retry.
+
+A server MAY also publish
+[RFC 8414](https://www.rfc-editor.org/rfc/rfc8414) authorization server
+metadata at `/.well-known/oauth-authorization-server` naming these endpoints as
+`device_authorization_endpoint` and `token_endpoint`, with
+`urn:ietf:params:oauth:grant-type:device_code` in `grant_types_supported`. A
+client MUST NOT depend on it: the fixed paths are authoritative, and on many
+hosts an unknown path answers `200` with an HTML page, so a missing metadata
+document is not a reliable absence signal.
 
 ### 14.2. Command-line login
 
-A device-authorization flow. The client cannot receive a browser redirect, so
-the server issues two codes: a secret the client polls with, and a short code
-the person types or confirms in a browser.
+The OAuth 2.0 Device Authorization Grant,
+[RFC 8628](https://www.rfc-editor.org/rfc/rfc8628). The client cannot receive a
+browser redirect, so the server issues two codes: a secret the client polls
+with, and a short code the person types or confirms in a browser. The wire
+format is RFC 8628's, so a stock OAuth device-flow client works unchanged. This
+section fixes the endpoint paths, pins the choices RFC 8628 leaves open, and
+adds a few fields. Where this section is silent, RFC 8628 and
+[RFC 6749](https://www.rfc-editor.org/rfc/rfc6749) apply.
+
+What the client receives is not a short-lived access token but a long-lived
+`rpk_` API key with the `push_own` scope (see
+[the key model](authentication.md#the-key-model)), returned in the standard
+`access_token` field. It has no refresh token and does not expire until the
+person revokes it.
 
 ```
 client                          server                      person's browser
-  |  POST /api/manage/cli-auth     |                                |
+  |  POST /api/auth/device         |                                |
   |------------------------------->|                                |
-  |  201 {device_code, user_code,  |                                |
-  |       verify_url, expires_in,  |                                |
-  |       interval}                |                                |
+  |  200 {device_code, user_code,  |                                |
+  |       verification_uri,        |                                |
+  |       verification_uri_complete,                                |
+  |       expires_in, interval}    |                                |
   |<-------------------------------|                                |
-  |  (print verify_url + user_code)|         person opens verify_url|
+  |  (print URI + user_code)       |    person opens the URI        |
   |                                |<-------------------------------|
-  |                                |         person approves        |
-  |  POST /api/manage/cli-auth/poll|                                |
+  |                                |    person signs in, approves   |
+  |  POST /api/auth/token          |                                |
   |------------------------------->|                                |
-  |  200 {"status": "pending"}     |                                |
+  |  400 {"error": "authorization_pending"}                         |
   |<-------------------------------|                                |
   |  ... wait `interval` seconds, repeat ...                        |
-  |  200 {"status": "approved", "token": "rpk_..."}                 |
+  |  200 {"access_token": "rpk_...", "token_type": "Bearer", ...}   |
   |<-------------------------------|                                |
 ```
 
-#### POST /api/manage/cli-auth
+Both endpoints are **unauthenticated**: this is how a caller with no credential
+gets one. Requests use `application/x-www-form-urlencoded` bodies (RFC 8628
+§3.1, §3.4). A server MAY also accept the same fields as a JSON object. All
+responses are JSON and MUST carry `Cache-Control: no-store` (RFC 6749 §5.1).
 
-Start a login. Unauthenticated: this is how a caller with no credential gets
-one.
+#### POST /api/auth/device
 
-**Request body** (the whole body is OPTIONAL):
+Start a login (the device authorization endpoint, RFC 8628 §3.1).
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `label` | string \| null | no | Display name for this machine on the approval page. A client SHOULD send the hostname. Servers SHOULD trim it and MAY truncate it. |
+**Request parameters:**
 
-**Response 201:**
+| Field | Required | Description |
+|-------|----------|-------------|
+| `client_id` | yes | Names the client software, e.g. `rp`. Grants nothing. A server MUST accept any non-empty value without prior registration (RFC 6749 §2.4) and MAY show it on the approval page. |
+| `scope` | no | Ignored by servers that mint only `push_own`. |
+| `label` | no | Extension. Display name for this machine on the approval page. A client SHOULD send the hostname. Servers SHOULD trim it and MAY truncate it. |
+
+**Response 200** (RFC 8628 §3.2):
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `device_code` | string | REQUIRED | Opaque polling secret. Never displayed to the person. |
 | `user_code` | string | REQUIRED | Short code the person sees. |
-| `verify_url` | string | REQUIRED | Absolute URL the person opens to approve. |
-| `expires_in` | integer | RECOMMENDED | Seconds until the request expires. Default `600` when absent. |
-| `interval` | integer | RECOMMENDED | Seconds a client SHOULD wait between polls. Default `3` when absent. |
+| `verification_uri` | string | REQUIRED | Absolute URL of the page where the person enters `user_code`. |
+| `verification_uri_complete` | string | RECOMMENDED | `verification_uri` with the code already filled in. |
+| `expires_in` | integer | REQUIRED | Seconds until the request expires. |
+| `interval` | integer | RECOMMENDED | Seconds a client MUST wait between polls. Default `5` when absent. |
 
 Servers MAY include further fields; clients MUST ignore what they do not know.
+A client SHOULD open `verification_uri_complete` when present, and MUST also
+print `user_code` so the person can check it matches the one on the page.
 
 The `device_code` MUST be unguessable, MUST be stored hashed rather than in the
 clear, and MUST NOT be an API key: it grants nothing but the right to collect
 the result of this one request. The `user_code` SHOULD avoid characters people
-confuse (`I`, `O`, `0`, `1`) and SHOULD be short enough to read aloud.
+confuse (`I`, `O`, `0`, `1`), SHOULD be short enough to read aloud, and SHOULD
+be matched ignoring case and punctuation (RFC 8628 §6.1).
 
-`verify_url` MUST point at a page on the server where a signed-in person can
-approve or ignore the request. What that page looks like, and how the person
-signs in, is entirely the server's business and is not specified here. A server
-MUST require an authenticated person to approve; it MUST NOT approve on the
-strength of the `user_code` alone.
+The verification page MUST be served by the server. What it looks like, and how
+the person signs in, is the server's business and is not specified here. A
+server MUST require an authenticated person to approve, and MUST NOT approve on
+the strength of the `user_code` alone: the person has to press an explicit
+approve control. The page SHOULD show the requesting `label` and the
+`user_code` so the person can spot a request they did not start (RFC 8628
+§5.4). It MAY offer a deny control. Servers SHOULD rate-limit code entry
+(RFC 8628 §5.1).
 
-**Status codes:** `201`, `404` (server does not implement this tier),
-`503` (server could not allocate a code; the client SHOULD retry).
+**Status codes:** `200`; `400` with an OAuth error body for a malformed request;
+`404` (server does not offer command-line login); `429` or `503` when the
+server cannot open another request right now (the client SHOULD retry after
+`Retry-After`).
 
-#### POST /api/manage/cli-auth/poll
+#### POST /api/auth/token
 
-Collect the result. **Unauthenticated**: the `device_code` is the credential.
+Collect the result (the token endpoint, RFC 8628 §3.4). The `device_code` is
+the credential.
 
-**Request body:**
+**Request parameters:**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `grant_type` | yes | The literal `urn:ietf:params:oauth:grant-type:device_code` |
+| `device_code` | yes | From the start response |
+| `client_id` | yes | The same value sent to `/api/auth/device` |
+
+**Response 200, approved** (RFC 6749 §5.1):
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `device_code` | string | REQUIRED | From the start response |
+| `access_token` | string | REQUIRED | The minted `rpk_` key. See [the key model](authentication.md#the-key-model). |
+| `token_type` | string | REQUIRED | `"Bearer"` |
+| `scope` | string | RECOMMENDED | Granted scopes, space-separated, e.g. `"push_own"` |
+| `orcid` | string \| null | RECOMMENDED | Extension. The approving person's identifier |
+| `name` | string \| null | RECOMMENDED | Extension. The approving person's display name |
+| `url` | string \| null | | Extension. The server's canonical base URL |
 
-**Response 200, not yet approved:**
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `status` | string | `"pending"` |
-| `interval` | integer | Servers MAY revise the poll interval here |
-
-**Response 200, approved:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `status` | string | REQUIRED | `"approved"` |
-| `token` | string | REQUIRED | The minted key. See [the key model](authentication.md#the-key-model). |
-| `orcid` | string \| null | RECOMMENDED | The approving person's identifier |
-| `name` | string \| null | RECOMMENDED | The approving person's display name |
-| `url` | string \| null | | The server's canonical base URL |
-
-`status` is the only field a client branches on. This specification defines
-`"pending"` and `"approved"`. A client MUST treat any other value as not yet
-approved and keep polling until the request expires, so a server MAY add states
-without breaking existing clients.
+The response carries no `expires_in` and no `refresh_token`, because the key
+does not expire on a schedule.
 
 **The approved response is returned exactly once.** The server MUST mint the key
-and invalidate the `device_code` in the same operation. A second poll after
-collection MUST return `404`, not the token again.
+and invalidate the `device_code` in the same operation. A later request with
+the same `device_code` MUST get `expired_token`, not the key again.
 
-**Status codes:**
+**Response 400, not approved** (RFC 8628 §3.5) carries
+`{"error": "<code>", "error_description": "<optional text>"}`:
 
-- `200` with a `status` body
-- `404` when the `device_code` is unknown, has expired, or has already been
-  collected. These three MUST be indistinguishable, and the client SHOULD tell
-  the person to log in again.
-- `410` when the approving identity has been removed
-- `422` when `device_code` is missing
+| `error` | Meaning | Client action |
+|---------|---------|---------------|
+| `authorization_pending` | Not yet approved | Wait `interval` seconds, poll again |
+| `slow_down` | Polling too fast | Add 5 seconds to `interval` for all later polls, then poll again |
+| `access_denied` | The person refused, or the approving identity has been removed | Stop; report that the login was refused |
+| `expired_token` | The `device_code` is unknown, expired, or already collected | Stop; tell the person to log in again |
+| `invalid_request`, `unsupported_grant_type`, `invalid_grant` | Malformed request (RFC 6749 §5.2) | Stop; report the error |
 
-Servers SHOULD purge expired requests. Servers MAY rate-limit polling; a client
-that honors `interval` will not trip a reasonable limit.
+A server MUST answer unknown, expired, and already-collected codes with the same
+`expired_token` response, so the three are indistinguishable. A client MUST
+treat `invalid_grant` like `expired_token`, since stock OAuth servers use it for
+the same cases.
+
+A server that throttles a polling client SHOULD answer `slow_down` rather than
+`429`. A client MUST treat `429` like `slow_down`. A client MUST treat any
+other `error` value it does not recognize as fatal, and MUST stop polling once
+`expires_in` has passed.
+
+Servers SHOULD purge expired requests.
+
+These two endpoints do not use the `{"detail": ...}` body of
+[section 13](#13-error-format); they use the OAuth error body above.
 
 ### 14.3. Identity echo
 
@@ -881,71 +1071,55 @@ Each `profiles` entry:
 | `rid` | string | |
 | `role` | string | `owner` or `editor` |
 
-**Status codes:** `200`; `400` when the credential belongs to the agent family
+**Status codes:** `200`; `400` when the credential belongs to the account family
 (the response SHOULD name the correct endpoint); `401` when the header is
 missing, malformed, or the key is unknown, revoked, or expired.
 
 #### GET /api/manage/agent/whoami
 
-Describe an agent-family (`rpa_`) key. Requires `Authorization: Bearer <key>`.
-An agent is expected to call this at the start of every session, before
-attempting any write.
+Describe an account-family (`rpa_`) key: everything it may read and write.
+Requires `Authorization: Bearer <key>`. A key is expected to call this at the
+start of every session, before attempting any write, and again after a
+refusal.
 
 **Response 200:**
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `principal` | object | REQUIRED | The agent itself (below) |
-| `owner` | object \| null | REQUIRED | `{orcid, name}` of the person who minted the key |
-| `profiles` | array | REQUIRED | Profiles this key is bound to (below) |
-| `tier` | string | REQUIRED | The most permissive [viewer tier](authentication.md#viewer-tiers) this key reads at |
-| `scopes` | list[string] | REQUIRED | Granted agent scopes, sorted |
-| `scopes_not_granted` | list[string] | RECOMMENDED | Every agent scope this key does not hold |
-| `never_delegable` | array | RECOMMENDED | Acts no agent key can ever perform, as `{act, why}` objects |
+| `principal` | object | REQUIRED | The key itself (below) |
+| `owner` | object \| null | REQUIRED | `{orcid, name}` of the person whose account the key acts for |
+| `profiles` | array | REQUIRED | Every profile the account reaches (below) |
+| `parts` | object | REQUIRED | The key's [parts table](authentication.md#per-part-access): `{part: "read" \| "write"}`. A part left out is `none` |
+| `replace_profiles` | boolean | REQUIRED | Whether the key holds [Replace whole profiles](authentication.md#replace-whole-profiles) |
+| `never_delegable` | array | RECOMMENDED | [Acts no app or key may hold](authentication.md#acts-no-app-or-key-may-hold), as `{act, why}` objects, worded accurately for this key |
 
 `principal`:
 
 | Field | Type | Description |
 |-------|------|-------------|
+| `kind` | string | `consumer` |
 | `label` | string \| null | Human label given when the key was minted |
-| `handle` | string | Stable machine identifier for this agent |
+| `handle` | string | Stable machine identifier for this key |
 | `created_at` | string \| null | ISO 8601 |
 | `last_used_at` | string \| null | ISO 8601 |
 | `expires_at` | string \| null | ISO 8601, or null for no expiry |
+
+A server MAY add fields (for example numeric ids).
 
 Each `profiles` entry:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `slug` | string | |
+| `slug` | string \| null | |
 | `rid` | string | |
-| `role` | string | `editor` when the key holds any write scope, else `viewer-restricted` |
+| `role` | string | How the account reaches it: `owner`, `co-owner`, `editor`, or `permission` (a person granted the account a permission on their data) |
+| `writes` | list[string] | The parts the key may write here: the table's `write` parts where the account may write, else empty |
 | `published` | boolean | Present when the server tracks a publication decision |
-| `profile_visibility` | string \| null | The profile's document-level tier |
 
-`scopes_not_granted` exists so an agent can state what it cannot do without
-guessing. `never_delegable` exists so it can state what nobody can grant it.
-Servers SHOULD populate both.
+The table is the whole of the key's authority. It is not stored in the key and
+the account holder may change it at any time, so a client MUST NOT cache it
+across sessions.
 
 **Status codes:** `200`; `400` when the credential belongs to the app family;
 `401` when the header is missing or malformed, or the key is unknown, revoked,
 or expired.
-
-#### GET /api/manage/agent/scopes
-
-The scope catalog. **Unauthenticated**: it describes the vocabulary, not any
-particular key, and an agent needs to read it before it has a key.
-
-**Response 200** is a flat object keyed by scope name. Each value:
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `description` | string | REQUIRED | One sentence, written for the person deciding whether to grant it |
-| `endpoints` | list[string] | RECOMMENDED | Requests this scope unlocks, as `"METHOD /path"` |
-| `fields` | list[string] | RECOMMENDED | Metadata fields this scope covers, when it covers fields |
-| `dangerous` | boolean | REQUIRED | Whether granting it can reduce what the world can see |
-| `default_on` | boolean | REQUIRED | Whether a minting interface SHOULD pre-select it |
-
-The catalog MUST contain the scopes defined in
-[Agent scopes](authentication.md#agent-scopes). A server MAY add its own; a
-client MUST ignore names it does not recognize.

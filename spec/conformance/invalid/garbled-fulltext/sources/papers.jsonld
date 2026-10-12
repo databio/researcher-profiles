@@ -1,0 +1,50 @@
+{
+  "@context": "https://profiles.databio.org/context/v1.jsonld",
+  "@type": "Collection",
+  "conformsTo": "https://profiles.databio.org/context/v1.jsonld",
+  "about": {
+    "@id": "https://orcid.org/0000-0002-1825-0097"
+  },
+  "hasPart": [
+    {
+      "@id": "#paper/lovelace1843notes",
+      "@type": "ScholarlyArticle",
+      "name": "Notes upon the Sketch of the Analytical Engine",
+      "summary": "An extended commentary on Babbage's Analytical Engine, describing how the machine could be directed to compute Bernoulli numbers and arguing that it manipulates symbols, not merely numbers.",
+      "paper_id": "lovelace1843notes",
+      "datePublished": "1843",
+      "isPartOf": {
+        "@type": "Periodical",
+        "name": "Taylor's Scientific Memoirs"
+      },
+      "type": "authored",
+      "first_author": "Lovelace",
+      "author_position": "first",
+      "author_index": 1,
+      "total_authors": 1,
+      "is_corresponding": true,
+      "citation": "Lovelace, Taylor's Scientific Memoirs (1843)",
+      "access": "open"
+    },
+    {
+      "@id": "#paper/lovelace1843translation",
+      "@type": "ScholarlyArticle",
+      "name": "Sketch of the Analytical Engine (translation with notes)",
+      "summary": "A translation of Menabrea's account of the Analytical Engine, annotated with the translator's own notes on its operation and potential.",
+      "paper_id": "lovelace1843translation",
+      "datePublished": "1843",
+      "isPartOf": {
+        "@type": "Periodical",
+        "name": "Taylor's Scientific Memoirs"
+      },
+      "type": "authored",
+      "first_author": "Lovelace",
+      "author_position": "first",
+      "author_index": 1,
+      "total_authors": 1,
+      "is_corresponding": true,
+      "citation": "Lovelace, Taylor's Scientific Memoirs (1843)",
+      "access": "open"
+    }
+  ]
+}

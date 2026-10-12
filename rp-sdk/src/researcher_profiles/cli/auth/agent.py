@@ -6,18 +6,20 @@ Resolution order for credentials:
 2. ``RESEARCHER_PROFILES_AGENT_KEY`` / ``RESEARCHER_PROFILES_API_URL``
    environment variables
 3. Nearest ``.env`` walked up from the working directory
-4. ``$XDG_CONFIG_HOME/researcher-profiles/credentials.toml``
+4. ``credentials.toml`` in the folder from ``credentials.config_dir()``
+   (``$XDG_CONFIG_HOME/researcher-profiles``)
 """
 
 import os
-from dataclasses import dataclass, field
+import tomllib
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
 import httpx
-import tomllib
 
 from ...env import check_retired_env_vars
+from .credentials import config_dir
 
 AGENT_KEY_PREFIX = "rpa_"
 CONFIG_FILENAME = "credentials.toml"
@@ -40,11 +42,17 @@ class AgentAPIError(Exception):
         super().__init__(f"HTTP {status}: {detail}")
 
 
-class InsufficientScopeError(AgentAPIError):
-    """A 403 with the insufficient_scope body shape."""
+class InsufficientAccessError(AgentAPIError):
+    """A 403 ``insufficient_access``: the key lacks Write on a part the write touches.
+
+    ``missing`` names the parts, ``needs_replace`` the changes no part covers
+    (only the "Replace whole profiles" switch allows those).
+    """
 
     def __init__(self, status: int, detail: str, body: dict):
+        self.required = body.get("required", [])
         self.missing = body.get("missing", [])
+        self.needs_replace = body.get("needs_replace", [])
         self.hint = body.get("hint", "")
         super().__init__(status, detail, body)
 
@@ -56,7 +64,6 @@ class Credential:
     source: str
     profile: Optional[str] = None
     owner: Optional[str] = None
-    scopes: list[str] = field(default_factory=list)
 
 
 def _find_dotenv() -> Optional[Path]:
@@ -87,13 +94,6 @@ def _parse_dotenv(path: Path) -> dict[str, str]:
         v = v.strip().strip("'\"")
         result[k] = v
     return result
-
-
-def _config_dir() -> Path:
-    xdg = os.environ.get("XDG_CONFIG_HOME")
-    if xdg:
-        return Path(xdg) / "researcher-profiles"
-    return Path.home() / ".config" / "researcher-profiles"
 
 
 def _check_permissions(path: Path) -> None:
@@ -143,7 +143,7 @@ def resolve_credential(
             return Credential(key=dotenv_key, url=dotenv_url, source=str(dotenv))
 
     # 4. credentials.toml
-    config_path = _config_dir() / CONFIG_FILENAME
+    config_path = config_dir() / CONFIG_FILENAME
     looked_at.append(str(config_path))
     if config_path.is_file():
         _check_permissions(config_path)
@@ -160,7 +160,6 @@ def resolve_credential(
                     source=f"{config_path} [hosts.{target}]",
                     profile=entry.get("profile"),
                     owner=entry.get("owner"),
-                    scopes=entry.get("scopes", []),
                 )
 
     raise CredentialError(
@@ -207,8 +206,12 @@ class ManagementClient:
                 detail = body if isinstance(body, dict) else {"detail": body}
             except ValueError:
                 detail = {"detail": resp.text}
-            if isinstance(detail, dict) and detail.get("error") == "insufficient_scope":
-                raise InsufficientScopeError(403, detail.get("hint", str(detail)), detail)
+            # FastAPI wraps a structured refusal in ``detail``.
+            inner = detail.get("detail") if isinstance(detail.get("detail"), dict) else detail
+            if inner.get("error") == "insufficient_access":
+                raise InsufficientAccessError(403, inner.get("hint", str(inner)), inner)
+            if inner.get("hint"):
+                raise AgentAPIError(403, inner["hint"], inner)
             raise AgentAPIError(403, str(detail.get("detail", detail)), detail)
 
         if resp.status_code == 409:
@@ -238,6 +241,12 @@ class ManagementClient:
     def _put(self, path: str, body: dict[str, Any]) -> Any:
         return self._handle_response(self._session.put(self._url(path), json=body))
 
+    def _post(self, path: str, body: dict[str, Any]) -> Any:
+        return self._handle_response(self._session.post(self._url(path), json=body))
+
+    def _delete(self, path: str) -> Any:
+        return self._handle_response(self._session.delete(self._url(path)))
+
 
 class IdentityClient:
     """Remote identity introspection resource."""
@@ -246,10 +255,8 @@ class IdentityClient:
         self._client = client
 
     def whoami(self) -> dict:
+        """The key's authority: its parts table, switch, and the profiles it reaches."""
         return self._client._get("/api/manage/agent/whoami")
-
-    def scopes(self) -> dict:
-        return self._client._get("/api/manage/agent/scopes")
 
 
 class ProfileClient:
@@ -259,7 +266,8 @@ class ProfileClient:
         self._client = client
 
     def get(self, slug: str) -> dict:
-        return self._client._get(f"/api/v1/profiles/{slug}")
+        """The full view: every metadata field (``fields``) and the narrative bodies."""
+        return self._client._get(f"/api/v1/profiles/{slug}?view=full")
 
     def patch_metadata(self, slug: str, patch: dict, base_hash: str | None = None) -> dict:
         body = dict(patch)
@@ -267,11 +275,25 @@ class ProfileClient:
             body["base_hash"] = base_hash
         return self._client._patch(f"/api/v1/profiles/{slug}/metadata", body)
 
-    def put_soul(self, slug: str, soul: str, base_hash: str | None = None) -> dict:
-        body: dict[str, Any] = {"soul": soul}
-        if base_hash:
-            body["base_hash"] = base_hash
-        return self._client._put(f"/api/v1/profiles/{slug}/soul", body)
+    def get_work(self, slug: str, paper_id: str) -> dict:
+        """One work, full view: ``fields`` (on-disk names), ``version``, sizes."""
+        return self._client._get(f"/api/v1/profiles/{slug}/papers/{paper_id}?view=full")
+
+    def patch_work(
+        self, slug: str, paper_id: str, patch: dict, base_version: str | None = None
+    ) -> dict:
+        body = dict(patch)
+        if base_version:
+            body["base_version"] = base_version
+        return self._client._patch(f"/api/v1/profiles/{slug}/works/{paper_id}", body)
+
+    def add_work(self, slug: str, record: dict) -> dict:
+        """Add one new work; an existing ``paper_id`` is refused (409)."""
+        return self._client._post(f"/api/v1/profiles/{slug}/works", record)
+
+    def delete_work(self, slug: str, paper_id: str, base_version: str | None = None) -> dict:
+        query = f"?base_version={base_version}" if base_version else ""
+        return self._client._delete(f"/api/v1/profiles/{slug}/works/{paper_id}{query}")
 
     def patch_visibility(
         self,
@@ -294,7 +316,7 @@ __all__ = [
     "Credential",
     "CredentialError",
     "IdentityClient",
-    "InsufficientScopeError",
+    "InsufficientAccessError",
     "ManagementClient",
     "ProfileClient",
     "resolve_credential",

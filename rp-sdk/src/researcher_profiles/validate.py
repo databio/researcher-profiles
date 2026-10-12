@@ -1,30 +1,13 @@
 """Build-time and CLI schema validation for researcher-profile artifacts.
 
-This module is the single validator for the researcher-profiles format,
-providing both Pydantic model conformance checks and undeclared-term detection.
-
 Design rules:
 
-- Schemas are imported in-process from ``researcher_profiles.schema_export``.
-  No vendored copies, no network fetch. One source of truth.
-- This module must import nothing outside the SDK's core tier. Validity is
-  a property of the *format*; gating is a property of the *build*.
-- Schema conformance failure is deterministic and structural. Undeclared-term
-  drift is a separate check (``undeclared_terms``) that the build may route
-  through questions.
-- ``additionalProperties`` stays ``true`` in the Pydantic models.
-  Strictness lives in ``undeclared_terms``, not in the JSON Schema.
-- Content quality (expertise.md length, SOUL.md sections, missing bracketed
-  paper_id citations) is out of this module's remit. Nothing in
-  the SDK enforces it; that judgment belongs to the agent writing the profile.
-
-**Two-validator split.**  The Pydantic models are the authoritative conformance
-check: they accept the on-disk serialized form via ``mode="before"`` validators
-(e.g. ``datePublished`` is a string on disk, coerced to ``int`` by the model).
-The exported JSON Schema (``build_schemas()``) describes the Python input shape,
-which differs from the on-disk shape for fields with custom serializers. The
-validator therefore uses Pydantic ``model_validate`` for conformance and the
-JSON Schema only for undeclared-term detection via ``known_terms()``.
+- Schemas come in-process from ``researcher_profiles.schema_export``; no
+  vendored copies, no network fetch.
+- This module imports nothing outside the SDK's core tier.
+- Conformance is Pydantic ``model_validate``. ``additionalProperties`` stays
+  ``true``; strictness lives in :func:`undeclared_terms`, a separate check.
+- Content quality (expertise.md length, SOUL.md sections) is out of scope.
 """
 
 import hashlib
@@ -42,10 +25,11 @@ from .schema import (
     PapersDocument,
     ProfileDocument,
     SummaryFile,
+    TrialsDocument,
 )
 from .schema.jsonld import CONTEXT_URL, read_jsonld
 from .schema_export import build_schemas
-from .utils.paths import CACHE_DIRNAME
+from .utils.paths import CACHE_DIRNAME, LEGACY_CACHE_DIRNAME
 
 if TYPE_CHECKING:
     from .schema import ArtifactRef
@@ -53,15 +37,11 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 # Schema name -> Pydantic model mapping
 # ---------------------------------------------------------------------------
-#
-# One document shape: profile.jsonld is a ProfileDocument and papers.jsonld a
-# PapersDocument, authored and published alike. There is no separate
-# published-manifest schema.
-
 _SCHEMA_MODELS: dict[str, type] = {
     "profile_jsonld": ProfileDocument,
     "papers_jsonld": PapersDocument,
     "grants_jsonld": GrantsDocument,
+    "trials_jsonld": TrialsDocument,
     "summary_file": SummaryFile,
 }
 
@@ -116,6 +96,8 @@ class ProfileValidationReport:
     package_version: str
     artifacts: list[ArtifactResult] = field(default_factory=list)
     cross_artifact: list[Violation] = field(default_factory=list)
+    #: Reported but not failing, e.g. a derived index not built on this machine.
+    warnings: list[Violation] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -264,7 +246,6 @@ def validate_artifact(
         if isinstance(exc, PydanticValidationError):
             raw_errors = exc.errors()
         else:
-            # A ValueError from a model_validator (e.g. bare list for papers)
             raw_errors = [{"loc": (), "type": "value_error", "msg": str(exc)}]
 
         violations = sorted(
@@ -278,9 +259,8 @@ def validate_artifact(
         result.ok = False
         return result
 
-    # Undeclared terms and retired-key detection (only for JSON-LD artifacts,
-    # not summary)
-    if schema_name in ("profile_jsonld", "papers_jsonld", "grants_jsonld"):
+    # JSON-LD artifacts only.
+    if schema_name in ("profile_jsonld", "papers_jsonld", "grants_jsonld", "trials_jsonld"):
         result.undeclared = undeclared_terms(doc, schema_name)
         result.violations = [_retired_term_violation(t) for t in retired_terms(doc)]
 
@@ -302,42 +282,43 @@ def known_terms(schema_name: str) -> frozenset[str]:
            U { every term defined in context/v1.jsonld }
            U { "@context", "@id", "@type", "@value", "@list", "@set", "@graph" }
 
-    Scoped to one schema on purpose. A property name is only "known" because
-    ``schema_name`` itself declares it, not because some unrelated schema
-    happens to reuse the word: ``ProfileCollection`` (schema name
-    ``collection``) has its own ``artifacts`` field, but that must not
-    license the word ``artifacts`` inside a ``profile.jsonld``, which is a
-    different document with a different vocabulary. Unioning across every
-    published schema is exactly the bug this scoping avoids: a rename on one
-    document type would otherwise go undetected on every other.
+    Scoped to one schema on purpose: ``collection`` has an ``artifacts``
+    field, but that must not license ``artifacts`` inside a
+    ``profile.jsonld``.
     """
     terms: set[str] = set()
 
-    # JSON-LD keywords
     terms.update(
         {"@context", "@id", "@type", "@value", "@list", "@set", "@graph", "@vocab", "@version"}
     )
 
-    # This schema's own field aliases (and whatever it reaches via $defs).
     _collect_property_names(build_schemas()[schema_name], terms)
 
-    # Terms from context/v1.jsonld (bundled copy in a wheel, repo-root in a
-    # source checkout, see jsonld.context_document_text). The context is
-    # shared vocabulary across every document type, not per-schema.
+    # The context is shared vocabulary across every document type.
     from .schema.jsonld import context_document_text
 
     context_text = context_document_text()
     if context_text is not None:
         try:
             ctx_doc = json.loads(context_text)
-            ctx = ctx_doc.get("@context", {})
-            for key in ctx:
-                if not key.startswith("@"):
-                    terms.add(key)
+            _collect_context_terms(ctx_doc.get("@context", {}), terms)
         except json.JSONDecodeError:
             pass
 
     return frozenset(terms)
+
+
+def _collect_context_terms(ctx: dict, terms: set[str]) -> None:
+    """Collect every term a context defines, including in scoped contexts.
+
+    A term defined only in a scoped context (``collaborators`` -> its entries'
+    ``relationship``) is declared vocabulary too.
+    """
+    for key, definition in ctx.items():
+        if not key.startswith("@"):
+            terms.add(key)
+        if isinstance(definition, dict) and isinstance(definition.get("@context"), dict):
+            _collect_context_terms(definition["@context"], terms)
 
 
 def _collect_property_names(schema: dict, terms: set[str]) -> None:
@@ -366,11 +347,6 @@ def _walk_keys(doc: Any, prefix: str = "") -> list[tuple[str, str, Any]]:
 def undeclared_terms(doc: Any, schema_name: str) -> list[TermUse]:
     """Find terms in ``doc`` that are not known to ``schema_name``.
 
-    The vocabulary (:func:`known_terms`) is scoped to the one document schema
-    being checked, not every published schema, so a term only counts as known
-    when ``schema_name`` itself declares it. Deciding *whether* a document
-    gets the check at all is the caller's job (see :func:`validate_artifact`).
-
     Returns a list of :class:`TermUse` entries, sorted by term then pointer.
     """
     known = known_terms(schema_name)
@@ -389,13 +365,9 @@ def undeclared_terms(doc: Any, schema_name: str) -> list[TermUse]:
 # Retired-key detection
 # ---------------------------------------------------------------------------
 
-#: Key -> replacement key, for on-disk field names retired since first
-#: publication. Checked unconditionally, independent of :func:`known_terms`:
-#: a retired key can still be "known" (some other schema may reuse the same
-#: word for something else), so this cannot rely on vocabulary membership.
-#: A document that reused a retired name would otherwise pass silently, which
-#: is exactly how ``artifacts`` (renamed to ``researchOutputs``) went
-#: undetected on six live profiles.
+#: Key -> replacement key, for retired on-disk field names. Checked
+#: independently of :func:`known_terms`, because a retired key may still be a
+#: known term.
 RETIRED_TERMS: dict[str, str] = {
     "artifacts": "researchOutputs",
 }
@@ -403,9 +375,6 @@ RETIRED_TERMS: dict[str, str] = {
 
 def retired_terms(doc: Any) -> list[TermUse]:
     """Find retired keys in ``doc``, checked against :data:`RETIRED_TERMS`.
-
-    Independent of :func:`known_terms`: a retired key is flagged whether or
-    not some other schema happens to still declare a field of that name.
 
     Returns a list of :class:`TermUse` entries, sorted by term then pointer.
     """
@@ -440,10 +409,7 @@ def _retired_term_violation(hit: TermUse) -> Violation:
 def validate_profile_dir(profile_dir: str | Path) -> ProfileValidationReport:
     """Validate all artifacts in a profile directory.
 
-    Walks the artifact table below, runs per-artifact schema validation, then
-    checks cross-artifact invariants. A profile is a single document shape.
-    ``profile.jsonld`` is always a ``ProfileDocument`` (there is no separate
-    published-manifest form to detect).
+    Runs per-artifact schema validation, then cross-artifact invariants.
     """
     root = Path(profile_dir)
     now = datetime.now(timezone.utc).isoformat()
@@ -460,10 +426,11 @@ def validate_profile_dir(profile_dir: str | Path) -> ProfileValidationReport:
         (root / "profile.jsonld", "profile_jsonld"),
         (root / "sources" / "papers.jsonld", "papers_jsonld"),
         (root / "sources" / "grants.jsonld", "grants_jsonld"),
+        (root / "sources" / "trials.jsonld", "trials_jsonld"),
     ]
     for path, schema_name in artifact_map:
-        # grants.jsonld is presence-conditional
-        if schema_name == "grants_jsonld" and not path.is_file():
+        # grants.jsonld and trials.jsonld are presence-conditional
+        if schema_name in ("grants_jsonld", "trials_jsonld") and not path.is_file():
             continue
         art_result = validate_artifact(path, schema_name)
         report.artifacts.append(art_result)
@@ -473,16 +440,74 @@ def validate_profile_dir(profile_dir: str | Path) -> ProfileValidationReport:
     if summaries_dir.is_dir():
         for f in sorted(summaries_dir.iterdir()):
             if f.is_file() and f.name.endswith(".summary.md"):
-                text = f.read_text(encoding="utf-8")
+                text = f.read_bytes().decode("utf-8", errors="replace")
                 fm = _extract_frontmatter(text)
                 if fm is not None:
                     art_result = _validate_data(fm, "summary_file", str(f))
                     report.artifacts.append(art_result)
 
+    # Character rule for paper text (full text and summaries)
+    for art_result in _check_text_artifacts(root):
+        report.artifacts.append(art_result)
+
     # Cross-artifact invariants
     _check_cross_artifact(root, report)
 
     return report
+
+
+#: The text artifacts the character rule covers: (directory, filename suffix,
+#: manifest role).
+_TEXT_ARTIFACT_DIRS: tuple[tuple[str, str, str], ...] = (
+    ("sources/papers", ".md", "paper_fulltext"),
+    ("sources/summaries", ".summary.md", "paper_summary"),
+)
+
+
+def _check_text_artifacts(root: Path) -> list[ArtifactResult]:
+    """Fail every paper full text or summary that is not clean text.
+
+    Only failing files get a result. The rule lives in
+    :mod:`researcher_profiles.text_artifact`.
+    """
+    from .text_artifact import text_artifact_problems
+
+    results: list[ArtifactResult] = []
+    for rel_dir, suffix, role in _TEXT_ARTIFACT_DIRS:
+        directory = root / rel_dir
+        if not directory.is_dir():
+            continue
+        for f in sorted(directory.iterdir()):
+            if not (f.is_file() and f.name.endswith(suffix)):
+                continue
+            problems = text_artifact_problems(f.read_bytes())
+            if not problems:
+                continue
+            results.append(
+                ArtifactResult(
+                    path=str(f),
+                    schema_name=role,
+                    exists=True,
+                    parsed=True,
+                    ok=False,
+                    violations=[
+                        Violation(
+                            json_pointer="/",
+                            keyword="text_content",
+                            message=_cap(problem, 300),
+                            found=f"{rel_dir}/{f.name}",
+                            expected="clean UTF-8 text",
+                            fix=(
+                                "delete the file and re-download the paper"
+                                if role == "paper_fulltext"
+                                else "delete the summary and regenerate it"
+                            ),
+                        )
+                        for problem in problems
+                    ],
+                )
+            )
+    return results
 
 
 def _extract_frontmatter(text: str) -> dict | None:
@@ -587,28 +612,18 @@ def _manifest_refs(profile_doc: dict, report: ProfileValidationReport) -> "list[
     return refs
 
 
-#: Directory name used for the profile-adjacent derived cache before its
-#: rename to :data:`~researcher_profiles.utils.paths.CACHE_DIRNAME`
-#: (``.cache/``). A manifest entry still pointing under this name is not
-#: really dangling: the file is on disk, just under the old directory.
-_LEGACY_CACHE_DIRNAME = "cache"
-
-
 def _split_legacy_cache_stale(
     root: Path, stale: list[str], report: ProfileValidationReport
 ) -> list[str]:
     """Pull pre-rename-cache-dir entries out of ``stale``, reporting them.
 
-    ``build_manifest`` only ever looks for the derived sqlite cache under
-    :data:`CACHE_DIRNAME` (``.cache/``), so a manifest recorded before that
-    rename names the file under the old, un-dotted ``cache/`` directory. The
-    fresh manifest has nothing at that path, and generic drift then reads it
-    as "no file" even though the file is right there under the old name.
+    Without this, generic drift would report a file still sitting under the
+    retired un-dotted ``cache/`` directory as missing.
 
     Returns the remaining ``stale`` entries, for the caller to report as
     ordinary drift.
     """
-    legacy_prefix = f"{_LEGACY_CACHE_DIRNAME}/"
+    legacy_prefix = f"{LEGACY_CACHE_DIRNAME}/"
     legacy = [
         entry for entry in stale if entry.startswith(legacy_prefix) and (root / entry).is_file()
     ]
@@ -619,17 +634,45 @@ def _split_legacy_cache_stale(
                 keyword="legacy_cache_dirname",
                 message=(
                     f"{len(legacy)} manifest entry(ies) under the retired cache "
-                    f"directory name {_LEGACY_CACHE_DIRNAME!r}: {legacy[:5]}"
+                    f"directory name {LEGACY_CACHE_DIRNAME!r}: {legacy[:5]}"
                 ),
-                found=f"{_LEGACY_CACHE_DIRNAME}/",
+                found=f"{LEGACY_CACHE_DIRNAME}/",
                 expected=f"{CACHE_DIRNAME}/",
                 fix=(
-                    f"move the file(s) from {_LEGACY_CACHE_DIRNAME}/ to {CACHE_DIRNAME}/ "
-                    "and run `rp manifest --write` to regenerate"
+                    f"move the file(s) from {LEGACY_CACHE_DIRNAME}/ to {CACHE_DIRNAME}/ "
+                    "and run `rp manifest --write` (it will show what changes and "
+                    "refuse to drop entries)"
                 ),
             )
         )
     return [entry for entry in stale if entry not in legacy]
+
+
+def is_derived_cache(entry: str) -> bool:
+    """A manifest path for a rebuildable index under ``.cache/`` (``rp index``)."""
+    from .schema.manifest import PUBLISHED_CACHE
+
+    return entry in {f"{CACHE_DIRNAME}/{name}" for name in PUBLISHED_CACHE}
+
+
+def _split_unbuilt_cache(stale: list[str], report: ProfileValidationReport) -> list[str]:
+    """Pull missing derived indexes out of ``stale`` and report them as a warning.
+
+    A fresh clone has no index; that is "not built here yet", not a broken profile.
+    """
+    unbuilt = [entry for entry in stale if is_derived_cache(entry)]
+    if unbuilt:
+        report.warnings.append(
+            Violation(
+                json_pointer="/hasPart",
+                keyword="index_not_built",
+                message=f"derived index not built on this machine: {unbuilt}",
+                found="no file",
+                expected="a built index",
+                fix="run `rp index <profile>` or `rp queue reindex`",
+            )
+        )
+    return [entry for entry in stale if entry not in unbuilt]
 
 
 def _check_manifest_drift(root: Path, profile_doc: dict, report: ProfileValidationReport) -> None:
@@ -641,7 +684,7 @@ def _check_manifest_drift(root: Path, profile_doc: dict, report: ProfileValidati
         report.cross_artifact.append(
             Violation(
                 json_pointer="/hasPart",
-                keyword="manifest_drift",
+                keyword="manifest_unlisted",
                 message=(
                     f"{len(drift['missing'])} file(s) on disk not in manifest: "
                     f"{drift['missing'][:5]}"
@@ -651,16 +694,22 @@ def _check_manifest_drift(root: Path, profile_doc: dict, report: ProfileValidati
                 fix="run `rp manifest --write` to regenerate",
             )
         )
-    stale = _split_legacy_cache_stale(root, drift["stale"], report)
+    stale = _split_unbuilt_cache(_split_legacy_cache_stale(root, drift["stale"], report), report)
     if stale:
+        # Distinct from ``manifest_unlisted`` because the fix is opposite: in a
+        # partial copy, regenerating the manifest deletes these entries for good.
         report.cross_artifact.append(
             Violation(
                 json_pointer="/hasPart",
-                keyword="manifest_drift",
+                keyword="manifest_stale",
                 message=f"{len(stale)} manifest entry(ies) with no file: {stale[:5]}",
                 found=f"{len(stale)} dangling entries",
                 expected="every manifest entry has a file on disk",
-                fix="run `rp manifest --write` to regenerate",
+                fix=(
+                    "either restore the files, or if this copy is intentionally "
+                    "partial, do not run `rp manifest --write` here: it would drop "
+                    "these entries"
+                ),
             )
         )
 
@@ -714,7 +763,9 @@ def _check_content_urls(root: Path, profile_doc: dict, report: ProfileValidation
                         fix="change to a relative path within the profile directory",
                     )
                 )
-            elif not (root / url).exists():
+            elif not (root / url).exists() and not is_derived_cache(url):
+                # A missing derived index is reported once, as a warning, by
+                # the drift check.
                 report.cross_artifact.append(
                     Violation(
                         json_pointer=f"/{section_name}/contentUrl",
@@ -727,12 +778,38 @@ def _check_content_urls(root: Path, profile_doc: dict, report: ProfileValidation
                 )
 
 
+def _check_derivation(profile_doc: dict, report: ProfileValidationReport) -> None:
+    """Every ``derivedFrom`` reference resolves, and the graph has no cycle.
+
+    An unresolved reference is a restriction the projection silently failed
+    to apply. Wraps :func:`~researcher_profiles.privacy.derivation_errors`.
+    """
+    from .privacy import derivation_errors
+    from .schema import ProfileDocument
+
+    try:
+        document = ProfileDocument.model_validate(profile_doc)
+    except PydanticValidationError:
+        # Already reported as schema violations.
+        return
+    for message in derivation_errors(document):
+        report.cross_artifact.append(
+            Violation(
+                json_pointer="/hasPart/derivedFrom",
+                keyword="derivation",
+                message=message,
+                found="an unresolvable derivedFrom graph",
+                expected="every derivedFrom names a manifest paperId or role, acyclically",
+                fix="point derivedFrom at an artifact in this manifest, or remove it",
+            )
+        )
+
+
 def _check_cross_artifact(root: Path, report: ProfileValidationReport) -> None:
     """Check cross-artifact invariants and append violations to the report.
 
-    Each check depends only on the documents it names, so an artifact that
-    cannot be read skips its own checks and no others. Aborting the whole pass
-    on one unreadable file would report a corrupt profile as clean.
+    An unreadable artifact skips only its own checks, so one bad file never
+    makes a corrupt profile read as clean.
     """
     profile_doc = _load_json_doc(root / "profile.jsonld")
     papers_doc = _load_json_doc(root / "sources" / "papers.jsonld")
@@ -740,8 +817,60 @@ def _check_cross_artifact(root: Path, report: ProfileValidationReport) -> None:
     if profile_doc is not None:
         _check_manifest_drift(root, profile_doc, report)
         _check_content_urls(root, profile_doc, report)
+        _check_derivation(profile_doc, report)
     if papers_doc is not None:
         _check_orphan_summaries(root, _paper_ids(papers_doc), report)
+
+
+# ---------------------------------------------------------------------------
+# Served links (a profile over HTTP)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class DeadLink:
+    """A manifest entry whose ``contentUrl`` does not resolve where it is served."""
+
+    content_url: str
+    href: str
+    status: int
+
+
+def served_dead_links(get: Any, profile_url: str) -> list[DeadLink]:
+    """Every manifest link that does not answer 200, read the way a consumer reads it.
+
+    Base conformance rule 6 (every ``hasPart`` / ``subjectOf`` entry resolves
+    at its ``contentUrl``), checked over HTTP rather than on disk. ``profile_url``
+    is turned into the document URL by the spec's consumer rule: used as is if it
+    ends in ``/profile.jsonld``, else ``/profile.jsonld`` is appended. Each
+    relative ``contentUrl`` is resolved against the URL the document was served
+    from (after redirects), as RFC 3986 says, and fetched.
+
+    ``get`` is any callable taking an absolute URL and returning a response with
+    ``status_code``, ``json()`` and optionally ``url`` (``httpx`` or a
+    ``TestClient``). Templated (``{...}``) and absolute contentUrls are skipped,
+    as the browser validator skips them.
+    """
+    from urllib.parse import urljoin
+
+    doc_url = profile_url
+    if not doc_url.endswith("/profile.jsonld"):
+        doc_url = doc_url.rstrip("/") + "/profile.jsonld"
+    r = get(doc_url)
+    if r.status_code != 200:
+        return [DeadLink("profile.jsonld", doc_url, r.status_code)]
+    served_at = str(getattr(r, "url", None) or doc_url)
+    doc = r.json()
+    dead: list[DeadLink] = []
+    for entry in list(doc.get("hasPart") or []) + list(doc.get("subjectOf") or []):
+        rel = entry.get("contentUrl") or ""
+        if not rel or "{" in rel or rel.startswith(("http://", "https://")):
+            continue
+        href = urljoin(served_at, rel)
+        status = get(href).status_code
+        if status != 200:
+            dead.append(DeadLink(rel, href, status))
+    return dead
 
 
 # ---------------------------------------------------------------------------
@@ -816,6 +945,15 @@ def report_to_dict(report: ProfileValidationReport) -> dict[str, Any]:
             }
             for v in report.cross_artifact
         ],
+        "warnings": [
+            {
+                "json_pointer": v.json_pointer,
+                "keyword": v.keyword,
+                "message": v.message,
+                "fix": v.fix,
+            }
+            for v in report.warnings
+        ],
     }
 
 
@@ -856,11 +994,19 @@ def format_text_report(report: ProfileValidationReport) -> str:
         for v in report.cross_artifact:
             lines.append(f"    {v.json_pointer}: {v.keyword} - {v.message}")
 
+    if report.warnings:
+        lines.append("")
+        lines.append("  Warnings:")
+        for v in report.warnings:
+            lines.append(f"    {v.json_pointer}: {v.keyword} - {v.message}")
+            lines.append(f"      fix: {v.fix}")
+
     return "\n".join(lines)
 
 
 __all__ = [
     "RETIRED_TERMS",
+    "is_derived_cache",
     "ArtifactResult",
     "ProfileValidationReport",
     "TermUse",

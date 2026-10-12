@@ -416,7 +416,7 @@ than emit it as deep.
 
 The supplied inputs are named in the build sidecar
 (`.build/<slug>/meta/build_state.json`, under `inputs`): `grants_source`
-(`grants-data` / `manual` / `none`), `reporter_supplement` (an opt-in public NIH
+(`mygrants` / `manual` / `none`), `reporter_supplement` (an opt-in public NIH
 RePORTER supplement), `cv_source` (a path or URL), and `websites` (a list of
 URLs). They are build *inputs*, not published record. What the profile publishes
 is the *result*: a CV manifest entry, web pages, a grants collection.

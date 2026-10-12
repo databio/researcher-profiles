@@ -1,23 +1,12 @@
 /**
- * Route model + path helpers for the browser (history) router.
- *
- * The app runs on react-router v7's `createBrowserRouter` (see `routes.tsx`).
- * This module holds the small, framework-agnostic pieces the rest of the app
- * depends on:
- *
- *   - the `Route` discriminated union, so call sites say
- *     `navigate({ page: "profile", url })` instead of hand-writing paths;
- *   - `buildPath(route)` -> the real, history-API path for a route (used by
- *     `<Link to>` and by `navigate`);
- *   - `navigate(route)` -> imperative navigation from non-hook code, delegating
- *     to the live router registered by `routes.tsx` (`registerRouter`);
- *   - `pageOf(pathname)` -> the inverse of `buildPath`, so the shell can derive
- *     the active page from `useLocation().pathname` for nav highlighting.
+ * Route model and path helpers, free of React imports. The router itself is
+ * built in `routes.tsx`.
  *
  * Routes (browser paths, not hash fragments):
  *   /                              - landing (hero + what-this-is)
  *   /browse                        - sources + inventory
- *   /p?u=<encodeURIComponent(url)> - profile detail
+ *   /p?u=<encodeURIComponent(url)> - profile detail (`u` may also be a slug,
+ *                                    see `resolveProfileRef`)
  *   /clusters                      - cluster view
  *   /topics                        - topic view
  *   /search?q=...                  - free-text search
@@ -30,6 +19,8 @@
  *
  * ?list=<url> on first load bootstraps a source before routing settles.
  */
+
+import type { ProfileCard, SourceEntry } from "./store";
 
 export type Route =
   | { page: "home" }
@@ -68,9 +59,7 @@ export function buildPath(route: Route): string {
 
 /**
  * The active page for a (basename-relative) pathname, for nav highlighting.
- * `null` for anything this app does not serve, including a host application's
- * own routes, so mounting this app under a host never lights up the wrong
- * nav link.
+ * `null` for anything this app does not serve, including a host's own routes.
  */
 export function pageOf(pathname: string): Route["page"] | null {
   const p = pathname.replace(/\/+$/, "") || "/";
@@ -109,20 +98,16 @@ interface NavigableRouter {
 let liveRouter: NavigableRouter | null = null;
 
 /**
- * Register the live router instance. Called once by `routes.tsx` after the
- * browser router is created. Kept here (rather than importing the router into
- * this module) so `router.ts` stays free of any React/route-table imports and
- * there is no import cycle: `routes.tsx` -> components -> `router.ts`.
+ * Register the live router instance. Registration, rather than an import,
+ * avoids the cycle `routes.tsx` -> components -> `router.ts`.
  */
 export function registerRouter(router: NavigableRouter): void {
   liveRouter = router;
 }
 
 /**
- * Imperative navigation for event handlers in plain functions. Prefer
- * `<Link to={buildPath(route)}>` in JSX; use this where a click handler must
- * navigate. No-ops (with a warning) before the router is registered, which
- * cannot happen at runtime once the app has mounted.
+ * Imperative navigation for plain functions. Prefer `<Link to={buildPath(route)}>`
+ * in JSX. Warns and does nothing before the router is registered.
  */
 export function navigate(route: Route): void {
   const to = buildPath(route);
@@ -137,4 +122,41 @@ export function navigate(route: Route): void {
 export function getBootstrapList(): string | null {
   const params = new URLSearchParams(window.location.search);
   return params.get("list");
+}
+
+// ---------------------------------------------------------------------------
+// The profile route's `u`: a profile URL or a slug
+// ---------------------------------------------------------------------------
+
+export type ProfileRef =
+  | { kind: "url"; url: string }
+  | { kind: "pending" }
+  | { kind: "error"; message: string };
+
+/**
+ * What `/p?u=<ref>` points at. An http(s) URL is used as is. Anything else is a
+ * slug looked up among loaded cards, the host's home source first. `pending`
+ * while a source still loads; an `error` result, never a throw, otherwise.
+ */
+export function resolveProfileRef(
+  ref: string,
+  cards: ProfileCard[],
+  sources: SourceEntry[],
+): ProfileRef {
+  const text = ref.trim();
+  if (!text) return { kind: "error", message: "No profile given. Open a profile from Browse, or pass ?u=<profile URL>." };
+  if (/^[a-z][a-z0-9+.-]*:/i.test(text)) {
+    return /^https?:\/\//i.test(text)
+      ? { kind: "url", url: text }
+      : { kind: "error", message: `Only http(s) profile URLs are supported, got "${text}".` };
+  }
+  const home = new Set(sources.filter((s) => s.builtin).map((s) => s.url));
+  const matches = cards.filter((c) => c.slug === text);
+  const match = matches.find((c) => home.has(c.sourceUrl)) ?? matches[0];
+  if (match) return { kind: "url", url: match.base };
+  if (sources.some((s) => s.status === "loading")) return { kind: "pending" };
+  return {
+    kind: "error",
+    message: `"${text}" is not a profile URL, and no loaded source has a profile with that slug.`,
+  };
 }

@@ -31,11 +31,6 @@ SKIP_PREFIXES = ("http://", "https://", "mailto:", "tel:", "data:", "#", "//")
 #: Fenced code blocks: links inside them are illustrative, not navigable.
 FENCE = re.compile(r"^\s*(```|~~~)")
 
-#: Templates whose links are relative to where their OUTPUT lands, not to
-#: themselves. Checking them in place reports false breaks; the rendered file
-#: is tracked and gets checked like any other document.
-SKIP_FILES = frozenset({"rp-sdk/scripts/python-api-directives.md"})
-
 
 def strip_code_fences(text: str) -> str:
     out, in_fence = [], False
@@ -83,7 +78,7 @@ def main() -> int:
 
     problems: list[str] = []
     for md in tracked_markdown(root):
-        if md.exists() and md.relative_to(root).as_posix() not in SKIP_FILES:
+        if md.exists():
             problems += broken_links(md, root)
 
     if problems:

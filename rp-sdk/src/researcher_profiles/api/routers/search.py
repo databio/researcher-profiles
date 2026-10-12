@@ -1,10 +1,4 @@
-"""Retrieval over the corpus, gated by the ``match`` consumer scope.
-
-One profile's index (``search``, ``rank-works``), the whole store
-(``match``, ``match/reviewers``), and the derived graph (``coi/check``,
-``graph/neighbors``). ``match_reviewers`` straddles ranking and the graph
-and stays here with the rest of its scope.
-"""
+"""Retrieval over one profile, the whole store, and the graph; all gated by the ``match`` scope."""
 
 import logging
 import os
@@ -13,7 +7,7 @@ from typing import Any
 import pydantic
 from fastapi import Depends, HTTPException, Request
 
-from ...errors import CapabilityUnavailableError
+from ...errors import Invalid, NotFound
 from ...models.api import (
     CoiBlock,
     CoiCheckRequest,
@@ -37,24 +31,23 @@ from ...models.api import (
     SearchRequest,
     SearchResponse,
 )
-from ...privacy import (
-    ViewerTier,
+from ...privacy import CHUNK_SOURCE_TYPE_ROLE
+from ...schema import ResearchInterest
+from .. import _semantic
+from .._limits import (
+    MATCH_K,
+    MATCH_PREFILTER_CAP,
+    RANK_K,
+    RANK_MAX_PAGES_CAP,
+    SEARCH_K,
+    TOPK_CHUNKS_CAP,
+    clamp,
+    truncate_words,
 )
-from ...store import ProfileStore
-from .._projection import (
-    _allowed_source_types,
-    _gate_profile,
-    _ranked_visible,
-    _visible_hits,
-)
-from ..deps import (
-    get_graph,
-    get_match_store,
-    get_profile,
-    get_store,
-    get_viewer_tier,
-    require_scope,
-)
+from .._projection import _allowed_source_types, _visible_hits
+from ..caller import Caller
+from ..deps import get_graph, get_match_store, get_read_caller, get_service, require_scope
+from ..service import Service
 from ._routers import router
 
 logger = logging.getLogger(__name__)
@@ -68,54 +61,44 @@ logger = logging.getLogger(__name__)
 def search_profile(
     slug: str,
     body: SearchRequest,
-    request: Request,
-    store: ProfileStore = Depends(get_store),
-    viewer: ViewerTier = Depends(get_viewer_tier),
+    service: Service = Depends(get_service),
+    caller: Caller = Depends(get_read_caller),
 ) -> SearchResponse:
     """Semantic search over one profile, projected through the viewer's tier.
 
-    The served index (``.cache/embeddings.sqlite``) holds ``cv``, ``web``, and
-    ``grant`` chunks as well as public ones, and this route returns chunk text
-    verbatim, so without the projection a ``match``-scoped consumer reads a
-    researcher's CV back a chunk at a time. Restricted source types are
-    excluded from the query and dropped from the result: the first keeps them
-    from crowding out results the caller may actually have, the second is the
-    guarantee.
+    Chunks this viewer may not read are excluded from the query (so they do
+    not crowd out allowed hits) and dropped from the result (the guarantee).
+    ``k`` defaults to 5 and is clamped to 20 (``k_applied``); hit text is cut to
+    ``SNIPPET_CHARS`` (``truncated``).
     """
-    prof = get_profile(slug, store)
-    _gate_profile(request, prof, viewer, slug)
+    store, prof, viewer = service.read(caller, slug)
+    k = clamp(body.k, *SEARCH_K)
     allowed = _allowed_source_types(prof.metadata, viewer)
-    query_filter = dict(body.filter or {})
-    if allowed is not None:
-        requested = query_filter.get("source_type")
-        if requested is not None:
-            requested = [requested] if isinstance(requested, str) else list(requested)
-            allowed = [st for st in allowed if st in requested]
-        query_filter["source_type"] = allowed
-    try:
-        hits = prof.index.search(body.query, k=body.k, filter=query_filter or None)
-    except CapabilityUnavailableError as e:
-        # This backend has no local index at all (a SQL store, a static host).
-        # 501, not 500: the server is fine, this operation is not offered here.
-        raise HTTPException(status_code=501, detail=str(e)) from e
-    # Boundary: the whole embedding stack behind one profile's index.
-    except Exception as e:
-        logger.exception("search failed for %s", slug)
-        raise HTTPException(status_code=500, detail=f"search failed: {e}") from e
+    types = list(allowed) if allowed is not None else list(CHUNK_SOURCE_TYPE_ROLE)
+    requested = (body.filter or {}).get("source_type")
+    if requested is not None:
+        requested = [requested] if isinstance(requested, str) else list(requested)
+        types = [st for st in types if st in requested]
+    hits, note = _semantic.search_chunks(store, prof, viewer, body.query, source_types=types, k=k)
+    if hits is None:
+        # No vectors or no encoder: unavailable, not a server fault.
+        raise HTTPException(status_code=503, detail=note or "semantic search unavailable")
     visible = _visible_hits(prof.metadata, viewer, hits)
-    return SearchResponse(hits=[_search_hit_payload(h) for h in visible])
+    return SearchResponse(hits=[_search_hit_payload(h) for h in visible], k_applied=k)
 
 
 def _search_hit_payload(h: Any) -> SearchHitPayload:
+    text, truncated = truncate_words(h.text or "")
     return SearchHitPayload(
-        text=h.text,
+        text=text,
+        truncated=truncated,
         source_type=h.source_type,
         source_id=h.source_id,
         chunk_index=h.chunk_index,
         section=h.section,
         cosine=h.cosine,
         score=h.score,
-        meta=h.meta or {},
+        meta=getattr(h, "meta", None) or {},
     )
 
 
@@ -126,27 +109,33 @@ def _search_hit_payload(h: Any) -> SearchHitPayload:
 )
 def match_profiles(
     body: MatchRequest,
-    request: Request,
     vstore=Depends(get_match_store),
-    viewer: ViewerTier = Depends(get_viewer_tier),
+    service: Service = Depends(get_service),
+    caller: Caller = Depends(get_read_caller),
 ) -> MatchResponse:
     """Rank all indexed profiles against a free-text query.
 
-    Runs the store's centroid prefilter + chunk re-rank + optional MMR
-    diversification (``store.match.rank``) and returns each match's
-    slug, name, ORCID, score, and evidence. Chunk-level evidence is included
-    only when ``include_chunks=True``.
+    Chunk-level evidence is included only when ``include_chunks=True``.
+    ``interests`` add a topic component (see ``MatchManager.rank``).
     """
+    try:
+        interests = [ResearchInterest.model_validate(i) for i in body.interests]
+    except pydantic.ValidationError as e:
+        raise HTTPException(status_code=422, detail=f"invalid interests: {e}") from e
+    k, prefilter, topk_chunks = _match_caps(body)
     try:
         matches = vstore.match.rank(
             body.query,
-            k=body.k,
-            prefilter=body.prefilter,
+            k=k,
+            prefilter=prefilter,
             require_topics=body.require_topics,
             diversify=body.diversify,
             lambda_=body.lambda_,
-            topk_chunks=body.topk_chunks,
+            topk_chunks=topk_chunks,
             normalize=body.normalize,
+            interests=interests or None,
+            topic_alpha=body.topic_alpha,
+            viewer=lambda prof: service.visible(caller, prof)[1],
         )
     # Boundary: the whole store-wide match stack.
     except Exception as e:
@@ -156,11 +145,8 @@ def match_profiles(
     results: list[MatchResult] = []
     for m in matches:
         prof = m.profile
-        # A profile this viewer may not see is not a match they may have: a
-        # ranking that names it has disclosed it exists. A ranked object that
-        # cannot answer for its own tier is skipped rather than trusted: an
-        # unanswerable privacy question is a "no".
-        allowed, per_profile = _ranked_visible(request, prof, viewer)
+        # Naming a hidden profile in a ranking would disclose that it exists.
+        allowed, _ = service.visible(caller, prof)
         if not allowed:
             continue
         ev = m.evidence
@@ -168,15 +154,10 @@ def match_profiles(
             centroid_score=ev.centroid_score,
             top_papers=list(ev.top_papers or []),
             overlapping_topics=list(ev.overlapping_topics or []),
+            matched_topics=list(ev.matched_topics or []),
+            # Already filtered to this caller's tier by ``rank(viewer=...)``.
             top_chunks=(
-                [
-                    _search_hit_payload(h)
-                    for h in _visible_hits(
-                        getattr(prof, "metadata", None), per_profile, ev.top_chunks
-                    )
-                ]
-                if body.include_chunks
-                else []
+                [_search_hit_payload(h) for h in ev.top_chunks] if body.include_chunks else []
             ),
         )
         orcid = prof.orcid
@@ -209,17 +190,24 @@ def match_profiles(
         matches=results,
         ranked_profiles=ranked_profiles,
         total_profiles=total_profiles,
+        k_applied=k,
+        prefilter_applied=prefilter,
     )
+
+
+def _match_caps(body) -> tuple[int, int, int]:
+    """``(k, prefilter, topk_chunks)`` clamped to their caps (``_limits``)."""
+    k = clamp(body.k, *MATCH_K)
+    prefilter = clamp(body.prefilter, max(k, 10), MATCH_PREFILTER_CAP)
+    topk_chunks = clamp(body.topk_chunks, 5, TOPK_CHUNKS_CAP)
+    return k, prefilter, topk_chunks
 
 
 def _match_ranked_floor() -> float:
     """The minimum ``ranked/total`` fraction ``/match`` must clear, or fail loud.
 
-    ``RESEARCHER_PROFILES_MATCH_MIN_RANKED_FRACTION``, default 0 (disabled).
-    Most deployments legitimately see fewer ranked results than the corpus
-    size (privacy-tier filtering, low relevance), so this is off unless an
-    operator opts in; a wrong default would turn ordinary narrow results into
-    false 503s.
+    ``RESEARCHER_PROFILES_MATCH_MIN_RANKED_FRACTION``, default 0 (off), since
+    tier filtering and low relevance make narrow results normal.
     """
     raw = os.environ.get("RESEARCHER_PROFILES_MATCH_MIN_RANKED_FRACTION")
     if not raw:
@@ -231,14 +219,7 @@ def _match_ranked_floor() -> float:
         return 0.0
 
 
-# ---------------------------------------------------------------------------
-# Profile graph: COI check, COI-filtered reviewer match, neighborhood
-#
-# These compose over /match (store.match.rank), never replace it: reviewer matching
-# is /match then a COI drop; team/collab discovery is a neighborhood frontier
-# then /match ranking. All are privileged (reviewer/COI queries), so they gate on
-# the ``match`` consumer scope, like the rest of the heavy read surface.
-# ---------------------------------------------------------------------------
+# Profile graph: COI check, COI-filtered reviewer match, neighborhood.
 
 
 def _coi_reason_payload(r) -> CoiReasonPayload:
@@ -295,18 +276,14 @@ def coi_check(
 ) -> CoiCheckResponse:
     """Conflict-of-interest check between a candidate and a set of authors.
 
-    Given a manuscript's ``author_set`` and a ``candidate`` reviewer (slug or
-    rid), return every COI edge between them (coauthorship within ``years``,
-    a shared institution, or an advising relationship) with the reason and the
-    parameters that fired. An author passed with only a name + affiliation (no
-    profile) still trips a same-institution COI.
+    Returns every COI edge (coauthorship within ``years``, shared institution,
+    advising) with its reason. An author given only by name and affiliation
+    still trips a same-institution COI.
     """
     try:
         candidate_key = graph.resolve(body.candidate)
     except (KeyError, ValueError) as e:
-        raise HTTPException(
-            status_code=404, detail=f"candidate {body.candidate!r} not found in graph"
-        ) from e
+        raise NotFound(f"candidate {body.candidate!r} not found in graph") from e
     author_descriptors = [a.model_dump() for a in body.author_set]
     verdict = graph.coi_edges(author_descriptors, candidate_key, years=body.years)
     node = graph.get_node(candidate_key)
@@ -325,30 +302,28 @@ def coi_check(
 )
 def match_reviewers(
     body: ReviewerMatchRequest,
-    request: Request,
     vstore=Depends(get_match_store),
     graph=Depends(get_graph),
-    viewer: ViewerTier = Depends(get_viewer_tier),
+    service: Service = Depends(get_service),
+    caller: Caller = Depends(get_read_caller),
 ) -> ReviewerMatchResponse:
     """Expertise ranking (``/match``) composed with a COI filter.
 
-    Ranks all indexed profiles against ``query`` exactly as ``/match`` does, then
-    for each candidate runs the same COI logic as ``/coi/check`` against
-    ``author_set`` within ``years``. ``mode='drop'`` (default) removes conflicted
-    candidates; ``mode='annotate'`` keeps them and attaches a ``coi`` block. This
-    is a thin wrapper over ``store.match.rank``: the ranking code is not forked.
+    ``mode='drop'`` (default) removes conflicted candidates; ``mode='annotate'``
+    keeps them with a ``coi`` block.
     """
     if body.mode not in ("drop", "annotate"):
-        raise HTTPException(status_code=400, detail="mode must be 'drop' or 'annotate'")
+        raise Invalid("mode must be 'drop' or 'annotate'")
+    k, prefilter, topk_chunks = _match_caps(body)
     try:
         matches = vstore.match.rank(
             body.query,
-            k=body.k,
-            prefilter=body.prefilter,
+            k=k,
+            prefilter=prefilter,
             require_topics=body.require_topics,
             diversify=body.diversify,
             lambda_=body.lambda_,
-            topk_chunks=body.topk_chunks,
+            topk_chunks=topk_chunks,
             normalize=body.normalize,
         )
     # Boundary: the match stack plus the derived graph.
@@ -360,7 +335,7 @@ def match_reviewers(
     results: list[ReviewerMatchResult] = []
     for m in matches:
         prof = m.profile
-        allowed, per_profile = _ranked_visible(request, prof, viewer)
+        allowed, per_profile = service.visible(caller, prof)
         if not allowed:
             continue
         ev = m.evidence
@@ -368,15 +343,9 @@ def match_reviewers(
             centroid_score=ev.centroid_score,
             top_papers=list(ev.top_papers or []),
             overlapping_topics=list(ev.overlapping_topics or []),
+            # Already filtered to this caller's tier by ``rank(viewer=...)``.
             top_chunks=(
-                [
-                    _search_hit_payload(h)
-                    for h in _visible_hits(
-                        getattr(prof, "metadata", None), per_profile, ev.top_chunks
-                    )
-                ]
-                if body.include_chunks
-                else []
+                [_search_hit_payload(h) for h in ev.top_chunks] if body.include_chunks else []
             ),
         )
         orcid = prof.orcid
@@ -406,7 +375,7 @@ def match_reviewers(
                 coi=coi_block if body.mode == "annotate" else None,
             )
         )
-    return ReviewerMatchResponse(matches=results)
+    return ReviewerMatchResponse(matches=results, k_applied=k, prefilter_applied=prefilter)
 
 
 @router.get(
@@ -423,8 +392,7 @@ def graph_neighbors(
 
     Query params: ``types`` (comma-separated edge types, default all),
     ``since_year`` (recency filter on coauthor edges), ``max_hops`` (1 for direct
-    neighbors, 2 for the reachable-but-not-direct frontier). Backs team assembly
-    and the collaboration recommender.
+    neighbors, 2 for the reachable-but-not-direct frontier).
     """
     from ...graph import EdgeType
 
@@ -435,26 +403,26 @@ def graph_neighbors(
         try:
             types = [EdgeType(t.strip()) for t in raw_types.split(",") if t.strip()]
         except ValueError as e:
-            raise HTTPException(status_code=400, detail=f"invalid edge type: {e}") from e
+            raise Invalid(f"invalid edge type: {e}") from e
     since_year = None
     if params.get("since_year"):
         try:
             since_year = int(params["since_year"])
         except ValueError as e:
-            raise HTTPException(status_code=400, detail="since_year must be an integer") from e
+            raise Invalid("since_year must be an integer") from e
     max_hops = 1
     if params.get("max_hops"):
         try:
             max_hops = int(params["max_hops"])
         except ValueError as e:
-            raise HTTPException(status_code=400, detail="max_hops must be an integer") from e
+            raise Invalid("max_hops must be an integer") from e
     if max_hops < 1 or max_hops > 3:
-        raise HTTPException(status_code=400, detail="max_hops must be between 1 and 3")
+        raise Invalid("max_hops must be between 1 and 3")
 
     try:
         center_key = graph.resolve(ref)
     except (KeyError, ValueError) as e:
-        raise HTTPException(status_code=404, detail=f"ref {ref!r} not found in graph") from e
+        raise NotFound(f"ref {ref!r} not found in graph") from e
     center = graph.get_node(center_key)
     neighbors = graph.neighbors(center_key, types=types, since_year=since_year, max_hops=max_hops)
     return NeighborsResponse(
@@ -470,22 +438,48 @@ def graph_neighbors(
     )
 
 
-def _rank_works():
-    """The ranking function, lazily resolved so a core-only install 503s.
+def _matching_unavailable() -> HTTPException:
+    """The 503 for a store or install that cannot rank works."""
+    return HTTPException(
+        status_code=503,
+        detail="matching unavailable: install the 'vectors' and 'st' extras and build indexes",
+    )
 
-    Same degradation contract as ``get_match_store``: the embeddings tier is an
-    extra, and its absence is "matching unavailable", never a 500.
-    """
+
+def _rank_works():
+    """The ranking function, lazily resolved so a core-only install gets a 503, not a 500."""
     try:
         from ...embeddings.rank import rank_works_against_profile
     except ImportError as e:
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "matching unavailable: install the 'vectors' and 'st' extras and build indexes"
-            ),
-        ) from e
+        raise _matching_unavailable() from e
     return rank_works_against_profile
+
+
+def _profile_vector_and_backend(store, ref: str):
+    """``(centroid, backend)`` for one profile from the store, or the 503.
+
+    From the store, not the profile directory, so it works on every store
+    (filesystem and SQL). The backend is the store's query backend: the space
+    its centroids live in.
+    """
+    from ...embeddings.backends import MissingEmbeddingBackendError
+    from ...embeddings.cache import IndexNotBuiltError
+    from ...errors import CapabilityUnavailableError
+
+    try:
+        vec = store.centroid(ref)
+        backend = store.centroids.backend
+    except (
+        IndexNotBuiltError,
+        CapabilityUnavailableError,
+        MissingEmbeddingBackendError,
+        KeyError,
+        AttributeError,
+    ) as e:
+        raise _matching_unavailable() from e
+    if vec is None:
+        raise _matching_unavailable()
+    return vec, backend
 
 
 @router.post(
@@ -496,9 +490,8 @@ def _rank_works():
 def rank_works_for_profile(
     slug: str,
     body: RankWorksRequest,
-    request: Request,
-    store: ProfileStore = Depends(get_store),
-    viewer: ViewerTier = Depends(get_viewer_tier),
+    service: Service = Depends(get_service),
+    caller: Caller = Depends(get_read_caller),
 ) -> RankWorksResponse:
     """Rank candidate works against one profile: the inverse of ``/match``.
 
@@ -507,9 +500,12 @@ def rank_works_for_profile(
     ``since`` (default: the last 30 days) from OpenAlex, seeded by the
     profile's topics and citation neighborhood, then ranks them.
     """
-    prof = get_profile(slug, store)
-    _gate_profile(request, prof, viewer, slug)
+    store, prof, _viewer = service.read(caller, slug)
     rank = _rank_works()
+    # Before any OpenAlex fetch: a profile with no vector fails fast, budget unspent.
+    profile_vector, backend = _profile_vector_and_backend(store, slug)
+    k = clamp(body.k, *RANK_K)
+    max_pages = clamp(body.max_pages, 5, RANK_MAX_PAGES_CAP)
 
     if body.works:
         from ...schema import PaperRecord
@@ -517,55 +513,56 @@ def rank_works_for_profile(
         try:
             works = [PaperRecord.model_validate(w) for w in body.works]
         except pydantic.ValidationError as e:
-            raise HTTPException(status_code=400, detail=f"invalid candidate work: {e}") from e
+            raise Invalid(f"invalid candidate work: {e}") from e
     elif body.use_openalex:
+        import os
         from datetime import date, timedelta
 
         from ...openalex import fetch_new_works, profile_query_terms
+        from ...openalex_client import OpenAlexBudgetError, OpenAlexClient
 
         since = body.since or (date.today() - timedelta(days=30)).isoformat()
         terms = profile_query_terms(prof)
         if not terms["topics"] and not terms["seed_work_ids"]:
-            raise HTTPException(
-                status_code=400,
-                detail="profile has no subfields/interests or OpenAlex work ids to query with",
-            )
+            raise Invalid("profile has no subfields/interests or OpenAlex work ids to query with")
         try:
-            works = fetch_new_works(
-                since=since,
-                topics=terms["topics"],
-                seed_work_ids=terms["seed_work_ids"],
-                mailto=body.mailto,
-                max_pages=body.max_pages,
-            )
-        # Boundary: a live third-party HTTP API.
+            with OpenAlexClient(os.environ.get("OPENALEX_API_KEY")) as client:
+                works = fetch_new_works(
+                    client,
+                    since=since,
+                    topics=terms["topics"],
+                    seed_work_ids=terms["seed_work_ids"],
+                    max_pages=max_pages,
+                )
+        except OpenAlexBudgetError as e:
+            raise HTTPException(
+                status_code=503,
+                detail="OpenAlex's daily limit is used up; try again after midnight UTC",
+            ) from e
+        # Boundary: a live third-party HTTP API. The detail is a fixed string:
+        # an exception message can carry the request URL.
         except Exception as e:
             logger.exception("OpenAlex fetch failed for %s", slug)
-            raise HTTPException(status_code=502, detail=f"OpenAlex fetch failed: {e}") from e
+            raise HTTPException(status_code=502, detail="OpenAlex fetch failed") from e
     else:
-        raise HTTPException(
-            status_code=400, detail="supply candidate works or set use_openalex=true"
-        )
+        raise Invalid("supply candidate works or set use_openalex=true")
 
-    from ...embeddings.cache import IndexNotBuiltError
+    from ...embeddings.backends import MissingEmbeddingBackendError
+    from ...errors import CapabilityUnavailableError
 
     try:
         ranked = rank(
             prof,
             works,
-            k=body.k,
-            kind=body.kind,
+            k=k,
+            profile_vector=profile_vector,
+            backend=backend,
             diversify=body.diversify,
             lambda_=body.lambda_,
             threshold=body.threshold,
         )
-    except IndexNotBuiltError as e:
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "matching unavailable: install the 'vectors' and 'st' extras and build indexes"
-            ),
-        ) from e
+    except (CapabilityUnavailableError, MissingEmbeddingBackendError) as e:
+        raise _matching_unavailable() from e
     # Boundary: the whole ranking stack.
     except Exception as e:
         logger.exception("work ranking failed for %s", slug)
@@ -575,4 +572,6 @@ def rank_works_for_profile(
         slug=store.resolve_slug(slug),
         rid=getattr(prof, "rid", None),
         works=[RankedWorkPayload(**r.to_dict()) for r in ranked],
+        k_applied=k,
+        max_pages_applied=max_pages,
     )

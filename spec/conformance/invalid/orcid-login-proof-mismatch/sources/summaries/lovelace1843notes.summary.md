@@ -1,0 +1,1 @@
+Lovelace's Notes explain how Babbage's Analytical Engine could be programmed with punched cards to compute Bernoulli numbers, in what is often read as the first published algorithm. The Notes argue that the engine operates on general symbols and so could, in principle, act on anything reducible to symbolic relations, not numbers alone.

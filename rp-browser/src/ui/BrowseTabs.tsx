@@ -1,14 +1,6 @@
 /**
- * Secondary navigation for the Browse area. The four ways of looking at the
- * same registry (the flat inventory, clusters, topics, and free-text search)
- * are one activity, so they live behind one top-nav entry ("Browse") and
- * switch here rather than sitting in the top navbar next to unrelated things
- * (Validate, About, My profile).
- *
- * Clusters / Topics / Search only appear when there is data to analyze and the
- * visitor can read it (`showAnalysis`); Inventory is always present.
- *
- * Styled with the shared `nav-link` component + utilities; no CSS module.
+ * Secondary navigation for the Browse area: inventory, clusters, topics, and
+ * search. The last three show only when `showAnalysis` is true.
  */
 import { Link } from "react-router";
 import { buildPath, type Route } from "../router";

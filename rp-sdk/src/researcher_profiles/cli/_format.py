@@ -1,9 +1,4 @@
-"""The format verbs: ``schema``, ``validate``, ``manifest``, ``where``, ``mint-local-id``.
-
-These are the commands that answer questions about the on-disk contract rather
-than about a corpus or a server: what the schema is, whether a directory passes
-it, what its manifest says, and which directory an identifier resolves to.
-"""
+"""The format verbs: ``schema``, ``validate``, ``manifest``, ``where``, ``mint-local-id``."""
 
 import argparse
 import json
@@ -84,6 +79,15 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
         action="store_true",
         help="Exit non-zero when the recorded manifest disagrees with the directory",
     )
+    p_manifest.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "Write even though the new manifest drops entries. Without it, "
+            "--write refuses: dropping entries is what a partial copy of a "
+            "profile looks like."
+        ),
+    )
     add_json(p_manifest, "Emit the manifest entries and any drift as JSON")
 
     p_where = add_subcommand(
@@ -145,8 +149,6 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         print(json.dumps(report_to_dict(report), indent=2))
     else:
         print(format_text_report(report))
-    # Exit 0 on ok, EXIT_VALIDATION on a conformance violation: the code
-    # that says "the artifact is wrong" rather than "the command was".
     # Undeclared-terms-only is a pass with a warning banner.
     if report.ok:
         has_undeclared = any(a.undeclared for a in report.artifacts)
@@ -188,18 +190,7 @@ def _cmd_manifest(args: argparse.Namespace) -> int:
         return EXIT_USAGE
     root = prof.require_directory("rp manifest")
     if args.write:
-        parts = prof.build_manifest(write=True)
-        target = root / "profile.jsonld"
-        if args.as_json:
-            print(
-                json.dumps(
-                    {"profile": str(root), "written": len(parts), "path": str(target)},
-                    indent=2,
-                )
-            )
-        else:
-            print(f"wrote {len(parts)} manifest entries to {target}")
-        return EXIT_OK
+        return _write_manifest(args, prof, root)
     entries = prof.manifest()
     drift = manifest_drift(root, entries)
     if args.as_json:
@@ -220,9 +211,7 @@ def _cmd_manifest(args: argparse.Namespace) -> int:
         for entry in entries:
             print(f"{entry.role or '-':<16} {entry.content_url}")
     if drift["missing"] or drift["stale"]:
-        # Always to stderr, including under --json: drift is a diagnosis
-        # about the document, and mixing it into stdout would break `rp
-        # manifest --json | jq`.
+        # Always stderr, so `rp manifest --json | jq` keeps working.
         for m in drift["missing"]:
             print(f"MISSING from manifest: {m}", file=sys.stderr)
         for m in drift["stale"]:
@@ -239,6 +228,69 @@ def _cmd_manifest(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+#: Longest list of dropped manifest entries printed before summarizing.
+_DROPPED_CAP = 20
+
+
+def _write_manifest(args: argparse.Namespace, prof, root: Path) -> int:
+    """``rp manifest --write``: diff first, then write, and never drop silently.
+
+    Regenerating from a directory walk is only safe when the directory is the
+    whole profile; in a partial copy it drops entries that the next push then
+    deletes. So dropped entries are named, and a drop needs ``--force``.
+    """
+    before = [e.content_url for e in prof.manifest()]
+    parts, subjects = prof.storage.build_manifest()
+    after = [e.content_url for e in (*parts, *subjects)]
+    dropped = sorted(set(before) - set(after))
+    added = sorted(set(after) - set(before))
+    target = root / "profile.jsonld"
+
+    if dropped and not args.force:
+        print(
+            f"manifest: {len(before)} -> {len(after)} entries (+{len(added)} -{len(dropped)})",
+            file=sys.stderr,
+        )
+        for rel in dropped[:_DROPPED_CAP]:
+            print(f"  would drop: {rel}", file=sys.stderr)
+        if len(dropped) > _DROPPED_CAP:
+            print(f"  ... and {len(dropped) - _DROPPED_CAP} more", file=sys.stderr)
+        print(
+            f"refusing to drop {len(dropped)} entries; re-run with --force if these "
+            "files are really gone.\n"
+            "A manifest that shrinks usually means this is a partial copy of the "
+            "profile:\n"
+            f"  rp where {args.profile}   # which root is in force",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+
+    written = prof.build_manifest(write=True)
+    if args.as_json:
+        print(
+            json.dumps(
+                {
+                    "profile": str(root),
+                    "written": len(written),
+                    "path": str(target),
+                    "before": before,
+                    "after": after,
+                    "added": added,
+                    "dropped": dropped,
+                },
+                indent=2,
+            )
+        )
+    else:
+        print(f"manifest: {len(before)} -> {len(after)} entries (+{len(added)} -{len(dropped)})")
+        for rel in dropped[:_DROPPED_CAP]:
+            print(f"  dropped: {rel}")
+        if len(dropped) > _DROPPED_CAP:
+            print(f"  ... and {len(dropped) - _DROPPED_CAP} more")
+        print(f"wrote {len(written)} manifest entries to {target}")
+    return EXIT_OK
+
+
 def _cmd_where(args: argparse.Namespace) -> int:
     """Print the profile directory a rid or slug resolves to."""
     from ..store import ProfileNotFoundError
@@ -252,13 +304,8 @@ def _cmd_where(args: argparse.Namespace) -> int:
             raise FileNotFoundError(f"profiles root does not exist: {root_path}")
         path = FilesystemProfileStore(root_path).path_for(args.ref)
     except (FileNotFoundError, ProfileNotFoundError, ValueError) as e:
-        # Name the ref, the directory searched, and how that directory was
-        # chosen. "not found: KeyError('x')" is true and useless: the usual
-        # cause is a cache resolved from a setting the caller forgot about.
         lines = [f"rp where: nothing matches {args.ref!r}"]
-        # A bare KeyError stringifies to the ref already printed above; only the
-        # cases that say something new (a missing root, an unreadable
-        # index) earn a second line.
+        # A bare KeyError just repeats the ref; only new detail gets a line.
         detail = str(e).strip("'\"")
         if detail and detail != args.ref:
             lines.append(f"  {e}")

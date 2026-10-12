@@ -1,10 +1,5 @@
-"""The derived profile graph: edge derivation, COI, and the query endpoints.
-
-The suite builds a small fixture store with a KNOWN structure and asserts the
-graph derives the expected edges, that the COI endpoints read them correctly,
-and that the store round-trips (rebuild is idempotent; a push invalidates it).
-No embedding index is needed, since the graph is pure bibliometric transformation.
-These tests stub the registry where ranking would otherwise require real vectors.
+"""The derived profile graph: edge derivation, COI, and the query endpoints, on a fixture store with a known shape.
+No embedding index is needed; the registry is stubbed where ranking would require vectors.
 """
 
 from pathlib import Path
@@ -96,31 +91,22 @@ def _make_store(root: Path) -> Path:
 
 
 @pytest.fixture
-def store(tmp_path: Path) -> Path:
+def graph_root(tmp_path: Path) -> Path:
     return _make_store(tmp_path / "profiles")
 
 
 @pytest.fixture
-def graph(store: Path) -> ProfileGraph:
-    profs = [ResearcherProfile.from_files(store / s) for s in ("alice", "bob", "carol")]
+def graph(graph_root: Path) -> ProfileGraph:
+    profs = [ResearcherProfile.from_files(graph_root / s) for s in ("alice", "bob", "carol")]
     return build_graph(profs)
 
 
-# ---------------------------------------------------------------------------
-# Name folding
-# ---------------------------------------------------------------------------
-
-
-def test_normalize_name_folds_initials_and_order():
-    assert normalize_name("Jane A. Doe") == "doe j"
-    assert normalize_name("J. Doe") == "doe j"
-    assert normalize_name("Doe, Jane") == "doe j"
-    assert normalize_name("  ") is None
-
-
-# ---------------------------------------------------------------------------
-# 1. Edge derivation
-# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "raw, folded",
+    [("Jane A. Doe", "doe j"), ("J. Doe", "doe j"), ("Doe, Jane", "doe j"), ("  ", None)],
+)
+def test_normalize_name_folds_initials_and_order(raw, folded):
+    assert normalize_name(raw) == folded
 
 
 def _edge(graph: ProfileGraph, a: str, b: str, type_: EdgeType):
@@ -130,29 +116,24 @@ def _edge(graph: ProfileGraph, a: str, b: str, type_: EdgeType):
     return None
 
 
-def test_coauthor_edge_from_shared_doi(graph: ProfileGraph):
-    e = _edge(graph, ALICE, BOB, EdgeType.coauthor)
-    assert e is not None
-    assert e.paper_count == 1  # one shared work, not double-counted per corpus
-    assert e.first_year == 2022
-    assert e.last_year == 2022
-    assert e.confidence == "high"  # cross-corpus join, no name matching
-
-
-def test_shared_institution_edge_from_affiliation_id(graph: ProfileGraph):
-    e = _edge(graph, ALICE, BOB, EdgeType.shared_institution)
-    assert e is not None
-    assert e.confidence == "high"  # ROR-keyed
-    assert e.institution == "Shared University"
-
-
-def test_advised_edge_from_training_advisor(graph: ProfileGraph):
-    e = _edge(graph, ALICE, BOB, EdgeType.advised)
-    assert e is not None
-    assert e.directed is True
-    assert e.src == ALICE  # advisee -> advisor
-    assert e.dst == BOB
-    assert e.training_kind == "degree"
+@pytest.mark.parametrize(
+    "type_, expected",
+    [
+        (  # one shared work, not double-counted per corpus; cross-corpus join, no name matching
+            EdgeType.coauthor,
+            {"paper_count": 1, "first_year": 2022, "last_year": 2022, "confidence": "high"},
+        ),
+        (EdgeType.shared_institution, {"confidence": "high", "institution": "Shared University"}),
+        (  # advisee -> advisor
+            EdgeType.advised,
+            {"directed": True, "src": ALICE, "dst": BOB, "training_kind": "degree"},
+        ),
+    ],
+    ids=["coauthor", "shared-institution", "advised"],
+)
+def test_alice_bob_edge(graph: ProfileGraph, type_, expected):
+    e = _edge(graph, ALICE, BOB, type_)
+    assert {k: getattr(e, k) for k in expected} == expected
 
 
 def test_unrelated_profile_has_no_edges(graph: ProfileGraph):
@@ -160,87 +141,57 @@ def test_unrelated_profile_has_no_edges(graph: ProfileGraph):
     assert graph.edges_between([BOB], CAROL) == []
 
 
-# ---------------------------------------------------------------------------
-# 5. Rebuild idempotence + store round-trip
-# ---------------------------------------------------------------------------
-
-
-def test_graph_rebuilds_identically_from_store(store: Path):
-    profs = [ResearcherProfile.from_files(store / s) for s in ("alice", "bob", "carol")]
+def test_graph_rebuilds_identically_from_store(graph_root: Path):
+    profs = [ResearcherProfile.from_files(graph_root / s) for s in ("alice", "bob", "carol")]
     g = build_graph(profs)
-    g.save(store)
-    assert graph_db_path(store).is_file()
+    g.save(graph_root)
+    assert graph_db_path(graph_root).is_file()
 
-    nodes, edges, meta = load_graph(store)
-    reloaded = ProfileGraph(nodes=nodes, edges=edges, meta=meta, root=store)
+    nodes, edges, meta = load_graph(graph_root)
+    reloaded = ProfileGraph(nodes=nodes, edges=edges, meta=meta, root=graph_root)
     assert {e.key() for e in g.edges} == {e.key() for e in reloaded.edges}
     assert {n.key for n in g.nodes} == {n.key for n in reloaded.nodes}
 
     # Delete + rebuild yields the same edge set (no dependence on prior state).
-    graph_db_path(store).unlink()
-    rebuilt = ProfileGraph.from_store(store)
+    graph_db_path(graph_root).unlink()
+    rebuilt = ProfileGraph.from_store(graph_root)
     assert {e.key() for e in g.edges} == {e.key() for e in rebuilt.edges}
 
 
-# ---------------------------------------------------------------------------
-# 2 + 4. COI check endpoint
-# ---------------------------------------------------------------------------
-
-
-def test_coi_check_returns_known_coauthor(make_api_client, store: Path):
-    client = make_api_client(store)
-    r = client.post(
-        "/api/v1/coi/check",
-        json={"author_set": [{"rid": ALICE, "name": "Alice Alpha"}], "candidate": "bob"},
-    )
-    assert r.status_code == 200, r.text
+@pytest.mark.parametrize(
+    "author_set, candidate, status, has_coi, reason",
+    [
+        (
+            [{"rid": ALICE, "name": "Alice Alpha"}],
+            "bob",
+            200,
+            True,
+            {"type": "coauthor", "last_year": 2022, "in_window": True},
+        ),
+        ([{"rid": CAROL, "name": "Carol Gamma"}], "bob", 200, False, None),
+        (  # a manuscript author with no profile still trips a same-institution COI
+            [{"name": "Nobody Unknown", "affiliation_id": ROR}],
+            "alice",
+            200,
+            True,
+            {"type": "shared_institution"},
+        ),
+        ([{"rid": ALICE}], "no-such-slug", 404, None, None),
+    ],
+    ids=["coauthor", "clear", "external-by-affiliation", "unknown-candidate"],
+)
+def test_coi_check(
+    make_api_client, graph_root: Path, author_set, candidate, status, has_coi, reason
+):
+    client = make_api_client(graph_root)
+    r = client.post("/api/v1/coi/check", json={"author_set": author_set, "candidate": candidate})
+    assert r.status_code == status, r.text
+    if status != 200:
+        return
     body = r.json()
-    assert body["has_coi"] is True
-    kinds = {reason["type"] for reason in body["reasons"]}
-    assert "coauthor" in kinds
-    coauthor = next(x for x in body["reasons"] if x["type"] == "coauthor")
-    assert coauthor["last_year"] == 2022
-    assert coauthor["in_window"] is True
-
-
-def test_coi_check_no_relationship_is_clear(make_api_client, store: Path):
-    client = make_api_client(store)
-    r = client.post(
-        "/api/v1/coi/check",
-        json={"author_set": [{"rid": CAROL, "name": "Carol Gamma"}], "candidate": "bob"},
-    )
-    assert r.status_code == 200, r.text
-    assert r.json()["has_coi"] is False
-
-
-def test_coi_check_external_author_by_affiliation(make_api_client, store: Path):
-    """A manuscript author with no profile still trips a same-institution COI."""
-    client = make_api_client(store)
-    r = client.post(
-        "/api/v1/coi/check",
-        json={
-            "author_set": [{"name": "Nobody Unknown", "affiliation_id": ROR}],
-            "candidate": "alice",
-        },
-    )
-    assert r.status_code == 200, r.text
-    body = r.json()
-    assert body["has_coi"] is True
-    assert any(x["type"] == "shared_institution" for x in body["reasons"])
-
-
-def test_coi_check_unknown_candidate_404(make_api_client, store: Path):
-    client = make_api_client(store)
-    r = client.post(
-        "/api/v1/coi/check",
-        json={"author_set": [{"rid": ALICE}], "candidate": "no-such-slug"},
-    )
-    assert r.status_code == 404
-
-
-# ---------------------------------------------------------------------------
-# 3. COI-filtered reviewer match (registry stubbed, no vectors needed)
-# ---------------------------------------------------------------------------
+    assert body["has_coi"] is has_coi
+    if reason:
+        assert any(reason.items() <= x.items() for x in body["reasons"])
 
 
 class _FakeMatch:
@@ -271,47 +222,37 @@ class _FakeVectorStore:
 
 
 @pytest.fixture
-def reviewer_client(make_api_client, store: Path):
+def reviewer_client(make_api_client, graph_root: Path):
     """An API client whose ranking returns [bob, carol]. Bob is Alice's coauthor."""
     from researcher_profiles.api.deps import get_match_store
 
-    client = make_api_client(store)
-    bob = ResearcherProfile.from_files(store / "bob")
-    carol = ResearcherProfile.from_files(store / "carol")
+    client = make_api_client(graph_root)
+    bob = ResearcherProfile.from_files(graph_root / "bob")
+    carol = ResearcherProfile.from_files(graph_root / "carol")
     fake = _FakeVectorStore([bob, carol])
     client.app.dependency_overrides[get_match_store] = lambda: fake
     return client
 
 
-def test_reviewer_match_drops_conflicted(reviewer_client):
-    r = reviewer_client.post(
-        "/api/v1/match/reviewers",
-        json={"query": "genomics", "author_set": [{"rid": ALICE}], "mode": "drop"},
-    )
-    assert r.status_code == 200, r.text
-    slugs = [m["slug"] for m in r.json()["matches"]]
-    assert "bob" not in slugs  # coauthor of the manuscript author, dropped
-    assert "carol" in slugs  # unconflicted, retained
+def test_reviewer_match_handles_conflicts(reviewer_client):
+    def post(mode):
+        r = reviewer_client.post(
+            "/api/v1/match/reviewers",
+            json={"query": "genomics", "author_set": [{"rid": ALICE}], "mode": mode},
+        )
+        assert r.status_code == 200, r.text
+        return {m["slug"]: m for m in r.json()["matches"]}
+
+    dropped = post("drop")
+    assert "bob" not in dropped  # coauthor of the manuscript author
+    assert "carol" in dropped  # unconflicted, retained
+    annotated = post("annotate")
+    assert annotated["bob"]["coi"]["has_coi"] is True
+    assert annotated["carol"].get("coi") is None
 
 
-def test_reviewer_match_annotate_flags_conflicted(reviewer_client):
-    r = reviewer_client.post(
-        "/api/v1/match/reviewers",
-        json={"query": "genomics", "author_set": [{"rid": ALICE}], "mode": "annotate"},
-    )
-    assert r.status_code == 200, r.text
-    by_slug = {m["slug"]: m for m in r.json()["matches"]}
-    assert by_slug["bob"]["coi"]["has_coi"] is True
-    assert by_slug["carol"].get("coi") is None
-
-
-# ---------------------------------------------------------------------------
-# Neighborhood endpoint
-# ---------------------------------------------------------------------------
-
-
-def test_neighbors_returns_direct_coauthor(make_api_client, store: Path):
-    client = make_api_client(store)
+def test_neighbors_returns_direct_coauthor(make_api_client, graph_root: Path):
+    client = make_api_client(graph_root)
     r = client.get("/api/v1/graph/neighbors/alice", params={"types": "coauthor"})
     assert r.status_code == 200, r.text
     body = r.json()
@@ -321,21 +262,16 @@ def test_neighbors_returns_direct_coauthor(make_api_client, store: Path):
     assert CAROL not in nbr_rids
 
 
-# ---------------------------------------------------------------------------
-# Invalidation: a push drops the graph snapshot and on-disk cache
-# ---------------------------------------------------------------------------
-
-
-def test_push_invalidates_graph(make_api_client, store: Path):
-    client = make_api_client(store)
+def test_push_invalidates_graph(make_api_client, graph_root: Path):
+    client = make_api_client(graph_root)
     # Warm the graph and its on-disk cache.
     r = client.get("/api/v1/graph/neighbors/alice")
     assert r.status_code == 200
-    assert client.app.state.graph is not None
-    assert graph_db_path(store).is_file()
+    assert client.app.state.service.graph is not None
+    assert graph_db_path(graph_root).is_file()
 
-    # A metadata patch funnels through _invalidate_after_write.
+    # A metadata patch funnels through Service.invalidate.
     r = client.patch("/api/v1/profiles/carol/metadata", json={"field": "Genomics"})
     assert r.status_code == 200, r.text
-    assert client.app.state.graph is None
-    assert not graph_db_path(store).is_file()
+    assert client.app.state.service.graph is None
+    assert not graph_db_path(graph_root).is_file()

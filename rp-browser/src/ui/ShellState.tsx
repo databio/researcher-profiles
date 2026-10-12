@@ -1,8 +1,6 @@
 /**
  * One presentational card for a shell-level state (signed out, no access,
- * empty registry, ...). Every state in `selectShellState` renders one
- * instance of this so they share layout, spacing, and tokens instead of
- * each screen inventing its own empty-state markup.
+ * empty registry, ...), shared by every state in `selectShellState`.
  */
 import type { ReactNode } from "react";
 import { Link } from "react-router";

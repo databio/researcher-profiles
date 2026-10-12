@@ -17,18 +17,12 @@ from researcher_profiles.validate import (
     known_terms,
     report_to_dict,
     retired_terms,
-    schema_fingerprint,
     undeclared_terms,
     validate_artifact,
     validate_profile_dir,
 )
 
 from .factories import CONTEXT_IRI, FIXTURE_DIR, MONOREPO_ROOT, write_raw_profile
-
-# --------------------------------------------------------------------------
-# The validator
-# --------------------------------------------------------------------------
-
 
 #: Read-only: this file asserts that the committed fixture bytes still validate.
 JANE_DOE = FIXTURE_DIR / "jane-doe"
@@ -92,46 +86,33 @@ def _validate_doc(tmp_path: Path, doc: dict):
     return validate_artifact(write_raw_profile(tmp_path, doc), "profile_jsonld")
 
 
-def test_validate_artifact_missing_required_field(tmp_path: Path):
-    doc = {k: v for k, v in RAW_MINIMAL.items() if k != "name"}  # no ``name``
+@pytest.mark.parametrize(
+    "doc,keyword,pointer",
+    [
+        ({k: v for k, v in RAW_MINIMAL.items() if k != "name"}, "missing", "name"),
+        ({**RAW_MINIMAL, "conformsTo": "https://example.com/wrong"}, "value_error", "conformsTo"),
+    ],
+    ids=["missing-name", "wrong-conformsTo"],
+)
+def test_validate_artifact_rejects(tmp_path: Path, doc, keyword, pointer):
     result = _validate_doc(tmp_path, doc)
     assert result.ok is False
-    assert any(v.keyword == "missing" and "name" in v.json_pointer for v in result.violations)
+    assert any(v.keyword == keyword and pointer in v.json_pointer for v in result.violations)
 
 
-def test_validate_artifact_wrong_conformsTo(tmp_path: Path):
-    doc = {**RAW_MINIMAL, "conformsTo": "https://example.com/wrong"}
-    result = _validate_doc(tmp_path, doc)
-    assert result.ok is False
-    assert any(
-        "conformsTo" in v.json_pointer or "conformsTo" in v.message for v in result.violations
-    )
-
-
-# --------------------------------------------------------------------------
-# Retired-key detection
-# --------------------------------------------------------------------------
-
-
-def test_retired_terms_flags_the_old_key():
-    doc = {**RAW_MINIMAL, "artifacts": [{"type": "Software", "name": "some-tool"}]}
-    hits = retired_terms(doc)
-    assert {h.term for h in hits} == {"artifacts"}
-    assert hits[0].json_pointer == "/artifacts"
-
-
-def test_retired_terms_ignores_the_replacement_key():
-    doc = {**RAW_MINIMAL, "researchOutputs": [{"type": "Software", "name": "some-tool"}]}
-    assert retired_terms(doc) == []
+@pytest.mark.parametrize(
+    "key,expected_terms,expected_pointers",
+    [("artifacts", {"artifacts"}, ["/artifacts"]), ("researchOutputs", set(), [])],
+    ids=["old-key-flagged", "replacement-ignored"],
+)
+def test_retired_terms(key, expected_terms, expected_pointers):
+    hits = retired_terms({**RAW_MINIMAL, key: [{"type": "Software", "name": "some-tool"}]})
+    assert {h.term for h in hits} == expected_terms
+    assert [h.json_pointer for h in hits] == expected_pointers
 
 
 def test_validate_artifact_fails_on_a_retired_key(tmp_path: Path):
-    """The retired key is a distinct, actionable failure, not a silent pass.
-
-    ``artifacts`` is still a known term overall (``ProfileCollection`` has its
-    own field of that name), so without this check a document using it would
-    validate clean.
-    """
+    """``artifacts`` is still a known term elsewhere, so this check alone catches it."""
     doc = {**RAW_MINIMAL, "artifacts": [{"type": "Software", "name": "some-tool"}]}
     result = _validate_doc(tmp_path, doc)
     assert result.ok is False
@@ -150,27 +131,10 @@ def test_validate_artifact_passes_with_the_replacement_key(tmp_path: Path):
 
 
 @pytest.mark.parametrize(
-    "term, origin",
-    [
-        ("name", "model field"),
-        ("rid", "model field"),
-        ("conformsTo", "model field"),
-        ("hasPart", "model field"),
-        ("sameAs", "context term"),
-        ("datePublished", "context term"),
-    ],
-    ids=[
-        "name-model-field",
-        "rid-model-field",
-        "conformsTo-model-field",
-        "hasPart-model-field",
-        "sameAs-context-term",
-        "datePublished-context-term",
-    ],
+    "term", ["name", "rid", "conformsTo", "hasPart", "sameAs", "datePublished"]
 )
-def test_known_terms_includes(term: str, origin: str):
-    terms = known_terms("profile_jsonld")
-    assert term in terms, f"{term!r} should be a known {origin}"
+def test_known_terms_includes(term: str):
+    assert term in known_terms("profile_jsonld")
 
 
 def test_known_terms_is_scoped_per_schema():
@@ -187,13 +151,25 @@ def test_known_terms_is_scoped_per_schema():
     assert "researchOutputs" in known_terms("profile_jsonld")
 
 
+def test_collaborator_relationship_is_declared():
+    """The spec's ``{name, affiliation, relationship}`` collaborator node is
+    declared vocabulary (a scoped term), not drift. The Python field name
+    ``research_outputs`` is not: on disk the key is ``researchOutputs``."""
+    doc = {
+        "collaborators": [{"name": "Al", "affiliation": "UVA", "relationship": "coauthor"}],
+        "research_outputs": [],
+    }
+    assert [t.term for t in undeclared_terms(doc, "profile_jsonld")] == ["research_outputs"]
+
+
 @pytest.mark.parametrize(
     "extra_fields, expected",
     [
         ({"bogus_field": "surprise"}, {"bogus_field"}),
         ({"rid": "0000-0002-1825-0097"}, set()),
+        ({"provenanceNote": "self-reported via a structured interview"}, set()),
     ],
-    ids=["unknown-field-reported", "known-field-ignored"],
+    ids=["unknown-field-reported", "known-field-ignored", "provenance-note-declared"],
 )
 def test_undeclared_terms_reports_exactly_the_unknown_fields(extra_fields: dict, expected: set):
     doc = {
@@ -203,14 +179,6 @@ def test_undeclared_terms_reports_exactly_the_unknown_fields(extra_fields: dict,
     }
     result = undeclared_terms(doc, "profile_jsonld")
     assert {t.term for t in result} == expected
-
-
-def test_schema_fingerprint_stable():
-    fp1 = schema_fingerprint()
-    fp2 = schema_fingerprint()
-    assert fp1 == fp2
-    assert isinstance(fp1, str)
-    assert len(fp1) == 64  # SHA-256 hex
 
 
 def test_violations_are_deterministic(tmp_path: Path):
@@ -251,7 +219,6 @@ def test_found_truncation_cap(tmp_path: Path):
 def test_report_to_dict_roundtrips():
     report = validate_profile_dir(JANE_DOE)
     d = report_to_dict(report)
-    assert isinstance(d, dict)
     assert d["ok"] is True
     assert "artifacts" in d
     assert "cross_artifact" in d
@@ -259,29 +226,26 @@ def test_report_to_dict_roundtrips():
     json.dumps(d)
 
 
+def _profile_with_part(tmp_path: Path, part: dict) -> Path:
+    profile_dir = tmp_path / "profile"
+    profile_dir.mkdir(parents=True)
+    write_raw_profile(profile_dir, {**RAW_MINIMAL, "hasPart": [part]})
+    return profile_dir
+
+
 def test_validate_profile_dir_cross_artifact_manifest_drift(tmp_path: Path):
     """A manifest entry pointing to a nonexistent file triggers a cross_artifact violation."""
-    profile_dir = tmp_path / "profile"
-    (profile_dir / "sources").mkdir(parents=True)
-
-    # A hasPart entry pointing at a file that is not there: the drift itself.
-    write_raw_profile(
-        profile_dir,
+    profile_dir = _profile_with_part(
+        tmp_path,
         {
-            **RAW_MINIMAL,
-            "hasPart": [
-                {
-                    "@type": "DigitalDocument",
-                    "name": "Ghost file",
-                    "role": "works",
-                    "encodingFormat": "application/ld+json",
-                    "contentUrl": "sources/ghost.jsonld",
-                }
-            ],
+            "@type": "DigitalDocument",
+            "name": "Ghost file",
+            "role": "works",
+            "encodingFormat": "application/ld+json",
+            "contentUrl": "sources/ghost.jsonld",
         },
     )
-
-    # A minimal papers.jsonld so that artifact itself validates.
+    (profile_dir / "sources").mkdir()
     papers_doc = {
         "@context": CONTEXT_IRI,
         "@type": "Collection",
@@ -292,43 +256,30 @@ def test_validate_profile_dir_cross_artifact_manifest_drift(tmp_path: Path):
     (profile_dir / "sources" / "papers.jsonld").write_text(json.dumps(papers_doc), encoding="utf-8")
 
     report = validate_profile_dir(profile_dir)
-    # The ghost contentUrl should produce a cross_artifact violation
-    stale_violations = [
-        v for v in report.cross_artifact if v.keyword in ("manifest_drift", "content_url_missing")
-    ]
-    assert len(stale_violations) >= 1, (
-        f"Expected a cross-artifact violation for the missing file, got: {report.cross_artifact}"
-    )
+    # "A manifest entry with no file" has its own keyword: it wants a different fix
+    # from an unlisted file.
+    stale = [v for v in report.cross_artifact if v.keyword == "manifest_stale"]
+    assert stale, f"Expected a manifest_stale violation, got: {report.cross_artifact}"
+    # It must not advise the destructive fix: regenerating in a partial copy drops entries.
+    assert "would drop these entries" in stale[0].fix
+    # The papers.jsonld the manifest never listed is the OTHER condition, reported separately.
+    unlisted = [v for v in report.cross_artifact if v.keyword == "manifest_unlisted"]
+    assert unlisted, f"Expected a manifest_unlisted violation, got: {report.cross_artifact}"
+    assert "sources/papers.jsonld" in unlisted[0].message
 
 
 def test_validate_profile_dir_flags_legacy_cache_dirname(tmp_path: Path):
-    """A manifest entry under the pre-rename ``cache/`` dir is not "no file".
-
-    ``build_manifest`` only looks under ``.cache/`` (``CACHE_DIRNAME``). A
-    manifest recorded before that rename still names the file under the old,
-    un-dotted ``cache/`` directory. The file is right there on disk, so this
-    must surface as its own named condition, not the generic "no file"
-    ``manifest_drift`` message.
-    """
-    profile_dir = tmp_path / "profile"
-    profile_dir.mkdir(parents=True)
-
-    write_raw_profile(
-        profile_dir,
+    """A manifest entry under the pre-rename ``cache/`` dir is not "no file"."""
+    profile_dir = _profile_with_part(
+        tmp_path,
         {
-            **RAW_MINIMAL,
-            "hasPart": [
-                {
-                    "@type": "DataDownload",
-                    "name": "Embedding index (local sqlite)",
-                    "role": "embedding_index_sqlite",
-                    "encodingFormat": "application/vnd.sqlite3",
-                    "contentUrl": "cache/embeddings.sqlite",
-                }
-            ],
+            "@type": "DataDownload",
+            "name": "Embedding index (local sqlite)",
+            "role": "embedding_index_sqlite",
+            "encodingFormat": "application/vnd.sqlite3",
+            "contentUrl": "cache/embeddings.sqlite",
         },
     )
-
     # The file really is on disk, just under the retired directory name.
     legacy_cache = profile_dir / "cache"
     legacy_cache.mkdir(parents=True)
@@ -341,12 +292,31 @@ def test_validate_profile_dir_flags_legacy_cache_dirname(tmp_path: Path):
         f"Expected one legacy_cache_dirname violation, got: {report.cross_artifact}"
     )
     assert "cache/embeddings.sqlite" in legacy[0].message
-
     # Not double-reported under the generic drift message.
     generic_stale = [
-        v for v in report.cross_artifact if v.keyword == "manifest_drift" and "no file" in v.message
+        v for v in report.cross_artifact if v.keyword == "manifest_stale" and "no file" in v.message
     ]
     assert generic_stale == [], f"Should not also appear as generic drift: {generic_stale}"
+
+
+def test_missing_derived_index_is_a_warning_not_a_failure(tmp_path: Path):
+    """A fresh clone lacks the derived ``.cache/embeddings.sqlite``; that must not fail it."""
+    profile_dir = _profile_with_part(
+        tmp_path,
+        {
+            "@type": "DataDownload",
+            "name": "Embedding index (local sqlite)",
+            "role": "embedding_index_sqlite",
+            "encodingFormat": "application/vnd.sqlite3",
+            "contentUrl": ".cache/embeddings.sqlite",
+        },
+    )
+
+    report = validate_profile_dir(profile_dir)
+
+    assert report.cross_artifact == [], report.cross_artifact
+    assert [v.keyword for v in report.warnings] == ["index_not_built"]
+    assert "rp index" in report.warnings[0].fix
 
 
 @pytest.mark.parametrize(
@@ -358,9 +328,7 @@ def test_validate_profile_dir_flags_legacy_cache_dirname(tmp_path: Path):
     ids=["unquoted_yaml_datetime_is_coerced", "quoted_string_passes_through"],
 )
 def test_summary_file_coerces_datetime_written_at(raw_written_at, parses_as_str, expected):
-    """An unquoted ISO-8601 timestamp in YAML frontmatter parses as a
-    datetime object; SummaryFile must coerce it back to a string. A quoted
-    one is already a string and passes through untouched."""
+    """An unquoted YAML timestamp parses as a datetime; SummaryFile coerces it back to a string."""
     fm = yaml.safe_load(
         "paper_id: paper2020a\n"
         "source_kind: fulltext\n"
@@ -372,14 +340,7 @@ def test_summary_file_coerces_datetime_written_at(raw_written_at, parses_as_str,
     assert sf.written_at == expected
 
 
-# --------------------------------------------------------------------------
-# The shared conformance corpus
-# --------------------------------------------------------------------------
-
-
 CORPUS = MONOREPO_ROOT / "spec" / "conformance"
-
-
 CASES = json.loads((CORPUS / "cases.json").read_text(encoding="utf-8"))["cases"]
 
 
@@ -388,17 +349,9 @@ def _case_id(case: dict) -> str:
 
 
 class TestConformanceCorpus:
-    """Run the CLI validator over the shared conformance corpus.
+    """Run the CLI validator over the shared conformance corpus (``spec/conformance/``).
 
-    The corpus (``spec/conformance/``) is the single set of fixtures that both
-    validators, this Python CLI (:func:`validate_profile_dir`) and the explorer's
-    ``runValidation`` (see ``rp-browser/tests/conformance.test.ts``), run over.
-    Each case's expected verdict lives in ``cases.json``. This test asserts the CLI
-    half; the vitest harness asserts the explorer half against the same fixtures.
-
-    Together they make validator divergence impossible to ship unnoticed: a change
-    that makes one validator accept something the corpus says is invalid (or reject
-    something it says is valid) fails CI.
+    The explorer's twin is ``rp-browser/tests/conformance.test.ts``; divergence fails CI.
     """
 
     @pytest.mark.parametrize("case", CASES, ids=[_case_id(c) for c in CASES])

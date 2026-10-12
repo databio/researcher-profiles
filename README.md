@@ -7,9 +7,9 @@ between tools.
 
 A Researcher Profile (RP) captures a person's papers, expertise, funding, and
 career history in far more depth than a publication list. Privacy is built into
-the format. Every part of a profile carries a tier (`public`, `internal`, or
-`restricted`) set by the author, and the sharing API enforces it, so a public
-profile never exposes its internal or restricted parts.
+the format. Every part of a profile carries a tier (`public`, `limited`, or
+`private`) set by the author, and the sharing API enforces it, so a public
+profile never exposes its limited or private parts.
 
 The case driving it is AI. An agent can read a profile and understand what a
 researcher knows and has done at a depth that is otherwise slow and expensive to

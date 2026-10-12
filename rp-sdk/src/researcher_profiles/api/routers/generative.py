@@ -1,14 +1,12 @@
-"""The persona endpoints, gated by the ``persona`` consumer scope.
+"""The persona endpoints (LLM answers in one profile's voice), gated by the ``persona`` scope.
 
-``ask``, ``review``, ``innovate`` and ``riff`` all put a question to an LLM in
-the voice of one profile, and all four degrade the same way when no persona is
-available.
+All four answer 409 when no persona is available.
 """
 
 import logging
 from typing import Any
 
-from fastapi import Depends, HTTPException, Request
+from fastapi import Depends, HTTPException
 
 from ...models.api import (
     AskRequest,
@@ -22,26 +20,17 @@ from ...models.api import (
     RiffRequest,
 )
 from ...models.results import GenerativeParseError, PersonaUnavailableError
-from ...privacy import (
-    ViewerTier,
-)
-from ...store import ProfileStore
-from .._projection import (
-    _allowed_source_types,
-    _gate_profile,
-)
-from ..deps import (
-    get_profile,
-    get_store,
-    get_viewer_tier,
-    require_scope,
-)
+from .._limits import PERSONA_K_CAP, clamp
+from .._projection import _allowed_source_types
+from ..caller import Caller
+from ..deps import get_read_caller, get_service, require_scope
+from ..service import Service
 from ._routers import router
 
 logger = logging.getLogger(__name__)
 
 
-def _llm_response(text_obj: Any) -> LLMTextResponse:
+def _llm_response(text_obj: Any, k_applied: int) -> LLMTextResponse:
     from ...models.api import CitationRefPayload
 
     cits = []
@@ -67,6 +56,7 @@ def _llm_response(text_obj: Any) -> LLMTextResponse:
         refused=bool(getattr(text_obj, "refused", False)),
         refusal_reason=getattr(text_obj, "refusal_reason", None),
         grounded=bool(getattr(text_obj, "grounded", True)),
+        k_applied=k_applied,
     )
 
 
@@ -78,16 +68,15 @@ def _llm_response(text_obj: Any) -> LLMTextResponse:
 def ask_profile(
     slug: str,
     body: AskRequest,
-    request: Request,
-    store: ProfileStore = Depends(get_store),
-    viewer: ViewerTier = Depends(get_viewer_tier),
+    service: Service = Depends(get_service),
+    caller: Caller = Depends(get_read_caller),
 ) -> LLMTextResponse:
-    prof = get_profile(slug, store)
-    _gate_profile(request, prof, viewer, slug)
+    _store, prof, viewer = service.read(caller, slug)
+    k = clamp(body.k, 5, PERSONA_K_CAP)
     try:
         resp = prof.persona.ask(
             body.question,
-            k=body.k,
+            k=k,
             source_types=_allowed_source_types(prof.metadata, viewer),
             model=body.model,
             strict_corpus=body.strict_corpus,
@@ -100,7 +89,7 @@ def ask_profile(
     except Exception as e:
         logger.exception("ask failed for %s", slug)
         raise HTTPException(status_code=500, detail=f"ask failed: {e}") from e
-    return _llm_response(resp)
+    return _llm_response(resp, k)
 
 
 @router.post(
@@ -111,18 +100,17 @@ def ask_profile(
 def review_profile(
     slug: str,
     body: ReviewRequest,
-    request: Request,
-    store: ProfileStore = Depends(get_store),
-    viewer: ViewerTier = Depends(get_viewer_tier),
+    service: Service = Depends(get_service),
+    caller: Caller = Depends(get_read_caller),
 ) -> LLMTextResponse:
-    prof = get_profile(slug, store)
-    _gate_profile(request, prof, viewer, slug)
+    _store, prof, viewer = service.read(caller, slug)
+    k = clamp(body.k, 5, PERSONA_K_CAP)
     try:
         resp = prof.persona.review(
             body.material,
             source_types=_allowed_source_types(prof.metadata, viewer),
             focus=body.focus,
-            k=body.k,
+            k=k,
             model=body.model,
             strict_corpus=body.strict_corpus,
             refusal_threshold=body.refusal_threshold,
@@ -133,7 +121,7 @@ def review_profile(
     except Exception as e:
         logger.exception("review failed for %s", slug)
         raise HTTPException(status_code=500, detail=f"review failed: {e}") from e
-    return _llm_response(resp)
+    return _llm_response(resp, k)
 
 
 @router.post(
@@ -144,18 +132,17 @@ def review_profile(
 def innovate_profile(
     slug: str,
     body: InnovateRequest,
-    request: Request,
-    store: ProfileStore = Depends(get_store),
-    viewer: ViewerTier = Depends(get_viewer_tier),
+    service: Service = Depends(get_service),
+    caller: Caller = Depends(get_read_caller),
 ) -> IdeaList:
-    prof = get_profile(slug, store)
-    _gate_profile(request, prof, viewer, slug)
+    _store, prof, viewer = service.read(caller, slug)
+    k = clamp(body.k, 12, PERSONA_K_CAP)
     try:
         ideas = prof.persona.innovate(
             body.topic,
             n=body.n,
             source_types=_allowed_source_types(prof.metadata, viewer),
-            k=body.k,
+            k=k,
             model=body.model,
             temperature=body.temperature,
         )
@@ -176,7 +163,8 @@ def innovate_profile(
                 related_works=list(i.related_works or []),
             )
             for i in ideas
-        ]
+        ],
+        k_applied=k,
     )
 
 
@@ -188,18 +176,17 @@ def innovate_profile(
 def riff_profile(
     slug: str,
     body: RiffRequest,
-    request: Request,
-    store: ProfileStore = Depends(get_store),
-    viewer: ViewerTier = Depends(get_viewer_tier),
+    service: Service = Depends(get_service),
+    caller: Caller = Depends(get_read_caller),
 ) -> RiffList:
-    prof = get_profile(slug, store)
-    _gate_profile(request, prof, viewer, slug)
+    _store, prof, viewer = service.read(caller, slug)
+    k = clamp(body.k, 4, PERSONA_K_CAP)
     try:
         riffs = prof.persona.riff(
             body.seed,
             n=body.n,
             source_types=_allowed_source_types(prof.metadata, viewer),
-            k=body.k,
+            k=k,
             model=body.model,
             temperature=body.temperature,
         )
@@ -212,11 +199,6 @@ def riff_profile(
         logger.exception("riff failed for %s", slug)
         raise HTTPException(status_code=500, detail=f"riff failed: {e}") from e
     return RiffList(
-        items=[RiffPayload(angle=r.angle, text=r.text, related_work=r.related_work) for r in riffs]
+        items=[RiffPayload(angle=r.angle, text=r.text, related_work=r.related_work) for r in riffs],
+        k_applied=k,
     )
-
-
-# Streaming upgrade path (deferred):
-# - Add /api/v1/profiles/{slug}/ask/stream returning text/event-stream
-#   via sse-starlette EventSourceResponse, and a matching async generator
-#   on the client.

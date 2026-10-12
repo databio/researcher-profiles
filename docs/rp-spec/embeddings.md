@@ -15,7 +15,7 @@ Vector search over HTTP means reading the entire vector set. SQLite is
 optimized for random row access, which is the wrong pattern here. Flat blobs
 are one contiguous read per model.
 
-`.cache/embeddings.sqlite` is a derived local index at tier `restricted`.
+`.cache/embeddings.sqlite` is a derived local index at tier `private`.
 The servable form lives in `embeddings/`.
 
 ---
@@ -104,12 +104,21 @@ The file does not contain the chunk text; fetch the source document to display a
 
 ## 6. Privacy
 
-Chunk tiers follow the derivation rule. A chunk from a `restricted` source is
-itself `restricted` and MUST NOT appear in a public blob. `cv`, `web`, and
-`grant` chunks resolve to `restricted` by their role default and are dropped
-from a public blob accordingly.
+Chunk tiers follow the derivation rule. A chunk's tier is the most
+restrictive of the profile default, the role default for its source type, and
+the effective tier of the source artifact it was cut from (so a tier set on
+one file, a section tier such as `soul`, and `derivedFrom` inheritance all
+apply). A chunk whose source artifact is unknown is `private`. A chunk from a
+`private` source is itself `private` and MUST NOT appear in a public blob.
+`cv`, `web`, and `grant` chunks resolve to `private` by their role default and
+are dropped from a public blob accordingly.
 
-Collection centroids MAY be computed over all chunks (including restricted)
+The same rule governs every use of a chunk at serve time, not only the blob: a
+chunk the caller may not read MUST NOT be returned, and MUST NOT contribute to
+a score or to evidence shown to that caller (for example the chunk half of a
+`/match` score and its `top_papers`).
+
+Collection centroids MAY be computed over all chunks (including private)
 because a single averaged vector cannot reconstruct individual inputs.
 
 ---

@@ -1,9 +1,4 @@
-"""Whole-profile upload and download, gated by the ``push`` consumer scope.
-
-``PUT /profiles/{slug}`` accepts either a JSON document or a tarball, and
-``GET /profiles/{slug}/archive`` hands back a tier-filtered copy of the
-directory.
-"""
+"""Whole-profile upload (``push`` scope) and tier-filtered archive download."""
 
 import hashlib
 import json
@@ -14,12 +9,10 @@ from pathlib import Path
 from fastapi import Depends, HTTPException, Request, Response
 from pydantic import ValidationError
 
-from ...errors import ProfileWriteError
+from ...errors import Invalid, NotFound, ProfileWriteError
 from ...models.api import (
+    CapabilitiesResponse,
     PushResponse,
-)
-from ...privacy import (
-    ViewerTier,
 )
 from ...schema import (
     ProfileDocument,
@@ -27,26 +20,40 @@ from ...schema import (
     validate_ref,
 )
 from ...store import ProfileStore
-from .._projection import (
-    _gate_profile,
-    invalidate_after_write,
-)
-from ..deps import (
-    get_profile,
-    get_store,
-    get_viewer_tier,
-    require_scope,
-)
+from ..caller import Caller
+from ..deps import get_read_caller, get_service, get_store, require_scope
+from ..service import Service
 from ..upload import (
     DEFAULT_MAX_UPLOAD_BYTES,
+    PUSH_MODES,
     SLUG_RE,
     UploadError,
     build_viewer_archive,
     ingest_archive,
 )
-from ._routers import router
+from ._routers import public_router, router
 
 logger = logging.getLogger(__name__)
+
+
+#: Push behaviours advertised at ``GET /api/v1/capabilities``. ``manifest_splice``:
+#: a kept file keeps its manifest entry, so a manifest that drops entries cannot
+#: delete artifacts the server holds.
+PUSH_FEATURES = ["manifest_splice"]
+
+
+@public_router.get("/capabilities", response_model=CapabilitiesResponse)
+def capabilities() -> CapabilitiesResponse:
+    """What this server accepts, for a client to check before it writes.
+
+    Unauthenticated on purpose: it says nothing about any profile. A 404 means a
+    server without this route.
+    """
+    return CapabilitiesResponse(
+        version="v1",
+        push_modes=list(PUSH_MODES),
+        features=list(PUSH_FEATURES),
+    )
 
 
 @router.put(
@@ -61,20 +68,12 @@ async def put_profile(
 ) -> PushResponse:
     """Upload (create or replace) a profile.
 
-    Accepts two content types on the same canonical URL:
+    * ``application/json``: a ``profile.jsonld`` body, giving a document-only
+      profile.
+    * any other content type: a gzipped tarball of the profile directory with
+      ``profile.jsonld`` at the root.
 
-    * ``application/json``: a JSON body conforming to ``profile.jsonld``.
-      Creates a document-only profile (identity + expertise); enrichment
-      (papers, embeddings) is added later by a push or a build. This is the
-      backend write path for services that own identity.
-
-    * tarball (any other content type): a gzipped tar archive of one
-      profile directory's contents with ``profile.jsonld`` at the tar root.
-      The archive is validated, staged, and committed into the store.
-
-    Both paths invalidate the profile cache entry and the registry snapshot
-    so the pushed profile is immediately visible to ``/profiles`` and
-    ``/match`` (when it carries a built embedding index).
+    The pushed profile is visible immediately.
     """
     if not SLUG_RE.match(slug):
         raise HTTPException(
@@ -82,12 +81,9 @@ async def put_profile(
             detail=f"invalid slug {slug!r} (expected ^[a-z0-9][a-z0-9-]*$)",
         )
 
-    # Dispatch on content type: JSON or tarball
     ctype = request.headers.get("content-type", "").split(";")[0].strip().lower()
     if ctype == "application/json":
         return await _put_profile_json(slug, request, store)
-
-    # Tarball path (the original behavior)
     return await _put_profile_tarball(slug, request, store)
 
 
@@ -103,11 +99,7 @@ async def _put_profile_json(
     request: Request,
     store: ProfileStore,
 ) -> PushResponse:
-    """Handle JSON upsert of a profile document.
-
-    Parses the body as a ProfileDocument, optionally mints a local:rid if
-    ``mintLocalRid=true`` is passed in the body or ``?mint=local`` in the
-    query, then calls ``store.put_document``.
+    """JSON upsert. Mints a ``local:`` rid on ``mintLocalRid=true`` or ``?mint=local``.
 
     Supports optimistic concurrency via ``If-Match: <content_hash>``.
     """
@@ -119,7 +111,6 @@ async def _put_profile_json(
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="body must be a JSON object")
 
-    # Handle local:rid minting
     mint_query = request.query_params.get("mint", "").lower()
     mint_body = body.pop("mintLocalRid", False)
     should_mint = mint_body is True or mint_query == "local"
@@ -147,7 +138,6 @@ async def _put_profile_json(
             detail="cannot mint: document already carries a rid",
         )
 
-    # Parse and validate the document
     try:
         document = ProfileDocument.model_validate(body)
     except ValidationError as e:
@@ -155,7 +145,6 @@ async def _put_profile_json(
 
     _push_gate(request, slug, document.rid)
 
-    # Optimistic concurrency: If-Match header
     if_match = request.headers.get("if-match")
     if if_match:
         if store.exists(slug):
@@ -166,14 +155,13 @@ async def _put_profile_json(
                     detail="content hash mismatch (concurrent edit)",
                     headers={"X-RP-Content-Hash": current_hash},
                 )
-        # If the profile doesn't exist, If-Match is irrelevant (create)
 
     try:
         prof = store.put_document(slug, document)
     except ProfileWriteError as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
 
-    invalidate_after_write(request, store, slug)
+    get_service(request).invalidate(slug)
 
     logger.info("profile %s JSON upsert", slug)
     return PushResponse(
@@ -190,11 +178,7 @@ async def _put_profile_tarball(
     request: Request,
     store: ProfileStore,
 ) -> PushResponse:
-    """Handle tarball upload of a profile directory.
-
-    The original PUT path: a gzipped tar archive of the profile directory's
-    contents with ``profile.jsonld`` at the tar root.
-    """
+    """Tarball upload of a profile directory."""
     max_bytes = getattr(request.app.state, "max_upload_bytes", DEFAULT_MAX_UPLOAD_BYTES)
     declared = request.headers.get("content-length")
     if declared and declared.isdigit() and int(declared) > max_bytes:
@@ -205,6 +189,13 @@ async def _put_profile_tarball(
     if not data:
         raise HTTPException(status_code=400, detail="empty request body")
 
+    # ``?mode=``: what happens to the live files the archive does not carry.
+    mode = request.query_params.get("mode", "replace")
+    if mode not in PUSH_MODES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"invalid mode {mode!r} (expected one of {', '.join(PUSH_MODES)})",
+        )
     try:
         result = ingest_archive(
             store,
@@ -212,15 +203,16 @@ async def _put_profile_tarball(
             data,
             include_fulltext=bool(getattr(request.app.state, "accept_fulltext", False)),
             gate=lambda rid: _push_gate(request, slug, rid),
+            mode=mode,
         )
     except UploadError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+    except ProfileWriteError as e:
+        # Includes RetiredRidError: an archive whose rid or slug a merge retired.
+        raise HTTPException(status_code=409, detail=str(e)) from e
 
-    # Invalidate: cached profile object, in-memory registry snapshot, and the
-    # on-disk registry caches. Extraction restores archive mtimes, which can
-    # predate centroids.npz, so the mtime check alone cannot be trusted to
-    # notice a replaced profile.
-    invalidate_after_write(request, store, slug)
+    # Explicit: extracted mtimes can predate centroids.npz, so mtime checks miss it.
+    get_service(request).invalidate(slug)
 
     logger.info("profile %s pushed (%d bytes)", slug, len(data))
     return PushResponse(
@@ -229,62 +221,51 @@ async def _put_profile_tarball(
         name=result.name,
         level=result.level,
         indexed=result.indexed,
+        kept=result.kept,
+        spliced=result.spliced,
+        manifest_counts=result.manifest_counts,
+        mode=result.mode,
     )
 
 
-# Gated on `read`, not `push`, even though this route lives in the push router
-# as the inverse of PUT. Nothing here writes, and WHAT a caller gets is decided
-# by `get_viewer_tier` + `build_viewer_archive`, not by the scope -- so gating a
-# download on a write scope checked the wrong axis and forced every read-only
-# consumer (a CI job pulling profile context, say) to hold push rights.
+# Gated on `read`, not `push`: nothing here writes, and the viewer tier decides
+# what a caller gets.
 @router.get(
     "/profiles/{slug}/archive",
     dependencies=[Depends(require_scope("read"))],
 )
 def get_profile_archive(
     slug: str,
-    request: Request,
-    store: ProfileStore = Depends(get_store),
-    viewer: ViewerTier = Depends(get_viewer_tier),
+    service: Service = Depends(get_service),
+    caller: Caller = Depends(get_read_caller),
 ) -> Response:
     """Download a profile as a gzipped tarball: the inverse of ``PUT``.
 
-    Projected through the caller's viewer tier by
-    :func:`~researcher_profiles.api.upload.build_viewer_archive`, so the tarball
-    contains exactly what the JSON read surface would serve the same caller: no
-    artifact above their tier, and never the hard floors (copyrighted full
-    text, ``.cache/``, ``.keys/``). The former ``serve_fulltext`` operator flag
-    is gone: the full-text floor is the schema's job now, in one place.
-
-    The response carries ``X-RP-Archive-Digest`` (md5 of the body) so the
-    client can verify the transfer before committing it to its cache, and
-    ``X-RP-Archive-Tier`` naming the tier it was built for.
+    Holds exactly what the read surface would serve this caller, never the
+    hard floors (``.cache/``, ``.keys/``), and no registry-issued proofs.
+    ``X-RP-Archive-Digest`` is the body's md5; ``X-RP-Archive-Tier`` names the
+    tier it was built for.
     """
     # A read path accepts either form. Never gate a rid on SLUG_RE: it
     # forbids uppercase and would reject every X-suffixed ORCID.
     try:
         validate_ref(slug)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-    # Resolve through the cache so a missing profile 404s consistently, and so
-    # the path below is built from a real directory name rather than the
-    # caller-supplied reference.
-    prof = get_profile(slug, store)
-    _gate_profile(request, prof, viewer, slug)
+        raise Invalid(str(e)) from e
+    # The path below uses the resolved slug, never the caller's reference.
+    store, prof, viewer = service.read(caller, slug)
     slug = store.resolve_slug(slug)
     root = store.root
     try:
         if root is not None:
             data = build_viewer_archive(root / slug, viewer=viewer)
         else:
-            # No directory to tar. Materialize one in scratch space, archive it,
-            # and drop it: the tarball is an INTERCHANGE format, so a store that
-            # is not a directory still has to be able to emit one.
+            # No directory store: stage one in scratch space.
             with tempfile.TemporaryDirectory(prefix="rp-archive-") as tmp:
                 staged = store.export_directory(slug, Path(tmp) / slug)
                 data = build_viewer_archive(staged, viewer=viewer)
     except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
+        raise NotFound(str(e)) from e
     # Transfer-integrity digest only, not a security control; TLS and signing cover tampering.
     digest = hashlib.md5(data).hexdigest()
     return Response(

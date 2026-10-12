@@ -37,16 +37,8 @@ def registry_root(fixture_profiles_root):
     return fixture_profiles_root("jane-doe", "john-smith")
 
 
-def test_the_roster_holds_every_profile(registry_root):
-    store = FilesystemProfileStore(registry_root)
-    roster = store._rostered()
-    assert len(roster) == 2
-    assert set(roster.slugs) == {"jane-doe", "john-smith"}
-
-
-def test_the_roster_is_slug_sorted(registry_root):
-    roster = FilesystemProfileStore(registry_root)._rostered()
-    assert roster.slugs == sorted(roster.slugs)
+def test_the_roster_holds_every_profile_slug_sorted(registry_root):
+    assert FilesystemProfileStore(registry_root)._rostered().slugs == ["jane-doe", "john-smith"]
 
 
 def test_the_roster_skips_non_profile_and_dot_dirs(registry_root):
@@ -59,13 +51,7 @@ def test_the_roster_skips_non_profile_and_dot_dirs(registry_root):
 
 
 def test_the_roster_keeps_unindexed_profiles(registry_root):
-    """An unindexed profile stays in the roster and gets a zero centroid row.
-
-    Dropping it here is what the dissolved registry's ``skip_unindexed`` did,
-    and it made "this deployment has no indexes" arrive as "nobody matched".
-    A zero row can never rank, and the serving layer asks the question
-    explicitly instead (``api.deps.get_match_store``).
-    """
+    """An unindexed profile stays rostered with a zero row, so it can never rank."""
     store = FilesystemProfileStore(registry_root)
     assert not any(store.has_vector_index(s) for s in store.list_slugs())
     assert len(store._rostered()) == 2
@@ -185,22 +171,11 @@ _MIXED_HITS = [
 
 
 class TestLitePapers:
-    """Regression tests for lite-profile handling in the cross-profile analytics.
+    """Lite profiles index paper abstracts, not summaries. Pins three past bugs:
 
-    A ``lite`` profile indexes paper *abstracts* (``paper_abstract`` chunks) and
-    has no LLM-written summaries, so any code that keys on ``paper_summary`` alone
-    degrades silently for it. These tests pin the three places where that
-    can happen:
-
-    1. ``match.rank`` building ``top_papers`` from ``paper_summary`` only, so a
-       lite profile arrives on the wire with empty paper evidence.
-    2. ``indexes.coverage`` counting ``n_papers`` the same way, so a lite profile
-       reports 0 papers.
-    3. A calibration failure swallowed by a bare ``except``, silently ranking
-       an uncalibrated raw score against normalized peers.
-
-    These use hand-built profiles and monkeypatched embedding/search so they need
-    no model, no GPU, and no network.
+    1. ``match.rank`` built ``top_papers`` from ``paper_summary`` only.
+    2. ``indexes.coverage`` counted ``n_papers`` from ``paper_summary`` only.
+    3. A calibration failure was swallowed, ranking a raw score against normalized peers.
     """
 
     @pytest.fixture
@@ -241,19 +216,61 @@ class TestLitePapers:
         hits: list[SearchHit],
         expected: list[str],
     ) -> None:
-        """Match evidence collects every paper chunk type, once per paper.
-
-        Abstract-derived hits must populate match evidence rather than being
-        dropped; multiple chunks of one paper collapse to a single paper id;
-        and the full/deep path is unchanged, so ``paper_summary`` hits still
-        count while non-paper chunk types (soul/expertise) stay excluded.
-        """
+        """Match evidence collects every paper chunk type, once per paper."""
         _stub_search(lite_store, monkeypatch, hits)
         matches = lite_store.match.rank(
             "chromatin accessibility ATAC-seq", k=3, normalize=False, diversify=False
         )
         assert len(matches) == 1
         assert matches[0].evidence.top_papers == expected
+
+    # ----------------------------------------------------------------------
+    # The topic component: the query's typed interests against a candidate's
+    # OpenAlex topics
+    # ----------------------------------------------------------------------
+
+    @staticmethod
+    def _topic(code: str, weight: float | None, method: str = "declared") -> dict:
+        entry = {
+            "concept": {
+                "@id": f"https://openalex.org/{code}",
+                "system": "https://openalex.org/topics",
+                "code": code,
+                "display": code,
+            },
+            "method": method,
+            "generator": "user" if method == "declared" else "openalex-topics@2026-09",
+            "assertedAt": "2026-09-25T12:00:00Z",
+        }
+        if weight is not None:
+            entry["weight"] = weight
+        else:
+            entry["evidence"] = {"papers": ["W1"], "share": 0.5}
+        return entry
+
+    def test_rank_topic_boost_hard_exclude_and_require_topic_ids(
+        self, lite_store: FilesystemProfileStore
+    ) -> None:
+        from researcher_profiles.schema import ResearchInterest
+
+        doc_path = lite_store.root / "lite-researcher" / "profile.jsonld"
+        doc = json.loads(doc_path.read_text())
+        doc["rp:researchInterests"] = [self._topic("T10222", None, method="inferred")]
+        doc_path.write_text(json.dumps(doc))
+
+        def rank(**kw):
+            return lite_store.match.rank("chromatin", k=3, normalize=False, diversify=False, **kw)
+
+        def query(weight):
+            return [ResearchInterest.model_validate(self._topic("T10222", weight))]
+
+        [plain] = rank()
+        [boosted] = rank(interests=query(1), topic_alpha=0.2)
+        assert boosted.score == pytest.approx(plain.score + 0.2)
+        assert boosted.evidence.matched_topics == ["T10222"]
+        assert rank(interests=query(-1)) == []
+        assert [m.profile.slug for m in rank(require_topics=["T10222"])] == ["lite-researcher"]
+        assert rank(require_topics=["T11289"]) == []
 
     # ----------------------------------------------------------------------
     # Bug 2: indexes.coverage counted n_papers from paper_summary only
@@ -294,11 +311,7 @@ class TestLitePapers:
         n_chunks: int,
         n_papers: int,
     ) -> None:
-        """A lite profile reports its real paper count, not 0.
-
-        Summaries and abstracts both count as papers, a source_id shared by
-        both forms counts once, and non-paper chunk types never count.
-        """
+        """Summaries and abstracts both count, once per source_id; non-paper chunks never count."""
         root = tmp_path / "profiles"
         root.mkdir()
         prof_dir = _write_lite_profile(root, slug=slug)
@@ -319,41 +332,24 @@ class TestLitePapers:
     # Bug 3: calibration failure was swallowed silently
     # ----------------------------------------------------------------------
 
-    def test_calibration_failure_is_logged_not_swallowed(
+    def test_calibration_failure_warns_and_falls_back_to_the_raw_score(
         self,
         lite_store: FilesystemProfileStore,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """A failed calibration warns loudly that the score is uncalibrated."""
-
         def _boom(prof):
             raise RuntimeError("calibration exploded on an abstract-only index")
 
         monkeypatch.setattr("researcher_profiles.analytics.match.ensure_calibration", _boom)
 
-        with caplog.at_level(logging.WARNING, logger="researcher_profiles.analytics.match"):
-            matches = lite_store.match.rank("chromatin", k=3, normalize=True, diversify=False)
-
-        assert len(matches) == 1
-        warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
-        assert warnings, "calibration failure was swallowed with no signal"
-        assert any("UNCALIBRATED" in r.getMessage() for r in warnings)
-        assert any("lite-researcher" in r.getMessage() for r in warnings)
-
-    def test_calibration_failure_still_returns_a_match(
-        self, lite_store: FilesystemProfileStore, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """The fallback stays fail-soft: a broken calibration must not raise."""
-
-        def _boom(prof):
-            raise RuntimeError("nope")
-
-        monkeypatch.setattr("researcher_profiles.analytics.match.ensure_calibration", _boom)
-
         raw = lite_store.match.rank("chromatin", k=3, normalize=False, diversify=False)
-        fallback = lite_store.match.rank("chromatin", k=3, normalize=True, diversify=False)
-        # normalize=True degraded to exactly the raw score.
+        with caplog.at_level(logging.WARNING, logger="researcher_profiles.analytics.match"):
+            fallback = lite_store.match.rank("chromatin", k=3, normalize=True, diversify=False)
+
+        messages = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+        assert any("UNCALIBRATED" in m and "lite-researcher" in m for m in messages)
+        assert len(fallback) == 1
         assert fallback[0].score == pytest.approx(raw[0].score)
 
     def test_successful_calibration_emits_no_warning(
@@ -419,12 +415,7 @@ def _stub_search(store, monkeypatch: pytest.MonkeyPatch, hits) -> None:
 
 
 def _stub_matrix(monkeypatch: pytest.MonkeyPatch, make_matrix) -> None:
-    """Hand ranking a fixed matrix, paired with the live roster.
-
-    ``snapshot`` and not ``matrix``: ranking reads the pair so a row can never
-    name the wrong profile, and a stub that patched only ``matrix`` would leave
-    the real (unstubbed) one behind whatever ``snapshot`` returned.
-    """
+    """Stub ``snapshot`` (not ``matrix``): ranking reads roster and matrix as one pair."""
     monkeypatch.setattr(
         CentroidManager,
         "snapshot",
@@ -442,12 +433,7 @@ def _stub_topics(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _stub_centroids(store, monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    """Make every profile's centroid a cheap unit vector; record who was asked.
-
-    Stubs the *store*, which is where the analytics read vectors from. Stubbing
-    ``prof.index`` would no longer be observed, which is the point of the
-    capability: the analytics do not reach into a profile for its vectors.
-    """
+    """Stub the store's centroids with cheap unit vectors; return the list of slugs asked."""
     asked: list[str] = []
 
     def _centroid(ref: str):
@@ -462,12 +448,18 @@ def _stub_centroids(store, monkeypatch: pytest.MonkeyPatch) -> list[str]:
     return asked
 
 
-class TestConstructionIsPure:
-    """Building a store, or a roster over it, reads; it does not write.
+@pytest.fixture
+def two_indexed_root(tmp_path: Path) -> Path:
+    """Profiles ``one`` and ``two``, each with a hand-built index."""
+    root = tmp_path / "profiles"
+    root.mkdir()
+    _write_indexed_profile(root, "one", _RIDS[0])
+    _write_indexed_profile(root, "two", _RIDS[1])
+    return root
 
-    Writing ``.cache/index.json`` as a side effect of loading would let
-    unrelated consumers depend on a file nobody owns refreshing.
-    """
+
+class TestConstructionIsPure:
+    """Building a store, or a roster over it, reads; it never writes ``.cache/index.json``."""
 
     def test_loading_writes_no_lookup_index(self, tmp_path: Path):
         root = tmp_path / "profiles"
@@ -492,23 +484,10 @@ class TestConstructionIsPure:
 
 
 class TestCentroidCache:
-    """``store.centroids`` memoizes in process and caches on disk.
+    """``store.centroids`` memoizes in process and caches on disk, and notices staleness."""
 
-    Recomputing means reading every profile's embedding index, so the cache is
-    what makes ranking a large root affordable. A cache that goes stale
-    without noticing is worse than no cache at all.
-    """
-
-    @pytest.fixture
-    def root(self, tmp_path: Path) -> Path:
-        root = tmp_path / "profiles"
-        root.mkdir()
-        _write_indexed_profile(root, "one", _RIDS[0])
-        _write_indexed_profile(root, "two", _RIDS[1])
-        return root
-
-    def test_cold_computes_and_writes_the_npz(self, root: Path, monkeypatch):
-        store = FilesystemProfileStore(root)
+    def test_cold_computes_and_writes_the_npz(self, two_indexed_root: Path, monkeypatch):
+        store = FilesystemProfileStore(two_indexed_root)
         asked = _stub_centroids(store, monkeypatch)
         assert not store.centroids.cache_path.exists()
         mat = store.centroids.matrix
@@ -516,8 +495,8 @@ class TestCentroidCache:
         assert asked == ["one", "two"]
         assert store.centroids.cache_path.is_file()
 
-    def test_warm_in_process_rereads_nothing(self, root: Path, monkeypatch):
-        store = FilesystemProfileStore(root)
+    def test_warm_in_process_rereads_nothing(self, two_indexed_root: Path, monkeypatch):
+        store = FilesystemProfileStore(two_indexed_root)
         _stub_centroids(store, monkeypatch)
         first = store.centroids.matrix
 
@@ -527,12 +506,12 @@ class TestCentroidCache:
         monkeypatch.setattr(np, "load", _boom)
         assert store.centroids.matrix is first
 
-    def test_warm_cross_process_reads_the_npz(self, root: Path, monkeypatch):
-        store = FilesystemProfileStore(root)
+    def test_warm_cross_process_reads_the_npz(self, two_indexed_root: Path, monkeypatch):
+        store = FilesystemProfileStore(two_indexed_root)
         _stub_centroids(store, monkeypatch)
         expected = store.centroids.matrix
 
-        fresh = FilesystemProfileStore(root)
+        fresh = FilesystemProfileStore(two_indexed_root)
         monkeypatch.setattr(
             fresh,
             "centroid",
@@ -542,47 +521,53 @@ class TestCentroidCache:
         )
         assert np.allclose(fresh.centroids.matrix, expected)
 
-    def test_an_index_newer_than_the_cache_forces_a_recompute(self, root: Path, monkeypatch):
-        store = FilesystemProfileStore(root)
+    def test_an_index_newer_than_the_cache_forces_a_recompute(
+        self, two_indexed_root: Path, monkeypatch
+    ):
+        store = FilesystemProfileStore(two_indexed_root)
         _stub_centroids(store, monkeypatch)
         _ = store.centroids.matrix
         newer = store.centroids.cache_path.stat().st_mtime + 60
-        db = cache_dir(root / "one") / "embeddings.sqlite"
+        db = cache_dir(two_indexed_root / "one") / "embeddings.sqlite"
         import os
 
         os.utime(db, (newer, newer))
 
-        fresh = FilesystemProfileStore(root)
+        fresh = FilesystemProfileStore(two_indexed_root)
         asked = _stub_centroids(fresh, monkeypatch)
         _ = fresh.centroids.matrix
         assert asked == ["one", "two"]
 
-    def test_a_new_profile_forces_a_recompute(self, root: Path, monkeypatch):
-        store = FilesystemProfileStore(root)
+    def test_a_new_profile_forces_a_recompute(self, two_indexed_root: Path, monkeypatch):
+        store = FilesystemProfileStore(two_indexed_root)
         _stub_centroids(store, monkeypatch)
         _ = store.centroids.matrix
 
-        _write_indexed_profile(root, "three", _RIDS[2])
-        fresh = FilesystemProfileStore(root)
+        _write_indexed_profile(two_indexed_root, "three", _RIDS[2])
+        fresh = FilesystemProfileStore(two_indexed_root)
         asked = _stub_centroids(fresh, monkeypatch)
         assert fresh.centroids.matrix.shape == (3, 4)
         assert asked == ["one", "three", "two"]
 
-    def test_a_profile_with_no_index_makes_the_cache_stale(self, root: Path, monkeypatch):
-        store = FilesystemProfileStore(root)
+    def test_a_profile_with_no_index_makes_the_cache_stale(
+        self, two_indexed_root: Path, monkeypatch
+    ):
+        store = FilesystemProfileStore(two_indexed_root)
         _stub_centroids(store, monkeypatch)
         _ = store.centroids.matrix
-        (cache_dir(root / "one") / "embeddings.sqlite").unlink()
+        (cache_dir(two_indexed_root / "one") / "embeddings.sqlite").unlink()
 
-        fresh = FilesystemProfileStore(root)
+        fresh = FilesystemProfileStore(two_indexed_root)
         asked = _stub_centroids(fresh, monkeypatch)
         _ = fresh.centroids.matrix
         assert asked == ["one", "two"]
 
-    def test_an_unbuilt_index_gets_a_zero_row_not_a_crash(self, root: Path, monkeypatch):
+    def test_an_unbuilt_index_gets_a_zero_row_not_a_crash(
+        self, two_indexed_root: Path, monkeypatch
+    ):
         from researcher_profiles.embeddings import IndexNotBuiltError
 
-        store = FilesystemProfileStore(root)
+        store = FilesystemProfileStore(two_indexed_root)
         _stub_centroids(store, monkeypatch)
         original = store.centroid
 
@@ -597,8 +582,8 @@ class TestCentroidCache:
         assert not mat[roster.slugs.index("one")].any()
         assert mat[roster.slugs.index("two")].any()
 
-    def test_invalidate_drops_the_memo_and_the_file(self, root: Path, monkeypatch):
-        store = FilesystemProfileStore(root)
+    def test_invalidate_drops_the_memo_and_the_file(self, two_indexed_root: Path, monkeypatch):
+        store = FilesystemProfileStore(two_indexed_root)
         asked = _stub_centroids(store, monkeypatch)
         _ = store.centroids.matrix
         assert len(asked) == 2
@@ -610,26 +595,14 @@ class TestCentroidCache:
 
 
 class TestWritesInvalidateTheSnapshot:
-    """The whole point of dissolving the registry: no manual invalidation.
+    """A write reaches the analytics with no manual invalidation, via the store's generation."""
 
-    The analytics live on a live, mutable store, so a write has to reach them
-    with nobody calling anything. The store's write generation is what does it,
-    and it moves whether the write went through a store method or through a
-    profile the store handed out.
-    """
-
-    @pytest.fixture
-    def root(self, tmp_path: Path) -> Path:
-        root = tmp_path / "profiles"
-        root.mkdir()
-        _write_indexed_profile(root, "one", _RIDS[0])
-        _write_indexed_profile(root, "two", _RIDS[1])
-        return root
-
-    def test_a_create_through_the_store_widens_the_matrix(self, root: Path, monkeypatch):
+    def test_a_create_through_the_store_widens_the_matrix(
+        self, two_indexed_root: Path, monkeypatch
+    ):
         from researcher_profiles.schema import ProfileDocument
 
-        store = FilesystemProfileStore(root)
+        store = FilesystemProfileStore(two_indexed_root)
         _stub_centroids(store, monkeypatch)
         assert store.centroids.matrix.shape == (2, 4)
         assert store.rid_for("one") == _RIDS[0]
@@ -645,8 +618,10 @@ class TestWritesInvalidateTheSnapshot:
         assert store._rostered().slugs == ["one", "three", "two"]
         assert store.rid_for("three") == _RIDS[2]
 
-    def test_a_delete_through_the_store_narrows_the_matrix(self, root: Path, monkeypatch):
-        store = FilesystemProfileStore(root)
+    def test_a_delete_through_the_store_narrows_the_matrix(
+        self, two_indexed_root: Path, monkeypatch
+    ):
+        store = FilesystemProfileStore(two_indexed_root)
         _stub_centroids(store, monkeypatch)
         assert store.centroids.matrix.shape == (2, 4)
 
@@ -657,9 +632,11 @@ class TestWritesInvalidateTheSnapshot:
         with pytest.raises(ProfileNotFoundError):
             store.rid_for("one")
 
-    def test_a_write_through_a_handed_out_profile_moves_the_generation(self, root: Path):
+    def test_a_write_through_a_handed_out_profile_moves_the_generation(
+        self, two_indexed_root: Path
+    ):
         """No store method is called here, so only the post-commit hook can see it."""
-        store = FilesystemProfileStore(root)
+        store = FilesystemProfileStore(two_indexed_root)
         before = store.generation
         roster = store._rostered()
 
@@ -668,8 +645,10 @@ class TestWritesInvalidateTheSnapshot:
         assert store.generation > before
         assert store._rostered() is not roster
 
-    def test_ranking_reflects_a_write_with_no_invalidation(self, root: Path, monkeypatch):
-        store = FilesystemProfileStore(root)
+    def test_ranking_reflects_a_write_with_no_invalidation(
+        self, two_indexed_root: Path, monkeypatch, fake_backend
+    ):
+        store = FilesystemProfileStore(two_indexed_root)
         _stub_centroids(store, monkeypatch)
         _stub_search(store, monkeypatch, _ABSTRACT_HITS)
         _stub_topics(monkeypatch)
@@ -688,12 +667,10 @@ class TestWritesInvalidateTheSnapshot:
 class TestSqlStoreInvalidation:
     """The same contract on a store that mutates rows rather than directories."""
 
-    def test_a_create_and_a_delete_are_both_seen(self, monkeypatch):
+    def test_a_create_and_a_delete_are_both_seen(self, empty_sql_store):
         from researcher_profiles.schema import ProfileDocument
-        from researcher_profiles.store.sql import SqlProfileStore
 
-        store = SqlProfileStore("sqlite://")
-        store.create_all()
+        store = empty_sql_store
         assert store._rostered().slugs == []
         gen = store.generation
 
@@ -707,12 +684,10 @@ class TestSqlStoreInvalidation:
         store.delete("one")
         assert store._rostered().slugs == []
 
-    def test_a_write_through_a_handed_out_profile_moves_the_generation(self):
+    def test_a_write_through_a_handed_out_profile_moves_the_generation(self, empty_sql_store):
         from researcher_profiles.schema import ProfileDocument
-        from researcher_profiles.store.sql import SqlProfileStore
 
-        store = SqlProfileStore("sqlite://")
-        store.create_all()
+        store = empty_sql_store
         store.create(
             ProfileDocument(name="One", rid=_RIDS[0], provenance="self_published"), slug="one"
         )
@@ -755,43 +730,30 @@ class TestCalibration:
     def test_normalize_score_degenerate_inputs(self, raw, stats, expected):
         assert cal.normalize_score(raw, stats) == expected  # type: ignore[arg-type]
 
-    def test_normalize_score_is_bounded_0_1(self):
+    def test_normalize_score_is_bounded_monotonic_and_centered(self):
         c = {"mean": 0.0, "std": 0.1}
-        for raw in (-5.0, -0.1, 0.0, 0.1, 5.0):
-            s = cal.normalize_score(raw, c)
-            assert 0.0 <= s <= 1.0
+        raws = (-5.0, -0.2, -0.1, 0.0, 0.1, 0.2, 5.0)
+        scores = [cal.normalize_score(raw, c) for raw in raws]
+        assert all(0.0 <= s <= 1.0 for s in scores)
+        assert scores == sorted(scores)
+        by_raw = dict(zip(raws, scores))
+        assert by_raw[-0.2] < by_raw[0.0] < by_raw[0.2]
+        assert by_raw[0.0] == pytest.approx(0.5, abs=1e-9)
 
-    def test_normalize_score_monotonic(self):
-        c = {"mean": 0.0, "std": 0.1}
-        lo = cal.normalize_score(-0.2, c)
-        mid = cal.normalize_score(0.0, c)
-        hi = cal.normalize_score(0.2, c)
-        assert lo < mid < hi
-        # score at the mean is 0.5
-        assert abs(mid - 0.5) < 1e-9
-
-    def test_load_calibration_missing_returns_none(self, tmp_path):
-        p = _FakeProfile(tmp_path)
-        assert cal.load_calibration(p) is None
-
-    def test_load_calibration_roundtrip(self, tmp_path):
-        p = _FakeProfile(tmp_path)
-        meta = cache_dir(tmp_path)
-        meta.mkdir()
-        payload = {
-            "mean": 0.1,
-            "std": 0.05,
-            "scorer_version": cal.SCORER_VERSION,
-        }
-        (meta / "calibration.json").write_text(json.dumps(payload), encoding="utf-8")
-        loaded = cal.load_calibration(p)
-        assert loaded is not None
-        assert loaded["mean"] == 0.1
-
-    def test_load_calibration_wrong_version_returns_none(self, tmp_path):
-        p = _FakeProfile(tmp_path)
-        meta = cache_dir(tmp_path)
-        meta.mkdir()
-        payload = {"mean": 0.1, "std": 0.05, "scorer_version": cal.SCORER_VERSION + 1}
-        (meta / "calibration.json").write_text(json.dumps(payload), encoding="utf-8")
-        assert cal.load_calibration(p) is None
+    @pytest.mark.parametrize(
+        "version_offset, mean",
+        [(None, None), (0, 0.1), (1, None)],
+        ids=["missing", "roundtrip", "wrong-version"],
+    )
+    def test_load_calibration(self, tmp_path, version_offset, mean):
+        if version_offset is not None:
+            meta = cache_dir(tmp_path)
+            meta.mkdir()
+            payload = {
+                "mean": 0.1,
+                "std": 0.05,
+                "scorer_version": cal.SCORER_VERSION + version_offset,
+            }
+            (meta / "calibration.json").write_text(json.dumps(payload), encoding="utf-8")
+        loaded = cal.load_calibration(_FakeProfile(tmp_path))
+        assert (loaded and loaded["mean"]) == mean

@@ -1,26 +1,17 @@
 """The ``rp`` command line: registration, parsing, wiring, exit codes, JSON.
 
-The ``cli`` package is the user-facing entry point and, for most callers, an
-*agent*-facing one: it reads ``--help`` once, copies a line, and checks ``$?``. This
-file owns five things: every verb is registered and documents itself, a flag
-lands on the right ``dest`` with the right default, ``rp foo --bar X`` reaches
-the library as ``bar=X``, the documented 0/1/2/4 exit table, and the ``--json``
-shapes. It also owns the ``_plugin_handler`` hook that plugin distributions
-re-attach through.
-
-**It does not re-test the library through the CLI**: nearly every
-verb wraps a function that ``test_publish``, ``test_api``, ``test_validate``,
-``test_embeddings``, ``test_schema`` and ``test_profile``
-already cover, so wiring is asserted with a recorder, never by re-running the
-work. Signing's end-to-end tests stay in ``test_signing.py``, the packaged
-skill tree in ``test_packaging.py``, ``prog="rp"`` in ``test_guardrails.py``;
-this file takes only their parsing and exit-code edges.
+Wiring is asserted with a recorder, never by re-running the library (covered by
+test_publish, test_api, test_validate, test_embeddings). Signing's end-to-end tests
+live in test_signing.py.
 """
 
 import argparse
+import hashlib
 import importlib
+import io
 import json
 import re
+import tarfile
 from functools import cached_property, lru_cache
 from pathlib import Path
 from types import SimpleNamespace
@@ -28,6 +19,7 @@ from types import SimpleNamespace
 import pytest
 
 from researcher_profiles.cli import _COMMANDS, build_parser, main
+from researcher_profiles.cli.auth.agent import AgentAPIError
 
 from .factories import break_papers, copy_fixture
 
@@ -45,6 +37,7 @@ VERBS_TOP = (
     "push",
     "render",
     "site",
+    "publish",
     "install",
     "seek",
     "list",
@@ -61,6 +54,7 @@ VERBS_TOP = (
     "sign-verify",
     "agent",
     "profile",
+    "work",
 )
 
 #: Every reachable parser path, including the two ``schema`` subcommands.
@@ -74,12 +68,14 @@ VERB_PATHS = tuple((v,) for v in VERBS_TOP) + (
     ("db", "list"),
     ("db", "rm"),
     ("agent", "whoami"),
-    ("agent", "scopes"),
     ("agent", "config"),
     ("profile", "pull"),
     ("profile", "diff"),
     ("profile", "push"),
     ("profile", "visibility"),
+    ("work", "show"),
+    ("work", "set"),
+    ("work", "rm"),
 )
 VERB_IDS = [" ".join(p) for p in VERB_PATHS]
 
@@ -108,13 +104,7 @@ class TestRegistration:
 
     @pytest.mark.parametrize("path", VERB_PATHS, ids=VERB_IDS)
     def test_every_verb_is_registered_and_documented(self, path, capsys):
-        """One walk of the tree asserting everything a parser owes its reader.
-
-        ``--json`` is one namespace attribute across the whole tool. If it
-        arrived on several dests (``as_json``, ``json``, ``status_json``,
-        ``validate_json``), a caller reading ``args.as_json`` would silently get
-        ``False`` on the other verbs and argparse would report nothing.
-        """
+        """``--json`` must be one dest (``as_json``) everywhere, or a caller silently reads False."""
         parser = _verb_parser(path)
         # cli's package docstring promises both on every parser; `sign` and
         # `sign-verify` were the two that did not carry them.
@@ -165,7 +155,16 @@ class TestParsing:
             (["skill"], {"install": False, "dir": None}),
             (
                 ["push", "P", "--url", "U"],
-                {"slug": None, "token": None, "include_fulltext": False},
+                {
+                    "slug": None,
+                    "token": None,
+                    "include_fulltext": False,
+                    "dry_run": False,
+                    "force": False,
+                    "only": None,
+                    "merge": False,
+                    "prune": False,
+                },
             ),
             (["listr"], {"url": None, "as_json": False}),
         ],
@@ -188,10 +187,7 @@ class TestParsing:
         ],
     )
     def test_namespace(self, argv, expected):
-        # The `--json` rows carry the most weight. argparse happily sets an
-        # attribute nobody reads, so one spelling mapping to several dests
-        # (`json`, `status_json`, `validate_json`, `as_json`) goes unnoticed;
-        # every `--json` lands on `as_json`, and these rows are where that holds.
+        # every `--json` must land on `as_json`; argparse never reports a stray dest
         args = build_parser().parse_args(argv)
         assert {k: getattr(args, k) for k in expected} == expected
 
@@ -208,6 +204,7 @@ class TestParsing:
             ["site", "D", "-o", "O", "--force"],
             ["site", "D", "-o", "O", "-v"],
             ["definitely-not-a-verb"],
+            ["agent", "scopes"],
         ],
         ids=[
             "site-needs-out",
@@ -220,13 +217,11 @@ class TestParsing:
             "site-force-is-gone",
             "site-verbose-is-gone",
             "unknown-verb",
+            "agent-scopes-is-gone",
         ],
     )
     def test_usage_error_exits_two(self, argv):
-        # The code, not the wording: the code is what an agent branches on.
-        # `--force` and `-v/--verbose` were removed from `site`: `build_site`
-        # has no such parameters, so both were parsed and discarded, and
-        # `--force` documented a guard that does not exist.
+        # the code, not the wording, is what an agent branches on
         with pytest.raises(SystemExit) as e:
             main(argv)
         assert e.value.code == 2
@@ -250,14 +245,8 @@ def _spy(monkeypatch, dotted: str, result=None) -> list[SimpleNamespace]:
 
 
 def _results() -> dict:
-    """Return values whose *shape* the CLI's own formatting depends on.
-
-    Not bare mocks: `install`'s human branch indexes ``summary["status"]`` and
-    ``["path"]`` directly, `push`'s summary line ``.get()``s four keys, and the
-    `index` branch reads six report attributes. A thinner stand-in would only
-    prove that a KeyError is possible.
-    """
-    from researcher_profiles.client import RegistryListing
+    """Return values shaped like the real ones: the CLI's formatting indexes into them."""
+    from researcher_profiles.client import PushPlan, PushResult, RegistryListing
     from researcher_profiles.validate import ProfileValidationReport
 
     return {
@@ -267,12 +256,15 @@ def _results() -> dict:
         "researcher_profiles.embeddings.write_flat_export": None,
         "researcher_profiles.publish.render_profile": None,
         "researcher_profiles.publish.build_site": SimpleNamespace(warnings=[]),
-        "researcher_profiles.client.push_profile": {
-            "slug": "jane-doe",
-            "name": "Jane Doe",
-            "level": "full",
-            "indexed": 0,
-        },
+        "researcher_profiles.client.push_profile": PushResult(
+            plan=PushPlan(
+                slug="jane-doe",
+                exists=True,
+                changed={"works": ["sources/papers.jsonld"]},
+                dropped={"fulltext": ["sources/papers/doe2016example.md"]},
+            ),
+            summary={"slug": "jane-doe", "name": "Jane Doe", "level": "full", "indexed": 0},
+        ),
         "researcher_profiles.client.install_profile": {
             "status": "installed",
             "slug": "jane-doe",
@@ -326,10 +318,30 @@ class TestWiring:
                 {"base_url": "U", "no_index": True, "now": "T"},
             ),
             (
-                ["push", "{P}", "--url", "U", "--slug", "S", "--token", "T", "--include-fulltext"],
+                [
+                    "push",
+                    "{P}",
+                    "--url",
+                    "U",
+                    "--slug",
+                    "S",
+                    "--token",
+                    "T",
+                    "--include-fulltext",
+                    "--force",
+                    "--only",
+                    "sources/papers.jsonld",
+                ],
                 "researcher_profiles.client.push_profile",
                 ("U", "{P}"),
-                {"slug": "S", "token": "T", "include_fulltext": True},
+                {
+                    "slug": "S",
+                    "token": "T",
+                    "include_fulltext": True,
+                    "force": True,
+                    "only": ["sources/papers.jsonld"],
+                    "dry_run": False,
+                },
             ),
             (
                 ["install", "a", "--url", "U", "--root", "R", "--token", "T", "--force"],
@@ -421,14 +433,7 @@ class TestWiring:
 
 
 class TestProfileRef:
-    """A ``profile`` positional takes a path, a rid, or a slug.
-
-    ``rp install`` prints a slug and leaves the directory under the cache, so
-    the slug is the handle a caller has when the next command runs. Every verb
-    that takes a profile resolves it the same way; these rows are the contract,
-    not a re-test of the verbs (``validate`` and ``manifest`` stand in because
-    they need nothing but the tree).
-    """
+    """A ``profile`` positional takes a path, a rid, or a slug, and says what it resolved to."""
 
     @pytest.mark.parametrize("verb", ["validate", "manifest"])
     @pytest.mark.parametrize(
@@ -436,11 +441,13 @@ class TestProfileRef:
         ["jane-doe", "0000-0002-1825-0097"],
         ids=["slug", "rid"],
     )
-    def test_ref_resolves_against_the_cache(self, verb, ref, cases):
+    def test_ref_resolves_against_the_cache(self, verb, ref, cases, capsys):
         assert main([verb, ref, "--root", str(cases.root)]) == 0
+        err = capsys.readouterr().err
+        assert f"profile: {cases.root / 'jane-doe'}" in err
+        assert "root from --root" in err
 
     def test_a_real_path_wins_over_a_same_named_cache_entry(self, cases, monkeypatch, capsys):
-        """A directory that exists is itself, never the cache entry it is named after."""
         monkeypatch.chdir(cases.root)
         assert main(["validate", "jane-doe", "--root", str(cases.root), "--json"]) == 0
         report = json.loads(capsys.readouterr().out)
@@ -451,6 +458,33 @@ class TestProfileRef:
         err = capsys.readouterr().err
         assert "no profile at 'nope-nobody'" in err
         assert str(cases.root) in err
+
+    def test_push_dry_run_names_the_directory_for_a_slug(self, monkeypatch, cases, capsys):
+        import httpx
+
+        monkeypatch.setattr(httpx, "Client", _StubServer([]))
+        argv = ["push", "jane-doe", "--root", "{root}", "--url", "http://x", "--dry-run"]
+        assert main(cases.argv(argv)) == 0
+        err = capsys.readouterr().err
+        assert f"profile: {cases.root / 'jane-doe'}" in err
+        assert f"source: {cases.root / 'jane-doe'}" in err
+
+    def test_two_roots_holding_the_slug_warn(self, tmp_path, monkeypatch, capsys):
+        from researcher_profiles.store import config
+
+        chosen = tmp_path / "chosen"
+        copy_fixture("jane-doe", chosen)
+        other = tmp_path / "other"
+        copy_fixture("jane-doe", other)
+        monkeypatch.setenv(config.PROFILES_ROOT_ENV_VAR, str(chosen))
+        monkeypatch.setattr(config, "DEFAULT_CACHE_DIR", str(other))
+
+        assert main(["manifest", "jane-doe"]) == 0
+
+        err = capsys.readouterr().err
+        assert f"profile: {chosen / 'jane-doe'}" in err
+        assert f"also exists under {other.resolve()}" in err
+        assert "RESEARCHER_PROFILES_ROOT" in err
 
 
 class _Cases:
@@ -511,27 +545,28 @@ class TestExitCodes:
     """The documented table: 0 ok, 1 error, 2 usage, 4 validation/contract."""
 
     @pytest.mark.parametrize(
-        "argv,expected",
+        # quiet: the user typed the path; echoing it back tells them nothing
+        "argv,expected,quiet",
         [
-            (["where", "jane-doe", "--root", "{root}"], 0),
-            (["where", "nope", "--root", "{root}"], 2),
-            (["seek", "jane-doe", "--root", "{root}"], 0),
-            (["seek", "nope", "--root", "{root}"], 2),
-            (["list", "--root", "{root}"], 0),
-            (["list", "--root", "{empty}"], 0),  # an empty cache is not an error
-            (["validate", "{good}"], 0),
-            (["validate", "{broken}"], 4),
-            (["manifest", "{good}"], 0),
-            (["manifest", "{stale}", "--check"], 4),
-            (["manifest", "{missing}"], 2),
-            (["render", "{missing}"], 2),
-            (["push", "{missing}", "--url", "http://x"], 2),
-            (["listr"], 2),
-            (["install", "jane-doe"], 2),
-            (["mint-local-id", "--name", "Elena Voss"], 0),
-            (["schema", "export", "{empty}"], 0),
-            (["sign", "{empty}"], 2),
-            (["sign-verify", "{good}"], 2),
+            (["where", "jane-doe", "--root", "{root}"], 0, False),
+            (["where", "nope", "--root", "{root}"], 2, False),
+            (["seek", "jane-doe", "--root", "{root}"], 0, False),
+            (["seek", "nope", "--root", "{root}"], 2, False),
+            (["list", "--root", "{root}"], 0, False),
+            (["list", "--root", "{empty}"], 0, False),  # an empty cache is not an error
+            (["validate", "{good}"], 0, True),
+            (["validate", "{broken}"], 4, False),
+            (["manifest", "{good}"], 0, True),
+            (["manifest", "{stale}", "--check"], 4, False),
+            (["manifest", "{missing}"], 2, False),
+            (["render", "{missing}"], 2, False),
+            (["push", "{missing}", "--url", "http://x"], 2, False),
+            (["listr"], 2, False),
+            (["install", "jane-doe"], 2, False),
+            (["mint-local-id", "--name", "Elena Voss"], 0, False),
+            (["schema", "export", "{empty}"], 0, False),
+            (["sign", "{empty}"], 2, False),
+            (["sign-verify", "{good}"], 2, False),
         ],
         ids=[
             "where-hit",
@@ -555,31 +590,35 @@ class TestExitCodes:
             "sign-verify-no-jwks",
         ],
     )
-    def test_exit_code(self, argv, expected, cases):
+    def test_exit_code(self, argv, expected, quiet, cases, capsys):
         assert main(cases.argv(argv)) == expected
+        if quiet:
+            assert "profile:" not in capsys.readouterr().err
 
 
 class TestMachineOutput:
-    """What a machine parses: the ``--json`` key sets, and a clean stdout."""
+    """The ``--json`` key sets, and a clean stdout."""
 
     @pytest.mark.parametrize(
-        "argv,expected_keys",
+        "argv,expected_keys,nested",
         [
-            (["list", "--root", "{root}", "--json"], {"root", "profiles"}),
-            (["where", "jane-doe", "--root", "{root}", "--json"], {"ref", "path", "root"}),
-            (["seek", "jane-doe", "--root", "{root}", "--json"], {"slug", "path", "root"}),
-            (["manifest", "{good}", "--json"], {"profile", "entries", "drift"}),
+            (["list", "--root", "{root}", "--json"], {"root", "profiles"}, {}),
+            (["where", "jane-doe", "--root", "{root}", "--json"], {"ref", "path", "root"}, {}),
+            (["seek", "jane-doe", "--root", "{root}", "--json"], {"slug", "path", "root"}, {}),
+            (
+                ["manifest", "{good}", "--json"],
+                {"profile", "entries", "drift"},
+                {"drift": {"missing", "stale"}},
+            ),
         ],
         ids=["list", "where", "seek", "manifest"],
     )
-    def test_top_level_keys(self, argv, expected_keys, cases, capsys):
+    def test_top_level_keys(self, argv, expected_keys, nested, cases, capsys):
         assert main(cases.argv(argv)) == 0
-        assert set(json.loads(capsys.readouterr().out)) == expected_keys
-
-    def test_manifest_json_reports_drift_by_kind(self, cases, capsys):
-        main(cases.argv(["manifest", "{good}", "--json"]))
-        drift = json.loads(capsys.readouterr().out)["drift"]
-        assert set(drift) == {"missing", "stale"}
+        body = json.loads(capsys.readouterr().out)
+        assert set(body) == expected_keys
+        for key, inner in nested.items():
+            assert set(body[key]) == inner
 
     def test_install_json_is_one_record_per_requested_slug(self, monkeypatch, capsys):
         target = "researcher_profiles.client.install_profile"
@@ -605,137 +644,718 @@ class TestMachineOutput:
         ids=["list-empty-root-note", "manifest-drift"],
     )
     def test_diagnostics_never_contaminate_a_json_stdout(self, argv, stderr_marker, cases, capsys):
-        # Two source comments promise this and nothing enforced it: `rp ...
-        # --json | jq` must not break because the command had something to say.
+        # `rp ... --json | jq` must not break because the command had something to say
         main(cases.argv(argv))
         captured = capsys.readouterr()
         json.loads(captured.out)
         assert stderr_marker in captured.err
 
 
+class TestManifestWrite:
+    """``--write`` in a partial copy once turned 141 entries into 88."""
+
+    def test_manifest_write_refuses_to_drop_entries(self, cases, capsys):
+        before = (cases.stale / "profile.jsonld").read_text()
+
+        assert main(cases.argv(["manifest", "{stale}", "--write"])) == 2
+
+        err = capsys.readouterr().err
+        assert "would drop: personality/expertise.md" in err
+        assert "refusing to drop 1 entries" in err
+        assert "rp where" in err
+        # Nothing written: a refusal that had already rewritten the document
+        # would be no refusal at all.
+        assert (cases.stale / "profile.jsonld").read_text() == before
+
+    def test_manifest_write_with_force_drops_and_reports(self, cases, capsys):
+        assert main(cases.argv(["manifest", "{stale}", "--write", "--force"])) == 0
+
+        out = capsys.readouterr().out
+        assert "dropped: personality/expertise.md" in out
+        assert "-1)" in out
+        doc = json.loads((cases.stale / "profile.jsonld").read_text())
+        urls = {e["contentUrl"] for e in (*doc["hasPart"], *doc.get("subjectOf", []))}
+        assert "personality/expertise.md" not in urls
+
+    def test_manifest_write_that_drops_nothing_needs_no_force(self, cases, capsys):
+        assert main(cases.argv(["manifest", "{good}", "--write"])) == 0
+        out = capsys.readouterr().out
+        assert "-0)" in out
+        assert "wrote " in out
+
+    def test_manifest_write_json_carries_the_diff(self, cases, capsys):
+        assert main(cases.argv(["manifest", "{good}", "--write", "--json"])) == 0
+        body = json.loads(capsys.readouterr().out)
+        assert set(body) == {
+            "profile",
+            "written",
+            "path",
+            "before",
+            "after",
+            "added",
+            "dropped",
+        }
+        assert body["dropped"] == []
+
+
+class _StubResponse:
+    def __init__(self, status_code: int, payload: dict | None = None):
+        self.status_code = status_code
+        self.text = ""
+        self._payload = payload or {}
+
+    def json(self) -> dict:
+        return self._payload
+
+
+class _StubServer:
+    """A push target: answers the capability and preflight GETs, records every PUT.
+
+    Stands in for ``httpx.Client``, which ``push_profile`` constructs itself
+    (the CLI has no client to inject), so patching the class is the seam. A
+    ``manifest`` of ``None`` means the server does not hold the profile.
+
+    ``capabilities`` is what ``GET /api/v1/capabilities`` answers; ``None``
+    makes it a 404, which is how a build predating that route behaves and is
+    the state the mode check has to refuse a merge against.
+    """
+
+    _DEFAULT_CAPS = {
+        "version": "v1",
+        "push_modes": ["replace", "merge", "prune"],
+        "features": ["manifest_splice"],
+    }
+
+    def __init__(
+        self,
+        manifest: list[dict] | None = None,
+        *,
+        capabilities: dict | None = _DEFAULT_CAPS,
+        summary: dict | None = None,
+        refuse: dict | None = None,
+    ):
+        self.manifest = manifest
+        self.capabilities = capabilities
+        self.summary = summary
+        #: A 403 body the PUT answers with (inside ``detail``), as a host does.
+        self.refuse = refuse
+        self.puts: list[tuple[str, bytes]] = []
+
+    def __call__(self, **kwargs):
+        return self
+
+    def get(self, url):
+        if url.endswith("/capabilities"):
+            if self.capabilities is None:
+                return _StubResponse(404)
+            return _StubResponse(200, self.capabilities)
+        if self.manifest is None:
+            return _StubResponse(404)
+        assert url.endswith("/files"), url
+        return _StubResponse(200, {"files": self.manifest, "withheld": []})
+
+    def put(self, url, *, content, headers=None):
+        self.puts.append((url, content))
+        if self.refuse is not None:
+            return _StubResponse(403, {"detail": self.refuse})
+        return _StubResponse(
+            200,
+            self.summary
+            or {"slug": "jane-doe", "name": "Jane Doe", "level": "full", "indexed": False},
+        )
+
+    def close(self):
+        pass
+
+
+def _entry(profile_dir: Path, rel: str, role: str) -> dict:
+    """A server manifest entry for a file that is on disk, digest and all."""
+    digest = hashlib.sha256((profile_dir / rel).read_bytes()).hexdigest()
+    return {"contentUrl": rel, "role": role, "sha256": digest}
+
+
+def _sent_names(payload: bytes) -> set[str]:
+    """The member names of an uploaded tarball."""
+    with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as tf:
+        return {m.name for m in tf.getmembers()}
+
+
+_GONE = {"contentUrl": "sources/web/gone.md", "role": "web", "sha256": "abc"}
+_KEEP = {"contentUrl": "sources/web/keep.md", "role": "web", "sha256": "abc"}
+
+
+def _add_legacy_cache(profile_dir: Path) -> None:
+    (profile_dir / "cache").mkdir()
+    (profile_dir / "cache" / "embeddings.sqlite").write_bytes(b"not really sqlite")
+
+
+def _add_ghost_part(profile_dir: Path) -> None:
+    doc = json.loads((profile_dir / "profile.jsonld").read_text())
+    doc["hasPart"].append(
+        {
+            "@type": "DigitalDocument",
+            "name": "Ghost",
+            "role": "paper_fulltext",
+            "encodingFormat": "text/markdown",
+            "contentUrl": "sources/papers/ghost.md",
+        }
+    )
+    (profile_dir / "profile.jsonld").write_text(json.dumps(doc))
+
+
+class TestPushPreflight:
+    """The CLI's half of ``rp push``: dry runs upload nothing, removals are refused, exclusions are named."""
+
+    @pytest.fixture
+    def server(self, monkeypatch):
+        import httpx
+
+        def _make(manifest: list[dict] | None = None, **kwargs) -> _StubServer:
+            stub = _StubServer(manifest, **kwargs)
+            monkeypatch.setattr(httpx, "Client", stub)
+            return stub
+
+        return _make
+
+    def test_dry_run_prints_the_plan_and_uploads_nothing(self, server, jane_doe_dir, capsys):
+        stub = server([_entry(jane_doe_dir, "sources/papers.jsonld", "works")])
+
+        assert main(["push", str(jane_doe_dir), "--url", "http://x", "--dry-run"]) == 0
+
+        captured = capsys.readouterr()
+        assert stub.puts == []
+        assert "dry run: push jane-doe -> http://x (update, replace)" in captured.out
+        # One file matches the server's digest; everything else is new.
+        assert "added (8):" in captured.out
+        assert "personality/SOUL.md" in captured.out
+        # unchanged is counted, never listed: it is the part nothing happens to.
+        assert "sources/papers.jsonld" not in captured.out
+        # Withheld fulltext is a count, not a warning.
+        assert "withheld 2 fulltext file(s)" in captured.err
+        assert "warning:" not in captured.err
+
+    def test_dry_run_json_carries_every_group(self, server, jane_doe_dir, capsys):
+        server([_entry(jane_doe_dir, "sources/papers.jsonld", "works")])
+
+        assert main(["push", str(jane_doe_dir), "--url", "http://x", "--dry-run", "--json"]) == 0
+
+        plan = json.loads(capsys.readouterr().out)
+        assert plan["slug"] == "jane-doe" and plan["exists"] is True
+        assert plan["unchanged"] == {"works": ["sources/papers.jsonld"]}
+        assert plan["counts"] == {
+            "added": 8,
+            "changed": 0,
+            "unchanged": 1,
+            "removed": 0,
+            "kept": 0,
+            "respliced": 0,
+        }
+        assert plan["dropped"]["fulltext"]
+
+    @pytest.mark.parametrize(
+        ("manifest", "prepare", "extra_argv", "fragments"),
+        [
+            (
+                [_GONE],
+                None,
+                [],
+                [
+                    "push refused [would-remove]: 1 server file(s)",
+                    "sources/web/gone.md",
+                    "--merge",
+                    "--force",
+                ],
+            ),
+            (
+                None,
+                None,
+                ["--prune", "--only", "SKILL.md"],
+                ["--prune conflicts with --only/--merge"],
+            ),
+            (
+                None,
+                _add_legacy_cache,
+                [],
+                [
+                    "push refused [legacy-cache]: 1 file(s)",
+                    "cache/embeddings.sqlite",
+                    "rp manifest --write",
+                ],
+            ),
+            # a manifest naming a file this directory lacks is a partial copy, not drift
+            (
+                [],
+                _add_ghost_part,
+                [],
+                [
+                    "push refused [partial-copy]: 1 manifest entry(ies)",
+                    "sources/papers/ghost.md",
+                    "rp where",
+                    "--only",
+                ],
+            ),
+        ],
+        ids=["would-remove", "only-and-prune", "legacy-cache", "partial-copy"],
+    )
+    def test_refusal_uploads_nothing(
+        self, server, jane_doe_dir, capsys, manifest, prepare, extra_argv, fragments
+    ):
+        stub = server(manifest)
+        if prepare:
+            prepare(jane_doe_dir)
+
+        assert main(["push", str(jane_doe_dir), "--url", "http://x", *extra_argv]) == 2
+
+        err = capsys.readouterr().err
+        assert stub.puts == []
+        for fragment in fragments:
+            assert fragment in err
+        assert "Traceback" not in err
+
+    @pytest.mark.parametrize(
+        ("manifest", "extra_argv", "present", "absent"),
+        [
+            # a run that uploads nothing cannot perform removals, so it reports them
+            ([_GONE], ["--dry-run"], ["removed (1):"], []),
+            (
+                [_KEEP],
+                ["--merge", "--dry-run"],
+                ["dry run: push jane-doe -> http://x (update, merge)"],
+                ["removed ("],
+            ),
+            (
+                [],
+                ["--dry-run"],
+                ["source: {dir}", "target: http://x/api/v1/profiles/jane-doe (mode: replace)"],
+                [],
+            ),
+        ],
+        ids=["removals-reported", "merge-names-mode", "source-and-target"],
+    )
+    def test_dry_run_reports(
+        self, server, jane_doe_dir, capsys, manifest, extra_argv, present, absent
+    ):
+        stub = server(manifest)
+
+        assert main(["push", str(jane_doe_dir), "--url", "http://x", *extra_argv]) == 0
+
+        captured = capsys.readouterr()
+        text = captured.out + captured.err
+        assert stub.puts == []
+        for fragment in present:
+            assert fragment.replace("{dir}", str(jane_doe_dir)) in text
+        for fragment in absent:
+            assert fragment not in text
+
+    def test_force_sends_the_push_and_the_line_counts_the_diff(self, server, jane_doe_dir, capsys):
+        stub = server([{"contentUrl": "sources/web/gone.md", "role": "web", "sha256": "abc"}])
+
+        assert main(["push", str(jane_doe_dir), "--url", "http://x", "--force"]) == 0
+
+        assert len(stub.puts) == 1
+        assert capsys.readouterr().out.startswith("pushed jane-doe: +9 ~0 -1 ")
+
+    def test_only_uploads_the_document_and_the_named_file(self, server, jane_doe_dir, capsys):
+        """``--only`` merges: a server file the archive lacks stays, instead of being a removal."""
+        stub = server([{"contentUrl": "sources/web/keep.md", "role": "web", "sha256": "abc"}])
+
+        argv = ["push", str(jane_doe_dir), "--url", "http://x", "--only", "sources/papers.jsonld"]
+        assert main(argv) == 0
+
+        url, payload = stub.puts[0]
+        assert _sent_names(payload) == {"profile.jsonld", "sources/papers.jsonld"}
+        assert url.endswith("?mode=merge")
+
+    def test_push_only_takes_the_manifest_from_the_server(self, server, jane_doe_dir, capsys):
+        """``--only`` commits the server's index (5 entries), not the local one (2)."""
+        remote = [
+            _entry(jane_doe_dir, "sources/papers.jsonld", "works"),
+            {"contentUrl": "sources/papers/a.md", "role": "paper_fulltext", "sha256": "a1"},
+            {"contentUrl": "sources/papers/b.md", "role": "paper_fulltext", "sha256": "b1"},
+            {"contentUrl": "personality/SOUL.md", "role": "soul", "sha256": "s1"},
+            {"contentUrl": "SKILL.md", "role": "agent_entry_point", "sha256": "k1"},
+        ]
+        stub = server(remote)
+        doc = json.loads((jane_doe_dir / "profile.jsonld").read_text())
+        doc["hasPart"] = [e for e in doc["hasPart"] if e["contentUrl"] == "sources/papers.jsonld"]
+        doc["subjectOf"] = []
+        (jane_doe_dir / "profile.jsonld").write_text(json.dumps(doc))
+
+        argv = ["push", str(jane_doe_dir), "--url", "http://x", "--only", "sources/papers.jsonld"]
+        assert main(argv) == 0
+
+        _, payload = stub.puts[0]
+        with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as tf:
+            sent = json.loads(tf.extractfile("profile.jsonld").read())
+        urls = {e["contentUrl"] for e in (*sent["hasPart"], *sent.get("subjectOf", []))}
+        assert urls == {e["contentUrl"] for e in remote}
+        # The named file's digest is restamped from disk, not copied from the
+        # server: that is the one thing this push is actually changing.
+        refreshed = next(e for e in sent["hasPart"] if e["contentUrl"] == "sources/papers.jsonld")
+        on_disk = hashlib.sha256((jane_doe_dir / "sources/papers.jsonld").read_bytes()).hexdigest()
+        assert refreshed["sha256"] == on_disk
+        # And the persona document went back into subjectOf, not hasPart.
+        assert [e["contentUrl"] for e in sent["subjectOf"]] == ["personality/SOUL.md"]
+
+    def test_dry_run_reports_manifest_shrink_as_removal(self, server, jane_doe_dir, capsys):
+        """A shrinking manifest is a removal even when no path lands in ``removed``."""
+        remote = [
+            _entry(jane_doe_dir, "sources/papers.jsonld", "works"),
+            {"contentUrl": "sources/papers/a.md", "role": "paper_fulltext", "sha256": "a1"},
+            {"contentUrl": "sources/papers/b.md", "role": "paper_fulltext", "sha256": "b1"},
+        ]
+        stub = server(remote, capabilities={"push_modes": ["replace", "merge", "prune"]})
+        doc = json.loads((jane_doe_dir / "profile.jsonld").read_text())
+        doc["hasPart"] = [
+            e for e in doc["hasPart"] if not e["contentUrl"].startswith("sources/papers/")
+        ]
+        (jane_doe_dir / "profile.jsonld").write_text(json.dumps(doc))
+
+        argv = ["push", str(jane_doe_dir), "--url", "http://x", "--dry-run"]
+        assert main(argv) == 0
+        out = capsys.readouterr().out
+        assert stub.puts == []
+        # No manifest_splice in the capabilities above, so the two entries the
+        # local manifest dropped are deletions, not resplices.
+        assert "manifest: 3 entries on server -> " in out
+        assert "removed (2):" in out
+
+        assert main(["push", str(jane_doe_dir), "--url", "http://x"]) == 2
+        err = capsys.readouterr().err
+        assert stub.puts == []
+        assert "push refused [would-remove]: 2 server file(s)" in err
+        assert "manifest 3 -> " in err
+
+    def test_a_server_that_splices_reports_respliced_not_removed(
+        self, server, jane_doe_dir, capsys
+    ):
+        """Same push, against a server that adds the entries back."""
+        remote = [
+            _entry(jane_doe_dir, "sources/papers.jsonld", "works"),
+            {"contentUrl": "sources/papers/a.md", "role": "paper_fulltext", "sha256": "a1"},
+        ]
+        server(remote)
+        doc = json.loads((jane_doe_dir / "profile.jsonld").read_text())
+        doc["hasPart"] = [
+            e for e in doc["hasPart"] if not e["contentUrl"].startswith("sources/papers/")
+        ]
+        (jane_doe_dir / "profile.jsonld").write_text(json.dumps(doc))
+
+        argv = ["push", str(jane_doe_dir), "--url", "http://x", "--merge", "--dry-run"]
+        assert main(argv) == 0
+        out = capsys.readouterr().out
+        assert "1 respliced" in out
+        assert "removed (" not in out
+
+    def test_a_server_without_push_modes_refuses_a_merge(self, server, jane_doe_dir, capsys):
+        """An old server answers 200 to ``?mode=merge`` and runs a replace: ask first."""
+        stub = server([], capabilities=None)
+
+        argv = ["push", str(jane_doe_dir), "--url", "http://x", "--merge"]
+        assert main(argv) == 2
+
+        err = capsys.readouterr().err
+        assert stub.puts == []
+        assert "push refused [mode-unknown]:" in err and "mode=merge" in err
+        # The default mode is what such a server does anyway, so it still works.
+        assert main(["push", str(jane_doe_dir), "--url", "http://x"]) == 0
+        assert len(stub.puts) == 1
+
+    def test_a_part_refusal_names_the_missing_parts(self, server, jane_doe_dir, capsys):
+        """A 403 ``insufficient_access`` names the missing parts and exits 1."""
+        stub = server(
+            [],
+            refuse={
+                "error": "insufficient_access",
+                "required": ["paper_summary", "summary"],
+                "missing": ["summary"],
+                "needs_replace": ["provenance_note"],
+                "hint": "This needs Write on summary.",
+            },
+        )
+
+        assert main(["push", str(jane_doe_dir), "--url", "http://x"]) == 1
+
+        err = capsys.readouterr().err
+        assert len(stub.puts) == 1
+        assert "push refused [insufficient-access]:" in err
+        assert "needs Write on: summary" in err
+        assert '"Replace whole profiles" for: provenance_note' in err
+        assert "next: --only <file>" in err
+        assert "Traceback" not in err
+
+    def test_a_part_refusal_under_only_blames_the_document(self, server, jane_doe_dir, capsys):
+        server(
+            [],
+            refuse={"error": "insufficient_access", "missing": ["summary"], "needs_replace": []},
+        )
+
+        argv = ["push", str(jane_doe_dir), "--url", "http://x", "--only", "sources/papers.jsonld"]
+        assert main(argv) == 1
+
+        err = capsys.readouterr().err
+        assert "needs Write on: summary" in err
+        assert "profile.jsonld travels with --only" in err
+
+    def test_push_prints_post_commit_counts_and_warns_on_shrink(self, server, jane_doe_dir, capsys):
+        """The server's own count, after the fact, and a shout when it fell."""
+        remote = [
+            _entry(jane_doe_dir, "sources/papers.jsonld", "works"),
+            {"contentUrl": "sources/papers/a.md", "role": "paper_fulltext", "sha256": "a1"},
+        ]
+        server(
+            remote,
+            summary={
+                "slug": "jane-doe",
+                "name": "Jane Doe",
+                "level": "full",
+                "indexed": False,
+                "spliced": 0,
+                "manifest_counts": {"works": 1},
+            },
+        )
+
+        assert main(["push", str(jane_doe_dir), "--url", "http://x", "--force"]) == 0
+        captured = capsys.readouterr()
+        assert "server now holds 1 artifacts: works 1" in captured.out
+        assert "warning: artifact count fell from 2 to 1" in captured.err
+
+    def test_a_non_spec_file_on_disk_is_warned_about(self, server, jane_doe_dir, capsys):
+        stub = server()
+        (jane_doe_dir / "sources" / "html").mkdir(parents=True)
+        (jane_doe_dir / "sources" / "html" / "scrape.html").write_text("<html></html>")
+
+        assert main(["push", str(jane_doe_dir), "--url", "http://x"]) == 0
+
+        assert len(stub.puts) == 1
+        assert "warning: 1 path(s) are not profile members" in capsys.readouterr().err
+
+
 class TestErrorHandling:
     """A failure is a message and a code, never a traceback."""
 
-    def test_push_to_an_unreachable_server(self, jane_doe_dir, capsys):
-        # A real closed port, not a spy: the point is that the CLI, not the
-        # client library, owns the top-level catch. httpx.ConnectError is
-        # none of (FileNotFoundError, PermissionError, RuntimeError).
-        assert main(["push", str(jane_doe_dir), "--url", "http://127.0.0.1:9/x"]) == 1
-        assert "Traceback" not in capsys.readouterr().err
-
-    def test_search_without_an_index(self, jane_doe_dir, capsys):
-        assert main(["search", str(jane_doe_dir), "q"]) == 2
+    @pytest.mark.parametrize(
+        ("argv", "code", "fragment"),
+        [
+            # a real closed port: the CLI, not the library, owns the top-level catch
+            (["push", "{dir}", "--url", "http://127.0.0.1:9/x"], 1, None),
+            (["search", "{dir}", "q"], 2, "rp index"),
+            (["index", "{dir}", "--backend", "nonsense:1"], 2, None),
+            # exit 0 would look like an empty registry
+            (["listr", "--url", "http://127.0.0.1:9"], 1, None),
+        ],
+        ids=["push-unreachable", "search-no-index", "index-unknown-backend", "listr-all-down"],
+    )
+    def test_failure_is_a_message_not_a_traceback(
+        self, cases, jane_doe_dir, capsys, argv, code, fragment
+    ):
+        assert main([str(jane_doe_dir) if a == "{dir}" else a for a in argv]) == code
         err = capsys.readouterr().err
-        assert "Traceback" not in err and "rp index" in err
-
-    def test_index_with_an_unknown_backend(self, jane_doe_dir, capsys):
-        assert main(["index", str(jane_doe_dir), "--backend", "nonsense:1"]) == 2
-        assert "Traceback" not in capsys.readouterr().err
-
-    def test_listr_when_every_registry_is_down(self, cases, capsys):
-        # Exit 0 here is indistinguishable from "the registry is empty".
-        assert main(["listr", "--url", "http://127.0.0.1:9"]) == 1
-        assert "Traceback" not in capsys.readouterr().err
+        assert "Traceback" not in err
+        if fragment:
+            assert fragment in err
 
 
-class TestManagementClientDispatch:
-    """The CLI selects the ManagementClient resource, not its HTTP shape."""
-
-    def _install(self, monkeypatch, *, fail=None):
-        from researcher_profiles.cli.auth import agent
-
-        credential = agent.Credential(
-            "rpa_test", "https://example.test", "test", profile="jane-doe"
-        )
-        calls = []
-
-        class FakeClient:
-            def __init__(self, _credential):
-                self.identity = SimpleNamespace(
-                    whoami=lambda: calls.append("whoami") or {"principal": {}, "scopes": []},
-                    scopes=lambda: calls.append("scopes") or {},
-                )
-                self.profile = SimpleNamespace(
-                    get=lambda slug: calls.append(("get", slug)) or {"metadata": {}},
-                    patch_visibility=lambda slug, **kw: (
-                        (_ for _ in ()).throw(fail)
-                        if fail
-                        else calls.append(("visibility", slug, kw))
-                    ),
-                )
-
-        monkeypatch.setattr(agent, "resolve_credential", lambda **_: credential)
-        monkeypatch.setattr(agent, "ManagementClient", FakeClient)
-        return calls
-
-    def test_agent_identity_subcommands_dispatch_to_identity(self, monkeypatch, capsys):
-        calls = self._install(monkeypatch)
-        assert main(["agent", "whoami", "--json"]) == 0
-        assert main(["agent", "scopes", "--json"]) == 0
-        assert calls == ["whoami", "scopes"]
-        assert '"principal"' in capsys.readouterr().out
-
-    def test_profile_read_dispatches_to_profile_resource(self, monkeypatch, capsys):
-        calls = self._install(monkeypatch)
-        assert main(["profile", "visibility", "get"]) == 0
-        assert calls == [("get", "jane-doe")]
-        assert "visibility:" in capsys.readouterr().out
-
-    def test_profile_pull_reads_the_flat_manifest_list(self, monkeypatch, tmp_path, capsys):
-        """``manifest`` is a flat ``list[dict]``, not a ``{"entries": [...]}`` envelope.
-
-        That is what ``models.api.ProfileDetail`` serves and what the spec's
-        ``GET /profiles/{slug}`` table declares, so the soul fetch must find
-        its entry by iterating the list directly.
-        """
-        import httpx
-
-        from researcher_profiles.cli.auth import agent
-
-        credential = agent.Credential(
-            "rpa_test", "https://profiles.example.org", "test", profile="jane-doe"
-        )
-        detail = {
+#: What a host's ``GET /api/manage/agent/whoami`` answers, trimmed.
+WHOAMI = {
+    "principal": {"kind": "consumer", "label": "summary bot", "handle": "agent_1a2b3c"},
+    "owner": {"orcid": "0000-0002-1825-0097", "name": "Jane Doe"},
+    "profiles": [
+        {
             "slug": "jane-doe",
             "rid": "0000-0002-1825-0097",
-            "metadata": {"name": "Jane Doe"},
-            "content_hash": "sha256:abc",
-            "manifest": [
-                {"content_url": "papers.json", "role": "papers"},
-                {"content_url": "personality/SOUL.md", "role": "soul"},
-            ],
+            "role": "owner",
+            "writes": ["paper_summary"],
+            "published": True,
         }
+    ],
+    "parts": {"paper_summary": "write", "summary": "read", "cv": "read"},
+    "replace_profiles": False,
+    "never_delegable": [
+        {"act": "publish", "why": "Publishing is a decision by the person the profile describes."}
+    ],
+}
 
-        class FakeClient:
-            def __init__(self, _credential):
-                self.profile = SimpleNamespace(get=lambda slug: detail)
 
-        asked: list[str] = []
+_WORK = {
+    "paper_id": "smith2023protein",
+    "version": "0123456789abcdef",
+    "fields": {"paper_id": "smith2023protein", "doi": None, "datePublished": "2023"},
+}
 
-        def fake_get(url, headers=None, **kw):
-            asked.append(url)
-            return SimpleNamespace(raise_for_status=lambda: None, text="I study barnacles.\n")
 
-        monkeypatch.setattr(agent, "resolve_credential", lambda **_: credential)
-        monkeypatch.setattr(agent, "ManagementClient", FakeClient)
-        monkeypatch.setattr(httpx, "get", fake_get)
+class FakeApi:
+    """A recording stand-in for ``ManagementClient``."""
+
+    def __init__(self):
+        self.calls: list = []
+        self.fail: Exception | None = None
+        self.detail: dict = {"metadata": {}}  # the ``profile.get`` reply
+        self.work: dict = _WORK  # the ``get_work`` reply
+        self.identity = SimpleNamespace(
+            whoami=lambda: self.calls.append("whoami") or dict(WHOAMI),
+        )
+        self.profile = SimpleNamespace(
+            get=self._get,
+            patch_visibility=self._patch_visibility,
+            get_work=lambda slug, pid: self.calls.append(("get", slug, pid)) or self.work,
+            patch_work=lambda slug, pid, patch, base_version=None: (
+                self.calls.append(("patch", slug, pid, patch, base_version))
+                or {"updated": sorted(patch)}
+            ),
+            delete_work=lambda slug, pid: self.calls.append(("delete", slug, pid)) or {},
+        )
+
+    def _get(self, slug):
+        self.calls.append(("get", slug))
+        return self.detail
+
+    def _patch_visibility(self, slug, **kw):
+        if self.fail:
+            raise self.fail
+        self.calls.append(("visibility", slug, kw))
+
+
+@pytest.fixture
+def fake_api(monkeypatch) -> FakeApi:
+    from researcher_profiles.cli.auth import agent
+
+    fake = FakeApi()
+    credential = agent.Credential("rpa_test", "https://example.test", "test", profile="jane-doe")
+    monkeypatch.setattr(agent, "resolve_credential", lambda **_: credential)
+    monkeypatch.setattr(agent, "ManagementClient", lambda _credential: fake)
+    return fake
+
+
+_P = "smith2023protein"
+_J = "jane-doe"
+
+
+class TestManagementDispatch:
+    """The CLI selects the ManagementClient resource, not its HTTP shape."""
+
+    @pytest.mark.parametrize(
+        ("argv", "fail", "code", "calls", "stream", "fragment"),
+        [
+            (["agent", "whoami", "--json"], None, 0, ["whoami"], "out", '"principal"'),
+            (["profile", "visibility", "get"], None, 0, [("get", _J)], "out", "visibility:"),
+            (
+                ["profile", "visibility", "set", "--tier", "limited"],
+                AgentAPIError(403, "denied"),
+                1,
+                [],
+                "err",
+                "Error: denied",
+            ),
+            # JSON where it parses; a citation with a colon stays a string
+            (
+                [
+                    "work",
+                    "set",
+                    _P,
+                    "datePublished=2023",
+                    "is_corresponding=true",
+                    "citation=Smith et al., Nature (2023)",
+                ],
+                None,
+                0,
+                [
+                    (
+                        "patch",
+                        _J,
+                        _P,
+                        {
+                            "datePublished": 2023,
+                            "is_corresponding": True,
+                            "citation": "Smith et al., Nature (2023)",
+                        },
+                        None,
+                    )
+                ],
+                "out",
+                "updated",
+            ),
+            (
+                ["work", "set", _P, "doi=10.1/x", "--if-match", "0123abcd"],
+                None,
+                0,
+                [("patch", _J, _P, {"doi": "10.1/x"}, "0123abcd")],
+                "out",
+                "updated",
+            ),
+            (  # --force drops the base version: last writer wins
+                ["work", "set", _P, "doi=10.1/x", "--force"],
+                None,
+                0,
+                [("patch", _J, _P, {"doi": "10.1/x"}, None)],
+                "out",
+                "updated",
+            ),
+            (
+                ["work", "set", _P, "doi=10.1/x", "--dry-run"],
+                None,
+                0,
+                [("get", _J, _P)],
+                "out",
+                "-> '10.1/x'",
+            ),
+            (["work", "set", _P, "doi"], None, 2, [], "err", "key=value"),
+            (["work", "show", _P, "--json"], None, 0, [("get", _J, _P)], "out", '"paper_id"'),
+            (["work", "rm", _P], None, 0, [("delete", _J, _P)], "out", None),
+        ],
+        ids=[
+            "agent-whoami-json",
+            "visibility-get",
+            "visibility-set-denied",
+            "work-set-typed",
+            "work-set-if-match",
+            "work-set-force",
+            "work-set-dry-run",
+            "work-bare-word",
+            "work-show",
+            "work-rm",
+        ],
+    )
+    def test_dispatch(self, fake_api, capsys, argv, fail, code, calls, stream, fragment):
+        fake_api.fail = fail
+        assert main(argv) == code
+        assert fake_api.calls == calls
+        if fragment:
+            assert fragment in getattr(capsys.readouterr(), stream)
+
+    def test_whoami_prints_the_parts_table(self, fake_api, capsys):
+        assert main(["agent", "whoami"]) == 0
+        out = capsys.readouterr().out
+        assert "Write:   paper_summary" in out
+        assert "Read:    cv, summary" in out
+        assert "None:    every other part" in out
+        assert "Replace whole profiles: off" in out
+        assert "jane-doe (owner, published): writes paper_summary" in out
+        assert "publish: Publishing is a decision" in out
+        assert "scope" not in out.lower() and "tier" not in out.lower()
+
+    def test_profile_pull_writes_the_full_view(self, fake_api, tmp_path, capsys):
+        """The full view carries the SOUL body inline; pull writes it, no second fetch."""
+        fake_api.detail = {
+            "slug": "jane-doe",
+            "rid": "0000-0002-1825-0097",
+            "view": "full",
+            "fields": {"name": "Jane Doe"},
+            "content_hash": "sha256:abc",
+            "soul": "I study barnacles.\n",
+        }
 
         out = tmp_path / "profile.md"
         assert main(["profile", "pull", "-o", str(out)]) == 0
-        assert asked == [
-            "https://profiles.example.org/api/v1/profiles/jane-doe/content/personality/SOUL.md"
-        ]
         body = out.read_text()
         assert "I study barnacles." in body
         assert "base_hash: sha256:abc" in body
+        assert "name: Jane Doe" in body
 
-    def test_profile_write_preserves_agent_error_exit(self, monkeypatch, capsys):
-        from researcher_profiles.cli.auth.agent import AgentAPIError
-
-        calls = self._install(monkeypatch, fail=AgentAPIError(403, "denied"))
-        assert main(["profile", "visibility", "set", "--tier", "internal"]) == 1
-        assert calls == []
-        assert "Error: denied" in capsys.readouterr().err
+        # a SOUL this key may not read must not write an empty body a later push would save
+        fake_api.detail["soul"] = None
+        assert main(["profile", "pull", "-o", str(out)]) == 0
+        assert "may not read the SOUL" in capsys.readouterr().err
 
 
 class TestPluginSeam:
@@ -764,3 +1384,18 @@ class TestPluginSeam:
 
         monkeypatch.setattr("importlib.metadata.entry_points", lambda **kw: [_Boom()])
         assert main(cases.argv(["list", "--root", "{empty}"])) == 0
+
+
+def test_work_assignments_only_decode_typed_fields():
+    from researcher_profiles.cli._work import _parse_assignments
+
+    got = _parse_assignments(
+        ["name=1984", "title=NaN", "datePublished=2023", "is_corresponding=true", "summary=null"]
+    )
+    assert got == {
+        "name": "1984",
+        "title": "NaN",
+        "datePublished": 2023,
+        "is_corresponding": True,
+        "summary": "null",
+    }

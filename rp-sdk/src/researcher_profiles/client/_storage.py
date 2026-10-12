@@ -1,22 +1,4 @@
-"""The two read-only HTTP storage backends and their remote capability managers.
-
-:class:`ApiArtifactStorage`
-    One profile served by a live ``researcher_profiles.api`` server.
-    ``ResearcherProfile.from_api(...)`` builds one. The server owns the model,
-    the corpus and the embedding index, so ``prof.persona`` and ``prof.index``
-    are HTTP-backed here, through :class:`_RemotePersona` and
-    :class:`_RemoteIndex`.
-
-:class:`StaticArtifactStorage`
-    One profile published as a directory on a dumb static host (Cloudflare
-    Pages, S3, Apache). ``ResearcherProfile.from_url(...)`` builds one. One
-    lazy GET per artifact, and the manifest in ``profile.jsonld`` stands in for
-    the directory listing a static host does not have.
-
-Both are read-only: every writer is refused by
-:class:`~researcher_profiles.profile.storage.ReadOnlyArtifactStorage` with one
-message naming :func:`install_profile`.
-"""
+"""The two read-only HTTP storage backends and their remote capability managers."""
 
 import hashlib
 import json
@@ -80,8 +62,8 @@ def _empty_collection_envelope(content_url: str, about: Optional[str]) -> dict:
 class _RemoteIndex:
     """``prof.index`` for a profile served by a live API server.
 
-    ``search`` goes over ``POST /search``, which the server answers from the
-    index IT built. The rest need the sqlite handle itself and are refused.
+    Only ``search`` is served (``POST /search``). The rest need the local
+    sqlite handle and raise :class:`CapabilityUnavailableError`.
     """
 
     def __init__(self, storage: "ApiArtifactStorage"):
@@ -139,10 +121,8 @@ class _RemotePersona:
 
     Each verb POSTs one request; the server owns the model, the corpus and the
     refusal policy. Signatures are a strict subset of the local ones:
-    ``thinking`` and ``max_tokens`` have no field on ``AskRequest`` /
-    ``ReviewRequest`` / ``InnovateRequest`` / ``RiffRequest``, and forwarding
-    them would only move the lie one hop, since ``_APIModel`` sets
-    ``extra="allow"``.
+    ``thinking`` and ``max_tokens`` have no wire field, and the server models
+    set ``extra="allow"``, so forwarding them would be silently ignored.
     """
 
     def __init__(self, profile: ResearcherProfile, storage: "ApiArtifactStorage"):
@@ -286,9 +266,9 @@ class _RemotePersona:
 class ApiArtifactStorage(ReadOnlyArtifactStorage):
     """A profile served by a live ``researcher_profiles.api`` server.
 
-    Read-only: every writer is refused by :class:`ReadOnlyArtifactStorage`.
-    Reads come off the combined detail payload where the API has one, and off
-    the dedicated routes otherwise.
+    Built by ``ResearcherProfile.from_api(...)``. Reads come off the combined
+    detail payload where the API has one, and off the dedicated routes
+    otherwise.
     """
 
     def __init__(
@@ -319,6 +299,7 @@ class ApiArtifactStorage(ReadOnlyArtifactStorage):
         # Caches for the combined endpoint.
         self._detail_cache: Optional[dict] = None
         self._paper_index_cache: Optional[list[dict]] = None
+        self._files_cache: Optional[list[dict]] = None
 
     def __repr__(self) -> str:
         return f"ApiArtifactStorage(slug={self._slug!r}, base_url={self.base_url!r})"
@@ -360,6 +341,7 @@ class ApiArtifactStorage(ReadOnlyArtifactStorage):
         """Drop cached immutable resources so the next access refetches."""
         self._detail_cache = None
         self._paper_index_cache = None
+        self._files_cache = None
 
     # HTTP helpers + error mapping
 
@@ -383,48 +365,92 @@ class ApiArtifactStorage(ReadOnlyArtifactStorage):
         return resp.text
 
     def _detail(self) -> dict:
+        """The full view: every metadata field plus the two narrative bodies."""
         if self._detail_cache is None:
-            self._detail_cache = self._request("GET", self._api_path())
+            self._detail_cache = self._request("GET", self._api_path(), params={"view": "full"})
         return self._detail_cache
 
+    def _files(self) -> list[dict]:
+        """The manifest entries the server holds (``GET .../files``)."""
+        if self._files_cache is None:
+            data = self._request("GET", self._api_path("files"))
+            self._files_cache = list(data.get("files") or [])
+        return self._files_cache
+
     def _fetch_summary(self, paper_id: str) -> str:
-        data = self._request("GET", self._api_path("summary", paper_id))
-        return data.get("summary", "")
+        data = self._request("GET", self._api_path("summaries"), params={"ids": paper_id})
+        return (data.get("summaries") or {}).get(paper_id, "")
 
     # Reads
 
     def load_document(self) -> ProfileDocument:
-        d = self._detail()
-        # Server emits a tolerant dict; round-trip through ProfileDocument.
-        return ProfileDocument.model_validate(d["metadata"])
+        """The served metadata with the manifest put back, as one document.
+
+        The record carries no manifest (it has its own route) and two counts
+        that are not document fields. Both are fixed here so the document
+        validates.
+        """
+        fields = dict(self._detail().get("fields") or {})
+        for key in ("paper_count", "summary_count"):
+            fields.pop(key, None)
+        files = self._files()
+        for slot, key in (("hasPart", "has_part"), ("subjectOf", "subject_of")):
+            fields[key] = [
+                {k: v for k, v in e.items() if k not in ("effective_visibility", "slot")}
+                for e in files
+                if e.get("slot") == slot
+            ]
+        return ProfileDocument.model_validate(fields)
 
     def content_hash(self) -> str:
         """``"sha256:<hex>"`` over the served document + soul.
 
-        A read, so it stays supported on a read-only view. Computed from the
-        combined detail payload rather than raw bytes, because the API serves a
-        document, not a file.
+        Computed from the parsed document, not raw bytes, because the API
+        serves a document, not a file.
         """
         d = self._detail()
         h = hashlib.sha256()
-        h.update(
-            canonical_dumps(
-                ProfileDocument.model_validate(d["metadata"]).model_dump(mode="json")
-            ).encode("utf-8")
-        )
+        h.update(canonical_dumps(self.load_document().model_dump(mode="json")).encode("utf-8"))
         h.update(b"\x00")
         h.update((d.get("soul") or "").encode("utf-8"))
         return f"sha256:{h.hexdigest()}"
 
     def load_expertise(self) -> str:
-        return self._detail().get("expertise", "")
+        return self._detail().get("expertise") or ""
 
     def load_soul(self) -> str:
-        return self._detail().get("soul", "")
+        return self._detail().get("soul") or ""
+
+    def _paper_rows(self) -> list[dict]:
+        """Every paper row, following the cursor 100 at a time."""
+        rows: list[dict] = []
+        cursor: Optional[str] = None
+        while True:
+            params: dict[str, Any] = {"limit": 100}
+            if cursor:
+                params["cursor"] = cursor
+            page = self._request("GET", self._api_path("papers"), params=params)
+            rows.extend(page.get("items") or [])
+            cursor = page.get("next_cursor")
+            if not cursor:
+                return rows
 
     def load_papers(self) -> list[PaperRecord]:
-        entries = self._request("GET", self._api_path("papers"))
-        self._paper_index_cache = list(entries)
+        """The whole records off the works file, indexed by the paged rows.
+
+        The rows say which summaries this caller may fetch; the works file
+        (``content/sources/papers.jsonld``, gated by the same tier as the rows)
+        carries every bibliographic field in one read. A server that will not
+        serve the file still answers with records built from the rows.
+        """
+        rows = self._paper_rows()
+        self._paper_index_cache = rows
+        try:
+            raw = self._request("GET", self._api_path("content", PAPERS_URL))
+            data = json.loads(raw) if isinstance(raw, str) else raw
+            return PapersDocument.model_validate(data or {}).has_part
+        except (KeyError, RuntimeError, ValueError, ValidationError):
+            pass
         return [
             PaperRecord.model_validate(
                 {
@@ -433,14 +459,11 @@ class ApiArtifactStorage(ReadOnlyArtifactStorage):
                     "year": e.get("year"),
                     "journal": e.get("journal"),
                     "first_author": e.get("first_author"),
-                    "authors": e.get("authors"),
                     "doi": e.get("doi"),
-                    "pmid": e.get("pmid"),
                     "openalex_id": e.get("openalex_id"),
-                    "full_text_link": e.get("full_text_link"),
                 }
             )
-            for e in entries
+            for e in rows
         ]
 
     def load_grants(self) -> list[GrantRecord]:
@@ -453,12 +476,11 @@ class ApiArtifactStorage(ReadOnlyArtifactStorage):
 
     def load_summaries(self) -> Mapping[str, str]:
         if self._paper_index_cache is None:
-            # Triggers a load + caches the paper index.
             self.load_papers()
         ids = [
             e["paper_id"]
             for e in (self._paper_index_cache or [])
-            if e.get("paper_id") and e.get("summary_available")
+            if e.get("paper_id") and (e.get("summary") or {}).get("available")
         ]
         return LazySummaries(ids, self._fetch_summary)
 
@@ -467,9 +489,8 @@ class ApiArtifactStorage(ReadOnlyArtifactStorage):
     def artifact_text(self, content_url: str) -> Optional[str]:
         """Only what v1 serves: soul, expertise, and paper summaries.
 
-        Returns ``None`` otherwise. An invented empty body is worse than an
-        empty column, and the v1 API has no route that hands back an arbitrary
-        artifact's bytes.
+        Returns ``None`` otherwise, rather than an invented empty body. The v1
+        API has no route for an arbitrary artifact's bytes.
         """
         if content_url == SOUL_URL:
             return self.load_soul() or None
@@ -496,7 +517,7 @@ class ApiArtifactStorage(ReadOnlyArtifactStorage):
             return None
 
     def build_manifest(self) -> tuple[list[ArtifactRef], list[ArtifactRef]]:
-        """The manifest the served document records; there is nothing to walk."""
+        """The manifest the server holds (``GET .../files``); there is nothing to walk."""
         try:
             doc = self.load_document()
         except (ProfileError, KeyError, RuntimeError):  # pragma: no cover
@@ -534,9 +555,7 @@ def _s3_to_https(url: str) -> str:
 class StaticArtifactStorage(ReadOnlyArtifactStorage):
     """A published profile directory on a dumb static host (Pages, S3, ...).
 
-    Unlike :class:`ApiArtifactStorage` (which talks to a live
-    ``researcher_profiles.api`` server), this fetches the published files
-    themselves (``profile.jsonld``, ``personality/*.md``, ``sources/*.jsonld``)
+    Built by ``ResearcherProfile.from_url(...)``. Fetches the published files
     with one lazy GET per artifact. Summaries are enumerated from the manifest
     in ``profile.jsonld``, since a static host has no directory listing.
 
@@ -625,10 +644,7 @@ class StaticArtifactStorage(ReadOnlyArtifactStorage):
     # Reads
 
     def content_hash(self) -> str:
-        """``"sha256:<hex>"`` over the fetched document + soul.
-
-        A read, so it stays supported on a read-only view.
-        """
+        """``"sha256:<hex>"`` over the fetched document + soul."""
         h = hashlib.sha256()
         raw = self._fetch("profile.jsonld")
         data = json.loads(raw) if raw is not None else {}
@@ -696,8 +712,6 @@ class StaticArtifactStorage(ReadOnlyArtifactStorage):
             raise ProfileLoadError(url, f"JSON parse error: {e}", e) from e
 
     def load_summaries(self) -> Mapping[str, str]:
-        # A static host has no directory listing, so enumerate from the
-        # manifest, which exists precisely for this.
         ids = sorted(
             p.paper_id
             for p in self.load_document().has_part

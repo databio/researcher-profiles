@@ -2,12 +2,15 @@ import { describe, expect, it, beforeEach } from "vitest";
 import { useStore } from "../src/store";
 import { getGroups, getCentroidsForGroup } from "../src/model/groups";
 
+const SRC = "https://profiles.example.org/api/v1/collection.json";
+
 beforeEach(() => {
   useStore.setState({
     sources: [],
     cards: [],
     failures: [],
     centroids: new Map(),
+    centroidSets: new Map(),
   });
 });
 
@@ -41,6 +44,7 @@ describe("getGroups", () => {
   it("reports hasCentroids when centroids are set", () => {
     useStore.addCards([card("a", "st:all-MiniLM-L6-v2")]);
     useStore.setCentroids(
+      SRC,
       "st:all-MiniLM-L6-v2",
       new Float32Array([1, 0, 0]),
       3,
@@ -57,6 +61,7 @@ describe("getGroups", () => {
     useStore.addCards([card("a", "st:all-MiniLM-L6-v2")]);
     const probe = { text: "test", vector: [0.1, 0.2, 0.3] };
     useStore.setCentroids(
+      SRC,
       "st:all-MiniLM-L6-v2",
       new Float32Array([1, 0, 0]),
       3,
@@ -76,7 +81,7 @@ describe("getCentroidsForGroup", () => {
 
   it("returns centroid data when available", () => {
     const vectors = new Float32Array([1, 0, 0, 0, 1, 0]);
-    useStore.setCentroids("st:all-MiniLM-L6-v2", vectors, 3, ["a", "b"]);
+    useStore.setCentroids(SRC, "st:all-MiniLM-L6-v2", vectors, 3, ["a", "b"]);
     const data = getCentroidsForGroup("st:all-MiniLM-L6-v2");
     expect(data).not.toBeNull();
     expect(data!.dim).toBe(3);
@@ -86,8 +91,10 @@ describe("getCentroidsForGroup", () => {
   it("throws on byte length mismatch", () => {
     // 3 floats but claiming 2 rows of dim 3 (needs 6 floats)
     const vectors = new Float32Array([1, 0, 0]);
-    useStore.setCentroids("bad", vectors, 3, ["a", "b"]);
-    expect(() => getCentroidsForGroup("bad")).toThrow("byte length mismatch");
+    expect(() => useStore.setCentroids(SRC, "bad", vectors, 3, ["a", "b"])).toThrow(
+      "byte length mismatch",
+    );
+    expect(getCentroidsForGroup("bad")).toBeNull();
   });
 });
 

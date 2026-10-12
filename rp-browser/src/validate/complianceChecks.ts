@@ -12,11 +12,23 @@ type Emit = (check: CheckResult) => void;
 // Static API checks (given a profile base URL)
 // ---------------------------------------------------------------------------
 
+/**
+ * The profile base (no trailing slash) for a pasted URL. Accepts either the
+ * base or a `.../profile.jsonld` URL, since the URL box is shared with the
+ * Profile tab, which accepts both.
+ */
+export function profileBaseOf(profileUrl: string): string {
+  return profileUrl
+    .trim()
+    .replace(/\/+$/, "")
+    .replace(/\/profile\.jsonld$/, "");
+}
+
 export async function staticApiChecks(
   profileUrl: string,
   emit: Emit,
 ): Promise<CheckResult[]> {
-  const base = profileUrl.replace(/\/+$/, "");
+  const base = profileBaseOf(profileUrl);
   const checks: CheckResult[] = [];
 
   function add(c: CheckResult) {
@@ -94,10 +106,8 @@ export async function staticApiChecks(
       : "HEAD request on profile.jsonld failed.",
   });
 
-  // ETag: we can't read ETag cross-origin unless exposed, so this is
-  // best-effort; note as indeterminate if unreadable.
-  // Note: ETag is not a CORS-safelisted header, so cross-origin reads may
-  // fail. We check but don't hard-fail.
+  // ETag is not CORS-safelisted, so a cross-origin read is best-effort and
+  // never a hard failure.
   let hasEtag: boolean | "indeterminate" = "indeterminate";
   try {
     const res = await fetch(manifestUrl, { mode: "cors" });
@@ -167,9 +177,8 @@ export async function staticApiChecks(
   const indexUrl = `${base}/index.html`;
   const indexOutcome = await fetchJson<unknown>(indexUrl);
   if (indexOutcome.ok && typeof indexOutcome.value === "string") {
-    // It returned JSON-parseable string? That's odd. Skip.
+    // A JSON string body is not an HTML page; skip.
   } else {
-    // Try fetching as text to parse HTML
     try {
       const res = await fetch(indexUrl, { mode: "cors" });
       if (res.ok) {
@@ -338,27 +347,35 @@ export async function dynamicApiChecks(
       passed:
         detailOutcome.ok &&
         "slug" in detailOutcome.value &&
-        "metadata" in detailOutcome.value,
+        "fields" in detailOutcome.value,
       message: detailOutcome.ok
-        ? "slug" in detailOutcome.value && "metadata" in detailOutcome.value
-          ? `GET /profiles/${slug} returns slug and metadata.`
+        ? "slug" in detailOutcome.value && "fields" in detailOutcome.value
+          ? `GET /profiles/${slug} returns slug and fields.`
           : `GET /profiles/${slug} missing required fields.`
         : `GET /profiles/${slug} failed: ${detailOutcome.ok ? "" : detailOutcome.detail}`,
     });
 
     // Papers endpoint
+    // A page of rows: {items: [...], total, limit_applied, next_cursor}.
     const papersOutcome = await fetchJson<unknown>(
       `${base}/profiles/${slug}/papers`,
     );
+    const papersPage =
+      papersOutcome.ok &&
+      typeof papersOutcome.value === "object" &&
+      papersOutcome.value !== null &&
+      Array.isArray((papersOutcome.value as Record<string, unknown>).items)
+        ? (papersOutcome.value as { items: unknown[]; total?: number })
+        : null;
     add({
       id: "dynamic-papers",
       title: "Papers Endpoint",
       severity: "error",
-      passed: papersOutcome.ok && Array.isArray(papersOutcome.value),
+      passed: papersPage !== null,
       message: papersOutcome.ok
-        ? Array.isArray(papersOutcome.value)
-          ? `GET /profiles/${slug}/papers returns array with ${(papersOutcome.value as unknown[]).length} entries.`
-          : "Papers endpoint did not return an array."
+        ? papersPage !== null
+          ? `GET /profiles/${slug}/papers returns a page of ${papersPage.items.length} rows (total ${String(papersPage.total ?? "?")}).`
+          : "Papers endpoint did not return a page ({items: [...]})."
         : `GET /profiles/${slug}/papers failed: ${papersOutcome.ok ? "" : papersOutcome.detail}`,
     });
 

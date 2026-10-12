@@ -26,68 +26,77 @@ describe("resolveTier", () => {
     mockedGetCachedProbe.mockReturnValue(null);
   });
 
-  it("returns tier 3 when backendSpec is null", () => {
-    const result = resolveTier(makeGroup({ backendSpec: null }));
-    expect(result.tier).toBe(3);
-    expect(result.probeVerdict).toBeNull();
-  });
+  const LOCAL = "st:all-MiniLM-L6-v2";
+  const probe = (verdict: string, cosine: number) => ({ verdict, cosine, backendSpec: LOCAL });
 
-  it("returns tier 3 when hasCentroids is false", () => {
-    const result = resolveTier(makeGroup({ hasCentroids: false }));
-    expect(result.tier).toBe(3);
-  });
-
-  it("returns tier 2 for non-local backend with centroids", () => {
-    const result = resolveTier(
-      makeGroup({ backendSpec: "openai:text-embedding-3-small" }),
-    );
-    expect(result.tier).toBe(2);
-    expect(result.probeVerdict).toBeNull();
-    expect(result.reason).toContain("cannot be reproduced locally");
-  });
-
-  it("returns tier 1 when local backend probe is verified", () => {
-    mockedGetCachedProbe.mockReturnValue({
+  it.each([
+    {
+      name: "tier 3 when backendSpec is null",
+      group: { backendSpec: null },
+      probe: null,
+      tier: 3,
+      verdict: null,
+    },
+    {
+      name: "tier 3 when hasCentroids is false",
+      group: { hasCentroids: false },
+      probe: null,
+      tier: 3,
+      verdict: null,
+    },
+    {
+      name: "tier 2 for non-local backend with centroids",
+      group: { backendSpec: "openai:text-embedding-3-small" },
+      probe: null,
+      tier: 2,
+      verdict: null,
+      reasonContains: "cannot be reproduced locally",
+    },
+    {
+      name: "tier 1 when local backend probe is verified",
+      group: {},
+      probe: probe("verified", 0.999),
+      tier: 1,
       verdict: "verified",
-      cosine: 0.999,
-      backendSpec: "st:all-MiniLM-L6-v2",
-    });
-    const result = resolveTier(makeGroup());
-    expect(result.tier).toBe(1);
-    expect(result.probeVerdict).toBe("verified");
-    expect(result.reason).toContain("matches");
-  });
-
-  it("returns tier 1 when local backend probe is degraded", () => {
-    mockedGetCachedProbe.mockReturnValue({
+      reasonContains: "matches",
+    },
+    {
+      name: "tier 1 when local backend probe is degraded",
+      group: {},
+      probe: probe("degraded", 0.95),
+      tier: 1,
       verdict: "degraded",
-      cosine: 0.95,
-      backendSpec: "st:all-MiniLM-L6-v2",
-    });
-    const result = resolveTier(makeGroup());
-    expect(result.tier).toBe(1);
-    expect(result.probeVerdict).toBe("degraded");
-    expect(result.reason).toContain("partially matches");
-  });
-
-  it("returns tier 2 when local backend probe is incompatible", () => {
-    mockedGetCachedProbe.mockReturnValue({
+      reasonContains: "partially matches",
+    },
+    {
+      name: "tier 2 when local backend probe is incompatible",
+      group: {},
+      probe: probe("incompatible", 0.4),
+      tier: 2,
       verdict: "incompatible",
-      cosine: 0.4,
-      backendSpec: "st:all-MiniLM-L6-v2",
-    });
-    const result = resolveTier(makeGroup());
-    expect(result.tier).toBe(2);
-    expect(result.probeVerdict).toBe("incompatible");
-    expect(result.reason).toContain("Probe test failed");
-  });
-
-  it("returns tier 2 when local backend has no cached probe", () => {
-    mockedGetCachedProbe.mockReturnValue(null);
-    const result = resolveTier(makeGroup());
-    expect(result.tier).toBe(2);
-    expect(result.probeVerdict).toBeNull();
-    expect(result.reason).toContain("not yet run");
+      reasonContains: "Probe test failed",
+    },
+    {
+      name: "tier 2 when local backend has no cached probe",
+      group: {},
+      probe: null,
+      tier: 2,
+      verdict: null,
+      reasonContains: "not yet run",
+    },
+  ] as {
+    name: string;
+    group: Partial<ComparisonGroup>;
+    probe: ReturnType<typeof probe> | null;
+    tier: number;
+    verdict: string | null;
+    reasonContains?: string;
+  }[])("returns $name", ({ group, probe, tier, verdict, reasonContains }) => {
+    mockedGetCachedProbe.mockReturnValue(probe);
+    const result = resolveTier(makeGroup(group));
+    expect(result.tier).toBe(tier);
+    expect(result.probeVerdict).toBe(verdict);
+    if (reasonContains) expect(result.reason).toContain(reasonContains);
   });
 
   it("passes backendSpec through in every result", () => {

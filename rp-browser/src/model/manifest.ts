@@ -36,7 +36,7 @@ export interface ArtifactRef {
   /** For per-paper entries (e.g. role `paper_summary`), the paper it belongs to. */
   paperId?: string | null;
   /** Publication scope of the file. */
-  visibility?: "public" | "internal" | "restricted" | string | null;
+  visibility?: "public" | "limited" | "private" | string | null;
   derivedFrom?: string | null;
   bytes?: number | null;
   sha256?: string | null;
@@ -85,29 +85,25 @@ export function manifestEntries(manifest: Manifest): ArtifactRef[] {
 export function normalizeBase(url: string): string {
   let u = url.trim();
 
-  // Strip trailing profile.jsonld
   if (u.endsWith("/profile.jsonld")) {
     u = u.slice(0, -"profile.jsonld".length);
   } else if (u.endsWith("/profile.jsonld/")) {
     u = u.slice(0, -"profile.jsonld/".length);
   }
 
-  // Force trailing slash
   if (!u.endsWith("/")) u += "/";
 
-  // Validate protocol
   const parsed = new URL(u);
   if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
     throw new Error(`Only http(s) URLs are supported, got ${parsed.protocol}`);
   }
 
-  // Block http in production (allow localhost in dev)
+  // Plain http to a non-local host is allowed but warned about.
   if (
     parsed.protocol === "http:" &&
     parsed.hostname !== "localhost" &&
     parsed.hostname !== "127.0.0.1"
   ) {
-    // Allow in dev, warn but don't block for now
     console.warn(`Non-HTTPS URL: ${u}. HTTPS is recommended for production.`);
   }
 
@@ -140,14 +136,8 @@ export interface ProfileFile {
   mediaType: string;
   bytes?: number | null;
   /**
-   * The tier declared on the manifest entry, when it declares one.
-   *
-   * Carried through so the ordinary browse path can show it: the screen that
-   * lists every file a profile contains can then say which of them are
-   * public. This is the declared tier, not the effective one: the manifest
-   * is tier-invariant (spec section 6) and does not carry the derivation
-   * rule's answer. The owner's Publication panel reads the server's
-   * `effective` for that; nothing recomputes it here.
+   * The tier declared on the manifest entry, not the effective one: the
+   * manifest is tier-invariant (spec section 6).
    */
   visibility?: string | null;
 }
@@ -191,6 +181,23 @@ export function profileFiles(resolved: ResolvedProfile): ProfileFile[] {
 }
 
 /**
+ * Resolve a per-paper manifest entry (e.g. role `paper_summary` or
+ * `paper_fulltext`) for one paper, matched on its exact `paperId`. Returns null
+ * when the profile lists no such artifact for that paper.
+ */
+export function paperArtifactUrl(
+  manifest: Manifest,
+  role: string,
+  paperId: string,
+): string | null {
+  const link = manifestEntries(manifest).find(
+    (e) => e.role === role && e.paperId === paperId,
+  );
+  if (!link) return null;
+  return new URL(link.contentUrl, manifest["@id"]).href;
+}
+
+/**
  * Resolve the summary file for a paper. Per-paper summaries are individual
  * manifest entries (role `paper_summary`) keyed by `paperId`.
  */
@@ -198,11 +205,18 @@ export function summaryUrl(
   manifest: Manifest,
   paperId: string,
 ): string | null {
-  const link = manifestEntries(manifest).find(
-    (e) => e.role === "paper_summary" && e.paperId === paperId,
-  );
-  if (!link) return null;
-  return new URL(link.contentUrl, manifest["@id"]).href;
+  return paperArtifactUrl(manifest, "paper_summary", paperId);
+}
+
+/**
+ * Resolve the profile's own copy of a paper's full text (role
+ * `paper_fulltext`, e.g. `sources/papers/<paperId>.md`), keyed by `paperId`.
+ */
+export function fulltextUrl(
+  manifest: Manifest,
+  paperId: string,
+): string | null {
+  return paperArtifactUrl(manifest, "paper_fulltext", paperId);
 }
 
 // ---------------------------------------------------------------------------
@@ -211,10 +225,7 @@ export function summaryUrl(
 
 const manifestCache = new Map<string, ResolvedProfile>();
 
-/**
- * Load a profile document from the given base URL. Returns a ResolvedProfile
- * with the parsed document and fetch outcome. Caches by normalized base URL.
- */
+/** Load a profile document from a base URL. Cached by normalized base URL. */
 export async function loadManifest(
   rawUrl: string,
 ): Promise<ResolvedProfile> {

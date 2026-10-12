@@ -27,11 +27,7 @@ def _split_profile_url(url: str) -> tuple[str, Optional[str]]:
 
 
 def _server_base(url: str) -> str:
-    """Strip a trailing ``/api/v1/...`` while preserving any mount prefix.
-
-    ``_split_profile_url`` drops the whole path in its no-slug branch, which
-    would break a server mounted under a prefix such as ``/profiles``.
-    """
+    """Strip a trailing ``/api/v1/...`` but keep a mount prefix such as ``/profiles``."""
     url = url.rstrip("/")
     marker = "/api/v1/"
     if marker in url:
@@ -40,20 +36,10 @@ def _server_base(url: str) -> str:
 
 
 def auth_headers(token: Optional[str]) -> dict[str, str]:
-    """The ``Authorization`` header for ``token``, or no headers when it is ``None``.
-
-    Public so a caller with its own HTTP client sends the same header this
-    module does.
-    """
+    """The ``Authorization`` header for ``token``, or no headers when it is ``None``."""
     return {"Authorization": f"Bearer {token}"} if token else {}
 
 
 def _compact(**fields: Any) -> dict[str, Any]:
-    """A request body with every ``None``-valued field dropped.
-
-    ``False`` is kept, so ``strict_corpus`` is always sent as a boolean. That
-    matches the server default (``AskRequest.strict_corpus`` and
-    ``ReviewRequest.strict_corpus`` both default to ``False``), so sending it
-    explicitly changes nothing.
-    """
+    """A request body with every ``None``-valued field dropped (``False`` is kept)."""
     return {k: v for k, v in fields.items() if v is not None}

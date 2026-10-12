@@ -24,22 +24,18 @@ function normalize(v: Float32Array): Float32Array {
 }
 
 describe("cosine", () => {
-  it("returns 1.0 for identical unit vectors", () => {
-    const v = basisVec(4, 0);
-    expect(cosine(v, v)).toBeCloseTo(1.0, 6);
-  });
-
-  it("returns 0.0 for orthogonal unit vectors", () => {
-    const a = basisVec(4, 0);
-    const b = basisVec(4, 1);
-    expect(cosine(a, b)).toBeCloseTo(0.0, 6);
-  });
-
-  it("returns intermediate value for angled vectors", () => {
-    const a = normalize(new Float32Array([1, 1, 0]));
-    const b = normalize(new Float32Array([1, 0, 0]));
-    // cos(45°) ≈ 0.7071
-    expect(cosine(a, b)).toBeCloseTo(Math.SQRT1_2, 4);
+  it.each([
+    { name: "identical unit vectors", a: basisVec(4, 0), b: basisVec(4, 0), expected: 1.0, digits: 6 },
+    { name: "orthogonal unit vectors", a: basisVec(4, 0), b: basisVec(4, 1), expected: 0.0, digits: 6 },
+    {
+      name: "45 degrees apart",
+      a: normalize(new Float32Array([1, 1, 0])),
+      b: normalize(new Float32Array([1, 0, 0])),
+      expected: Math.SQRT1_2,
+      digits: 4,
+    },
+  ])("$name", ({ a, b, expected, digits }) => {
+    expect(cosine(a, b)).toBeCloseTo(expected, digits);
   });
 
   it("throws on dimension mismatch", () => {
@@ -98,14 +94,11 @@ describe("mmrDiversify", () => {
     { index: 3, score: 0.3 },
   ];
 
-  it("returns fewer items than input when k < input.length", () => {
-    const result = mmrDiversify(scored, matrix, dim, 2, 0.5);
-    expect(result).toHaveLength(2);
-  });
-
-  it("returns input unchanged when k >= input.length", () => {
-    const result = mmrDiversify(scored, matrix, dim, 10, 0.5);
-    expect(result).toHaveLength(scored.length);
+  it.each([
+    { name: "returns fewer items than input when k < input.length", k: 2, len: 2 },
+    { name: "returns input unchanged when k >= input.length", k: 10, len: 4 },
+  ])("$name", ({ k, len }) => {
+    expect(mmrDiversify(scored, matrix, dim, k, 0.5)).toHaveLength(len);
   });
 
   it("first item is always the highest scored", () => {

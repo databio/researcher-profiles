@@ -1,15 +1,7 @@
 """``prof.topics``: this profile's research topics.
 
-Defines :class:`TopicManager`, the object ``ResearcherProfile.topics`` hands
-back (``prof.topics.get(...)`` / ``prof.topics.relevance(...)``), together with
-the functions behind it: clustering the embedding index into labeled topics
-(cached, cluster, or LLM methods) and scoring a topic string's relevance
-against a profile's centroid. Importing this module has no side effect on the
-profile class.
-
-Cluster-based topic extraction uses HDBSCAN if installed, else KMeans
-from scikit-learn. Both are soft-deps; missing deps raise a helpful
-error only when the caller actually requests clustering.
+Clustering uses HDBSCAN if installed, else scikit-learn KMeans. Both are
+optional; a missing one raises only when clustering is requested.
 """
 
 import json
@@ -224,8 +216,7 @@ def _topics_llm(profile, n: int) -> tuple[str, list[Topic]]:
             return "cluster", _topics_cluster(profile, n)
         data = json.loads(m.group(0))
     except (*_llm_call_errors(), json.JSONDecodeError) as e:
-        # method="llm" quietly becomes method="cluster" here, and the caller is
-        # told neither, so the downgrade has to be visible somewhere.
+        # Log the downgrade so it is visible somewhere.
         logger.warning("LLM topic extraction failed, falling back to clustering: %s", e)
         return "cluster", _topics_cluster(profile, n)
 
@@ -305,9 +296,8 @@ def _relevance_impl(profile, topic: str) -> float:
 class TopicManager:
     """``prof.topics``: this profile's research topics.
 
-    ``get()`` is the primary read, matching the other four managers; topic
-    extraction clusters the embedding index, so it needs the same directory
-    :class:`~researcher_profiles.profile.index.IndexManager` does.
+    Needs a local directory, like
+    :class:`~researcher_profiles.profile.index.IndexManager`.
     """
 
     def __init__(self, profile):

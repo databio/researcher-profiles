@@ -31,11 +31,6 @@ def _profile() -> dict:
     }
 
 
-# ---------------------------------------------------------------------------
-# JCS canonicalization
-# ---------------------------------------------------------------------------
-
-
 def test_jcs_sorts_keys_and_strips_whitespace():
     assert signing.jcs({"b": 1, "a": 2}) == b'{"a":2,"b":1}'
     assert signing.jcs([1, "x", True, None]) == b'[1,"x",true,null]'
@@ -47,9 +42,45 @@ def test_jcs_is_stable_regardless_of_input_key_order():
     assert a == b
 
 
-def test_jcs_refuses_floats():
-    with pytest.raises(TypeError, match="floats"):
-        signing.jcs({"x": 1.5})
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        # RFC 8785 appendix B vectors, then the shapes interest weights take.
+        (1e30, b"1e+30"),
+        (4.5, b"4.5"),
+        (0.002, b"0.002"),
+        (1e-27, b"1e-27"),
+        (333333333.33333329, b"333333333.3333333"),
+        (-0.0, b"0"),
+        (1e21, b"1e+21"),
+        (1e20, b"100000000000000000000"),
+        (1e-7, b"1e-7"),
+        (0.000001, b"0.000001"),
+        (-1.0, b"-1"),
+        (0.45, b"0.45"),
+    ],
+    ids=[
+        "1e30",
+        "4.50",
+        "2e-3",
+        "1e-27",
+        "shortest-digits",
+        "negative-zero",
+        "1e21-switches-to-exponent",
+        "1e20-stays-fixed",
+        "1e-7-switches-to-exponent",
+        "1e-6-stays-fixed",
+        "integral-weight",
+        "share",
+    ],
+)
+def test_jcs_writes_floats_as_es6_does(value, expected):
+    assert signing.jcs(value) == expected
+
+
+def test_jcs_refuses_nan():
+    with pytest.raises(TypeError, match="NaN"):
+        signing.jcs({"x": float("nan")})
 
 
 def test_preimage_excludes_the_proof_member():
@@ -58,135 +89,111 @@ def test_preimage_excludes_the_proof_member():
     assert signing.signing_preimage(prof) == signing.signing_preimage(with_proof)
 
 
-# ---------------------------------------------------------------------------
-# Sign / verify round-trip
-# ---------------------------------------------------------------------------
+@pytest.fixture
+def key():
+    return signing.generate_private_key()
 
 
-def test_sign_then_verify_round_trips():
-    key = signing.generate_private_key()
-    proof = signing.sign_profile(_profile(), key, base_url=BASE)
-    signed = {**_profile(), "proof": [proof]}
-    jwks = signing.jwk_set([signing.public_jwk(key)])
-    assert signing.verify_signature(signed, jwks) is True
+def _jwks(key):
+    return signing.jwk_set([signing.public_jwk(key)])
 
 
-def test_verification_method_names_the_exact_key():
-    key = signing.generate_private_key()
+@pytest.mark.parametrize(
+    ("over", "other_key", "signed", "expected"),
+    [
+        ({}, False, True, True),
+        (
+            {"proof_extra": [{"kind": "orcid_roundtrip", "issuer": f"https://orcid.org/{ORCID}"}]},
+            False,
+            True,
+            True,
+        ),
+        ({"name": "Mallory"}, False, True, False),
+        ({}, True, True, False),
+        ({}, False, False, False),
+    ],
+    ids=[
+        "round-trip",
+        "extra-non-signature-proof",
+        "tampered-name",
+        "other-key",
+        "no-signature-proof",
+    ],
+)
+def test_verify_signature(key, over, other_key, signed, expected):
+    """No key_signature proof returns False, never raising."""
+    over = dict(over)
+    extra = over.pop("proof_extra", [])
+    doc = _profile()
+    if signed:
+        proof = signing.sign_profile(doc, key, base_url=BASE)
+        doc = {**doc, **over, "proof": [proof, *extra]}
+    jwks = _jwks(signing.generate_private_key() if other_key else key)
+    assert signing.verify_signature(doc, jwks) is expected
+
+
+def test_verification_method_names_the_exact_key(key):
     proof = signing.sign_profile(_profile(), key, base_url=BASE)
     kid = signing.public_jwk(key)["kid"]
     assert proof["verificationMethod"] == (f"{BASE}/.well-known/researcher-profile-keys.json#{kid}")
     assert proof["alg"] == "EdDSA"
 
 
-def test_tampering_breaks_the_signature():
-    key = signing.generate_private_key()
-    proof = signing.sign_profile(_profile(), key, base_url=BASE)
-    jwks = signing.jwk_set([signing.public_jwk(key)])
-    tampered = {**_profile(), "name": "Mallory", "proof": [proof]}
-    assert signing.verify_signature(tampered, jwks) is False
-
-
-def test_a_different_key_does_not_verify():
-    key = signing.generate_private_key()
-    proof = signing.sign_profile(_profile(), key, base_url=BASE)
-    signed = {**_profile(), "proof": [proof]}
-    other = signing.jwk_set([signing.public_jwk(signing.generate_private_key())])
-    assert signing.verify_signature(signed, other) is False
-
-
-def test_no_signature_proof_is_not_trusted():
-    """A profile with no key_signature proof returns False, never raising."""
-    key = signing.generate_private_key()
-    jwks = signing.jwk_set([signing.public_jwk(key)])
-    assert signing.verify_signature(_profile(), jwks) is False
-
-
-def test_extra_non_signature_proofs_do_not_disturb_the_signature():
-    key = signing.generate_private_key()
-    proof = signing.sign_profile(_profile(), key, base_url=BASE)
-    jwks = signing.jwk_set([signing.public_jwk(key)])
-    signed = {
-        **_profile(),
-        "proof": [
-            proof,
-            {"kind": "orcid_roundtrip", "issuer": f"https://orcid.org/{ORCID}"},
-        ],
-    }
-    assert signing.verify_signature(signed, jwks) is True
-
-
-def test_thumbprint_kid_is_deterministic():
-    key = signing.generate_private_key()
+def test_thumbprint_kid_is_deterministic(key):
     assert signing.public_jwk(key)["kid"] == signing.public_jwk(key)["kid"]
 
 
-def test_pem_round_trip():
-    key = signing.generate_private_key()
+def test_pem_round_trip(key):
     pem = signing.private_key_to_pem(key)
     reloaded = signing.load_private_key(pem)
     assert signing.public_jwk(reloaded) == signing.public_jwk(key)
 
 
-# ---------------------------------------------------------------------------
-# A signed profile still validates as a ProfileDocument
-# ---------------------------------------------------------------------------
-
-
-def test_signed_document_is_a_valid_profile_document():
-    key = signing.generate_private_key()
-    # Sign the CANONICAL PUBLISHED serialization, not a pre-validation dict:
-    # model validation fills defaults (e.g. `level`), so a signature must cover
-    # the exact bytes a verifier will reconstruct. Loading + re-serializing is
-    # then a no-op, so the signature survives the round-trip.
+def test_signed_document_is_a_valid_profile_document(key):
+    # sign the canonical serialization; validation fills defaults
     doc = ProfileDocument.model_validate(_profile()).model_dump(mode="json")
     proof = signing.sign_profile(doc, key, base_url=BASE)
     doc["proof"] = [proof]
     model = ProfileDocument.model_validate(doc)
     assert len(model.proof) == 1
     assert model.proof[0].kind == "key_signature"
-    jwks = signing.jwk_set([signing.public_jwk(key)])
+    jwks = _jwks(key)
     assert signing.verify_signature(model.model_dump(mode="json"), jwks) is True
 
 
-# ---------------------------------------------------------------------------
-# Proof envelope validation
-# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    ("payload", "match"),
+    [
+        ({"kind": "key_signature", "alg": "EdDSA"}, "key_signature"),
+        ({"kind": "domain_wellknown", "issuer": "example.org"}, "domain_wellknown"),
+        ({"kind": "orcid_roundtrip"}, "orcid_roundtrip"),
+    ],
+)
+def test_proof_missing_members_is_refused(payload, match):
+    with pytest.raises(Exception, match=match):
+        Proof.model_validate(payload)
 
 
-def test_unknown_proof_kind_is_tolerated():
-    """A consumer must ignore a proof kind it does not understand."""
-    p = Proof.model_validate({"kind": "future_scheme_2030", "issuer": "whoever"})
-    assert p.kind == "future_scheme_2030"
-
-
-def test_key_signature_requires_its_members():
-    with pytest.raises(Exception, match="key_signature"):
-        Proof.model_validate({"kind": "key_signature", "alg": "EdDSA"})
-
-
-def test_domain_wellknown_requires_issuer_and_challenge():
-    with pytest.raises(Exception, match="domain_wellknown"):
-        Proof.model_validate({"kind": "domain_wellknown", "issuer": "example.org"})
-    ok = Proof.model_validate(
-        {
-            "kind": "domain_wellknown",
-            "issuer": "example.org",
-            "challenge": "https://example.org/.well-known/rp-challenge.txt",
-            "token": "abc123",
-        }
-    )
-    assert ok.token == "abc123"
-
-
-def test_orcid_roundtrip_requires_an_issuer():
-    with pytest.raises(Exception, match="orcid_roundtrip"):
-        Proof.model_validate({"kind": "orcid_roundtrip"})
-
-
-# ---------------------------------------------------------------------------
-# CLI: sign / sign-verify
-# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    ("payload", "attr", "value"),
+    [
+        # a consumer must ignore a proof kind it does not understand
+        ({"kind": "future_scheme_2030", "issuer": "whoever"}, "kind", "future_scheme_2030"),
+        (
+            {
+                "kind": "domain_wellknown",
+                "issuer": "example.org",
+                "challenge": "https://example.org/.well-known/rp-challenge.txt",
+                "token": "abc123",
+            },
+            "token",
+            "abc123",
+        ),
+    ],
+    ids=["unknown-kind", "domain-wellknown"],
+)
+def test_proof_accepted(payload, attr, value):
+    assert getattr(Proof.model_validate(payload), attr) == value
 
 
 def test_cli_sign_and_verify(tmp_path):

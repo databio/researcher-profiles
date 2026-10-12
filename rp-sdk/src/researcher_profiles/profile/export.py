@@ -1,18 +1,11 @@
 """Render one researcher profile into what a knowledge base ingests.
 
-A knowledge base wants two things from a profile: a single block of prose it can
-chunk and embed, and the handful of fields that travel with it (identity, links,
-the corpus DOI list, and a content hash to use as an idempotency key). This
-module produces both as a :class:`ProfileExportBundle`, so a downstream connector
-never opens ``profile.jsonld`` or the other source files itself. Vendor-specific
-details (a KB's collection ids, chunk size, field names) belong in the connector,
-not here; a connector that needs a new fact gets a new field on the bundle.
+The output is a :class:`ProfileExportBundle`: one block of prose to chunk and
+embed, plus the fields that travel with it. Vendor-specific details belong in
+the connector, not here.
 
-Core-only: this imports stdlib + pydantic + sibling core modules, nothing else,
-so a bare install with no extras can render an export. That is why paper
-selection here is a dependency-free scoring pass rather than an embedding one; a
-caller that has vectors passes its own paper list in. Nothing is written -- the
-export is rendered on demand from an existing profile directory.
+Core-only (stdlib + pydantic), so paper selection is a dependency-free scoring
+pass; a caller with vectors passes its own paper list. Nothing is written.
 """
 
 import hashlib
@@ -25,25 +18,28 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from ..errors import ProfileError
-from ..privacy import chunk_source_tiers, drop_above_public
-from ..schema import CareerEntry, PaperRecord, ProfileDocument, Training, normalize_doi, orcid_of
+from ..privacy import ViewerTier, chunk_source_tiers, project_document, tier_allows
+from ..schema import (
+    CareerEntry,
+    PaperRecord,
+    ProfileDocument,
+    Training,
+    effective_interests,
+    normalize_doi,
+    orcid_of,
+)
 from ..schema.jsonld import PROFILE_FORMAT_IRI, canonical_dumps
 from ..utils.clock import now_iso
 from . import ResearcherProfile
 
 #: Bump on any change to the rendered text layout or the bundle shape, so a KB
-#: can detect the change and re-ingest. This is a detector, not a switch: there
-#: is exactly one rendering and it is the current one. Never add a ``version=``
-#: parameter that reproduces an older blob.
-EXPORT_VERSION: int = 1
+#: can re-ingest. A detector, not a switch: never add a ``version=`` parameter.
+EXPORT_VERSION: int = 2
 
-#: The ``[abstract-only]`` marker a summary carries when it was written from an
-#: abstract rather than full text. Same marker ``embeddings/chunking.py``
-#: strips before embedding; it is bookkeeping, not prose.
+#: Bookkeeping marker on a summary written from an abstract, not prose.
 _ABSTRACT_ONLY_RE = re.compile(r"\[abstract-only\]\s*", re.IGNORECASE)
 
-#: A leading YAML frontmatter fence in a ``*.summary.md`` file. The frontmatter
-#: shape is :class:`schema.SummaryFile`; the body is what a KB wants.
+#: A leading YAML frontmatter fence in a ``*.summary.md`` file.
 _FRONTMATTER_RE = re.compile(r"\A---\r?\n.*?\r?\n---[ \t]*\r?\n", re.DOTALL)
 
 #: Word-ish tokens for the diversity pass: three or more chars, letter-initial.
@@ -52,10 +48,8 @@ _TOKEN_RE = re.compile(r"[a-z][a-z0-9-]{2,}")
 #: Three or more consecutive newlines, collapsed to a paragraph break.
 _BLANK_RUN_RE = re.compile(r"\n{3,}")
 
-#: Generic English stopwords plus the scientific-abstract boilerplate that
-#: appears in every corpus. Kept small: the corpus-specific pass in
-#: :func:`select_export_papers` removes the researcher's own boilerplate, which
-#: is what a hand-maintained list can never keep up with.
+#: Generic stopwords plus common abstract boilerplate. Kept small: the
+#: corpus-specific pass removes each researcher's own boilerplate.
 _STOPWORDS: frozenset[str] = frozenset(
     """
     the and for that with this from are was were has have had not but all any can
@@ -92,12 +86,7 @@ class ExportVisibilityError(ExportError):
 
 
 class ExportOptions(BaseModel):
-    """Every knob the export surface has.
-
-    Options live on this model rather than in positional parameters so a
-    downstream connector never breaks on a signature change: a new knob is a
-    new field with a default, and existing callers keep working untouched.
-    """
+    """Every knob the export surface has. New knobs are fields with defaults."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -229,8 +218,8 @@ def explore_url(profile_url: str | None, *, explore_base: str | None = None) -> 
     """The browser-app backlink for a published profile directory.
 
     Returns ``None`` unless both a profile URL and an explore base are given.
-    The hash shape matches what the browser app parses back to the same
-    directory: a trailing slash, ``profile.jsonld`` stripped, percent-encoded.
+    Shape: ``<base>/p?u=<directory>``, with ``profile.jsonld`` stripped, a
+    trailing slash, and percent-encoding.
     """
     if not profile_url or not explore_base:
         return None
@@ -244,7 +233,7 @@ def explore_url(profile_url: str | None, *, explore_base: str | None = None) -> 
     if not url.endswith("/"):
         url += "/"
     quoted = urllib.parse.quote(url, safe="")
-    return f"{explore_base.rstrip('/')}/#/p?u={quoted}"
+    return f"{explore_base.rstrip('/')}/p?u={quoted}"
 
 
 def export_paper_body(
@@ -254,11 +243,9 @@ def export_paper_body(
 ) -> tuple[str, str]:
     """Return ``(text, source)`` for one paper's prose.
 
-    ``source`` is ``"summary"`` or ``"abstract"``. The summary body is the
-    markdown after any YAML frontmatter fence (whose shape is
-    :class:`schema.SummaryFile`), with the ``[abstract-only]`` bookkeeping
-    marker removed and whitespace normalized. Returns ``("", "abstract")`` when
-    the paper has no usable body at all.
+    ``source`` is ``"summary"`` or ``"abstract"``. A summary body drops its
+    frontmatter and the ``[abstract-only]`` marker. Returns ``("", "abstract")``
+    when the paper has no usable body.
     """
     opts = options or ExportOptions()
     pid = paper.paper_id
@@ -294,13 +281,10 @@ def _public_body_keys(
     profile: ResearcherProfile,
     paper_ids: Sequence[str],
 ) -> set[tuple[str, str]]:
-    """The ``(source_type, source_id)`` chunk keys whose tier is ``public``.
-
-    ``privacy.py`` is the single authority; this never re-implements the rule.
-    """
+    """The ``(source_type, source_id)`` chunk keys whose tier is ``public``."""
     keys = [(kind, pid) for pid in paper_ids for kind in ("paper_summary", "paper_abstract")]
     tiers = chunk_source_tiers(profile.metadata, keys)
-    return set(drop_above_public(tiers.items()))
+    return {key for key, tier in tiers.items() if tier_allows("public", tier)}
 
 
 def _export_candidates(profile: ResearcherProfile, opts: ExportOptions) -> list[_Candidate]:
@@ -324,9 +308,7 @@ def _export_candidates(profile: ResearcherProfile, opts: ExportOptions) -> list[
     if opts.allow_nonpublic:
         return candidates
 
-    # The f"paper_{source}" key built here must match the ("paper_summary",
-    # "paper_abstract") literals _public_body_keys enumerates; the two strings
-    # are one convention split across two functions.
+    # f"paper_{source}" must match the literals _public_body_keys enumerates.
     allowed = _public_body_keys(profile, [p.paper_id for p, _, _ in candidates if p.paper_id])
     return [
         (p, body, source)
@@ -358,9 +340,8 @@ def _candidate_scores(candidates: list[_Candidate]) -> list[float]:
 def _distinctive_token_sets(candidates: list[_Candidate]) -> list[set[str]]:
     """Per-candidate token sets with the corpus's own boilerplate removed.
 
-    A token in most of the papers carries no discriminating signal; it is the
-    researcher's own boilerplate vocabulary. Removing it is what makes the
-    overlap coefficient measure topic difference rather than dialect.
+    Removing tokens found in most papers makes the overlap measure topic
+    difference rather than dialect.
     """
     token_sets = [_tokens(f"{p.title} {body}") for p, body, _ in candidates]
     n = len(candidates)
@@ -382,8 +363,7 @@ def _greedy_select(
 ) -> list[int]:
     """Greedy score-minus-overlap selection, returning indices in pick order.
 
-    ``tiebreak[i]`` is the ``(paper_id, title)`` pair that breaks an exact tie,
-    so the result is stable without this function knowing what a paper is.
+    ``tiebreak[i]`` is the ``(paper_id, title)`` pair that breaks an exact tie.
     """
     remaining = set(range(len(scores)))
     selected: list[int] = []
@@ -409,9 +389,8 @@ def select_export_papers(
 
     Filter (untitled, contaminated, bodyless, non-public), score
     (authorship + impact + recency), then diversify greedily so the selection
-    spans the researcher's topics instead of stacking their most-cited cluster.
-    No embeddings are involved. A caller that has vectors should select its
-    own list and pass it to :func:`render_export_text` instead.
+    spans the researcher's topics. No embeddings; a caller with vectors should
+    pass its own list to :func:`render_export_text`.
 
     Returned in presentation order (year desc, then title), which is not
     selection order.
@@ -510,11 +489,11 @@ def _overview_and_field_lines(meta: ProfileDocument) -> list[str]:
 def _profile_bullet_sections(meta: ProfileDocument) -> list[str]:
     """Expertise, interests (with the not-interested trailer), and commitments."""
     out = list(_bullets("Expertise", meta.expertise))
-    not_interests = [i for i in meta.not_interests if i and i.strip()]
+    interests, not_interests = _weighted_interest_labels(meta)
     out.extend(
         _bullets(
             "Interests",
-            meta.interests,
+            interests,
             trailer=(
                 "Not interested in: " + ", ".join(i.strip() for i in not_interests)
                 if not_interests
@@ -524,6 +503,27 @@ def _profile_bullet_sections(meta: ProfileDocument) -> list[str]:
     )
     out.extend(_bullets("Methodological commitments", meta.methodological_commitments))
     return out
+
+
+def _weighted_interest_labels(meta: ProfileDocument) -> tuple[list[str], list[str]]:
+    """The interest lists, each label followed by its weight when typed.
+
+    A profile with ``research_interests`` shows the signed weight beside each
+    label (``ATAC-seq (+0.5)``), so a reader can tell a core interest from a
+    passing one; a profile with only the plain lists shows them as they are.
+    """
+    if not meta.research_interests:
+        return (
+            [i for i in meta.interests if i and i.strip()],
+            [i for i in meta.not_interests if i and i.strip()],
+        )
+    pos: list[str] = []
+    neg: list[str] = []
+    for e in effective_interests(meta.research_interests):
+        if e.weight is None or e.weight == 0:
+            continue
+        (pos if e.weight > 0 else neg).append(f"{e.concept.text.strip()} ({e.weight:+g})")
+    return pos, neg
 
 
 def _career_lines(career: Sequence[CareerEntry]) -> list[str]:
@@ -573,10 +573,9 @@ def _persona_doc_sections(
 def _fit_to_budget(head: str, blocks: list[str], char_budget: int | None) -> str:
     """Join ``head`` and as many paper ``blocks`` as ``char_budget`` allows.
 
-    Whole blocks come off the end of the presentation-ordered list; a body is
-    never split, because half an abstract embeds as a claim its author did not
-    make. ``char_budget`` is therefore not a hard cap: a ``head`` longer than
-    the budget is returned over budget.
+    Whole blocks come off the end; a body is never split, because half an
+    abstract embeds as a claim its author did not make. Not a hard cap: a
+    ``head`` longer than the budget is returned over budget.
     """
 
     def assemble(n_blocks: int) -> str:
@@ -594,6 +593,16 @@ def _fit_to_budget(head: str, blocks: list[str], char_budget: int | None) -> str
     return text
 
 
+def export_viewer(options: ExportOptions) -> ViewerTier:
+    """The tier an export is rendered at.
+
+    ``public`` by default, because an export leaves this machine and a
+    held-back section must not ride out inside it. ``allow_nonpublic`` raises
+    the viewer to ``private``.
+    """
+    return "private" if options.allow_nonpublic else "public"
+
+
 def render_export_text(
     profile: ResearcherProfile,
     options: ExportOptions | None = None,
@@ -602,19 +611,14 @@ def render_export_text(
 ) -> str:
     """Render one profile as a single deterministic markdown blob.
 
-    The blob is the whole payload a knowledge base ingests: a synthesized
-    narrative (identity, expertise, interests, career, then the ``expertise.md``
-    and ``SOUL.md`` bodies verbatim) followed by the prose of a selected,
-    topic-representative set of papers. How it is chunked and embedded is
-    entirely the consumer's business.
+    A synthesized narrative (identity, expertise, interests, career, then the
+    ``expertise.md`` and ``SOUL.md`` bodies verbatim) followed by the prose of
+    selected papers.
 
-    Deterministic by contract. There is no timestamp, counter, hash, or
-    host-dependent value anywhere in the output: two renders of an unchanged
-    directory are byte-identical. :attr:`ProfileExportBundle.content_hash`
-    depends on that.
+    Deterministic by contract: two renders of an unchanged directory are
+    byte-identical. :attr:`ProfileExportBundle.content_hash` depends on that.
 
-    Pass ``papers`` to skip selection entirely. That is the override for a
-    caller that has embeddings and can choose better than this module can.
+    Pass ``papers`` to skip selection.
 
     Raises :class:`ExportVisibilityError` when the profile document's
     ``visibility`` is above ``public`` and ``options.allow_nonpublic`` is not set.
@@ -628,6 +632,7 @@ def render_export_text(
             "exporting it requires allow_nonpublic=True (CLI: --allow-nonpublic)"
         )
 
+    meta = project_document(meta, export_viewer(opts))
     selected = list(papers) if papers is not None else select_export_papers(profile, opts)
 
     doc_tiers = chunk_source_tiers(
@@ -657,9 +662,7 @@ def render_export_text(
 def export_content_hash(payload: Mapping[str, Any]) -> str:
     """``"sha256:<64 hex>"`` over ``payload`` in canonical JSON form.
 
-    ``jsonld.canonical_dumps`` fixes key order and formatting, so the digest is
-    reproducible across machines and Python versions rather than depending on
-    dict insertion order.
+    Reproducible across machines and Python versions.
     """
     digest = hashlib.sha256(canonical_dumps(payload).encode("utf-8")).hexdigest()
     return f"sha256:{digest}"
@@ -674,18 +677,17 @@ def build_export_bundle(
 ) -> ProfileExportBundle:
     """Render a profile and wrap it with the metadata a knowledge base needs.
 
-    The returned bundle is the whole handoff: a connector maps its fields onto
-    the destination's document schema, upserts keyed on :attr:`rid`, and uses
-    :attr:`content_hash` as the change detector. Re-running a backfill is then
-    a no-op, which is what makes a first load and a later refresh the same
-    operation.
+    A connector upserts keyed on :attr:`rid` and uses :attr:`content_hash` as
+    the change detector, so re-running a backfill is a no-op.
     """
     opts = options or ExportOptions()
     # Renders first, so a visibility refusal happens before any work.
     selected = list(papers) if papers is not None else select_export_papers(profile, opts)
     text = render_export_text(profile, opts, papers=selected)
 
-    meta = profile.metadata
+    # Same projection as the text: a field withheld from the prose but carried
+    # in the envelope has not been withheld at all.
+    meta = project_document(profile.metadata, export_viewer(opts))
     profile_url = opts.profile_url or meta.url
 
     dois: list[str] = []
@@ -693,8 +695,7 @@ def build_export_bundle(
     for p in profile.papers:
         doi = normalize_doi(p.doi)
         if doi:
-            # DOIs are case-insensitive per the DOI spec; store lowercase for
-            # deduplication and consistent comparison across systems.
+            # DOIs are case-insensitive per the DOI spec.
             doi_lower = doi.lower()
             if doi_lower not in seen:
                 seen.add(doi_lower)
@@ -711,7 +712,7 @@ def build_export_bundle(
         for p in selected
     ]
 
-    from .. import __version__  # the top-level package carries the version
+    from .. import __version__
 
     bundle = ProfileExportBundle(
         export_version=EXPORT_VERSION,
@@ -745,6 +746,42 @@ def build_export_bundle(
     return bundle
 
 
+def to_foaf(meta: ProfileDocument) -> dict[str, Any]:
+    """A FOAF view of the person's interests, as a JSON-LD node.
+
+    Emits ``foaf:topic_interest`` only for concepts with positive effective
+    weight; FOAF cannot say "not interested". Never ``schema:knowsAbout``,
+    which states expertise, not interest.
+    """
+    topics: list[dict[str, Any]] = []
+    for e in effective_interests(meta.research_interests):
+        if e.weight is None or e.weight <= 0:
+            continue
+        c = e.concept
+        if c.unmapped:
+            topics.append({"skos:prefLabel": c.text})
+        elif c.id_:
+            topics.append({"@id": c.id_, "skos:prefLabel": c.text})
+        else:
+            topics.append(
+                {
+                    "skos:inScheme": {"@id": c.system},
+                    "skos:notation": c.code,
+                    "skos:prefLabel": c.text,
+                }
+            )
+    return {
+        "@context": {
+            "foaf": "http://xmlns.com/foaf/0.1/",
+            "skos": "http://www.w3.org/2004/02/skos/core#",
+        },
+        "@id": meta.id_,
+        "@type": "foaf:Person",
+        "foaf:name": meta.name,
+        "foaf:topic_interest": topics,
+    }
+
+
 __all__ = [
     "EXPORT_VERSION",
     "ExportError",
@@ -756,6 +793,8 @@ __all__ = [
     "explore_url",
     "export_content_hash",
     "export_paper_body",
+    "export_viewer",
     "render_export_text",
     "select_export_papers",
+    "to_foaf",
 ]

@@ -10,8 +10,8 @@ This gives the Researcher Profile HTTP interface three tiers:
 2. [Dynamic API](dynamic-api.md): OPTIONAL. Additional endpoints for advanced use, like
    listing, searching, matching, and interacting with profiles programmatically.
 3. [Management API](dynamic-api.md#14-management-api): OPTIONAL. Endpoints for
-   obtaining and introspecting credentials: command-line login, identity echo,
-   and the scope catalog. A server that hosts profiles on behalf of the people
+   obtaining and introspecting credentials: command-line login, and identity
+   echo, including what a key may read and write, part by part. A server that hosts profiles on behalf of the people
    they describe needs these; a file server does not.
 
 All servers MUST satisfy the static API. The dynamic and management tiers are
@@ -87,8 +87,8 @@ Recommended `Cache-Control`:
 | Other | `public, max-age=3600` |
 
 Servers that implement [viewer tiers](authentication.md#viewer-tiers) SHOULD
-use `private` instead of `public` for tier-restricted responses, so shared
-caches (CDNs, proxies) do not serve a restricted artifact to a lower-tier
+use `private` instead of `public` for responses above the `public` tier, so shared
+caches (CDNs, proxies) do not serve a private artifact to a lower-tier
 caller.
 
 ---

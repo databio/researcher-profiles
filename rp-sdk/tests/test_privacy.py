@@ -14,8 +14,6 @@ from unittest.mock import MagicMock
 import pytest
 
 from researcher_profiles import (
-    CitationRef,
-    PersonaResponse,
     PersonaUnavailableError,
     ProfileError,
     ResearcherProfile,
@@ -31,10 +29,6 @@ from researcher_profiles.schema import (
 
 from .factories import stub_llm
 
-# --------------------------------------------------------------------------
-# Helpers
-# --------------------------------------------------------------------------
-
 
 def _patch_profile_json(profile_dir: Path, **fields) -> Path:
     """Read/patch/write ``profile.jsonld`` raw, without re-validating it."""
@@ -43,11 +37,6 @@ def _patch_profile_json(profile_dir: Path, **fields) -> Path:
     data.update(fields)
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
     return path
-
-
-# --------------------------------------------------------------------------
-# Tiers, .publishignore, and chunk source tiers
-# --------------------------------------------------------------------------
 
 
 def _profile(**parts) -> ProfileDocument:
@@ -60,39 +49,75 @@ def _profile(**parts) -> ProfileDocument:
     return ProfileDocument.model_validate(base)
 
 
-# ---------------------------------------------------------------------------
-# The derivation rule
-# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "tiers, expected",
+    [
+        (("public", "limited"), "limited"),
+        (("public", "private"), "private"),
+        (("limited", "private"), "private"),
+        (("public", "limited", "private"), "private"),
+        ((), "public"),
+        ((None, "public"), "public"),
+    ],
+)
+def test_tier_order_is_public_limited_private(tiers, expected):
+    assert most_restrictive(*tiers) == expected
 
 
-def test_most_restrictive_order():
-    assert most_restrictive("public", "internal") == "internal"
-    assert most_restrictive("public", "restricted") == "restricted"
-    assert most_restrictive("internal", "restricted") == "restricted"
-    assert most_restrictive() == "public"
-    assert most_restrictive(None, "public") == "public"
+@pytest.mark.parametrize(("old", "new"), [("internal", "limited"), ("restricted", "private")])
+def test_retired_tier_names_are_rejected_with_their_replacement(old, new):
+    msg = f"visibility '{old}' was renamed to '{new}'"
+    with pytest.raises(ValueError, match=msg):
+        _profile(visibility=old)
+    with pytest.raises(ValueError, match=msg):
+        ArtifactRef(role="cv", contentUrl="sources/cv.md", visibility=old)
+    with pytest.raises(ValueError, match=msg):
+        _profile(**{"rp:sectionVisibility": [{"section": "methods", "visibility": old}]})
+
+
+def test_context_expands_visibility_to_tier_iris():
+    """`visibility` values expand to rp:Public/Limited/Private, each linked by
+    skos:closeMatch to the EU access-right vocabulary."""
+    from researcher_profiles.schema.jsonld import context_document_text
+
+    doc = json.loads(context_document_text())
+    term = doc["@context"]["visibility"]
+    assert term["@type"] == "@vocab"
+    assert term["@context"] == {
+        "public": "rp:Public",
+        "limited": "rp:Limited",
+        "private": "rp:Private",
+    }
+    eu = "http://publications.europa.eu/resource/authority/access-right/"
+    matches = {node["@id"]: {m["@id"] for m in node["skos:closeMatch"]} for node in doc["@graph"]}
+    assert eu + "PUBLIC" in matches["rp:Public"]
+    assert eu + "RESTRICTED" in matches["rp:Limited"]
+    assert eu + "NON_PUBLIC" in matches["rp:Private"]
 
 
 @pytest.mark.parametrize(
     "content_url, role, declared, expected",
     [
-        ("sources/cv.md", "cv", None, "restricted"),
-        ("w.md", "web", None, "restricted"),
+        ("sources/cv.md", "cv", None, "private"),
+        ("w.md", "web", None, "private"),
         ("sources/papers.jsonld", "works", None, "public"),
-        ("sources/papers/p1.md", "paper_fulltext", "public", "restricted"),
-        ("w.md", "web", "internal", "internal"),
+        ("sources/papers/p1.md", "paper_fulltext", None, "private"),
+        ("sources/papers/p1.md", "paper_fulltext", "public", "public"),
+        ("w.md", "web", "limited", "limited"),
     ],
     ids=[
         "cv-role-default",
         "web-role-default",
         "works-role-default",
-        "fulltext-floor-cannot-be-lowered",
+        "fulltext-role-default",
+        "fulltext-tier-is-choosable",
         "explicit-tier-overrides-role-default",
     ],
 )
 def test_part_ref_visibility(content_url, role, declared, expected):
-    """Role defaults apply at model level; an explicit tier overrides them,
-    except `paper_fulltext`, which is `restricted` even if declared public.
+    """Role defaults apply at model level; an explicit tier overrides them for
+    every role, `paper_fulltext` included (its private default is a default,
+    not a floor).
     """
     data = {"contentUrl": content_url, "role": role}
     if declared is not None:
@@ -100,118 +125,48 @@ def test_part_ref_visibility(content_url, role, declared, expected):
     assert ArtifactRef.model_validate(data).visibility == expected
 
 
-def test_derivation_takes_most_restrictive_of_sources():
-    prof = _profile(
-        hasPart=[
-            {"contentUrl": "sources/cv.md", "role": "cv"},  # restricted
-            {
-                "contentUrl": "derived.json",
-                "role": "custom",
-                "derivedFrom": ["cv"],
-            },  # inherits restricted from cv
-        ]
-    )
-    eff = privacy.effective_tiers(prof)
-    assert eff["sources/cv.md"] == "restricted"
-    assert eff["derived.json"] == "restricted"
-
-
-def test_profile_default_holds_a_whole_profile_back():
-    prof = _profile(
-        visibility="internal",
-        hasPart=[{"contentUrl": "sources/papers.jsonld", "role": "works"}],
-    )
-    # A public artifact is floored by the profile default.
-    assert privacy.effective_tiers(prof)["sources/papers.jsonld"] == "internal"
-
-
-# ---------------------------------------------------------------------------
-# .publishignore
-# ---------------------------------------------------------------------------
-
-
-def test_publishignore_and_effective_tiers_cannot_drift():
-    """Every excluded path is non-public; every non-public artifact is excluded.
-
-    This is the invariant that keeps the declared data and the layout in sync.
-    """
-    prof = _profile(
-        visibility="public",
-        hasPart=[
-            {"contentUrl": "sources/papers/p1.md", "role": "paper_fulltext"},
-            {"contentUrl": "sources/cv.md", "role": "cv"},
-            {"contentUrl": "custom.md", "role": "web", "visibility": "internal"},
-            {"contentUrl": "sources/papers.jsonld", "role": "works"},
-            {"contentUrl": "embeddings/index.json", "role": "embedding_index"},
-        ],
-    )
-    eff = privacy.effective_tiers(prof)
-    ignore = set(privacy.publishignore_lines(prof))
-    # every manifest artifact above public appears in .publishignore
-    for url, tier in eff.items():
-        if tier != "public":
-            assert url in ignore, f"{url} ({tier}) missing from .publishignore"
-    # every listed *artifact* path (not the .cache/.keys prefixes) is non-public
-    artifact_urls = set(eff)
-    for line in ignore:
-        if line in artifact_urls:
-            assert eff[line] != "public"
-
-
-# ---------------------------------------------------------------------------
-# The two surfaces must agree: a static rsync deploy and the live API
-# ---------------------------------------------------------------------------
-
-
-def test_static_deploy_and_anonymous_http_publish_the_same_set(tmp_path, make_api_client):
-    """What ``.publishignore`` excludes is exactly what anonymous HTTP withholds.
-
-    Two mechanisms decide what reaches the open web: the exclude list a dumb
-    rsync honours, and the projection the live API applies. They were written at
-    different times for different callers, and nothing forced them to agree.
-    That is how the API came to serve, byte for byte, a profile the static
-    deploy would have held back. This is the test that keeps them from drifting
-    apart again.
-    """
+@pytest.fixture
+def built_profile_dir(tmp_path):
+    """A manifest-built profile (cv, web, both indexes, one paper full text)
+    alone under a ``profiles/`` root."""
     from .factories import ADA, build_profile_dir
 
-    root = tmp_path / "profiles"
-    root.mkdir()
     pdir = build_profile_dir(
-        root / "drift-check", rid=ADA, cv=True, web=True, index="both", manifest=True
+        tmp_path / "profiles" / "drift-check",
+        rid=ADA,
+        cv=True,
+        web=True,
+        index="both",
+        manifest=True,
     )
     (pdir / "sources" / "papers").mkdir(parents=True, exist_ok=True)
     (pdir / "sources" / "papers" / "p1.md").write_text("full text\n", encoding="utf-8")
     ResearcherProfile.from_files(pdir).build_manifest(write=True)
+    return pdir
 
+
+def test_static_deploy_and_anonymous_http_publish_the_same_set(built_profile_dir, make_api_client):
+    """What ``rp publish --who public`` ships is exactly what anonymous HTTP serves (the two mechanisms must not drift)."""
+    from researcher_profiles.publish import plan_profile_export
+
+    pdir = built_profile_dir
     prof = ResearcherProfile.from_files(pdir)
-    excluded = set(privacy.publishignore_lines(prof.metadata))
     all_artifacts = set(privacy.effective_tiers(prof.metadata))
+    on_disk = {url for url in all_artifacts if (pdir / url).is_file()}
 
-    client = make_api_client(root)
-    detail = client.get("/api/v1/profiles/drift-check")
+    client = make_api_client(pdir.parent)
+    detail = client.get("/api/v1/profiles/drift-check/files")
     assert detail.status_code == 200
     withheld = set(detail.json()["withheld"])
 
-    # rsync's view of "publishable", minus the prefixes it excludes by hand.
-    rsync_publishes = {
-        url
-        for url in all_artifacts
-        if url not in excluded
-        and not any(url.startswith(p) for p in privacy.ALWAYS_RESTRICTED_PREFIXES)
-    }
-    http_publishes = all_artifacts - withheld
-    assert http_publishes == rsync_publishes
-
-
-# ---------------------------------------------------------------------------
-# explain_tiers: the decision and its explanation are one computation
-# ---------------------------------------------------------------------------
+    static_publishes = set(plan_profile_export(pdir, "public").files)
+    http_publishes = (all_artifacts - withheld) & on_disk
+    assert static_publishes == http_publishes
 
 
 def test_explain_tiers_is_the_only_implementation_of_effective_tiers():
     prof = _profile(
-        visibility="internal",
+        visibility="limited",
         hasPart=[
             {"contentUrl": "sources/cv.md", "role": "cv"},
             {"contentUrl": "derived.json", "role": "custom", "derivedFrom": ["cv"]},
@@ -222,58 +177,116 @@ def test_explain_tiers_is_the_only_implementation_of_effective_tiers():
     assert {k: v.effective for k, v in explained.items()} == privacy.effective_tiers(prof)
 
 
-def test_raised_by_names_the_specific_cause_not_the_rule():
+_CV = {"contentUrl": "sources/cv.md", "role": "cv"}
+_WORKS = {"contentUrl": "sources/papers.jsonld", "role": "works"}
+_FULLTEXT = {"contentUrl": "sources/papers/p1.md", "role": "paper_fulltext"}
+
+
+@pytest.mark.parametrize(
+    "profile_kwargs, url, effective, raised_by, declared",
+    [
+        # The profile default holds an otherwise-public artifact back, and names itself.
+        (
+            {"visibility": "limited", "hasPart": [_WORKS]},
+            _WORKS["contentUrl"],
+            "limited",
+            ["the profile default (limited)"],
+            None,
+        ),
+        # A public artifact has nothing to explain.
+        ({"hasPart": [_WORKS]}, _WORKS["contentUrl"], "public", [], None),
+        # The cause named is the specific source, not the rule.
+        (
+            {
+                "hasPart": [
+                    _CV,
+                    {"contentUrl": "derived.json", "role": "custom", "derivedFrom": ["cv"]},
+                ]
+            },
+            "derived.json",
+            "private",
+            "sources/cv.md",
+            "public",
+        ),
+        # No role floor: fulltext defaults to private, and an explicit public declaration wins.
+        ({"hasPart": [_FULLTEXT]}, _FULLTEXT["contentUrl"], "private", None, None),
+        (
+            {"hasPart": [{**_FULLTEXT, "visibility": "public"}]},
+            _FULLTEXT["contentUrl"],
+            "public",
+            None,
+            None,
+        ),
+    ],
+    ids=[
+        "profile-default",
+        "public-nothing-to-explain",
+        "derived-names-source",
+        "fulltext-default",
+        "fulltext-raised",
+    ],
+)
+def test_explain_tiers_row(profile_kwargs, url, effective, raised_by, declared):
+    prof = _profile(**profile_kwargs)
+    note = privacy.explain_tiers(prof)[url]
+    assert note.effective == effective == privacy.effective_tiers(prof)[url]
+    if declared is not None:
+        assert note.declared == declared
+    if isinstance(raised_by, list):
+        assert note.raised_by == raised_by
+    elif raised_by is not None:
+        assert any(raised_by in phrase for phrase in note.raised_by)
+
+
+def test_derivation_restriction_is_transitive():
+    """A public derivative of a public derivative of a private CV is not public: the rule walks the chain."""
     prof = _profile(
-        visibility="public",
         hasPart=[
-            {"contentUrl": "sources/cv.md", "role": "cv"},
-            {"contentUrl": "derived.json", "role": "custom", "derivedFrom": ["cv"]},
-        ],
+            {"contentUrl": "sources/cv.md", "role": "cv"},  # private
+            {"contentUrl": "digest.md", "role": "digest", "derivedFrom": ["cv"]},
+            {"contentUrl": "blurb.md", "role": "blurb", "derivedFrom": ["digest"]},
+        ]
     )
-    note = privacy.explain_tiers(prof)["derived.json"]
-    assert note.declared == "public"
-    assert note.effective == "restricted"
-    assert any("sources/cv.md" in phrase for phrase in note.raised_by)
+    eff = privacy.effective_tiers(prof)
+    assert eff["sources/cv.md"] == "private"
+    assert eff["digest.md"] == "private"
+    assert eff["blurb.md"] == "private"
+    assert any("digest.md" in p for p in privacy.explain_tiers(prof)["blurb.md"].raised_by)
 
 
-def test_the_profile_default_names_itself():
+def test_a_derivation_cycle_raises_rather_than_guessing():
     prof = _profile(
-        visibility="internal",
-        hasPart=[{"contentUrl": "sources/papers.jsonld", "role": "works"}],
+        hasPart=[
+            {"contentUrl": "a.md", "role": "a", "derivedFrom": ["b"]},
+            {"contentUrl": "b.md", "role": "b", "derivedFrom": ["a"]},
+        ]
     )
-    works = privacy.explain_tiers(prof)["sources/papers.jsonld"]
-    assert works.effective == "internal"
-    assert works.raised_by == ["the profile default (internal)"]
+    with pytest.raises(privacy.DerivationCycleError, match="cycle"):
+        privacy.explain_tiers(prof)
+    # The validator reports it instead of raising, so `rp validate` names the problem.
+    assert "cycle" in "".join(privacy.derivation_errors(prof))
 
 
-def test_a_public_artifact_has_nothing_to_explain():
-    prof = _profile(hasPart=[{"contentUrl": "sources/papers.jsonld", "role": "works"}])
-    assert privacy.explain_tiers(prof)["sources/papers.jsonld"].raised_by == []
-
-
-def test_fulltext_is_locked_with_a_sentence_a_person_can_read():
-    prof = _profile(hasPart=[{"contentUrl": "sources/papers/p1.md", "role": "paper_fulltext"}])
-    entry = privacy.explain_tiers(prof)["sources/papers/p1.md"]
-    assert entry.locked is True
-    assert entry.lock_reason == privacy.FULLTEXT_LOCK_REASON
-    assert "legal floor" in entry.lock_reason
-
-
-# ---------------------------------------------------------------------------
-# Viewer tiers read the scale in the OTHER direction
-# ---------------------------------------------------------------------------
+def test_an_unresolvable_derivedFrom_is_a_validation_error_not_a_public_default():
+    prof = _profile(
+        hasPart=[{"contentUrl": "derived.json", "role": "custom", "derivedFrom": ["nowhere"]}]
+    )
+    errors = privacy.derivation_errors(prof)
+    assert len(errors) == 1
+    assert "nowhere" in errors[0]
+    assert privacy.explain_tiers(prof)["derived.json"].unresolved == ["nowhere"]
 
 
 @pytest.mark.parametrize(
     "viewer, artifact, allowed",
     [
         ("public", "public", True),
-        ("public", "internal", False),
-        ("public", "restricted", False),
-        ("internal", "public", True),
-        ("internal", "internal", True),
-        ("internal", "restricted", False),
-        ("restricted", "restricted", True),
+        ("public", "limited", False),
+        ("public", "private", False),
+        ("limited", "public", True),
+        ("limited", "limited", True),
+        ("limited", "private", False),
+        ("private", "private", True),
     ],
 )
 def test_tier_allows(viewer, artifact, allowed):
@@ -282,92 +295,71 @@ def test_tier_allows(viewer, artifact, allowed):
 
 def test_narrow_viewer_is_a_cap_not_the_artifact_rule():
     """The two rules move opposite ways; using the wrong one un-caps a preview."""
-    assert privacy.narrow_viewer("restricted", "public") == "public"
-    assert privacy.narrow_viewer("public", "restricted") == "public"
-    assert privacy.narrow_viewer("restricted", "internal") == "internal"
+    assert privacy.narrow_viewer("private", "public") == "public"
+    assert privacy.narrow_viewer("public", "private") == "public"
+    assert privacy.narrow_viewer("private", "limited") == "limited"
     # ...whereas most_restrictive, the ARTIFACT rule, would have said otherwise.
-    assert most_restrictive("restricted", "public") == "restricted"
+    assert most_restrictive("private", "public") == "private"
 
 
-def test_profile_visible_folds_in_a_host_floor():
+@pytest.mark.parametrize(
+    "viewer, floor, visible",
+    [("public", None, True), ("public", "limited", False), ("limited", "limited", True)],
+)
+def test_profile_visible_folds_in_a_host_floor(viewer, floor, visible):
     prof = _profile(visibility="public")
-    assert privacy.profile_visible(prof, "public") is True
-    assert privacy.profile_visible(prof, "public", floor="internal") is False
-    assert privacy.profile_visible(prof, "internal", floor="internal") is True
+    kwargs = {"floor": floor} if floor else {}
+    assert privacy.profile_visible(prof, viewer, **kwargs) is visible
 
 
-# ---------------------------------------------------------------------------
-# derivedFrom: the synthesis carve-out, asserted rather than left implicit
-# ---------------------------------------------------------------------------
+def test_no_built_manifest_role_declares_derivedFrom(built_profile_dir):
+    """Authored syntheses (summaries, expertise.md, SOUL.md) do not inherit their sources' tier; spec section 3.
 
-
-def test_no_built_manifest_role_declares_derivedFrom(tmp_path):
-    """Authored syntheses do not inherit their sources' tier. See spec section 3.
-
-    A paper summary, ``expertise.md``, and ``SOUL.md`` are new works, not
-    reproductions, so ``manifest.build_manifest`` populates ``derivedFrom`` on
-    nothing. That absence is load-bearing: were a summary to inherit from the
-    full text it summarizes, the public surface of every profile would collapse
-    to nothing. Asserted here so the carve-out is a decision on the record
-    rather than an omission nobody noticed. If a future role genuinely
-    REPRODUCES a restricted source, it gets ``derivedFrom`` and this test
-    changes with it.
+    The absence is load-bearing: a summary inheriting its full text's tier would
+    collapse every profile's public surface. A role that REPRODUCES a private source gets ``derivedFrom``.
     """
-    from .factories import ADA, build_profile_dir
-
-    pdir = build_profile_dir(
-        tmp_path / "derivation", rid=ADA, cv=True, web=True, index="both", manifest=True
-    )
-    (pdir / "sources" / "papers").mkdir(parents=True, exist_ok=True)
-    (pdir / "sources" / "papers" / "p1.md").write_text("full text\n", encoding="utf-8")
-    ResearcherProfile.from_files(pdir).build_manifest(write=True)
-
-    prof = ResearcherProfile.from_files(pdir)
+    prof = ResearcherProfile.from_files(built_profile_dir)
     parts = list(prof.metadata.has_part) + list(prof.metadata.subject_of)
     assert parts, "sanity: the fixture has a manifest"
     assert all(not p.derived_from for p in parts)
 
 
-def test_render_publishignore_is_stable_text():
-    prof = _profile(hasPart=[{"contentUrl": "sources/cv.md", "role": "cv"}])
-    body = privacy.render_publishignore(prof)
-    assert body.endswith("\n")
-    assert body == privacy.render_publishignore(prof)  # deterministic
+@pytest.mark.parametrize(
+    "role, tier", [("grant", "private"), ("grants", "public"), ("interview", "private")]
+)
+def test_role_default_visibility(role, tier):
+    # Grant-derived embedding text is private though the grants collection is public; the interview digest is the owner's alone.
+    if role in ROLE_DEFAULT_VISIBILITY:
+        assert ROLE_DEFAULT_VISIBILITY[role] == tier
+    assert role_default_visibility(role) == tier
 
 
-# ---------------------------------------------------------------------------
-# Chunk source tiers (the embedding-export filter) + the grant default
-# ---------------------------------------------------------------------------
-
-
-def test_grant_role_defaults_to_restricted():
-    """Grant-derived embedding text is restricted, though the collection is public."""
-    assert ROLE_DEFAULT_VISIBILITY["grant"] == "restricted"
-    assert role_default_visibility("grant") == "restricted"
-    # The plural collection role stays public (bibliographic record).
-    assert role_default_visibility("grants") == "public"
+def test_the_interview_digest_does_not_hold_back_the_public_documents():
+    ref = ArtifactRef(content_url="sources/interview.md", role="interview")
+    assert ref.visibility == "private"
+    # There is no derivedFrom link, only the disclosure line inside the derived documents.
+    prof = _profile(
+        hasPart=[{"contentUrl": "sources/interview.md", "role": "interview"}],
+        subjectOf=[
+            {"contentUrl": "personality/expertise.md", "role": "expertise"},
+            {"contentUrl": "personality/SOUL.md", "role": "soul"},
+        ],
+    )
+    tiers = privacy.effective_tiers(prof)
+    assert tiers["sources/interview.md"] == "private"
+    assert tiers["personality/expertise.md"] == "public"
+    assert tiers["personality/SOUL.md"] == "public"
 
 
 def test_chunk_source_tiers_tolerates_missing_profile():
     # None profile: default treated as public, role defaults still filter.
     tiers = privacy.chunk_source_tiers(None, [("cv", "cv"), ("soul", "soul")])
-    assert tiers[("cv", "cv")] == "restricted"
+    assert tiers[("cv", "cv")] == "private"
     assert tiers[("soul", "soul")] == "public"
 
 
-# --------------------------------------------------------------------------
-# The persona-availability guard
-# --------------------------------------------------------------------------
-
-
 class TestPersonaGuard:
-    """Library-level tests for the persona-availability guard.
-
-    The persona methods (``.ask``/``.review``/``.innovate``/``.riff``) must raise
-    ``PersonaUnavailableError``, never role-play an empty persona and
-    never call the LLM, when a profile lacks a synthesized persona (empty
-    ``expertise.md`` + ``SOUL.md``).
-    """
+    """Persona methods raise ``PersonaUnavailableError`` and never call the LLM when the persona was never synthesized."""
 
     @pytest.fixture
     def incomplete(self, fixture_profile):
@@ -380,46 +372,26 @@ class TestPersonaGuard:
         _patch_profile_json(jane_doe_dir, level="lite")
         return ResearcherProfile.from_files(jane_doe_dir)
 
-    # ----------------------------------------------------------------------
-    # has_persona predicate
-    # ----------------------------------------------------------------------
-
     def test_has_persona_true_for_complete(self, jane_doe_readonly):
         assert jane_doe_readonly.has_persona is True
-
-    def test_has_persona_false_for_incomplete(self, incomplete):
-        assert incomplete.has_persona is False
 
     def test_persona_unavailable_is_profile_error(self):
         assert issubclass(PersonaUnavailableError, ProfileError)
 
-    # ----------------------------------------------------------------------
-    # Level gate: a lite profile is never persona-ready, even with stray content
-    # ----------------------------------------------------------------------
-
-    def test_has_persona_false_for_lite_even_with_content(self, lite_jane):
+    def test_lite_level_gates_persona_off_even_with_content(self, lite_jane):
         # SOUL/expertise are present on disk, but level=lite gates persona off.
         assert lite_jane.level == "lite"
         assert lite_jane.expertise.strip()
         assert lite_jane.soul.strip()
-        assert lite_jane.has_persona is False
 
-    def test_ask_raises_persona_unavailable_for_lite(self, lite_jane):
-        fake = stub_llm(lite_jane)
+    @pytest.mark.parametrize("profile", ["incomplete", "lite_jane"])
+    def test_ask_raises_persona_unavailable(self, request, profile):
+        prof = request.getfixturevalue(profile)
+        assert prof.has_persona is False
+        fake = stub_llm(prof)
         with pytest.raises(PersonaUnavailableError):
-            lite_jane.persona.ask("q")
+            prof.persona.ask("q")
         fake.complete.assert_not_called()
-
-    def test_ask_raises_persona_unavailable(self, incomplete):
-        fake = stub_llm(incomplete)
-        with pytest.raises(PersonaUnavailableError):
-            incomplete.persona.ask("q")
-        fake.complete.assert_not_called()
-
-
-# --------------------------------------------------------------------------
-# The refusal contract on .ask / .review
-# --------------------------------------------------------------------------
 
 
 class _Hit:
@@ -432,7 +404,7 @@ class _Hit:
 
 
 class TestRefusalContract:
-    """Tests for refusal contract on .ask / .review."""
+    """A below-threshold corpus refuses without calling the LLM."""
 
     @pytest.mark.parametrize(
         "method, payload, score, kwargs, expect_refused",
@@ -462,16 +434,11 @@ class TestRefusalContract:
         ],
     )
     def test_refusal_gate(self, jane_doe, method, payload, score, kwargs, expect_refused):
-        """A below-threshold corpus refuses without ever calling the LLM.
-
-        The refusal payload is inert: no citations, no model, no token spend.
-        A refusal can never be mistaken for a cheap answer.
-        """
+        """The refusal payload is inert (no citations, model or tokens), so it cannot pass for a cheap answer."""
         fake = stub_llm(jane_doe, "ok")
         jane_doe.index.search = MagicMock(return_value=[_Hit("a", score)])  # type: ignore[method-assign]
 
         r = getattr(jane_doe.persona, method)(payload, **kwargs)
-        assert isinstance(r, PersonaResponse)
         assert r.refused is expect_refused
         if expect_refused:
             assert r.refusal_reason and "below threshold" in r.refusal_reason
@@ -483,30 +450,20 @@ class TestRefusalContract:
             assert r.text == "ok"
             fake.complete.assert_called_once()
 
-    def test_citations_are_citation_refs(self, jane_doe):
+    def test_paper_summary_chunks_become_citation_refs(self, jane_doe):
+        """Regression: the store's real ``source_type="paper_summary"`` must yield citations."""
         stub_llm(jane_doe, "ans")
         jane_doe.index.search = MagicMock(  # type: ignore[method-assign]
-            return_value=[_Hit("doe2016example", 0.8), _Hit("doe2019methods", 0.6)]
-        )
-        r = jane_doe.persona.ask("q?")
-        assert all(isinstance(c, CitationRef) for c in r.citations)
-        relevances = {c.paper_id: c.relevance for c in r.citations}
-        assert relevances["doe2016example"] == 0.8
-
-    def test_ask_emits_citations_for_paper_summary_chunks(self, jane_doe):
-        """Regression: paper_summary chunks must produce non-empty citations.
-
-        The embeddings store writes ``source_type="paper_summary"``; a check
-        for ``"summary"`` in ``_render_evidence`` would leave ``.ask()`` citations
-        always empty. This asserts the store's real value is honored.
-        """
-        stub_llm(jane_doe, "ans")
-        jane_doe.index.search = MagicMock(  # type: ignore[method-assign]
-            return_value=[_Hit("doe2016example", 0.8, source_type="paper_summary")]
+            return_value=[
+                _Hit("doe2016example", 0.8, source_type="paper_summary"),
+                _Hit("doe2019methods", 0.6, source_type="paper_summary"),
+            ]
         )
         r = jane_doe.persona.ask("q?")
         assert r.citations, "paper_summary chunks must yield citations"
         assert r.citations[0].paper_id == "doe2016example"
+        relevances = {c.paper_id: c.relevance for c in r.citations}
+        assert relevances["doe2016example"] == 0.8
 
     @pytest.mark.parametrize(
         "llm_text, expect_grounded",
@@ -533,8 +490,168 @@ class TestRefusalContract:
         jane_doe.persona.ask("new q?", history=history)
         kwargs = fake.complete.call_args.kwargs
         msgs = kwargs["messages"]
-        # First two are the historical turns, last is the current question.
-        assert msgs[0]["role"] == "user"
-        assert msgs[0]["content"] == "earlier question"
-        assert msgs[1]["role"] == "assistant"
+        assert msgs[:2] == history
         assert "new q?" in msgs[-1]["content"]
+
+
+def test_inline_section_projection_removes_private_values():
+    from researcher_profiles.privacy import project_document
+    from researcher_profiles.schema import ProfileDocument, SectionVisibility
+
+    doc = ProfileDocument(
+        name="Private Methods",
+        rid="local:private-methods-a1b2c3",
+        provenance="self_published",
+        summary="public summary",
+        methodological_commitments=["secret assay"],
+        section_visibility=[SectionVisibility(section="methods", visibility="private")],
+    )
+    public = project_document(doc, "public")
+    assert public.summary == "public summary"
+    assert public.methodological_commitments == []
+    assert project_document(doc, "private").methodological_commitments == ["secret assay"]
+
+
+#: The three private values planted in the fixture below, one per section.
+_SECRETS = ("secret assay", "pediatric ward overflow", "IND 12345")
+
+
+@pytest.fixture
+def leak_profile_root(tmp_path):
+    """A profile whose methods/site/clinical sections are private; the summary repeats one secret, as a generated blurb might."""
+    from researcher_profiles.schema import SectionVisibility, SiteCapabilities
+
+    from .factories import build_profile_dir
+
+    root = tmp_path / "profiles"
+    pdir = root / "leaky"
+    build_profile_dir(pdir, rid="local:leaky-a1b2c3", manifest=True)
+    prof = ResearcherProfile.from_files(pdir)
+    doc = prof.metadata
+    doc.summary = f"Runs trials. {_SECRETS[0]}."
+    doc.methodological_commitments = [_SECRETS[0]]
+    doc.site_capabilities = SiteCapabilities(patient_populations=[_SECRETS[1]])
+    doc.regulatory_experience = [_SECRETS[2]]
+    doc.section_visibility = [
+        SectionVisibility(section="summary", visibility="private"),
+        SectionVisibility(section="methods", visibility="private"),
+        SectionVisibility(section="site_capabilities", visibility="private"),
+        SectionVisibility(section="regulatory_experience", visibility="private"),
+    ]
+    prof.save_profile(doc)
+    return root
+
+
+def _assert_clean(blob: str) -> None:
+    for secret in _SECRETS:
+        assert secret not in blob
+
+
+class TestInlineSectionsCannotEscape:
+    """One private value, every public surface: a tier that holds on one read and not the export is a coincidence."""
+
+    def test_http_reads_at_every_tier(self, leak_profile_root, make_api_client):
+        client = make_api_client(leak_profile_root, token="op")
+        for path in (
+            "/api/v1/profiles",
+            "/api/v1/profiles/leaky",
+            "/profiles/leaky/profile.jsonld",
+        ):
+            _assert_clean(client.get(path).text)
+        # The projection caps the viewer; it deletes nothing, so the owner reads it back.
+        owner = client.get("/api/v1/profiles/leaky", headers={"Authorization": "Bearer op"}).json()
+        assert owner["fields"]["methodological_commitments"] == [_SECRETS[0]]
+
+    def test_static_publisher_output(self, leak_profile_root):
+        from researcher_profiles.publish import publish_collection, render_profile
+
+        pdir = leak_profile_root / "leaky"
+        render_profile(pdir)
+        _assert_clean((pdir / "index.html").read_text(encoding="utf-8"))
+        out = leak_profile_root.parent / "site"
+        publish_collection(leak_profile_root, out)
+        for f in out.rglob("*"):
+            if f.is_file() and f.suffix in (".json", ".jsonld", ".html", ".md"):
+                _assert_clean(f.read_text(encoding="utf-8"))
+
+    def test_viewer_archive(self, leak_profile_root):
+        import io
+        import tarfile
+
+        from researcher_profiles.api.upload import build_viewer_archive
+
+        blob = build_viewer_archive(leak_profile_root / "leaky", viewer="public")
+        with tarfile.open(fileobj=io.BytesIO(blob)) as tf:
+            for member in tf.getmembers():
+                if member.isfile():
+                    _assert_clean(tf.extractfile(member).read().decode("utf-8"))
+
+    def test_export_bundle(self, leak_profile_root):
+        from researcher_profiles.profile.export import build_export_bundle
+
+        prof = ResearcherProfile.from_files(leak_profile_root / "leaky")
+        bundle = build_export_bundle(prof)
+        _assert_clean(bundle.text)
+        _assert_clean(json.dumps(bundle.model_dump(mode="json")))
+
+
+def test_research_interest_keeps_neutral_and_unknown_out_of_both_lists():
+    """0 (declared neutral) and no weight (unknown) are neither interest nor exclusion."""
+    from researcher_profiles.schema import InterestConcept, ProfileDocument, ResearchInterest
+
+    def entry(label, weight):
+        return ResearchInterest(
+            concept=InterestConcept(label=label, unmapped=True),
+            weight=weight,
+            method="declared",
+            generator="user",
+            assertedAt="2026-09-25T12:00:00Z",
+        )
+
+    doc = ProfileDocument(
+        name="Weights",
+        rid="local:weights-a1b2c3",
+        provenance="self_published",
+        research_interests=[
+            entry("Example", 0.5),
+            entry("Neutral", 0),
+            entry("Unknown", None),
+            entry("Excluded", -1),
+        ],
+    )
+    assert doc.interests == ["Example"]
+    assert doc.not_interests == ["Excluded"]
+
+
+def test_served_manifest_entries_carry_effective_access_rights():
+    """Each entry gets the EU access-right IRI of its EFFECTIVE tier: a
+    public-declared digest of a private CV is labeled non-public."""
+    from researcher_profiles.privacy import project_document
+    from researcher_profiles.schema import ACCESS_RIGHTS_IRI
+
+    prof = _profile(
+        hasPart=[
+            {"contentUrl": "sources/cv.md", "role": "cv"},
+            {
+                "contentUrl": "digest.md",
+                "role": "web",
+                "visibility": "public",
+                "derivedFrom": ["cv"],
+            },
+            {"contentUrl": "sources/trials.jsonld", "role": "trials"},
+        ],
+        subjectOf=[{"contentUrl": "personality/expertise.md", "role": "expertise"}],
+    )
+    served = project_document(prof, "public").model_dump(mode="json", by_alias=True)
+    rights = {p["contentUrl"]: p["accessRights"] for p in served["hasPart"] + served["subjectOf"]}
+    assert rights == {
+        "sources/cv.md": ACCESS_RIGHTS_IRI["private"],
+        "digest.md": ACCESS_RIGHTS_IRI["private"],
+        "sources/trials.jsonld": ACCESS_RIGHTS_IRI["limited"],
+        "personality/expertise.md": ACCESS_RIGHTS_IRI["public"],
+    }
+    # Derived, never stored: the source document is untouched, and a served
+    # copy read back in drops the label.
+    assert "accessRights" not in prof.model_dump(mode="json", by_alias=True)["hasPart"][0]
+    reloaded = ProfileDocument.model_validate(served)
+    assert "accessRights" not in reloaded.model_dump(mode="json", by_alias=True)["hasPart"][0]

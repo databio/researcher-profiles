@@ -1,12 +1,4 @@
-"""``prof.coverage``: what this profile covers, and how fresh it is.
-
-Defines :class:`CoverageManager`, the object ``ResearcherProfile.coverage``
-hands back (``prof.coverage.get()`` / ``.staleness()`` / ``.recent_work()`` /
-``.last_updated``), together with the functions behind it: computing (or
-loading the cached) :class:`~researcher_profiles.models.results.Coverage`,
-staleness scoring, and recent-work selection. Importing this module has no
-side effect on the profile class.
-"""
+"""``prof.coverage``: what this profile covers, and how fresh it is."""
 
 import json
 import os
@@ -113,9 +105,8 @@ def _parse_since(since: str | int) -> int:
     if unit == "y":
         return now.year - n
     if unit == "m":
-        # Approximate: anything within roughly N months converts to a year floor.
+        # Approximate: N months converts to a year floor.
         cutoff_dt = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
-        # subtract n months
         total_months = cutoff_dt.year * 12 + cutoff_dt.month - 1 - n
         cutoff_year = total_months // 12
         return cutoff_year
@@ -123,7 +114,6 @@ def _parse_since(since: str | int) -> int:
         days = n * 7
     else:
         days = n
-    # day-resolution: convert by approximating cutoff year
     cutoff_ts = now.timestamp() - days * 86400
     return datetime.fromtimestamp(cutoff_ts, tz=timezone.utc).year
 
@@ -154,7 +144,7 @@ def _extract_topics(expertise_md: str, metadata) -> list[str]:
             topics.append(s[3:].strip())
     if topics:
         return topics
-    # Fall back to metadata.topics (additive field if present) or subfields.
+    # Fall back to metadata.topics, if present, or subfields.
     extra = getattr(metadata, "topics", None) if metadata else None
     if extra:
         return list(extra)

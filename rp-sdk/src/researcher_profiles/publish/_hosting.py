@@ -1,12 +1,8 @@
 """Hosting configuration files for static deployment.
 
-Emits the Cloudflare Pages / Netlify ``_headers`` file plus the crawl and
-discovery files (``robots.txt``, ``sitemap.xml``, the well-known document).
-Other hosts are configured by hand; see
-``docs/rp-sdk/publishing.md``.
-
-Without permissive CORS headers the browser app cannot fetch cross-origin
-(fails silently: empty page, no error).
+Other hosts are configured by hand; see ``docs/rp-sdk/publishing.md``. Without
+permissive CORS headers the browser app cannot fetch cross-origin, and fails
+silently with an empty page.
 """
 
 import json
@@ -63,7 +59,6 @@ def sitemap_xml(
         for slug in sorted(slugs)
     ]
 
-    # Add root
     root_url = f"""\
   <url>
     <loc>{base}/index.html</loc>{
