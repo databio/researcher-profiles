@@ -253,32 +253,11 @@ jobs:
         if: ${{ !cancelled() }}
         run: npm run build
 
+  # Shared org-wide lint job (ruff check + ruff format --check); the ruff
+  # version is pinned in databio/actions so every repo moves together. Rules
+  # are in ruff.toml.
   lint:
     name: Python lint
     needs: changes
     if: ${{ needs.changes.outputs.lint == 'true' }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-python@v7
-        with:
-          python-version: '3.14'
-
-      - name: Install ruff
-        run: pip install ruff==0.17.0
-
-      - name: Ruff
-        # The rule set is codified in ruff.toml (`[lint] select = ["E", "F",
-        # "I"]` at line-length 100), not spelled out here, so config and CI
-        # cannot drift. A developer running `ruff check .` locally hits the
-        # exact same gate. That file documents the house standard: style-
-        # enforcing E,F,I with the formatter owning wrapping (E501 ignored).
-        run: ruff check .
-
-      - name: Ruff format
-        # The house standard runs both: `ruff check` for lint rules and
-        # `ruff format --check` to prove the tree is already formatted. The
-        # formatter owns line wrapping (which is why E501 is ignored above),
-        # so this is the gate that actually enforces line-length 100.
-        run: ruff format --check .
+    uses: databio/actions/.github/workflows/ruff.yml@master
