@@ -1031,6 +1031,42 @@
   font-size: var(--font-size-sm);
 }
 
+.profile-interests__group {
+  margin-bottom: var(--space-5);
+}
+
+.profile-interests__title {
+  font-size: var(--font-size-base);
+  margin-bottom: var(--space-2);
+}
+
+.profile-interests__count {
+  color: var(--rp-color-muted);
+  font-weight: normal;
+}
+
+.profile-interests__item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2);
+  padding: var(--space-1) 0;
+}
+
+.profile-interests__chip {
+  font-size: var(--font-size-sm);
+  padding: 0 var(--space-1);
+  border: 1px solid var(--rp-color-border);
+  border-radius: 4px;
+  color: var(--rp-color-muted);
+}
+
+.profile-interests__source,
+.profile-interests__share {
+  color: var(--rp-color-muted);
+  font-size: var(--font-size-sm);
+}
+
 /* === SOURCES PANEL (sidebar) ============================================ */
 
 .sources {

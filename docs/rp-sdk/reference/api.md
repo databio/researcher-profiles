@@ -1268,7 +1268,7 @@ unchanged.
 | `expertise` | list[string] | Default `[]`. Distinct from the `expertise` markdown body of the full view. |
 | `interests` | list[string] | Default `[]`. Rebuilt from `research_interests` (positive weights) when that is set. |
 | `not_interests` | list[string] | Default `[]`. Authoritative: a consumer must not improvise around them. Rebuilt from `research_interests` (negative weights) when that is set. |
-| `research_interests` | list[dict] | Default `[]`. Typed, weighted interests (`ResearchInterest`). |
+| `research_interests` | list[ResearchInterest] | Default `[]`. Typed, weighted interests, in the same key form as `profile.jsonld` (`@type`, `@id`, `assertedAt`). |
 | `same_as` | list[string] | Default `[]`. Other URLs for the same person. |
 | `visibility` | string | The document's OWN declared tier. Read-only here. Set it through `PATCH .../visibility`, never a metadata patch. |
 

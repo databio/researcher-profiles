@@ -9,6 +9,8 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from ..schema import ResearchInterest
+
 
 class _APIModel(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
@@ -110,8 +112,9 @@ class ProfileMetadataPayload(_APIModel):
     not_interests: list[str] = []
     #: The canonical form of the two lists above: one ``ResearchInterest``
     #: per entry (a concept, a signed weight in -1..1 or none for unknown,
-    #: method, generator, assertedAt, evidence).
-    research_interests: list[dict] = []
+    #: method, generator, assertedAt, evidence), in its JSON-LD key form
+    #: (``@type``, ``@id``, ``assertedAt``) as ``profile.jsonld`` writes it.
+    research_interests: list[ResearchInterest] = []
     same_as: list[str] = []
     methodological_commitments: list[str] = []
     #: Optional clinical extension; see ``docs/rp-spec/index.md``.

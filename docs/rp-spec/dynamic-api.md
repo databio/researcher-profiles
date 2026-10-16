@@ -801,7 +801,7 @@ The following fields appear in profile detail responses (e.g. `GET /profiles/{sl
 | `expertise` | list[string] | Topic labels (distinct from the `expertise` markdown) |
 | `interests` | list[string] | Rebuilt from `research_interests` (positive weights) when that is set |
 | `not_interests` | list[string] | Authoritative non-interests; rebuilt from `research_interests` (negative weights) when that is set |
-| `research_interests` | list[object] | Typed, weighted interests (see [spec](index.md#research-interests)) |
+| `research_interests` | list[object] | Typed, weighted interests (see [spec](index.md#research-interests)), keyed as in `profile.jsonld` (`@type`, `@id`, `assertedAt`) |
 | `training` | list[object] | Educational history |
 | `career` | list[object] | Career history |
 | `collaborators` | list[string \| object] | Declared connections (see [spec](index.md#the-collaborators-array)) |

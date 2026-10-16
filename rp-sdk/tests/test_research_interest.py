@@ -234,6 +234,34 @@ class TestOwnerEdit:
         winner = effective_interests(doc.research_interests)[0]
         assert (winner.method, winner.weight) == ("declared", None)
 
+    def test_a_typed_only_patch_round_trips_and_projects(self, jane_doe, jane_doe_dir):
+        entries = [
+            _entry(_coded("T1", "Genomics"), None, method="inferred", generator="openalex-topics"),
+            _entry(_coded("T1", "Genomics"), 1, at="2026-10-01T00:00:00Z"),
+            _entry(_coded("T2", "Chromatin"), None, method="inferred", generator="openalex-topics"),
+            _entry({"label": "admin", "unmapped": True}, -0.5),
+            _entry({"label": "ML", "unmapped": True}, 0),
+        ]
+        jane_doe.edit.patch_metadata({"research_interests": entries})
+        reloaded = ResearcherProfile.from_files(jane_doe_dir).metadata
+        assert [e.model_dump(mode="json") for e in reloaded.research_interests] == [
+            ResearchInterest.model_validate(e).model_dump(mode="json") for e in entries
+        ]
+        assert reloaded.interests == ["Genomics"]
+        assert reloaded.not_interests == ["admin"]
+
+    def test_the_wire_payload_uses_the_jsonld_keys(self, jane_doe):
+        from researcher_profiles.models.api import ProfileMetadataPayload
+        from researcher_profiles.profile.payloads import metadata_payload_dict
+
+        jane_doe.edit.patch_metadata({"research_interests": [_entry(_coded("T1", "Genomics"), 1)]})
+        data = metadata_payload_dict(jane_doe, "private")
+        (entry,) = data["research_interests"]
+        assert entry["assertedAt"] == "2026-09-25T12:00:00Z"
+        assert entry["@type"] == "ResearchInterest"
+        assert entry["concept"]["@id"] == "https://openalex.org/T1"
+        assert ProfileMetadataPayload.model_validate(data).research_interests[0].weight == 1
+
 
 class TestJsonLd:
     def test_context_maps_concepts_to_skos_and_weight_to_wi(self):

@@ -134,6 +134,11 @@ def metadata_payload_dict(
     data["expertise"] = list(md.expertise)
     data["scholar_url"] = md.scholar_url
     data["openalex_id"] = md.openalex_id
+    # One shape for typed interests everywhere: the JSON-LD form the document
+    # itself carries, so a viewer reading either source parses one type.
+    data["research_interests"] = [
+        e.model_dump(mode="json", by_alias=True) for e in md.research_interests
+    ]
     return data
 
 

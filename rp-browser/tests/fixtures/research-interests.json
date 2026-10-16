@@ -1,0 +1,64 @@
+[
+  {
+    "concept": {
+      "@id": "https://openalex.org/T10222",
+      "system": "https://openalex.org/topics",
+      "code": "T10222",
+      "display": "Genomics and Chromatin Dynamics",
+      "version": "2026-09"
+    },
+    "method": "inferred",
+    "generator": "rp-builder-topics",
+    "assertedAt": "2026-09-25T12:00:00Z",
+    "evidence": { "papers": ["W2741809807", "W3012345678"], "share": 0.45 }
+  },
+  {
+    "concept": {
+      "@id": "http://id.nlm.nih.gov/mesh/D057890",
+      "system": "http://id.nlm.nih.gov/mesh",
+      "code": "D057890",
+      "display": "Epigenomics",
+      "version": "2026"
+    },
+    "weight": 0.9,
+    "method": "declared",
+    "generator": "user",
+    "assertedAt": "2026-09-25T12:05:00Z"
+  },
+  {
+    "concept": {
+      "@id": "http://id.nlm.nih.gov/mesh/D000069550",
+      "system": "http://id.nlm.nih.gov/mesh",
+      "code": "D000069550",
+      "display": "Machine Learning",
+      "version": "2026"
+    },
+    "weight": 0,
+    "method": "declared",
+    "generator": "user",
+    "assertedAt": "2026-09-25T12:05:00Z"
+  },
+  {
+    "concept": {
+      "@id": "https://openalex.org/T12820",
+      "system": "https://openalex.org/topics",
+      "code": "T12820",
+      "display": "Chromatin Remodeling and Cancer",
+      "version": "2026-09"
+    },
+    "weight": -1,
+    "method": "declared",
+    "generator": "user",
+    "assertedAt": "2026-09-25T12:05:00Z"
+  },
+  {
+    "concept": {
+      "label": "genomic interval data standards",
+      "unmapped": true
+    },
+    "weight": 0.5,
+    "method": "inferred",
+    "generator": "llm",
+    "assertedAt": "2026-09-25T12:00:00Z"
+  }
+]

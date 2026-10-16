@@ -4,6 +4,7 @@ import {
   MetadataPanel,
   MarkdownSection,
   PapersList,
+  effectiveInterests,
 } from "@rp/ui-lib";
 import type { ProfileDetail, PaperEntry } from "@rp/ui-lib/types";
 import {
@@ -23,6 +24,7 @@ import { useStore } from "../store";
 import { cosine } from "../vec/ops";
 import { EmbeddingsPanel } from "./EmbeddingsPanel";
 import { FilesPanel } from "./FilesPanel";
+import { InterestsPanel } from "./InterestsPanel";
 import { Copyable } from "./Copyable";
 import { useShellSlots } from "../slots";
 import { Link, useSearchParams } from "react-router";
@@ -35,6 +37,7 @@ import { navigate, buildPath, resolveProfileRef } from "../router";
 type TabId =
   | "overview"
   | "expertise"
+  | "interests"
   | "soul"
   | "papers"
   | "embeddings"
@@ -140,18 +143,22 @@ export function ProfilePage({ url: urlProp, activeTab, onTabChange }: ProfilePag
     [resolved],
   );
 
+  const interests = useMemo(() => detail?.metadata.research_interests ?? [], [detail]);
+  const interestCount = useMemo(() => effectiveInterests(interests).length, [interests]);
+
   const tabs = useMemo(() => {
     if (!detail) return [] as { id: TabId; label: string }[];
     const t: { id: TabId; label: string }[] = [{ id: "overview", label: "Overview" }];
     // Content tabs always render, empty or not, so the structure stays legible.
     t.push({ id: "expertise", label: "Expertise" });
+    t.push({ id: "interests", label: `Interests (${interestCount})` });
     t.push({ id: "soul", label: "Research Identity" });
     t.push({ id: "papers", label: `Publications (${papers.length})` });
     t.push({ id: "embeddings", label: "Embeddings" });
     t.push({ id: "files", label: "Files" });
     for (const e of extraTabs) t.push({ id: e.id, label: e.label });
     return t;
-  }, [detail, papers.length, extraTabs]);
+  }, [detail, papers.length, extraTabs, interestCount]);
 
   /**
    * The tab actually displayed. A linked extra tab can be absent, so fall back
@@ -278,6 +285,12 @@ export function ProfilePage({ url: urlProp, activeTab, onTabChange }: ProfilePag
               ) : (
                 <p className="text-muted">No expertise narrative yet.</p>
               ))}
+            {resolvedActive === "interests" && (
+              <InterestsPanel
+                entries={interests}
+                withheld={detail.withheld?.includes("research_interests")}
+              />
+            )}
             {resolvedActive === "soul" &&
               (detail.soul?.trim() ? (
                 <MarkdownSection title="Narrative voice (SOUL)" body={detail.soul} />

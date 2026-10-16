@@ -13,10 +13,25 @@ export { PaperRow } from "./PaperRow";
 export type { FullTextHref, LoadSummary } from "./PaperRow";
 export { Markdown } from "./Markdown";
 export { worksGraphToPapers } from "./works";
+export {
+  INTEREST_BANDS,
+  bandOf,
+  conceptKey,
+  conceptText,
+  effectiveInterests,
+  groupInterests,
+  parseResearchInterests,
+  sourceOf,
+  vocabularyOf,
+} from "./interests";
+export type { InterestBand } from "./interests";
 export type {
   ProfileDetail,
   ProfileMetadataPayload,
   ProfileSummary,
+  ResearchInterest,
+  InterestConcept,
+  InterestEvidence,
   PaperEntry,
   PaperSummary,
   // The `PaperRow` type is not re-exported: the component above takes that name.

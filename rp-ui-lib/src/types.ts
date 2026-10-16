@@ -245,9 +245,7 @@ export interface ProfileMetadataPayload {
   openalex_id?: string | null;
   provenance?: string | null;
   regulatory_experience?: string[];
-  research_interests?: {
-    [k: string]: unknown;
-  }[];
+  research_interests?: ResearchInterest[];
   rid?: string | null;
   same_as?: string[];
   scholar_url?: string | null;
@@ -267,6 +265,67 @@ export interface ProfileMetadataPayload {
   }[];
   url?: string | null;
   visibility?: string;
+  [k: string]: unknown;
+}
+/**
+ * One weighted person-to-concept link (``rp:ResearchInterest``).
+ *
+ * Modeled on the Weighted Interest Ontology pattern (person ->
+ * ``wi:WeightedInterest`` -> topic, with ``wi:weight``). ``weight`` is signed
+ * in ``[-1, 1]``: +1 a core interest, 0 declared neutral, -1 a hard exclude,
+ * and values between -1 and 0 mean rank lower. A missing weight means
+ * *unknown*, never 0, which is why an inferred entry built from paper counts
+ * carries its share in ``evidence`` and leaves ``weight`` unset.
+ *
+ * Several entries may cover one concept; :func:`effective_interests` picks
+ * the one that counts.
+ */
+export interface ResearchInterest {
+  "@context"?: string | null;
+  "@id"?: string | null;
+  "@type"?: string | null;
+  assertedAt: string;
+  concept: InterestConcept;
+  evidence?: InterestEvidence | null;
+  generator: string;
+  method: "declared" | "inferred" | "imported";
+  weight?: number | null;
+  [k: string]: unknown;
+}
+/**
+ * The concept a :class:`ResearchInterest` points at.
+ *
+ * Two forms, never mixed. A **coded** concept names a term in a controlled
+ * vocabulary: ``system`` (the vocabulary URI), ``code``, ``display`` (the
+ * label snapshot a human reads), an optional pinned ``version``, and the
+ * term's own IRI as ``@id``. A **text-only** concept is a ``label`` with
+ * ``unmapped: true`` and no ``@id``, ``system`` or ``code``: an interest no
+ * vocabulary covers, kept rather than forced onto a wrong term.
+ *
+ * The field names follow FHIR ``Coding`` (``system``, ``code``,
+ * ``display``, ``version``), so a Coding view is a rename, not a mapping.
+ */
+export interface InterestConcept {
+  "@context"?: string | null;
+  "@id"?: string | null;
+  "@type"?: string | null;
+  code?: string | null;
+  display?: string | null;
+  label?: string | null;
+  system?: string | null;
+  unmapped?: boolean;
+  version?: string | null;
+  [k: string]: unknown;
+}
+/**
+ * Why an inferred interest was proposed: raw counts live here, not in weight.
+ */
+export interface InterestEvidence {
+  "@context"?: string | null;
+  "@id"?: string | null;
+  "@type"?: string | null;
+  papers?: string[];
+  share?: number | null;
   [k: string]: unknown;
 }
 /**
