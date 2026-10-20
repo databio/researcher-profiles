@@ -32,8 +32,8 @@ The dynamic API categorizes routes by authentication requirement:
 | Read endpoints (list, record, files, papers, summaries, text, passages, content, collection) | No |
 | Search, match, persona, upload, archive, identity resolution | Yes |
 | Owner edit endpoints | Yes (owner-level) |
-| Command-line login (`/api/auth/*`) | No (see [section 14.2](#142-command-line-login)) |
-| Management endpoints (`/api/manage/*`) | Varies by endpoint (see [section 14](#14-management-api)) |
+| Command-line login (the device and token endpoints) | No (see [section 14.2](#142-command-line-login)) |
+| Management endpoints (`/api/v1/manage/*`) | Varies by endpoint (see [section 14](#14-management-api)) |
 
 A server MAY run in **open mode** (no token configured), in which case all
 routes accept any request.
@@ -871,30 +871,36 @@ A server MAY implement the management tier without the dynamic API, and vice
 versa. A server MAY offer further management endpoints beyond these four; they
 are outside this specification.
 
-### 14.1. The paths are normative
+### 14.1. Finding the endpoints
 
-Unlike the `/api/v1/` prefix in [section 1](#1-url-prefix), the paths in this
-section are fixed. Login endpoints live under `/api/auth/`; everything else
-lives under `/api/manage/`. A client discovers whether a server offers
-command-line login by calling `POST /api/auth/device` and reading the status.
-A server that mounts these endpoints elsewhere is not conforming.
-
-The fixed `/api/auth/` segment lets an operator protect every login route with
-one proxy rule (for example a rate limit). A server SHOULD keep any other route
-that signs a person in, such as its browser login, under the same prefix.
-
-Absence is the signal. A server that does not implement command-line login MUST
-let `POST /api/auth/device` answer `404`. A client that gets `404` there treats
-the server as offering no command-line login, reports that, and MUST NOT retry.
-
-A server MAY also publish
+The two command-line login endpoints are found, not fixed. A server that offers
+command-line login MUST publish
 [RFC 8414](https://www.rfc-editor.org/rfc/rfc8414) authorization server
-metadata at `/.well-known/oauth-authorization-server` naming these endpoints as
-`device_authorization_endpoint` and `token_endpoint`, with
-`urn:ietf:params:oauth:grant-type:device_code` in `grant_types_supported`. A
-client MUST NOT depend on it: the fixed paths are authoritative, and on many
-hosts an unknown path answers `200` with an HTML page, so a missing metadata
-document is not a reliable absence signal.
+metadata at `/.well-known/oauth-authorization-server` on its base URL. The
+document MUST include:
+
+| Field | Value |
+|-------|-------|
+| `issuer` | The server's base URL, exactly as a client is given it |
+| `device_authorization_endpoint` | Absolute URL of the endpoint that starts a login |
+| `token_endpoint` | Absolute URL of the endpoint the client polls |
+| `grant_types_supported` | A list containing `urn:ietf:params:oauth:grant-type:device_code` |
+
+A client reads both endpoints from this document and MUST NOT assume their
+paths. It MUST check that `issuer` equals the base URL it was given (RFC 8414
+§3.3) and stop if it does not. The reference implementation serves them at
+`/oauth/device_authorization` and `/oauth/token`.
+
+Absence is the signal. A server without command-line login answers `404` for
+the metadata, or publishes metadata with no `device_authorization_endpoint`. A
+client that gets either, or a body that is not a JSON object (some hosts answer
+every unknown path with `200` and an HTML page), treats the server as offering
+no command-line login, reports that, and MUST NOT retry.
+
+The identity echo endpoints ([section 14.3](#143-identity-echo)) are at fixed
+paths under `/api/v1/manage/`, unlike the `/api/v1/` prefix in
+[section 1](#1-url-prefix). A server that mounts them elsewhere is not
+conforming.
 
 ### 14.2. Command-line login
 
@@ -903,8 +909,8 @@ The OAuth 2.0 Device Authorization Grant,
 browser redirect, so the server issues two codes: a secret the client polls
 with, and a short code the person types or confirms in a browser. The wire
 format is RFC 8628's, so a stock OAuth device-flow client works unchanged. This
-section fixes the endpoint paths, pins the choices RFC 8628 leaves open, and
-adds a few fields. Where this section is silent, RFC 8628 and
+section pins the choices RFC 8628 leaves open and adds a few fields; the
+endpoint URLs come from the metadata in [section 14.1](#141-finding-the-endpoints). Where this section is silent, RFC 8628 and
 [RFC 6749](https://www.rfc-editor.org/rfc/rfc6749) apply.
 
 What the client receives is not a short-lived access token but a long-lived
@@ -915,7 +921,7 @@ person revokes it.
 
 ```
 client                          server                      person's browser
-  |  POST /api/auth/device         |                                |
+  |  POST device_authorization_endpoint                             |
   |------------------------------->|                                |
   |  200 {device_code, user_code,  |                                |
   |       verification_uri,        |                                |
@@ -925,7 +931,7 @@ client                          server                      person's browser
   |  (print URI + user_code)       |    person opens the URI        |
   |                                |<-------------------------------|
   |                                |    person signs in, approves   |
-  |  POST /api/auth/token          |                                |
+  |  POST token_endpoint           |                                |
   |------------------------------->|                                |
   |  400 {"error": "authorization_pending"}                         |
   |<-------------------------------|                                |
@@ -939,7 +945,7 @@ gets one. Requests use `application/x-www-form-urlencoded` bodies (RFC 8628
 §3.1, §3.4). A server MAY also accept the same fields as a JSON object. All
 responses are JSON and MUST carry `Cache-Control: no-store` (RFC 6749 §5.1).
 
-#### POST /api/auth/device
+#### POST device_authorization_endpoint
 
 Start a login (the device authorization endpoint, RFC 8628 §3.1).
 
@@ -978,15 +984,16 @@ server MUST require an authenticated person to approve, and MUST NOT approve on
 the strength of the `user_code` alone: the person has to press an explicit
 approve control. The page SHOULD show the requesting `label` and the
 `user_code` so the person can spot a request they did not start (RFC 8628
-§5.4). It MAY offer a deny control. Servers SHOULD rate-limit code entry
+§5.4). It SHOULD offer a deny control; a denied request answers the next poll
+with `access_denied`. Servers SHOULD rate-limit code entry
 (RFC 8628 §5.1).
 
 **Status codes:** `200`; `400` with an OAuth error body for a malformed request;
-`404` (server does not offer command-line login); `429` or `503` when the
+`404` (server does not offer command-line login; a client MUST NOT retry); `429` or `503` when the
 server cannot open another request right now (the client SHOULD retry after
 `Retry-After`).
 
-#### POST /api/auth/token
+#### POST token_endpoint
 
 Collect the result (the token endpoint, RFC 8628 §3.4). The `device_code` is
 the credential.
@@ -997,7 +1004,7 @@ the credential.
 |-------|----------|-------------|
 | `grant_type` | yes | The literal `urn:ietf:params:oauth:grant-type:device_code` |
 | `device_code` | yes | From the start response |
-| `client_id` | yes | The same value sent to `/api/auth/device` |
+| `client_id` | yes | The same value sent to the device authorization endpoint |
 
 **Response 200, approved** (RFC 6749 §5.1):
 
@@ -1049,7 +1056,7 @@ Two endpoints answer "what is this credential". They are split by key family
 (see [the key model](authentication.md#the-key-model)) because the answers have
 different shapes.
 
-#### GET /api/manage/whoami
+#### GET /api/v1/manage/whoami
 
 Describe an app-family (`rpk_`) key. Requires
 `Authorization: Bearer <key>`.
@@ -1075,7 +1082,7 @@ Each `profiles` entry:
 (the response SHOULD name the correct endpoint); `401` when the header is
 missing, malformed, or the key is unknown, revoked, or expired.
 
-#### GET /api/manage/agent/whoami
+#### GET /api/v1/manage/agent/whoami
 
 Describe an account-family (`rpa_`) key: everything it may read and write.
 Requires `Authorization: Bearer <key>`. A key is expected to call this at the

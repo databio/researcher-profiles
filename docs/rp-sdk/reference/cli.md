@@ -886,9 +886,11 @@ Requires the `[signing]` extra.
 
 Log in to a profile server from the command line and store the key it mints.
 The server runs the OAuth 2.0 device authorization grant
-([RFC 8628](https://www.rfc-editor.org/rfc/rfc8628)): `rp` asks for a code
-(`POST /api/auth/device`), prints a link and a short user code, and polls
-(`POST /api/auth/token`) until you approve the request in a browser. See
+([RFC 8628](https://www.rfc-editor.org/rfc/rfc8628)): `rp` reads the server's
+OAuth metadata (`GET /.well-known/oauth-authorization-server`), asks for a code
+at the `device_authorization_endpoint` it names, prints a link and a short user
+code, and polls the `token_endpoint` until you approve the request in a
+browser. See
 [Command-line login](../../rp-spec/dynamic-api.md#142-command-line-login) for
 the wire protocol.
 
@@ -923,7 +925,8 @@ flags at all.
 
 A server that does not offer
 [command-line login](../../rp-spec/dynamic-api.md#142-command-line-login)
-answers `404` on `POST /api/auth/device`, and the command fails at once with
+publishes no OAuth metadata (or none naming a device endpoint), and the
+command fails at once with
 `does not offer command-line login`. If you decline the request in the
 browser, or it expires before you approve it, the command stops and says so;
 run `rp login` again to start over.
@@ -956,7 +959,7 @@ Exits `0` whether or not a file was there; with nothing stored it prints
 ## whoami
 
 Ask a server who the stored token belongs to and which profiles it may push
-(`GET /api/manage/whoami`).
+(`GET /api/v1/manage/whoami`).
 
 ```
 rp whoami [--url BASE_URL] [--token TOKEN] [--json]
@@ -996,7 +999,7 @@ rp agent config [--host NAME]
 
 | Subcommand | Calls | Prints |
 |---|---|---|
-| `whoami` | `GET /api/manage/agent/whoami` | The key's label and handle, its owner, its parts table (which parts it may read and write), the "Replace whole profiles" switch, every profile the account reaches with the parts the key may write there, and the acts no key may ever do. |
+| `whoami` | `GET /api/v1/manage/agent/whoami` | The key's label and handle, its owner, its parts table (which parts it may read and write), the "Replace whole profiles" switch, every profile the account reaches with the parts the key may write there, and the acts no key may ever do. |
 | `config` | nothing (local) | Which credential resolved, and from where. |
 
 | Option | Description |

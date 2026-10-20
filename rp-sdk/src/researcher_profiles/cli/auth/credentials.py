@@ -1,7 +1,8 @@
 """``rp login``: a stored push credential for one registry.
 
-``rp login <server>`` runs the OAuth 2.0 Device Authorization Grant
-(RFC 8628) and stores the returned key in
+``rp login <server>`` reads the server's OAuth metadata (RFC 8414), runs the
+OAuth 2.0 Device Authorization Grant (RFC 8628) at the endpoints it names, and
+stores the returned key in
 ``~/.config/researcher-profiles/credentials.json`` (mode 0600)::
 
     {"url": "https://profiles.example.org", "token": "rpk_...", "orcid": ..., "name": ...}
@@ -124,14 +125,51 @@ def resolve_token(
 # --- the device flow -----------------------------------------------------------
 
 
-DEVICE_PATH = "/api/auth/device"
-TOKEN_PATH = "/api/auth/token"
+METADATA_PATH = "/.well-known/oauth-authorization-server"  # RFC 8414 section 3
 CLIENT_ID = "rp"
 SCOPE = "push_own"
 DEVICE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code"
 DEFAULT_INTERVAL = 5.0  # RFC 8628 §3.2, when the server sends no interval
 SLOW_DOWN_STEP = 5.0  # RFC 8628 §3.5
-START_ATTEMPTS = 3  # tries at /api/auth/device while it answers 429 or 503
+START_ATTEMPTS = 3  # tries at the device endpoint while it answers 429 or 503
+
+
+def _discover(http: Any, base: str) -> tuple[str, str]:
+    """``(device_authorization_endpoint, token_endpoint)`` from the server's metadata.
+
+    The metadata's ``issuer`` must be ``base`` itself (RFC 8414 section 3.3), so
+    a server cannot point ``rp login`` at another origin's endpoints by
+    accident. A server with no metadata, or none naming a device endpoint,
+    has no command-line login.
+    """
+    import httpx
+
+    try:
+        r = http.get(METADATA_PATH)
+    except httpx.HTTPError as e:
+        raise LoginError(f"{base}: {e}") from e
+    if r.status_code == 404:
+        raise LoginError(f"{base} does not offer command-line login (no {METADATA_PATH})")
+    if r.status_code != 200:
+        raise LoginError(f"{base}: server metadata unavailable ({_describe(r)})")
+    meta = _json(r)
+    if not meta:  # some hosts answer every unknown path with a 200 HTML page
+        raise LoginError(f"{base} does not offer command-line login (no {METADATA_PATH})")
+    issuer = meta.get("issuer")
+    if not isinstance(issuer, str) or issuer.rstrip("/") != base:
+        raise LoginError(
+            f"{base}: server metadata names issuer {issuer!r}, not {base}; "
+            "run rp login with the issuer URL"
+        )
+    device = meta.get("device_authorization_endpoint")
+    token = meta.get("token_endpoint")
+    if not isinstance(device, str) or not device:
+        raise LoginError(
+            f"{base} does not offer command-line login (no device_authorization_endpoint)"
+        )
+    if not isinstance(token, str) or not token:
+        raise LoginError(f"{base}: server metadata has no token_endpoint")
+    return device, token
 
 
 def login(
@@ -146,11 +184,13 @@ def login(
 ) -> Login:
     """Run the device authorization grant (RFC 8628) against ``url``; return the key.
 
-    ``POST /api/auth/device`` opens a request (retried on ``429``/``503``).
-    The user code and verification URL are printed on ``out`` (stderr by
-    default). Then ``POST /api/auth/token`` is polled every ``interval``
-    seconds until approval or until ``expires_in`` (or ``timeout``) runs out.
-    ``slow_down`` (or a ``429``) adds 5 seconds to the interval.
+    ``GET /.well-known/oauth-authorization-server`` names the two endpoints.
+    ``POST`` to its ``device_authorization_endpoint`` opens a request (retried
+    on ``429``/``503``). The user code and verification URL are printed on
+    ``out`` (stderr by default). Then the ``token_endpoint`` is polled every
+    ``interval`` seconds until approval or until ``expires_in`` (or
+    ``timeout``) runs out. ``slow_down`` (or a ``429``) adds 5 seconds to the
+    interval.
 
     Raises :class:`LoginError` on a ``404`` (no command-line login), a refusal,
     expiry, or any other failure. The result is not stored.
@@ -162,17 +202,18 @@ def login(
     http = client if client is not None else httpx.Client(base_url=base, timeout=30.0)
     try:
         sleep = sleep or time.sleep
+        device_endpoint, token_endpoint = _discover(http, base)
         form = {"client_id": CLIENT_ID, "scope": SCOPE, "label": label or _default_label()}
         for attempt in range(START_ATTEMPTS):
             try:
-                r = http.post(DEVICE_PATH, data=form)
+                r = http.post(device_endpoint, data=form)
             except httpx.HTTPError as e:
                 raise LoginError(f"{base}: {e}") from e
             if r.status_code not in (429, 503) or attempt == START_ATTEMPTS - 1:
                 break
             sleep(_retry_after(r) or DEFAULT_INTERVAL)  # busy: retry after Retry-After
         if r.status_code == 404:
-            raise LoginError(f"{base} does not offer command-line login (no {DEVICE_PATH})")
+            raise LoginError(f"{base} does not offer command-line login (no {device_endpoint})")
         if r.status_code != 200:
             raise LoginError(f"{base}: login request refused ({_describe(r)})")
         try:
@@ -201,7 +242,7 @@ def login(
         while time.monotonic() < deadline:
             sleep(interval)
             try:
-                p = http.post(TOKEN_PATH, data=poll)
+                p = http.post(token_endpoint, data=poll)
             except httpx.HTTPError as e:
                 raise LoginError(f"{base}: {e}") from e
             if p.status_code == 200:
@@ -267,14 +308,14 @@ def _default_label() -> str:
 
 
 def whoami(url: str, token: str, *, client: Any = None, timeout: float = 30.0) -> dict:
-    """``GET /api/manage/whoami`` with ``token``. Raises :class:`LoginError` on refusal."""
+    """``GET /api/v1/manage/whoami`` with ``token``. Raises :class:`LoginError` on refusal."""
     import httpx
 
     base = server_base(url)
     http = client if client is not None else httpx.Client(base_url=base, timeout=timeout)
     try:
         try:
-            r = http.get("/api/manage/whoami", headers={"Authorization": f"Bearer {token}"})
+            r = http.get("/api/v1/manage/whoami", headers={"Authorization": f"Bearer {token}"})
         except httpx.HTTPError as e:
             raise LoginError(f"{base}: {e}") from e
         if r.status_code == 401:

@@ -1156,7 +1156,7 @@ class TestErrorHandling:
             assert fragment in err
 
 
-#: What a host's ``GET /api/manage/agent/whoami`` answers, trimmed.
+#: What a host's ``GET /api/v1/manage/agent/whoami`` answers, trimmed.
 WHOAMI = {
     "principal": {"kind": "consumer", "label": "summary bot", "handle": "agent_1a2b3c"},
     "owner": {"orcid": "0000-0002-1825-0097", "name": "Jane Doe"},

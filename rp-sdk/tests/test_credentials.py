@@ -1,6 +1,7 @@
 """``rp login`` / ``logout`` / ``whoami`` and the stored-credential precedence.
 
-The device flow (RFC 8628: ``/api/auth/device`` then ``/api/auth/token``) is
+The device flow (RFC 8414 metadata, then RFC 8628: the device authorization
+endpoint and the token endpoint it names) is
 exercised against a stubbed server (an ``httpx`` mock transport), so this
 covers the CLI's side of the protocol: start, poll through pending /
 slow_down / 429 until approved or refused, store 0600, without a real server.
@@ -200,8 +201,8 @@ class TestCliWiring:
 
 
 class FakeServer:
-    """Enough of the RFC 8628 endpoints (``/api/auth/device`` + ``/api/auth/token``)
-    to drive ``rp login``.
+    """Enough of RFC 8414 metadata and the RFC 8628 endpoints it names
+    (``/oauth/device_authorization`` + ``/oauth/token``) to drive ``rp login``.
 
     ``replies`` scripts the token endpoint: each poll pops the next entry, an
     OAuth ``error`` code (400), an int status (with an empty body), or
@@ -218,10 +219,17 @@ class FakeServer:
         self.complete_uri = True
         self.interval: int | None = 0
         self.retry_after: str | None = None
+        self.metadata: dict = {
+            "issuer": SERVER,
+            "device_authorization_endpoint": f"{SERVER}/oauth/device_authorization",
+            "token_endpoint": f"{SERVER}/oauth/token",
+        }
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
-        if path == "/api/auth/device" and request.method == "POST":
+        if path == "/.well-known/oauth-authorization-server" and request.method == "GET":
+            return httpx.Response(200, json=self.metadata)
+        if path == "/oauth/device_authorization" and request.method == "POST":
             assert request.headers["content-type"] == "application/x-www-form-urlencoded"
             self.started.append(dict(parse_qsl(request.content.decode())))
             body = {
@@ -235,7 +243,7 @@ class FakeServer:
             if self.interval is not None:
                 body["interval"] = self.interval
             return httpx.Response(200, json=body)
-        if path == "/api/auth/token" and request.method == "POST":
+        if path == "/oauth/token" and request.method == "POST":
             assert request.headers["content-type"] == "application/x-www-form-urlencoded"
             assert dict(parse_qsl(request.content.decode())) == {
                 "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
@@ -263,7 +271,7 @@ class FakeServer:
                     "url": SERVER,
                 },
             )
-        if path == "/api/manage/whoami":
+        if path == "/api/v1/manage/whoami":
             if request.headers.get("authorization") != "Bearer rpk_minted":
                 return httpx.Response(401, json={"detail": "bad"})
             return httpx.Response(
@@ -383,7 +391,7 @@ class TestLoginFlow:
         busy = [httpx.Response(503, headers={"Retry-After": "7"}), httpx.Response(429)]
 
         def handle(request):
-            if request.url.path == "/api/auth/device" and busy:
+            if request.url.path == "/oauth/device_authorization" and busy:
                 return busy.pop(0)
             return real(request)
 
@@ -396,15 +404,18 @@ class TestLoginFlow:
     @pytest.mark.parametrize(
         ("status", "match", "calls"),
         [
-            (503, "refused \\(503", ["/api/auth/device"] * creds.START_ATTEMPTS),
-            (404, "does not offer command-line login", ["/api/auth/device"]),  # no retry
+            (503, "refused \\(503", ["/oauth/device_authorization"] * creds.START_ATTEMPTS),
+            (404, "does not offer command-line login", ["/oauth/device_authorization"]),
         ],
-        ids=["always-busy", "server-without-the-flow"],
+        ids=["always-busy", "device-endpoint-404-no-retry"],
     )
     def test_device_start_refused(self, monkeypatch, status, match, calls):
         seen = []
+        meta = FakeServer().metadata
 
         def handle(request):
+            if request.url.path == creds.METADATA_PATH:
+                return httpx.Response(200, json=meta)
             seen.append(request.url.path)
             return httpx.Response(status)
 
@@ -416,6 +427,50 @@ class TestLoginFlow:
         with pytest.raises(creds.LoginError, match=match):
             _login()
         assert seen == calls
+
+    @pytest.mark.parametrize(
+        ("metadata", "match"),
+        [
+            (None, "does not offer command-line login \\(no /.well-known"),
+            ("<html>", "does not offer command-line login \\(no /.well-known"),
+            ({"issuer": OTHER_SERVER}, "names issuer 'https://other.example.org'"),
+            ({"device_authorization_endpoint": None}, "no device_authorization_endpoint"),
+            ({"token_endpoint": ""}, "no token_endpoint"),
+        ],
+        ids=[
+            "no-metadata",
+            "html-page",
+            "issuer-mismatch",
+            "no-device-endpoint",
+            "no-token-endpoint",
+        ],
+    )
+    def test_discovery_refuses(self, fake, metadata, match):
+        if not isinstance(metadata, dict):
+            real = fake.handle
+            page = httpx.Response(404) if metadata is None else httpx.Response(200, text=metadata)
+            fake.handle = lambda r: page if r.url.path == creds.METADATA_PATH else real(r)
+        else:
+            fake.metadata.update(metadata)
+        with pytest.raises(creds.LoginError, match=match):
+            _login()
+        assert fake.started == []
+
+    def test_endpoints_come_from_metadata(self, fake):
+        fake.metadata["device_authorization_endpoint"] = f"{SERVER}/elsewhere/device"
+        real = fake.handle
+        seen = []
+
+        def handle(request):
+            seen.append(request.url.path)
+            if request.url.path == "/elsewhere/device":
+                request.url = request.url.copy_with(path="/oauth/device_authorization")
+            return real(request)
+
+        fake.handle = handle
+        result, _ = _login()
+        assert result.token == "rpk_minted"
+        assert seen[:2] == [creds.METADATA_PATH, "/elsewhere/device"]
 
     def test_timeout(self, monkeypatch):
         server = FakeServer(replies=["authorization_pending"] * 10**3)
@@ -471,7 +526,7 @@ class TestManagementClient:
     @pytest.mark.parametrize(
         "resource, method, args, kwargs, http_method, path, body",
         [
-            ("identity", "whoami", (), {}, "get", "/api/manage/agent/whoami", None),
+            ("identity", "whoami", (), {}, "get", "/api/v1/manage/agent/whoami", None),
             ("profile", "get", (SLUG,), {}, "get", f"/api/v1/profiles/{SLUG}?view=full", None),
             (
                 "profile",

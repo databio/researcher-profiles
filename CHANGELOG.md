@@ -7,6 +7,20 @@ specification are tracked in `docs/rp-spec/CHANGELOG.md`.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the parts follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Breaking: needs a Prosopia that serves its OAuth metadata with a device
+endpoint, and its management endpoints under `/api/v1/manage/`.
+
+### rp-sdk
+
+- `rp login` finds its endpoints in the server's OAuth metadata
+  (`/.well-known/oauth-authorization-server`, RFC 8414) instead of fixed
+  `/api/auth/device` and `/api/auth/token` paths, and checks that the
+  metadata's `issuer` is the server it was given
+- `rp whoami` and the agent `whoami` call `/api/v1/manage/whoami` and
+  `/api/v1/manage/agent/whoami` (were under `/api/manage/`)
+
 ## [0.2.0] - 2026-10-12
 
 Releases `rp-sdk` 0.2.0, `rp-browser` 0.2.0, and `rp-ui-lib` 0.2.0, matching

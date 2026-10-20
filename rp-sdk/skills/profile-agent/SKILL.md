@@ -51,7 +51,7 @@ any write, and again if a write is refused.
 rp agent whoami
 ```
 
-The answer (`GET /api/manage/agent/whoami`) looks like this:
+The answer (`GET /api/v1/manage/agent/whoami`) looks like this:
 
 ```json
 {

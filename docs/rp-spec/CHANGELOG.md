@@ -1,5 +1,16 @@
 # Spec changelog
 
+## Unreleased
+
+Command-line login endpoints are found, not fixed. A server that offers
+command-line login publishes RFC 8414 metadata at
+`/.well-known/oauth-authorization-server` naming its
+`device_authorization_endpoint` and `token_endpoint`; clients read them from
+there and check `issuer`. The fixed `/api/auth/device` and `/api/auth/token`
+paths are gone. The approval page should offer a deny control.
+
+Management endpoints moved under `/api/v1/manage/` (were `/api/manage/`).
+
 ## 0.2.0 - 2026-10-12
 
 Command-line login endpoints moved. Device login now follows the OAuth 2.0

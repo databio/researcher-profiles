@@ -61,7 +61,7 @@ An `rpa_` key MUST NOT carry any app scope other than `read` and `push_own`
 [`insufficient_scope`](#insufficient-scope). On data endpoints the prefix is a
 label, never an authorization input: scopes and tables decide, and a key of
 either family is judged by what it holds. Only on the management surfaces
-(such as [`GET /api/manage/agent/whoami`](dynamic-api.md#get-apimanageagentwhoami))
+(such as [`GET /api/v1/manage/agent/whoami`](dynamic-api.md#get-apiv1manageagentwhoami))
 MUST a server refuse a key of the other family with `400` rather than `401`,
 naming the endpoint that would have worked.
 
@@ -198,7 +198,7 @@ including what it tells the Public. No edit endpoint may change it, whatever the
 caller holds.
 
 A server SHOULD publish this list at
-[`GET /api/manage/agent/whoami`](dynamic-api.md#get-apimanageagentwhoami) as
+[`GET /api/v1/manage/agent/whoami`](dynamic-api.md#get-apiv1manageagentwhoami) as
 `never_delegable`, so a key can tell its user what it cannot be given. A request
 to perform one of these acts, or to change a metadata field no part covers,
 MUST return `403` with `detail.error` equal to `"not_delegable"` and a `hint`.
