@@ -10,7 +10,8 @@ and the parts follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 Breaking: needs a Prosopia that serves its OAuth metadata with a device
-endpoint, and its management endpoints under `/api/v1/manage/`.
+endpoint, and its management endpoints under `/api/v1/manage/`. `rp login`
+needs a server that registers the `rp-cli` client.
 
 ### rp-sdk
 
@@ -20,6 +21,23 @@ endpoint, and its management endpoints under `/api/v1/manage/`.
   metadata's `issuer` is the server it was given
 - `rp whoami` and the agent `whoami` call `/api/v1/manage/whoami` and
   `/api/v1/manage/agent/whoami` (were under `/api/manage/`)
+- `rp login` signs in as the registered OAuth client `rp-cli` with the
+  `profiles:push` scope. By default it opens the system browser and returns to
+  a one-time address on this computer (`http://127.0.0.1:<port>/callback`,
+  PKCE S256; RFC 8252). `rp login --device` uses the device flow, and so does
+  `rp login` over SSH, on Linux with no display, when no browser opens, or
+  when the server has no `authorization_endpoint`
+- The stored login now holds a one-hour access token and a refresh token
+  (`access_token`, `refresh_token`, `expires_at`, `issuer` in
+  `credentials.json`, written atomically, mode 0600). Commands renew it when
+  it has expired and once more on a 401, saving the rotated refresh token under
+  a file lock. A `credentials.json` from an older `rp` (`"token": "rpk_..."`)
+  keeps working unchanged until the next `rp login`
+- `rp login` learns who you are from `whoami`; it no longer reads `orcid` or
+  `name` from the token response
+- `rp logout` revokes the login at the server's `revocation_endpoint`
+  (RFC 7009) before deleting it. For an older `rpk_` login it says to revoke
+  the key on the Privacy page
 
 ## [0.2.0] - 2026-10-12
 

@@ -51,8 +51,8 @@ key names its own family on sight. Two families are defined.
 
 | Prefix | Family | Held by | Purpose |
 |--------|--------|---------|---------|
-| `rpk_` | app | An application, a script, or a person's own command line | Read, push, and other whole-application powers |
-| `rpa_` | account | An assistant or tool acting for one person's whole account | Read and write, part by part, what that account reaches |
+| `rpk_` | app | An application or a script | Read, push, and other whole-application powers |
+| `rpa_` | account | An assistant, a tool, or a person's own command line, acting for one person's whole account | Read and write, part by part, what that account reaches |
 
 Scopes name whole-application powers only. What a key may read and write of
 one profile is not a scope: it is the key's [parts table](#per-part-access).
@@ -60,10 +60,10 @@ An `rpa_` key MUST NOT carry any app scope other than `read` and `push_own`
 (below), and a server MUST refuse a request that needs another app scope with
 [`insufficient_scope`](#insufficient-scope). On data endpoints the prefix is a
 label, never an authorization input: scopes and tables decide, and a key of
-either family is judged by what it holds. Only on the management surfaces
-(such as [`GET /api/v1/manage/agent/whoami`](dynamic-api.md#get-apiv1manageagentwhoami))
-MUST a server refuse a key of the other family with `400` rather than `401`,
-naming the endpoint that would have worked.
+either family is judged by what it holds. Only on
+[`GET /api/v1/manage/agent/whoami`](dynamic-api.md#get-apiv1manageagentwhoami)
+MUST a server refuse a key of the other family (an `rpk_` key) with `400`
+rather than `401`, naming the endpoint that would have worked.
 
 An account key is bound to a person's account, never to one profile. It
 reaches every profile the account owns, co-owns, or edits, and every profile
@@ -92,8 +92,13 @@ learns nothing from probing.
 A server MAY define other app scopes.
 
 `push_own` is what the [command-line login flow](dynamic-api.md#142-command-line-login)
-mints, and it is why the flow is safe to expose to any person with an account: a
-key that escapes can still only touch profiles that person already controls.
+grants (as the OAuth scope `profiles:push`), and it is why the flow is safe to
+expose to any person with an account: a token that escapes can still only touch
+profiles that person already controls. The flow issues an account-family
+access token that lives about an hour, plus a rotating refresh token, so a
+leaked access token stops working soon and a replayed refresh token ends the
+login. Logins made by older servers hold a non-expiring `rpk_` key with
+`push_own`; clients keep using such a key until the person logs in again.
 
 ## Per-part access
 
