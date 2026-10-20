@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { normalizeBase, linkFor, summaryUrl, fulltextUrl, profileFiles } from "../src/model/manifest";
+import { normalizeBase, documentUrl, linkFor, summaryUrl, fulltextUrl, profileFiles } from "../src/model/manifest";
 import type { Manifest, ResolvedProfile } from "../src/model/manifest";
 
 describe("normalizeBase", () => {
@@ -188,5 +188,15 @@ describe("profileFiles carries the declared tier", () => {
     const files = profileFiles({ manifest, base: manifest["@id"] } as ResolvedProfile);
     const notes = files.find((f) => f.role === "notes");
     expect(notes?.visibility).toBeNull();
+  });
+});
+
+describe("documentUrl", () => {
+  it.each([
+    "https://example.com/profiles/alice/",
+    "https://example.com/profiles/alice",
+    "https://example.com/profiles/alice/profile.jsonld",
+  ])("%s", (input) => {
+    expect(documentUrl(input)).toBe("https://example.com/profiles/alice/profile.jsonld");
   });
 });

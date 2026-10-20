@@ -8,6 +8,7 @@ import {
 } from "@rp/ui-lib";
 import type { ProfileDetail, PaperEntry } from "@rp/ui-lib/types";
 import {
+  documentUrl,
   fulltextUrl,
   loadManifest,
   profileFiles,
@@ -222,8 +223,8 @@ export function ProfilePage({ url: urlProp, activeTab, onTabChange }: ProfilePag
     <div>
       <div className="profile-chrome">
         <span className="profile-chrome__origin">
-          <Copyable value={url || ref} title="Copy profile URL">
-            {url || ref}
+          <Copyable value={url ? documentUrl(url) : ref} title="Copy profile URL">
+            {url ? documentUrl(url) : ref}
           </Copyable>
         </span>
         <button

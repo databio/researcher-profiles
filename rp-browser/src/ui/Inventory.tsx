@@ -2,6 +2,7 @@ import { useStore, persistSources } from "../store";
 import type { ProfileCard } from "../store";
 import { useState, useMemo } from "react";
 import { Copyable } from "./Copyable";
+import { documentUrl } from "../model/manifest";
 import { Link } from "react-router";
 import { navigate, buildPath } from "../router";
 import { useShellSlots } from "../slots";
@@ -90,7 +91,7 @@ export function Inventory() {
                 <td>{c.level}</td>
                 <td>{c.paperCount}</td>
                 <td className="text-muted text-sm">
-                  <Copyable value={c.base} title="Copy profile URL">
+                  <Copyable value={documentUrl(c.base)} title="Copy profile URL">
                     {new URL(c.base).hostname}
                   </Copyable>
                 </td>
