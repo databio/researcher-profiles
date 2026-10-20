@@ -97,7 +97,7 @@ def _registry_target(url_flag: str | None, token_flag: str | None) -> tuple[str 
     is among the registries actually being asked.
     """
     from ..client import REGISTRY_ENV_VAR, resolve_registries
-    from .auth.credentials import TOKEN_ENV_VAR, load_login, server_base
+    from .auth.credentials import TOKEN_ENV_VAR, load_login, server_base, stored_token
 
     login = load_login()
     url = url_flag or os.environ.get(REGISTRY_ENV_VAR) or (login.url if login else None)
@@ -108,26 +108,28 @@ def _registry_target(url_flag: str | None, token_flag: str | None) -> tuple[str 
         return url, env
     servers = {server_base(u) for u in resolve_registries(url)}
     if login and login.url in servers:
-        return url, login.token
+        return url, stored_token()
     return url, None
 
 
 def _cmd_install(args: argparse.Namespace) -> int:
     """Pull profiles from a registry into the local cache."""
     from ..client import install_profile
+    from .auth.credentials import with_token_refresh
 
     url, token = _registry_target(args.url, args.token)
     rc = 0
     records = []
     for slug in args.slug:
+        used: list = []
+
+        def install(t, slug=slug, used=used):
+            used.append(t)
+            return install_profile(slug, url=url, root=args.root, token=t, force=args.force)
+
         try:
-            summary = install_profile(
-                slug,
-                url=url,
-                root=args.root,
-                token=token,
-                force=args.force,
-            )
+            summary = with_token_refresh(token, install)
+            token = used[-1]  # a refreshed token serves the remaining slugs
         except (ValueError, PermissionError, RuntimeError) as e:
             print(f"install failed for {slug}: {e}", file=sys.stderr)
             print(
