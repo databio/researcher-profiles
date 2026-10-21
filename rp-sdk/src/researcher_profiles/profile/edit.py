@@ -167,17 +167,15 @@ def _today() -> date:
     return date.fromisoformat(utc_now_iso()[:10])
 
 
-def _stamp_career_stage(
-    doc: ProfileDocument, patch: dict[str, Any], today: date
-) -> dict[str, Any]:
+def _stamp_career_stage(doc: ProfileDocument, patch: dict[str, Any], today: date) -> dict[str, Any]:
     """Make an owner edit of ``career_stage`` the owner's own answer.
 
     - ``career_stage: null`` clears the stage, untouched here.
-    - a dict naming a ``career_level`` becomes :func:`self_reported_stage`
-      for that level, with the patch's other fact keys laid over it;
-    - a dict with ``career_level: null`` withdraws the answer: it merges as
+    - a dict naming a ``current_rank`` becomes :func:`self_reported_stage`
+      for that rank, with the patch's other fact keys laid over it;
+    - a dict with ``current_rank: null`` withdraws the answer: it merges as
       usual but goes back to ``source: inferred`` so a build may infer again;
-    - a dict without ``career_level`` edits facts only and is stamped as the
+    - a dict without ``current_rank`` edits facts only and is stamped as the
       owner's answer.
 
     ``source``, ``confidence``, ``evidence`` and ``as_of`` are always the
@@ -188,14 +186,14 @@ def _stamp_career_stage(
         return patch
     facts = {k: v for k, v in raw.items() if k not in _STAMPED_STAGE_KEYS}
     existing = doc.career_stage
-    if "career_level" in facts and facts["career_level"] is not None:
-        level = facts.pop("career_level")
+    if "current_rank" in facts and facts["current_rank"] is not None:
+        rank = facts.pop("current_rank")
         try:
-            stage = self_reported_stage(level, existing, today)
+            stage = self_reported_stage(rank, existing, today)
         except ValueError as e:
             raise EditError(f"career_stage is not a valid CareerStage: {e}") from e
         stamped = {**stage.model_dump(mode="json"), **facts}
-    elif "career_level" in facts:
+    elif "current_rank" in facts:
         stamped = {**facts, "source": "inferred"}
     else:
         stamped = {

@@ -150,15 +150,16 @@ def test_a_refused_patch_raises_and_writes_nothing(jane_doe_dir, patch, match):
 
 
 @pytest.mark.parametrize(
-    "second_patch, rank",
+    "second_patch, rank, source",
     [
-        ({"current_rank": "associate_professor"}, "associate_professor"),
-        ({"current_rank": None}, None),
+        ({"current_rank": "associate_professor"}, "associate_professor", "self_reported"),
+        ({"current_rank": None}, None, "inferred"),
+        ({"notes": "On leave."}, "professor", "self_reported"),
     ],
-    ids=["new-rank", "null-clears-only-that-key"],
+    ids=["new-rank", "null-withdraws-the-rank", "facts-only"],
 )
 def test_a_partial_career_stage_patch_touches_only_its_keys(
-    jane_doe_dir, pinned_today, second_patch, rank
+    jane_doe_dir, pinned_today, second_patch, rank, source
 ):
     ResearcherProfile.from_files(jane_doe_dir).edit.patch_metadata({"career_stage": CAREER_STAGE})
     ResearcherProfile.from_files(jane_doe_dir).edit.patch_metadata({"career_stage": second_patch})
@@ -166,7 +167,7 @@ def test_a_partial_career_stage_patch_touches_only_its_keys(
     assert stage.current_rank == rank
     # An owner edit is the owner's answer: the server stamps when and who.
     assert stage.as_of == "2026-10-20"
-    assert stage.source == "self_reported"
+    assert stage.source == source
     assert stage.tenure_status == CAREER_STAGE["tenure_status"]
 
 
@@ -187,7 +188,6 @@ INFERRED_FACULTY = {
     "first_independent_appointment_year": 2015,
     "evidence": "ORCID employment.",
     "confidence": "medium",
-    "career_level": "faculty",
 }
 
 
@@ -198,41 +198,40 @@ def _write_stage(profile_dir, stage):
     path.write_text(json.dumps(doc))
 
 
-class TestCareerLevelEdit:
-    def test_level_on_a_doc_without_a_stage(self, jane_doe_dir, pinned_today):
+class TestCurrentRankEdit:
+    def test_rank_on_a_doc_without_a_stage(self, jane_doe_dir, pinned_today):
         _write_stage(jane_doe_dir, None)
         ResearcherProfile.from_files(jane_doe_dir).edit.patch_metadata(
-            {"career_stage": {"career_level": "graduate_student"}}
+            {"career_stage": {"current_rank": "graduate_student"}}
         )
         stage = ResearcherProfile.from_files(jane_doe_dir).metadata.career_stage
-        assert stage.career_level == "graduate_student"
         assert stage.source == "self_reported"
-        assert stage.current_rank == "student"
+        assert stage.current_rank == "graduate_student"
         assert stage.independence == "trainee"
         assert stage.as_of == "2026-10-20"
         assert stage.evidence == "Reported by the profile owner."
 
-    def test_level_over_an_inferred_faculty_stage(self, jane_doe_dir, pinned_today):
+    def test_rank_over_an_inferred_faculty_stage(self, jane_doe_dir, pinned_today):
         _write_stage(jane_doe_dir, INFERRED_FACULTY)
         ResearcherProfile.from_files(jane_doe_dir).edit.patch_metadata(
-            {"career_stage": {"career_level": "graduate_student"}}
+            {"career_stage": {"current_rank": "graduate_student"}}
         )
         stage = ResearcherProfile.from_files(jane_doe_dir).metadata.career_stage
-        assert (stage.career_level, stage.current_rank, stage.independence) == (
+        assert (stage.current_rank, stage.independence, stage.source) == (
             "graduate_student",
-            "student",
             "trainee",
+            "self_reported",
         )
         assert stage.terminal_degree_year == 2010
         assert stage.first_independent_appointment_year == 2015
 
-    def test_withdrawn_level_goes_back_to_inferred(self, jane_doe_dir, pinned_today):
+    def test_withdrawn_rank_goes_back_to_inferred(self, jane_doe_dir, pinned_today):
         _write_stage(jane_doe_dir, {**INFERRED_FACULTY, "source": "self_reported"})
         ResearcherProfile.from_files(jane_doe_dir).edit.patch_metadata(
-            {"career_stage": {"career_level": None}}
+            {"career_stage": {"current_rank": None}}
         )
         stage = ResearcherProfile.from_files(jane_doe_dir).metadata.career_stage
-        assert stage.career_level is None
+        assert stage.current_rank is None
         assert stage.source == "inferred"
 
     def test_caller_source_is_ignored(self, jane_doe_dir, pinned_today):
@@ -240,7 +239,7 @@ class TestCareerLevelEdit:
         ResearcherProfile.from_files(jane_doe_dir).edit.patch_metadata(
             {
                 "career_stage": {
-                    "career_level": "postdoc",
+                    "current_rank": "postdoc",
                     "source": "inferred",
                     "confidence": "low",
                     "evidence": "made up",
@@ -252,19 +251,20 @@ class TestCareerLevelEdit:
         assert stage.confidence == "high"
         assert stage.evidence == "Reported by the profile owner."
 
-    def test_level_with_a_rank_correction(self, jane_doe_dir, pinned_today):
+    def test_rank_with_a_fact_correction(self, jane_doe_dir, pinned_today):
         _write_stage(jane_doe_dir, None)
         ResearcherProfile.from_files(jane_doe_dir).edit.patch_metadata(
-            {"career_stage": {"career_level": "faculty", "current_rank": "associate_professor"}}
+            {"career_stage": {"current_rank": "associate_professor", "tenure_status": "tenured"}}
         )
         stage = ResearcherProfile.from_files(jane_doe_dir).metadata.career_stage
         assert stage.current_rank == "associate_professor"
         assert stage.independence == "independent"
+        assert stage.tenure_status == "tenured"
 
-    def test_bad_level_is_an_edit_error(self, jane_doe_dir, pinned_today):
+    def test_bad_rank_is_an_edit_error(self, jane_doe_dir, pinned_today):
         with pytest.raises(EditError, match="career_stage"):
             ResearcherProfile.from_files(jane_doe_dir).edit.patch_metadata(
-                {"career_stage": {"career_level": "wizard"}}
+                {"career_stage": {"current_rank": "wizard"}}
             )
 
 

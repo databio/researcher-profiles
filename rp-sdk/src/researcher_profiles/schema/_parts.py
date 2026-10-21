@@ -66,6 +66,22 @@ class PaperStats(_Base):
     year_max: int = 0
 
 
+CurrentRank = Literal[
+    "assistant_professor",
+    "associate_professor",
+    "professor",
+    "research_faculty",
+    "staff_scientist",
+    "postdoc",
+    "graduate_student",
+    "undergraduate",
+    "clinician",
+    "industry",
+    "other",
+]
+"""A person's current rank or position (``CareerStage.current_rank``)."""
+
+
 class CareerStage(_Base):
     """Date-anchored career-stage and eligibility facts (``rp:careerStage``).
 
@@ -127,19 +143,13 @@ class CareerStage(_Base):
         default=None,
         description="Year of the first independent faculty/PI appointment.",
     )
-    current_rank: (
-        Literal[
-            "assistant_professor",
-            "associate_professor",
-            "professor",
-            "research_faculty",
-            "staff_scientist",
-            "postdoc",
-            "student",
-            "other",
-        ]
-        | None
-    ) = Field(default=None, description="Current academic rank; null if unknown.")
+    current_rank: CurrentRank | None = Field(
+        default=None,
+        description=(
+            "The person's current rank or position. When source is 'inferred' "
+            "a model guessed it from the evidence; null if unknown."
+        ),
+    )
     tenure_status: Literal["tenured", "untenured_tenure_track", "non_tenure_track", "unknown"] = (
         Field(
             description=(
@@ -181,24 +191,6 @@ class CareerStage(_Base):
     )
     confidence: Literal["high", "medium", "low"] = Field(
         description="Overall confidence in the facts recorded here."
-    )
-    career_level: (
-        Literal[
-            "undergraduate",
-            "graduate_student",
-            "postdoc",
-            "faculty",
-            "clinician",
-            "industry",
-            "other",
-        ]
-        | None
-    ) = Field(
-        default=None,
-        description=(
-            "The person's coarse current career level. When source is "
-            "'inferred' a model guessed it from the evidence; null when unknown."
-        ),
     )
     source: Literal["self_reported", "inferred"] = Field(
         default="inferred",

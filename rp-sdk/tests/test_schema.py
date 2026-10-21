@@ -165,7 +165,7 @@ class TestSchemaExport:
     def test_schema_fingerprint_pinned_to_golden(self):
         """A change here is a contract change: update this golden and re-export ``schemas/`` together."""
         assert schema_fingerprint() == (
-            "3368d566a3a327272d5717a458c2a7d1d2963673dfc4f0963bba951bb1fb48f4"
+            "461d558da430946354718567971d38be0de01c1bdd9797de612d57250a1724f5"
         )
 
     def test_exported_schema_accepts_what_the_model_writes(self, schemas):

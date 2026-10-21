@@ -198,7 +198,6 @@
         "notes": "rp:notes",
         "evidence": "rp:evidence",
         "confidence": "rp:confidence",
-        "career_level": "rp:careerLevel",
         "source": "rp:careerStageSource"
       }
     },

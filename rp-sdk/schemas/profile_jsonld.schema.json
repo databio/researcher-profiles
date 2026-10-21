@@ -260,28 +260,6 @@
           "title": "As Of",
           "type": "string"
         },
-        "career_level": {
-          "anyOf": [
-            {
-              "enum": [
-                "undergraduate",
-                "graduate_student",
-                "postdoc",
-                "faculty",
-                "clinician",
-                "industry",
-                "other"
-              ],
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "The person's coarse current career level. When source is 'inferred' a model guessed it from the evidence; null when unknown.",
-          "title": "Career Level"
-        },
         "clinical_training_end_year": {
           "anyOf": [
             {
@@ -315,7 +293,10 @@
                 "research_faculty",
                 "staff_scientist",
                 "postdoc",
-                "student",
+                "graduate_student",
+                "undergraduate",
+                "clinician",
+                "industry",
                 "other"
               ],
               "type": "string"
@@ -325,7 +306,7 @@
             }
           ],
           "default": null,
-          "description": "Current academic rank; null if unknown.",
+          "description": "The person's current rank or position. When source is 'inferred' a model guessed it from the evidence; null if unknown.",
           "title": "Current Rank"
         },
         "evidence": {

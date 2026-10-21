@@ -29,12 +29,23 @@ models sit on top of those two: ``_parts`` (the nested nodes of the profile and
 the :class:`ArtifactRef` manifest entry), ``_proof`` (the verification envelope),
 ``_document`` (:class:`ProfileDocument` and its field groups) and ``_sources``
 (the ``sources/`` sidecars: papers, grants, summary frontmatter). ``_career``
-holds the pure career-level helpers over :class:`CareerStage`.
+holds the pure current-rank helpers over :class:`CareerStage`.
 """
 
 from scholarcore import CareerEntry, Training
 from scholarcore.identity import LOCAL_RID_RE, is_local, is_rid, orcid_of
 
+from ._career import (
+    CURRENT_RANKS,
+    FACULTY_RANKS,
+    TRAINEE_RANKS,
+    CurrentRank,
+    current_rank_is_self_reported,
+    current_rank_of,
+    is_trainee,
+    merge_career_stage,
+    self_reported_stage,
+)
 from ._common import _VISIBILITY_ORDER as _VISIBILITY_ORDER
 from ._common import (
     ACCESS_RIGHTS_IRI,
@@ -49,16 +60,6 @@ from ._common import (
     Visibility,
     most_restrictive,
     role_default_visibility,
-)
-from ._career import (
-    CAREER_LEVELS,
-    TRAINEE_LEVELS,
-    CareerLevel,
-    career_level_is_self_reported,
-    career_level_of,
-    is_trainee,
-    merge_career_stage,
-    self_reported_stage,
 )
 from ._document import ANCHOR_FIELDS, DERIVED_FIELDS, DOCUMENT_FIELDS, ProfileDocument
 from ._identity import (
@@ -122,11 +123,12 @@ __all__ = [
     "ArtifactRef",
     "CareerEntry",
     "CareerStage",
-    "CAREER_LEVELS",
-    "CareerLevel",
-    "TRAINEE_LEVELS",
-    "career_level_is_self_reported",
-    "career_level_of",
+    "CURRENT_RANKS",
+    "FACULTY_RANKS",
+    "CurrentRank",
+    "TRAINEE_RANKS",
+    "current_rank_is_self_reported",
+    "current_rank_of",
     "is_trainee",
     "merge_career_stage",
     "self_reported_stage",

@@ -1,67 +1,39 @@
-"""Career level: the coarse "where are you in your career" answer, and the rule
-that keeps a person's own answer ahead of a model's guess.
+"""Current rank: the "where are you in your career" answer, and the rule that
+keeps a person's own answer ahead of a model's guess.
 
-The level lives on :class:`~._parts.CareerStage` (``career_level`` plus
+The rank lives on :class:`~._parts.CareerStage` (``current_rank`` plus
 ``source``). Everything here is pure: no I/O, no clock (callers pass
 ``today``).
 
-- :func:`career_level_of` reads a level from any of the shapes a caller holds
-  (a document, a stage, a raw document dict, a trimmed API record), falling
-  back to ``current_rank`` / ``independence`` for stages written before the
-  field existed.
+- :func:`current_rank_of` reads the rank from any of the shapes a caller
+  holds (a document, a stage, a raw document dict, a trimmed API record).
 - :func:`self_reported_stage` turns an owner's answer into a full stage whose
   other facts agree with it.
 - :func:`merge_career_stage` is the one rule every overwrite path (build,
   push, merge, lens) applies: a self-reported stage is kept
   and only gains facts it lacks.
 
-The TypeScript mirror is ``prosopia/frontend/src/manage/careerLevel.ts``;
+The TypeScript mirror is ``prosopia/frontend/src/manage/currentRank.ts``;
 keep the two in sync.
 """
 
 from datetime import date
-from typing import Any, Literal, Mapping
+from typing import Any, Mapping, get_args
 
-from ._parts import CareerStage
+from ._parts import CareerStage, CurrentRank
 
-CareerLevel = Literal[
-    "undergraduate",
-    "graduate_student",
-    "postdoc",
-    "faculty",
-    "clinician",
-    "industry",
-    "other",
-]
+#: Every rank, in the schema's order.
+CURRENT_RANKS: tuple[str, ...] = get_args(CurrentRank)
 
-#: Every level, in display order.
-CAREER_LEVELS: tuple[str, ...] = (
-    "undergraduate",
-    "graduate_student",
-    "postdoc",
-    "faculty",
-    "clinician",
-    "industry",
-    "other",
-)
+#: Ranks for people still in training.
+TRAINEE_RANKS: frozenset[str] = frozenset({"undergraduate", "graduate_student", "postdoc"})
 
-#: Levels for people still in training.
-TRAINEE_LEVELS: frozenset[str] = frozenset({"undergraduate", "graduate_student", "postdoc"})
-
-_FACULTY_RANKS = frozenset(
+#: Ranks for faculty, who run an independent program.
+FACULTY_RANKS: frozenset[str] = frozenset(
     {"assistant_professor", "associate_professor", "professor", "research_faculty"}
 )
-_RANK_TO_LEVEL: dict[str, str] = {
-    "postdoc": "postdoc",
-    **{rank: "faculty" for rank in _FACULTY_RANKS},
-    "student": "graduate_student",
-    "staff_scientist": "other",
-    "other": "other",
-}
 #: Keys that mark a bare mapping as a stage (not a document without one).
-_STAGE_KEYS = frozenset(
-    {"career_level", "current_rank", "independence", "tenure_status", "as_of"}
-)
+_STAGE_KEYS = frozenset({"current_rank", "independence", "tenure_status", "as_of"})
 
 SELF_REPORT_EVIDENCE = "Reported by the profile owner."
 
@@ -94,51 +66,38 @@ def _stage_dict(obj: Any) -> Mapping[str, Any] | None:
     return None
 
 
-def career_level_of(obj: Any) -> str:
-    """The person's career level, or ``"unknown"``.
+def current_rank_of(obj: Any) -> str:
+    """The person's current rank, or ``"unknown"``.
 
-    Returns a :data:`CareerLevel` value or ``"unknown"``. ``career_level``
-    wins when set; otherwise the level is read from ``current_rank``, then
-    from ``independence == "independent"`` (faculty).
+    Returns a :data:`CurrentRank` value or ``"unknown"``.
     """
     stage = _stage_dict(obj)
-    if not stage:
-        return "unknown"
-    level = stage.get("career_level")
-    if level in CAREER_LEVELS:
-        return level
-    rank = stage.get("current_rank")
-    if rank in _RANK_TO_LEVEL:
-        return _RANK_TO_LEVEL[rank]
-    if stage.get("independence") == "independent":
-        return "faculty"
-    return "unknown"
+    rank = stage.get("current_rank") if stage else None
+    return rank if rank in CURRENT_RANKS else "unknown"
 
 
-def is_trainee(level: str | None) -> bool:
+def is_trainee(rank: str | None) -> bool:
     """True for undergraduates, graduate students and postdocs."""
-    return level in TRAINEE_LEVELS
+    return rank in TRAINEE_RANKS
 
 
-def career_level_is_self_reported(obj: Any) -> bool:
-    """True when the stage is the owner's own answer and names a level."""
+def current_rank_is_self_reported(obj: Any) -> bool:
+    """True when the stage is the owner's own answer and names a rank."""
     stage = _stage_dict(obj)
     return bool(
-        stage and stage.get("source") == "self_reported" and stage.get("career_level") is not None
+        stage and stage.get("source") == "self_reported" and stage.get("current_rank") is not None
     )
 
 
-def self_reported_stage(
-    level: str, existing: CareerStage | None, today: date
-) -> CareerStage:
-    """The stage recording an owner's answer ``level``, consistent with it.
+def self_reported_stage(rank: str, existing: CareerStage | None, today: date) -> CareerStage:
+    """The stage recording an owner's answer ``rank``, consistent with it.
 
     Starts from ``existing`` (or a blank stage), stamps it as the owner's
-    answer, and sets ``current_rank`` / ``independence`` to what the level
-    implies so eligibility code sees agreeing facts.
+    answer, and sets ``independence`` to what the rank implies so eligibility
+    code sees agreeing facts.
     """
-    if level not in CAREER_LEVELS:
-        raise ValueError(f"unknown career level {level!r}; allowed: {', '.join(CAREER_LEVELS)}")
+    if rank not in CURRENT_RANKS:
+        raise ValueError(f"unknown current rank {rank!r}; allowed: {', '.join(CURRENT_RANKS)}")
     if existing is not None:
         base = existing.model_dump(mode="json")
     else:
@@ -151,28 +110,20 @@ def self_reported_stage(
             "clinical_training_end_year": None,
             "first_independent_appointment_year": None,
             "first_r01_equivalent_year": None,
-            "current_rank": None,
         }
     base.update(
-        career_level=level,
+        current_rank=rank,
         source="self_reported",
         confidence="high",
         as_of=today.isoformat(),
         evidence=SELF_REPORT_EVIDENCE,
     )
-    if level in ("undergraduate", "graduate_student"):
-        base.update(current_rank="student", independence="trainee")
-    elif level == "postdoc":
-        base.update(current_rank="postdoc", independence="trainee")
-    elif level == "faculty":
+    if rank in TRAINEE_RANKS:
+        base["independence"] = "trainee"
+    elif rank in FACULTY_RANKS:
         base["independence"] = "independent"
-        if base.get("current_rank") not in _FACULTY_RANKS:
-            base["current_rank"] = None
-    else:  # clinician, industry, other
-        if not base.get("current_rank"):
-            base["current_rank"] = "other"
-        if not base.get("independence"):
-            base["independence"] = "unknown"
+    elif not base.get("independence"):
+        base["independence"] = "unknown"
     return CareerStage.model_validate(base)
 
 
@@ -217,12 +168,13 @@ def merge_career_stage(
 
 
 __all__ = [
-    "CAREER_LEVELS",
-    "CareerLevel",
+    "CURRENT_RANKS",
+    "CurrentRank",
+    "FACULTY_RANKS",
     "SELF_REPORT_EVIDENCE",
-    "TRAINEE_LEVELS",
-    "career_level_is_self_reported",
-    "career_level_of",
+    "TRAINEE_RANKS",
+    "current_rank_is_self_reported",
+    "current_rank_of",
     "is_trainee",
     "merge_career_stage",
     "self_reported_stage",

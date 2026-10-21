@@ -89,7 +89,7 @@ node type.
 | `career` | `rp:career` (`@set`) | scoped: `role` → `rp:careerRole`, `institution`, `start_year`, `end_year` |
 | `researchOutputs` | `rp:researchOutput` (`@set`) | scoped: `type` → `rp:researchOutputType`, `name`, `url` |
 | `anchor` | `rp:anchor` | scoped: `disambiguation_evidence`, `confidence`, `sources` (`@id`, `@set`), `created_at` |
-| `career_stage` | `rp:careerStage` | scoped: the dated stage facts, plus `career_level` → `rp:careerLevel` and `source` → `rp:careerStageSource` (`self_reported` or `inferred`) |
+| `career_stage` | `rp:careerStage` | scoped: the dated stage facts, plus `source` → `rp:careerStageSource` (`self_reported` or `inferred`) |
 | `paper_stats` | `rp:paperStats` | scoped: `first`, `last`, `middle`, `unknown`, `corresponding`, `total`, `year_min`, `year_max` |
 | `hasPart` | `schema:hasPart` (`@set`) | the manifest |
 | `subjectOf` | `schema:subjectOf` (`@set`) | persona documents |

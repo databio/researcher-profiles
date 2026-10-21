@@ -1,15 +1,15 @@
-"""Career level: reading it from every shape, stamping an owner's answer, and the merge rule."""
+"""Current rank: reading it from every shape, stamping an owner's answer, and the merge rule."""
 
 from datetime import date
 
 import pytest
 
 from researcher_profiles import (
-    CAREER_LEVELS,
-    TRAINEE_LEVELS,
+    CURRENT_RANKS,
+    TRAINEE_RANKS,
     CareerStage,
-    career_level_is_self_reported,
-    career_level_of,
+    current_rank_is_self_reported,
+    current_rank_of,
     is_trainee,
     merge_career_stage,
     self_reported_stage,
@@ -39,26 +39,21 @@ SHAPES = {
     "record": lambda d: {"slug": "a", "fields": {"career_stage": d}},
 }
 
-FALLBACK = [
-    ({"career_level": "industry", "current_rank": "professor"}, "industry"),
+READS = [
+    ({"current_rank": "industry", "independence": "independent"}, "industry"),
     ({"current_rank": "postdoc"}, "postdoc"),
-    ({"current_rank": "assistant_professor"}, "faculty"),
-    ({"current_rank": "associate_professor"}, "faculty"),
-    ({"current_rank": "professor"}, "faculty"),
-    ({"current_rank": "research_faculty"}, "faculty"),
-    ({"current_rank": "student"}, "graduate_student"),
-    ({"current_rank": "staff_scientist"}, "other"),
-    ({"current_rank": "other"}, "other"),
-    ({"independence": "independent"}, "faculty"),
-    ({"independence": "mentored"}, "unknown"),
+    ({"current_rank": "graduate_student"}, "graduate_student"),
+    ({"current_rank": "professor"}, "professor"),
+    ({"current_rank": None}, "unknown"),
+    ({"independence": "independent"}, "unknown"),
     ({}, "unknown"),
 ]
 
 
 @pytest.mark.parametrize("shape", sorted(SHAPES))
-@pytest.mark.parametrize("facts, want", FALLBACK)
-def test_career_level_of_every_shape(shape, facts, want):
-    assert career_level_of(SHAPES[shape]({**BASE, **facts})) == want
+@pytest.mark.parametrize("facts, want", READS)
+def test_current_rank_of_every_shape(shape, facts, want):
+    assert current_rank_of(SHAPES[shape]({**BASE, **facts})) == want
 
 
 @pytest.mark.parametrize(
@@ -67,53 +62,60 @@ def test_career_level_of_every_shape(shape, facts, want):
     ids=["none", "doc-without-stage", "record-withheld", "doc-null-stage"],
 )
 def test_missing_stage_is_unknown(obj):
-    assert career_level_of(obj) == "unknown"
-    assert career_level_is_self_reported(obj) is False
+    assert current_rank_of(obj) == "unknown"
+    assert current_rank_is_self_reported(obj) is False
 
 
 def test_document_without_stage_is_unknown():
-    assert career_level_of(ProfileDocument.model_validate(DOC)) == "unknown"
+    assert current_rank_of(ProfileDocument.model_validate(DOC)) == "unknown"
 
 
 def test_trimmed_record_scalars_read():
     # The record drops None and lists, so only some keys survive.
-    record = {"fields": {"career_stage": {"career_level": "postdoc", "source": "self_reported"}}}
-    assert career_level_of(record) == "postdoc"
-    assert career_level_is_self_reported(record)
+    record = {"fields": {"career_stage": {"current_rank": "postdoc", "source": "self_reported"}}}
+    assert current_rank_of(record) == "postdoc"
+    assert current_rank_is_self_reported(record)
 
 
-def test_self_reported_needs_a_level():
-    assert not career_level_is_self_reported(_stage(source="self_reported"))
-    assert not career_level_is_self_reported(_stage(career_level="postdoc"))
-    assert career_level_is_self_reported(_stage(career_level="postdoc", source="self_reported"))
+def test_self_reported_needs_a_rank():
+    assert not current_rank_is_self_reported(_stage(source="self_reported"))
+    assert not current_rank_is_self_reported(_stage(current_rank="postdoc"))
+    assert current_rank_is_self_reported(_stage(current_rank="postdoc", source="self_reported"))
 
 
-def test_trainee_levels():
-    assert set(TRAINEE_LEVELS) == {"undergraduate", "graduate_student", "postdoc"}
-    assert all(lvl in CAREER_LEVELS for lvl in TRAINEE_LEVELS)
-    assert is_trainee("postdoc") and not is_trainee("faculty") and not is_trainee("unknown")
+def test_trainee_ranks():
+    assert set(TRAINEE_RANKS) == {"undergraduate", "graduate_student", "postdoc"}
+    assert all(rank in CURRENT_RANKS for rank in TRAINEE_RANKS)
+    assert is_trainee("postdoc") and not is_trainee("professor") and not is_trainee("unknown")
+
+
+def test_student_is_not_a_rank():
+    assert "student" not in CURRENT_RANKS
+    with pytest.raises(ValueError):
+        _stage(current_rank="student")
 
 
 @pytest.mark.parametrize(
-    "level, rank, independence",
+    "rank, independence",
     [
-        ("undergraduate", "student", "trainee"),
-        ("graduate_student", "student", "trainee"),
-        ("postdoc", "postdoc", "trainee"),
-        ("faculty", None, "independent"),
-        ("clinician", "other", "unknown"),
-        ("industry", "other", "unknown"),
-        ("other", "other", "unknown"),
+        ("undergraduate", "trainee"),
+        ("graduate_student", "trainee"),
+        ("postdoc", "trainee"),
+        ("assistant_professor", "independent"),
+        ("research_faculty", "independent"),
+        ("staff_scientist", "unknown"),
+        ("clinician", "unknown"),
+        ("industry", "unknown"),
+        ("other", "unknown"),
     ],
 )
-def test_self_reported_stage_from_nothing(level, rank, independence):
-    stage = self_reported_stage(level, None, TODAY)
-    assert stage.career_level == level
+def test_self_reported_stage_from_nothing(rank, independence):
+    stage = self_reported_stage(rank, None, TODAY)
+    assert stage.current_rank == rank
     assert stage.source == "self_reported"
     assert stage.confidence == "high"
     assert stage.as_of == "2026-10-20"
     assert stage.evidence == "Reported by the profile owner."
-    assert stage.current_rank == rank
     assert stage.independence == independence
     assert stage.tenure_status == "unknown"
     assert stage.sources_checked == []
@@ -121,25 +123,23 @@ def test_self_reported_stage_from_nothing(level, rank, independence):
 
 
 @pytest.mark.parametrize(
-    "level, existing, rank, independence",
+    "rank, existing, independence",
     [
-        ("faculty", {"current_rank": "professor"}, "professor", "independent"),
-        ("faculty", {"current_rank": "postdoc"}, None, "independent"),
-        ("graduate_student", {"current_rank": "professor"}, "student", "trainee"),
-        ("industry", {"current_rank": "staff_scientist", "independence": "mentored"},
-         "staff_scientist", "mentored"),
-        ("clinician", {}, "other", "unknown"),
+        ("professor", {"current_rank": "postdoc", "independence": "trainee"}, "independent"),
+        ("graduate_student", {"current_rank": "professor"}, "trainee"),
+        ("industry", {"current_rank": "staff_scientist", "independence": "mentored"}, "mentored"),
+        ("clinician", {}, "unknown"),
     ],
 )
-def test_self_reported_stage_over_existing(level, existing, rank, independence):
+def test_self_reported_stage_over_existing(rank, existing, independence):
     prior = _stage(terminal_degree_year=2010, terminal_degree_type="research", **existing)
-    stage = self_reported_stage(level, prior, TODAY)
+    stage = self_reported_stage(rank, prior, TODAY)
     assert (stage.current_rank, stage.independence) == (rank, independence)
     assert stage.terminal_degree_year == 2010
     assert stage.source == "self_reported"
 
 
-def test_self_reported_stage_rejects_bad_level():
+def test_self_reported_stage_rejects_bad_rank():
     with pytest.raises(ValueError, match="allowed"):
         self_reported_stage("wizard", None, TODAY)
 
@@ -156,15 +156,14 @@ class TestMergeCareerStage:
         assert merge_career_stage(kept, incoming) is incoming
 
     def test_both_self_reported_takes_incoming(self):
-        kept = _stage(career_level="postdoc", source="self_reported")
-        incoming = _stage(career_level="faculty", source="self_reported")
+        kept = _stage(current_rank="postdoc", source="self_reported")
+        incoming = _stage(current_rank="professor", source="self_reported")
         assert merge_career_stage(kept, incoming) is incoming
 
     def test_self_reported_is_kept_and_filled(self):
         kept = self_reported_stage("graduate_student", None, TODAY)
         kept = kept.model_copy(update={"sources_checked": ["training"]})
         incoming = _stage(
-            career_level="faculty",
             current_rank="professor",
             independence="independent",
             tenure_status="tenured",
@@ -177,9 +176,8 @@ class TestMergeCareerStage:
             confidence="low",
         )
         out = merge_career_stage(kept, incoming)
-        assert out.career_level == "graduate_student"
         assert out.source == "self_reported"
-        assert out.current_rank == "student"
+        assert out.current_rank == "graduate_student"
         assert out.independence == "trainee"
         assert out.confidence == "high"
         assert out.evidence == "Reported by the profile owner."
@@ -193,7 +191,7 @@ class TestMergeCareerStage:
 
     def test_kept_facts_are_not_overwritten(self):
         kept = _stage(
-            career_level="postdoc",
+            current_rank="postdoc",
             source="self_reported",
             tenure_status="non_tenure_track",
             first_r01_equivalent_year=2020,
@@ -215,7 +213,7 @@ class TestMergeCareerStage:
     def test_degree_pair_is_atomic(self, kept_pair, want):
         year, kind = kept_pair
         kept = _stage(
-            career_level="postdoc",
+            current_rank="postdoc",
             source="self_reported",
             terminal_degree_year=year,
             terminal_degree_type=kind,
@@ -227,5 +225,5 @@ class TestMergeCareerStage:
 
 def test_old_stage_without_new_keys_is_inferred():
     stage = CareerStage.model_validate(BASE)
-    assert stage.career_level is None
+    assert stage.current_rank is None
     assert stage.source == "inferred"

@@ -178,11 +178,11 @@ for grant eligibility evaluation:
 | `as_of` | REQUIRED | ISO date when facts were assessed |
 | `terminal_degree_year` | optional | Integer or null |
 | `first_r01_equivalent_year` | optional | First R01/DP1/DP2/etc. |
+| `current_rank` | optional | Current rank or position: `assistant_professor`, `associate_professor`, `professor`, `research_faculty`, `staff_scientist`, `postdoc`, `graduate_student`, `undergraduate`, `clinician`, `industry`, `other`; null when unknown |
 | `tenure_status` | REQUIRED | Enum value |
 | `independence` | REQUIRED | Enum value |
 | `evidence` | REQUIRED | Citation of sources |
 | `confidence` | REQUIRED | `high`, `medium`, or `low` |
-| `career_level` | optional | Coarse current level: `undergraduate`, `graduate_student`, `postdoc`, `faculty`, `clinician`, `industry`, `other`; null when unknown |
 | `source` | optional | Who asserted the stage: `self_reported` (the profile owner said so) or `inferred` (default; a builder guessed from evidence) |
 
 A self-reported stage outranks an inferred one. A builder, a merge or any
