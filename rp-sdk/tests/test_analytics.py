@@ -224,6 +224,24 @@ class TestLitePapers:
         assert len(matches) == 1
         assert matches[0].evidence.top_papers == expected
 
+    def test_a_seed_paper_is_never_match_evidence(
+        self, lite_store: FilesystemProfileStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Interest seed chunks shape the centroid only: never a top chunk or paper."""
+        seed = SearchHit(
+            text="A paper the researcher follows.",
+            source_type="seed_abstract",
+            source_id="W77",
+            chunk_index=0,
+            section=None,
+            cosine=0.99,
+            score=0.99,
+        )
+        _stub_search(lite_store, monkeypatch, [seed, *_ABSTRACT_HITS])
+        [match] = lite_store.match.rank("chromatin", k=3, normalize=False, diversify=False)
+        assert "seed_abstract" not in {h.source_type for h in match.evidence.top_chunks}
+        assert match.evidence.top_papers == ["paper2020a", "paper2021b"]
+
     # ----------------------------------------------------------------------
     # The topic component: the query's typed interests against a candidate's
     # OpenAlex topics

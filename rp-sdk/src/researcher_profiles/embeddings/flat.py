@@ -36,6 +36,7 @@ from ..utils.paths import cache_dir
 if TYPE_CHECKING:  # pragma: no cover
     from .backends import EmbeddingBackend
 from ._sqlite import connect_vec, ensure_schema, read_index_meta, serialize_vec, write_index_meta
+from .profile_vec import blend_centroid
 
 logger = logging.getLogger(__name__)
 
@@ -345,7 +346,7 @@ def write_flat_export(
         index_path=index_path,
         blob_path=blob_path,
         chunks_path=chunks_path,
-        centroid=_unit_mean(mat),
+        centroid=blend_centroid(mat, chunks_meta),
         probe=index["probe"],
     )
 
@@ -540,25 +541,16 @@ class FlatEmbeddingIndex:
     # --- the profile-level vector ----------------------------------------
 
     def centroid(self) -> np.ndarray:
-        """The L2-normalized mean of every row.
+        """The profile vector under :func:`~.profile_vec.blend_centroid`.
 
-        Computed as the sqlite index computes it, but over the exported rows
-        only, so it differs when private rows were dropped.
+        Computed by the same rule as the sqlite index, but over the exported
+        rows only, so it differs when private rows were dropped.
         """
         from ._sqlite import IndexNotBuiltError
 
         if self._vectors.shape[0] == 0:
             raise IndexNotBuiltError("flat index has no vectors")
-        return _unit_mean(self._vectors)
-
-
-def _unit_mean(vectors: np.ndarray) -> np.ndarray:
-    """The L2-normalized mean of ``vectors``' rows (the unnormalized mean if ~0)."""
-    mean = vectors.astype(np.float32).mean(axis=0)
-    n = float(np.linalg.norm(mean))
-    if n < 1e-12:
-        return mean.astype(np.float32)
-    return (mean / n).astype(np.float32)
+        return blend_centroid(self._vectors, self._chunks)
 
 
 # ---------------------------------------------------------------------------

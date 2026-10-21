@@ -23,6 +23,7 @@ from ..models.api import (
     PaperPage,
     ProfileSummary,
     SectionTierReport,
+    SeedAddResult,
     SummaryBatch,
     TextSection,
     VisibilityReport,
@@ -38,7 +39,7 @@ from ..privacy import (
     tier_allows,
 )
 from ..profile.edit import EditError, WorkNotFoundError, paper_version
-from ..schema import PaperRecord, most_restrictive
+from ..schema import PaperRecord, SeedPaperRecord, most_restrictive
 from ..store import ProfileNotFoundError, ProfileStore
 from ..utils.paths import STORE_CACHE_DIRNAME
 from ._cursor import decode_cursor, encode_cursor
@@ -909,6 +910,114 @@ def remove_work(
     )
 
 
+# ---------------------------------------------------------------------------
+# Interest seed papers
+#
+# Papers that define a person's interests, never works they wrote. Their own
+# part (``seed_papers``), ``private`` by role default.
+# ---------------------------------------------------------------------------
+
+#: Where the seed list lives, and the manifest role whose tier governs it.
+SEED_PAPERS_URL = "sources/seed_papers.jsonld"
+SEED_PAPERS_ROLE = "seed_papers"
+
+
+def seed_paper_row(seed: SeedPaperRecord) -> dict:
+    """One seed as a flat JSON dict, ``seed_id`` included."""
+    return {
+        "seed_id": seed.seed_id,
+        "title": seed.name,
+        "year": seed.year,
+        "journal": seed.journal,
+        "doi": seed.doi,
+        "openalex_id": seed.openalex_id,
+        "abstract": seed.abstract,
+        "topics": list(seed.topics),
+        "added_via": seed.added_via,
+        "added_at": seed.added_at.isoformat() if seed.added_at else None,
+    }
+
+
+def list_seed_papers(service: Service, caller: Caller, ref: str) -> list[dict]:
+    """This profile's interest seed papers, for a caller who may read that part.
+
+    Projected through the caller's viewer tier against the effective tier of
+    ``sources/seed_papers.jsonld`` (``private`` unless the owner re-tiered it).
+    A caller below it gets the profile's ``NotFound``, indistinguishable from
+    a profile they may not see, as for the works list.
+    """
+    prof, viewer = service.load_visible(caller, ref)
+    explain = explain_tiers(prof.metadata)
+    if not artifact_visible(explain, prof.metadata, SEED_PAPERS_URL, SEED_PAPERS_ROLE, viewer):
+        raise profile_missing(ref)
+    return [seed_paper_row(s) for s in prof.seed_papers]
+
+
+def add_seed_papers(
+    service: Service,
+    caller: Caller,
+    ref: str,
+    records: list[dict],
+    *,
+    added_via: str,
+) -> SeedAddResult:
+    """Add already-resolved seed records (no network calls here).
+
+    Each record needs a title and an OpenAlex id or DOI. A work that is
+    already a seed, or already one of the person's authored works, is skipped
+    and reported; adds past ``SEED_PAPERS_MAX`` are refused and counted.
+    Gated like every edit, with the ``seed_papers`` write scope.
+    """
+    from pydantic import ValidationError
+
+    store = service.store
+    prof = _load_for_edit(service, caller, ref)
+    parsed: list[SeedPaperRecord] = []
+    for i, raw in enumerate(records or []):
+        if not isinstance(raw, dict):
+            raise Invalid(f"seed record {i} is not an object")
+        try:
+            parsed.append(SeedPaperRecord.model_validate({**raw, "added_via": added_via}))
+        except (ValidationError, ValueError) as e:
+            raise Invalid(f"seed record {i} is invalid: {e}") from e
+    _write_scope(service, caller, prof, SEED_PAPERS_ROLE, {"count": len(parsed)})
+    added, skipped = prof.add_seed_papers(parsed)
+    resolved = store.resolve_slug(ref)
+    new_hash = _content_hash(store, resolved)
+    if added:
+        _record(service, caller, prof, SEED_PAPERS_ROLE, [s.seed_id for s in added], new_hash)
+        service.invalidate(resolved)
+    return SeedAddResult(
+        slug=resolved,
+        rid=getattr(prof, "rid", None),
+        added=[s.seed_id for s in added],
+        already_seed=[s.seed_id for s, why in skipped if why == "already_seed"],
+        already_authored=[s.seed_id for s, why in skipped if why == "already_authored"],
+        over_cap=sum(1 for _s, why in skipped if why == "over_cap"),
+        content_hash=new_hash,
+    )
+
+
+def remove_seed_paper(service: Service, caller: Caller, ref: str, seed_id: str) -> EditResult:
+    """Remove one seed by ``seed_id``. ``NotFound`` when the list has no such seed."""
+    store = service.store
+    prof = _load_for_edit(service, caller, ref)
+    if not any(s.seed_id == seed_id for s in prof.seed_papers):
+        raise NotFound(f"no seed paper {seed_id!r} in this profile")
+    _write_scope(service, caller, prof, SEED_PAPERS_ROLE, {"seed_id": seed_id})
+    prof.remove_seed_paper(seed_id)
+    resolved = store.resolve_slug(ref)
+    new_hash = _content_hash(store, resolved)
+    _record(service, caller, prof, SEED_PAPERS_ROLE, [seed_id], new_hash)
+    service.invalidate(resolved)
+    return EditResult(
+        slug=resolved,
+        rid=getattr(prof, "rid", None),
+        updated=[seed_id],
+        content_hash=new_hash,
+    )
+
+
 def set_visibility(
     service: Service,
     caller: Caller,
@@ -1039,7 +1148,9 @@ def get_visibility(service: Service, caller: Caller, ref: str) -> VisibilityRepo
 
 
 __all__ = [
+    "SEED_PAPERS_URL",
     "Service",
+    "add_seed_papers",
     "add_work",
     "edit_metadata",
     "edit_work",
@@ -1054,11 +1165,14 @@ __all__ = [
     "list_files",
     "list_papers",
     "list_profiles",
+    "list_seed_papers",
     "profile_missing",
     "read_paper_text",
     "read_profile_text",
+    "remove_seed_paper",
     "remove_work",
     "require_edit",
+    "seed_paper_row",
     "set_visibility",
     "split_ids",
     "works_visible",

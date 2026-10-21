@@ -9,9 +9,11 @@ from typing import Optional
 
 from fastapi import Depends
 
+from ...errors import Invalid
 from ...models.api import (
     EditResult,
     MetadataPatch,
+    SeedAddResult,
     VisibilityPatch,
     VisibilityReport,
     WorkPatch,
@@ -100,6 +102,37 @@ def delete_profile_work(
     the delete is a 409 and the work stays.
     """
     return svc.remove_work(service, caller, slug, paper_id, base_version=base_version)
+
+
+@edit_router.post("/profiles/{slug}/seed-papers", response_model=SeedAddResult, status_code=201)
+def add_profile_seed_papers(
+    slug: str,
+    body: dict,
+    service: Service = Depends(get_service),
+    caller: Caller = Depends(get_caller),
+) -> SeedAddResult:
+    """Add interest seed papers: ``{"records": [...]}``, already-resolved metadata.
+
+    Each record needs a ``title`` and an ``openalex_id`` or ``doi``. A work
+    already a seed or already an authored work is skipped and reported; the
+    server makes no network call. Typed as a dict so a malformed record is a
+    400 naming it.
+    """
+    records = body.get("records") if isinstance(body, dict) else None
+    if not isinstance(records, list):
+        raise Invalid('body must be {"records": [...]}')
+    return svc.add_seed_papers(service, caller, slug, records, added_via="owner")
+
+
+@edit_router.delete("/profiles/{slug}/seed-papers/{seed_id:path}", response_model=EditResult)
+def delete_profile_seed_paper(
+    slug: str,
+    seed_id: str,
+    service: Service = Depends(get_service),
+    caller: Caller = Depends(get_caller),
+) -> EditResult:
+    """Remove one interest seed paper by ``seed_id`` (a ``W…`` id or ``doi:<doi>``)."""
+    return svc.remove_seed_paper(service, caller, slug, seed_id)
 
 
 @edit_router.get("/profiles/{slug}/visibility", response_model=VisibilityReport)

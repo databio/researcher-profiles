@@ -20,10 +20,12 @@ from researcher_profiles.store import ProfileNotFoundError
 from researcher_profiles.store.db import (
     ArtifactRow,
     BuildStateRow,
+    ChunkVectorRow,
     ExpertiseTopicRow,
     GrantRow,
     PaperRow,
     ProfileRow,
+    ProfileVectorRow,
     content_hash_for,
 )
 from researcher_profiles.store.sql import SqlProfileStore
@@ -403,3 +405,89 @@ class TestStoreHelpers:
     def test_content_hash_for_matches_the_filesystem_definition(self, jane_doe):
         document = json.loads((jane_doe.directory / "profile.jsonld").read_text())
         assert content_hash_for(document, jane_doe.soul) == jane_doe.content_hash()
+
+
+class TestSoulOnlyVectors:
+    """An interviewed trainee: a narrative, no papers. A refresh still indexes it."""
+
+    def test_refresh_vectors_writes_chunks_and_a_centroid(
+        self, tmp_path, fake_backend, empty_sql_store
+    ):
+        d = build_profile_dir(
+            tmp_path / "student",
+            rid="0000-0002-1825-0097",
+            level="lite",
+            papers=False,
+            personality=False,
+            summaries=False,
+        )
+        (d / "personality").mkdir()
+        (d / "personality" / "SOUL.md").write_text(
+            "> Self-reported. Written from an interview.\n\n"
+            "## Who they are as a scientist\n\nA student who maps enhancers.\n\n"
+            "## What drives the work\n\nWanting to know how chromatin folds.\n",
+            encoding="utf-8",
+        )
+        from .factories import refresh_manifest
+
+        refresh_manifest(d)
+        rid = empty_sql_store.import_directory(d)
+        assert empty_sql_store.refresh_vectors(rid) is True
+        with empty_sql_store.session() as s:
+            chunks = s.exec(select(ChunkVectorRow).where(ChunkVectorRow.profile_rid == rid)).all()
+            centroids = s.exec(
+                select(ProfileVectorRow).where(ProfileVectorRow.profile_rid == rid)
+            ).all()
+        assert chunks and {c.source_type for c in chunks} == {"soul"}
+        assert [c.kind for c in centroids] == ["centroid"]
+        assert empty_sql_store.centroid(rid).shape == (fake_backend.dim,)
+
+
+class TestSeedOnlyVectors:
+    """A student whose only chunks are private seeds still gets a centroid, and no chunk rows."""
+
+    def _seed_only(self, tmp_path, fake_backend) -> Path:
+        from researcher_profiles.embeddings import build_index
+        from researcher_profiles.schema import SeedPapersDocument
+        from researcher_profiles.schema.jsonld import canonical_dumps
+
+        d = build_profile_dir(
+            tmp_path / "student",
+            rid="0000-0002-1825-0097",
+            level="lite",
+            personality=False,
+            summaries=False,
+            papers=[{"paper_id": "none2024", "title": "No abstract"}],
+        )
+        doc = SeedPapersDocument.model_validate(
+            {
+                "hasPart": [
+                    {"title": "Seed A", "openalex_id": "W1", "abstract": "Chromatin."},
+                    {"title": "Seed B", "openalex_id": "W2", "abstract": "Enhancers."},
+                ]
+            }
+        )
+        (d / "sources" / "seed_papers.jsonld").write_text(
+            canonical_dumps(doc.model_dump(mode="json")), encoding="utf-8"
+        )
+        from .factories import refresh_manifest
+
+        refresh_manifest(d)
+        build_index(d, backend=fake_backend)
+        return d
+
+    def test_centroid_row_without_public_chunks(self, tmp_path, fake_backend, empty_sql_store):
+        from researcher_profiles.store.sql._vectors import shred_profile
+
+        d = self._seed_only(tmp_path, fake_backend)
+        prof = ResearcherProfile.from_files(d)
+        rows = shred_profile(prof.rid, prof)
+        assert [type(r) for r in rows] == [ProfileVectorRow]
+
+        rid = empty_sql_store.put(prof, include_binary=True)
+        with empty_sql_store.session() as s:
+            chunk_rows = s.exec(
+                select(ChunkVectorRow).where(ChunkVectorRow.profile_rid == rid)
+            ).all()
+        assert chunk_rows == []  # private seed vectors never leave the build
+        assert empty_sql_store.centroid(rid).shape == (fake_backend.dim,)

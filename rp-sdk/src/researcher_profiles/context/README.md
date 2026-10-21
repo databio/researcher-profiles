@@ -89,6 +89,7 @@ node type.
 | `career` | `rp:career` (`@set`) | scoped: `role` → `rp:careerRole`, `institution`, `start_year`, `end_year` |
 | `researchOutputs` | `rp:researchOutput` (`@set`) | scoped: `type` → `rp:researchOutputType`, `name`, `url` |
 | `anchor` | `rp:anchor` | scoped: `disambiguation_evidence`, `confidence`, `sources` (`@id`, `@set`), `created_at` |
+| `career_stage` | `rp:careerStage` | scoped: the dated stage facts, plus `career_level` → `rp:careerLevel` and `source` → `rp:careerStageSource` (`self_reported` or `inferred`) |
 | `paper_stats` | `rp:paperStats` | scoped: `first`, `last`, `middle`, `unknown`, `corresponding`, `total`, `year_min`, `year_max` |
 | `hasPart` | `schema:hasPart` (`@set`) | the manifest |
 | `subjectOf` | `schema:subjectOf` (`@set`) | persona documents |
@@ -176,6 +177,20 @@ context, the same as everywhere else in the document:
 `schema:funder` names the funding organization, not the recipient. The
 person→grant link is therefore `rp:heldGrant`, an `rp:` decision, not
 an oversight.
+
+## Interest seed papers
+
+`sources/seed_papers.jsonld` reuses the work terms (`name`, `datePublished`,
+`isPartOf`, `openalex_id`, `doi`, `abstract`, `topics`) and adds two:
+
+| on-disk key | expands to |
+|---|---|
+| `dateCreated` | `schema:dateCreated` (`xsd:dateTime`): when the seed was added |
+| `added_via` | `rp:addedVia`: `owner`, `interview`, `feed_upvote` or `migration` |
+
+`seedPapers` → `rp:seedPaper` (`@set`) names the person-to-seed relation: a
+paper that defines the person's interests. It is deliberately not
+`schema:author` or any authorship term; a seed never implies authorship.
 
 ## Change policy
 

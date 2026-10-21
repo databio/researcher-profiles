@@ -19,6 +19,7 @@ from researcher_profiles.schema import (
     PaperRecord,
     PapersDocument,
     ProfileDocument,
+    SeedPapersDocument,
 )
 from researcher_profiles.schema.jsonld import KEY_ORDER, canonical_dumps, canonicalize
 from researcher_profiles.schema_export import build_schemas, export_schemas
@@ -164,7 +165,7 @@ class TestSchemaExport:
     def test_schema_fingerprint_pinned_to_golden(self):
         """A change here is a contract change: update this golden and re-export ``schemas/`` together."""
         assert schema_fingerprint() == (
-            "cc81b19010b469c6ad585e0e150d39c44ab5ec6afed9bf72551181af19c9eec1"
+            "3368d566a3a327272d5717a458c2a7d1d2963673dfc4f0963bba951bb1fb48f4"
         )
 
     def test_exported_schema_accepts_what_the_model_writes(self, schemas):
@@ -528,3 +529,86 @@ def test_a_preprint_links_to_its_journal_version_under_dcterms_is_version_of():
     )
     term = json.loads(context_path.read_text())["@context"]["isVersionOf"]
     assert term == {"@id": "dcterms:isVersionOf", "@type": "@id"}
+
+
+class TestSeedPaperRecord:
+    """An interest seed is lightweight metadata that can never carry authorship."""
+
+    def test_needs_an_openalex_id_or_a_doi(self):
+        from researcher_profiles.schema import SeedPaperRecord
+
+        with pytest.raises(ValueError, match="OpenAlex id or a DOI"):
+            SeedPaperRecord.model_validate({"title": "No identity"})
+
+    @pytest.mark.parametrize(
+        ("given", "field", "expected", "seed_id"),
+        [
+            pytest.param(
+                {"doi": "https://doi.org/10.1093/Nar/X1"},
+                "doi",
+                "10.1093/Nar/X1",
+                "doi:10.1093/Nar/X1",
+                id="doi-resolver-prefix-stripped-case-kept",
+            ),
+            pytest.param(
+                {"openalex_id": "https://openalex.org/W42"},
+                "openalex_id",
+                "W42",
+                "W42",
+                id="openalex-iri-stored-bare",
+            ),
+        ],
+    )
+    def test_identifiers_are_normalized(self, given, field, expected, seed_id):
+        from researcher_profiles.schema import SeedPaperRecord
+
+        rec = SeedPaperRecord.model_validate({"title": "T", **given})
+        assert getattr(rec, field) == expected
+        assert rec.seed_id == seed_id
+
+    def test_abstract_is_capped(self):
+        from researcher_profiles.schema import SeedPaperRecord
+        from researcher_profiles.schema._sources import SEED_ABSTRACT_MAX
+
+        rec = SeedPaperRecord.model_validate(
+            {"title": "T", "doi": "10.1093/x", "abstract": "a" * 9000}
+        )
+        assert len(rec.abstract) == SEED_ABSTRACT_MAX
+
+    def test_from_paper_drops_authorship_and_full_record_fields(self):
+        from researcher_profiles.schema import SeedPaperRecord
+
+        paper = PaperRecord.model_validate(
+            {
+                "paper_id": "smith2020",
+                "name": "A paper",
+                "openalex_id": "https://openalex.org/W7",
+                "doi": "10.1093/abc",
+                "abstract": "Body.",
+                "topics": ["T1", "T2"],
+                "author": ["A. Smith"],
+                "author_position": "first",
+                "author_index": 0,
+                "is_corresponding": True,
+                "summary": "LLM summary",
+                "cited_by_count": 12,
+            }
+        )
+        seed = SeedPaperRecord.from_paper(paper, added_via="feed_upvote")
+        dumped = seed.model_dump(mode="json")
+        for key in (
+            "author",
+            "author_position",
+            "author_index",
+            "is_corresponding",
+            "summary",
+            "cited_by_count",
+            "paper_id",
+        ):
+            assert key not in dumped
+        assert dumped["@id"] == "https://openalex.org/W7"
+        assert seed.topics == ["T1", "T2"] and seed.added_via == "feed_upvote"
+        assert seed.added_at is not None
+        # Round trips through its own document.
+        doc = SeedPapersDocument.model_validate({"hasPart": [dumped]})
+        assert doc.has_part[0].seed_id == "W7"

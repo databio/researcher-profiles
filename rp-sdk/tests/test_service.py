@@ -315,3 +315,65 @@ def test_a_gate_not_found_names_the_callers_ref(store):
     with pytest.raises(NotFound) as e:
         svc.edit_metadata(service, OWNER, rid, {"field": "X"})
     assert e.value.what == f"profile {rid!r} not found"
+
+
+class TestSeedPapers:
+    """Interest seeds: gated like every edit, deduped, hidden from the public by default."""
+
+    SEED_OWNER = Caller(scopes=frozenset({"user:owner", "write:seed_papers"}))
+
+    def test_add_dedupes_reports_and_records(self, service, recorder):
+        jane = service.store.get(SLUG)
+        authored = jane.edit.patch_work(PAPER, {"doi": "10.1093/jane.1"})
+        out = svc.add_seed_papers(
+            service,
+            self.SEED_OWNER,
+            SLUG,
+            [
+                {"title": "New seed", "openalex_id": "W77"},
+                {"title": "Again", "openalex_id": "https://openalex.org/W77"},
+                {"title": "Hers", "doi": authored.doi},
+            ],
+            added_via="interview",
+        )
+        assert (out.added, out.already_seed, out.already_authored, out.over_cap) == (
+            ["W77"],
+            ["W77"],
+            [f"doi:{authored.doi}"],
+            0,
+        )
+        assert [a for _c, _s, a, _f, _h in recorder.calls] == ["seed_papers"]
+        rows = svc.list_seed_papers(service, Caller(is_operator=True), SLUG)
+        assert [(r["seed_id"], r["added_via"]) for r in rows] == [("W77", "interview")]
+        assert len(service.store.get(SLUG).papers) == len(jane.papers)  # never a work
+
+    def test_needs_the_seed_papers_write_scope(self, service):
+        with pytest.raises(InsufficientScope):
+            svc.add_seed_papers(
+                service, OWNER, SLUG, [{"title": "S", "openalex_id": "W1"}], added_via="owner"
+            )
+
+    def test_a_record_without_an_identifier_is_invalid(self, service):
+        with pytest.raises(Invalid):
+            svc.add_seed_papers(service, self.SEED_OWNER, SLUG, [{"title": "S"}], added_via="owner")
+
+    def test_the_public_cannot_list_seeds_by_default(self, service):
+        svc.add_seed_papers(
+            service, self.SEED_OWNER, SLUG, [{"title": "S", "openalex_id": "W1"}], added_via="owner"
+        )
+        with pytest.raises(NotFound):
+            svc.list_seed_papers(service, Caller(), SLUG)
+
+    def test_remove(self, service):
+        svc.add_seed_papers(
+            service,
+            self.SEED_OWNER,
+            SLUG,
+            [{"title": "S", "doi": "10.1093/s.1"}],
+            added_via="owner",
+        )
+        out = svc.remove_seed_paper(service, self.SEED_OWNER, SLUG, "doi:10.1093/s.1")
+        assert out.updated == ["doi:10.1093/s.1"]
+        assert service.store.get(SLUG).seed_papers == []
+        with pytest.raises(NotFound):
+            svc.remove_seed_paper(service, self.SEED_OWNER, SLUG, "doi:10.1093/s.1")

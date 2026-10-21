@@ -23,6 +23,12 @@ from researcher_profiles.utils.paths import build_logs_dir
 
 from .factories import fake_llm_response, stub_llm
 
+#: The retrieval filter for a viewer who may read every tier: every chunk
+#: type but the rank-only interest seeds.
+OWN_TEXT = {
+    "source_type": ["soul", "expertise", "paper_summary", "paper_abstract", "cv", "web", "grant"]
+}
+
 
 class _Chunk:
     def __init__(self, source_id, text, year=None, score=0.9, source_type="paper_summary"):
@@ -138,7 +144,7 @@ class TestAsk:
         assert "RETRIEVED EVIDENCE" in user_text
         assert "doe2016example" in user_text
         assert "QUESTION: consensus regions?" in user_text
-        jane_doe.index.search.assert_called_once_with("consensus regions?", k=3)
+        jane_doe.index.search.assert_called_once_with("consensus regions?", k=3, filter=OWN_TEXT)
 
     @pytest.mark.parametrize(
         "method, arg, call_kwargs, expected_fields, forbidden_substring",
@@ -199,7 +205,7 @@ class TestReview:
         assert material in user_text
         assert "FOCUS: Pay particular attention to methods" in user_text
         # search should have used the focus string
-        jane_doe.index.search.assert_called_once_with("methods", k=5)
+        jane_doe.index.search.assert_called_once_with("methods", k=5, filter=OWN_TEXT)
 
     def test_review_without_focus_uses_material_prefix(self, jane_doe):
         stub_llm(jane_doe, "hello world")
@@ -349,7 +355,7 @@ class TestGenerativePersona:
 
         getattr(jane_doe.persona, method)(arg, n=n)
 
-        jane_doe.index.search.assert_called_once_with(arg, k=expected_k)
+        jane_doe.index.search.assert_called_once_with(arg, k=expected_k, filter=OWN_TEXT)
         kwargs = fake.complete.call_args.kwargs
         assert kwargs["temperature"] == expected_temp
         assert mode_tail in kwargs["system"][1]["text"]
@@ -378,6 +384,21 @@ class TestGenerativePersona:
         with pytest.raises(GenerativeParseError) as excinfo:
             getattr(jane_doe.persona, method)(arg)
         assert bad_text in excinfo.value.raw_text
+
+
+class TestSeedPapersAreNeverEvidence:
+    """An interest seed's abstract is never retrieved as the researcher's own text."""
+
+    @pytest.mark.parametrize("source_types", [None, ["paper_summary", "seed_abstract"]])
+    @pytest.mark.parametrize("method", ["ask", "review", "innovate", "riff"])
+    def test_retrieval_leaves_out_seed_abstracts(self, jane_doe, method, source_types):
+        stub_llm(jane_doe, _GENERATIVE_RESPONSE.get(method, "hello world"))
+
+        getattr(jane_doe.persona, method)("chromatin", source_types=source_types)
+
+        types = jane_doe.index.search.call_args.kwargs["filter"]["source_type"]
+        assert "seed_abstract" not in types
+        assert "paper_summary" in types
 
 
 class TestInnovate:

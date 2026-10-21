@@ -197,7 +197,9 @@
         "first_r01_equivalent_year": "rp:firstR01EquivalentYear",
         "notes": "rp:notes",
         "evidence": "rp:evidence",
-        "confidence": "rp:confidence"
+        "confidence": "rp:confidence",
+        "career_level": "rp:careerLevel",
+        "source": "rp:careerStageSource"
       }
     },
 
@@ -229,6 +231,9 @@
     "pdf_url": { "@id": "rp:pdfUrl", "@type": "@id" },
     "full_text_link": { "@id": "rp:fullTextLink", "@type": "@id" },
     "topics": { "@id": "rp:openalexTopic", "@container": "@set" },
+    "dateCreated": { "@id": "schema:dateCreated", "@type": "xsd:dateTime" },
+    "added_via": "rp:addedVia",
+    "seedPapers": { "@id": "rp:seedPaper", "@container": "@set" },
 
     "ScholarlyArticle": {
       "@id": "schema:ScholarlyArticle",

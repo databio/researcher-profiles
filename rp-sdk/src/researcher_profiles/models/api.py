@@ -597,6 +597,23 @@ class EditResult(_APIModel):
     version: Optional[str] = None
 
 
+class SeedAddResult(_APIModel):
+    """Result of adding interest seed papers: what was added and why the rest was not."""
+
+    slug: str
+    rid: Optional[str] = None
+    #: ``seed_id`` of every seed added, in request order.
+    added: list[str] = []
+    #: Already in the seed list (same OpenAlex id or DOI).
+    already_seed: list[str] = []
+    #: Already one of the person's authored works: never also a seed.
+    already_authored: list[str] = []
+    #: How many were refused because the list is full (``SEED_PAPERS_MAX``).
+    over_cap: int = 0
+    #: The ``content_hash`` after this write.
+    content_hash: Optional[str] = None
+
+
 class ArtifactTier(_APIModel):
     """One artifact's tier, and why: the read side of the visibility API.
 
@@ -1024,6 +1041,7 @@ __all__ = [
     "ReviewerMatchResult",
     "CitationRefPayload",
     "EditResult",
+    "SeedAddResult",
     "HealthResponse",
     "IdeaList",
     "IdeaPayload",

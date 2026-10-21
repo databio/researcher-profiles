@@ -22,6 +22,11 @@ SECTION_SPLIT_THRESHOLD = 2000
 #: lite profiles report zero papers.
 PAPER_CHUNK_TYPES = ("paper_summary", "paper_abstract")
 
+#: Chunk source types that shape the centroid and the profile vector but are
+#: never returned as a passage, a search hit or match evidence: interest seed
+#: papers are not the researcher's own text.
+RANK_ONLY_SOURCE_TYPES = frozenset({"seed_abstract"})
+
 
 @dataclass
 class Chunk:
@@ -218,6 +223,34 @@ def chunk_grant(title: str, abstract: str | None, grant_id: str) -> list[Chunk]:
     return chunks
 
 
+def chunk_seed(title: str, abstract: str | None, seed_id: str) -> list[Chunk]:
+    """Chunk one interest seed paper: its title plus abstract (title alone without one).
+
+    Every profile level indexes seeds; ``seed_abstract`` is rank-only
+    (:data:`RANK_ONLY_SOURCE_TYPES`) and never a paper chunk.
+    """
+    parts = [p for p in ((title or "").strip(), (abstract or "").strip()) if p]
+    body = "\n\n".join(parts)
+    if not body:
+        return []
+    chunks: list[Chunk] = []
+    for i, piece in enumerate(_split_long_paragraph(body)):
+        embed_text = _strip_citations(piece).strip()
+        if not embed_text:
+            continue
+        chunks.append(
+            Chunk(
+                source_type="seed_abstract",
+                source_id=seed_id,
+                chunk_index=i,
+                text=piece,
+                embed_text=embed_text,
+                section=None,
+            )
+        )
+    return chunks
+
+
 def chunk_cv(text: str) -> list[Chunk]:
     """Chunk a sources/cv.md document on H2/H3 boundaries (``deep`` profiles)."""
     return _chunk_markdown_doc(text, "cv", "cv")
@@ -234,7 +267,7 @@ def chunk_web(text: str, page_id: str) -> list[Chunk]:
 
 #: Every chunk ``source_type`` the enumerator can produce.
 ALL_SOURCE_TYPES = frozenset(
-    {"expertise", "soul", "paper_summary", "paper_abstract", "grant", "cv", "web"}
+    {"expertise", "soul", "paper_summary", "paper_abstract", "grant", "cv", "web", "seed_abstract"}
 )
 
 _SUMMARY_SUFFIX = ".summary.md"
@@ -269,8 +302,8 @@ def _collection_entries(storage, content_url: str) -> list:
 def _corpus_ids(storage) -> set[str] | None:
     """Paper ids in ``sources/papers.jsonld``; None when the profile has none.
 
-    None means "no corpus to filter against" (an interview-built profile),
-    not "an empty corpus".
+    None means "no corpus to filter against" (a profile with no papers
+    file), not "an empty corpus".
     """
     if not storage.artifact_text("sources/papers.jsonld"):
         return None
@@ -279,6 +312,25 @@ def _corpus_ids(storage) -> set[str] | None:
         for e in _collection_entries(storage, "sources/papers.jsonld")
         if isinstance(e, dict) and e.get("paper_id")
     }
+
+
+def _seed_chunks(storage) -> list[Chunk]:
+    """``seed_abstract`` chunks for every seed in ``sources/seed_papers.jsonld``."""
+    out: list[Chunk] = []
+    for entry in _collection_entries(storage, "sources/seed_papers.jsonld"):
+        if not isinstance(entry, dict):
+            continue
+        oa = str(entry.get("openalex_id") or "").strip()
+        doi = str(entry.get("doi") or "").strip()
+        seed_id = oa.rstrip("/").rsplit("/", 1)[-1] if oa else (f"doi:{doi}" if doi else "")
+        if not seed_id:
+            continue
+        out.extend(
+            chunk_seed(
+                str(entry.get("name") or entry.get("title") or ""), entry.get("abstract"), seed_id
+            )
+        )
+    return out
 
 
 def _web_page_ids(storage) -> list[str]:
@@ -314,9 +366,10 @@ def enumerate_source_chunks(
     (pass ``level`` and ``build_state``). ``source_types`` limits the work to
     those types; ``None`` means all of them.
 
-    A ``lite`` profile is indexed over paper abstracts only (contaminated
-    papers skipped); ``full`` and ``deep`` over expertise, SOUL and summaries,
-    and ``deep`` adds grants, the CV and web pages.
+    A ``lite`` profile is indexed over paper abstracts (contaminated papers
+    skipped) and any SOUL its owner wrote; ``full`` and ``deep`` over expertise, SOUL and summaries, and
+    ``deep`` adds grants, the CV and web pages. Every level adds the interest
+    seed papers (``seed_abstract``).
 
     ``corpus_only`` skips a summary whose paper is not in
     ``sources/papers.jsonld``. Off by default: the format does not require
@@ -337,19 +390,40 @@ def enumerate_source_chunks(
 
     out: list[Chunk] = []
     if level == "lite":
-        if "paper_abstract" not in want:
-            return out
-        for i, entry in enumerate(_collection_entries(storage, "sources/papers.jsonld")):
-            if not isinstance(entry, dict):
-                continue
-            paper_id = entry.get("paper_id") or entry.get("openalex_id") or f"paper-{i}"
-            if build_state is not None and build_state.is_contaminated(entry.get("paper_id")):
-                continue
-            abstract = (entry.get("abstract") or "").strip()
-            if abstract:
-                out.extend(chunk_abstract(abstract, str(paper_id)))
-        return out
+        if "paper_abstract" in want:
+            out.extend(_lite_abstract_chunks(storage, build_state))
+        # A lite profile has no built narrative, but its owner may write one
+        # (an interview's "how I think"): index it, so a profile with no
+        # papers still has vectors to match on.
+        if "soul" in want:
+            text = storage.load_soul()
+            if text:
+                out.extend(chunk_soul(text))
+    else:
+        out.extend(_narrative_chunks(storage, want, level=level, corpus_only=corpus_only))
+    if "seed_abstract" in want:
+        out.extend(_seed_chunks(storage))
+    return out
 
+
+def _lite_abstract_chunks(storage, build_state) -> list[Chunk]:
+    """A ``lite`` profile's paper abstracts, contaminated papers skipped."""
+    out: list[Chunk] = []
+    for i, entry in enumerate(_collection_entries(storage, "sources/papers.jsonld")):
+        if not isinstance(entry, dict):
+            continue
+        paper_id = entry.get("paper_id") or entry.get("openalex_id") or f"paper-{i}"
+        if build_state is not None and build_state.is_contaminated(entry.get("paper_id")):
+            continue
+        abstract = (entry.get("abstract") or "").strip()
+        if abstract:
+            out.extend(chunk_abstract(abstract, str(paper_id)))
+    return out
+
+
+def _narrative_chunks(storage, want, *, level: str, corpus_only: bool) -> list[Chunk]:
+    """A ``full``/``deep`` profile's expertise, SOUL, summaries and ``deep`` extras."""
+    out: list[Chunk] = []
     if "expertise" in want:
         text = storage.load_expertise()
         if text:

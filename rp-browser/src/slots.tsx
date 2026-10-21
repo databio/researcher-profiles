@@ -11,6 +11,8 @@ export interface ProfileTabContext {
   url: string;
   /** The profile's slug, once the document has loaded. */
   slug: string | null;
+  /** The profile's rid, once the document has loaded. */
+  rid: string | null;
   /** Whether that URL is served from this origin. */
   sameOrigin: boolean;
 }
@@ -60,6 +62,8 @@ export interface ShellSlots {
   aboutNote: ReactNode;
   /** Extra tabs on the profile page. */
   profileTabs: ProfileTabSlot[];
+  /** Controls a host renders in the profile header (for example a Follow button). */
+  profileActions: ((ctx: ProfileTabContext) => ReactNode) | null;
 }
 
 const EMPTY: ShellSlots = {
@@ -71,6 +75,7 @@ const EMPTY: ShellSlots = {
   homeActions: null,
   aboutNote: null,
   profileTabs: [],
+  profileActions: null,
 };
 
 const Ctx = createContext<ShellSlots>(EMPTY);

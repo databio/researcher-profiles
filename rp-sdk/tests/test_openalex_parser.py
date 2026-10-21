@@ -296,6 +296,38 @@ class TestFetchNewWorks:
         assert out[0].openalex_id == "W1"
         assert out[0].title == "A Candidate Work"
 
+    def test_followed_authors_get_a_chunked_one_page_query_and_are_tagged(self, monkeypatch):
+        from researcher_profiles.openalex import fetch_new_works
+
+        work = _fetch_work("W5")
+        work["authorships"] = [
+            {"author": {"orcid": "https://orcid.org/0000-0002-1825-0097"}},
+            {"author": {"orcid": None}},
+        ]
+        # Every page claims there is another one: followed queries must stop at one.
+        client, calls = self._stub(lambda p: {"results": [work], "meta": {"next_cursor": "more"}})
+        orcids = [f"0000-0000-0000-{i:04d}" for i in range(120)]
+        out = fetch_new_works(
+            client, since="2026-01-01", topics=None, seed_work_ids=None, author_orcids=orcids,
+            max_pages=3,
+        )
+        filters = [c["filter"] for c in calls]
+        assert len(filters) == 3  # 120 ORCIDs in chunks of 50: one page each
+        assert all("author.orcid:" in f for f in filters)
+        assert filters[0].count("|") == 49 and filters[2].count("|") == 19
+        assert len(out) == 1
+        assert out[0].found_by == ["followed"]
+        assert out[0].author_orcids == ["0000-0002-1825-0097"]
+
+    def test_author_orcids_are_recorded_whichever_query_found_the_work(self, monkeypatch):
+        from researcher_profiles.openalex import fetch_new_works
+
+        work = _fetch_work("W6")
+        work["authorships"] = [{"author": {"orcid": "https://orcid.org/0000-0002-1825-0097"}}]
+        client, _calls = self._stub(lambda p: {"results": [work], "meta": {"next_cursor": None}})
+        out = fetch_new_works(client, since="2026-01-01", topics=["chromatin"])
+        assert out[0].author_orcids == ["0000-0002-1825-0097"]
+
     def test_cursor_pagination_follows_next_cursor(self, monkeypatch):
         from researcher_profiles.openalex import fetch_new_works
 
@@ -822,3 +854,63 @@ class TestMatchPapers:
         out = oa.fetch_author_works(client, "https://orcid.org/0000-0001-2345-6789")
         assert [w.openalex_id for w in out] == ["W1"]
         assert client.calls[0][1]["filter"] == "author.orcid:0000-0001-2345-6789"
+
+
+class TestSeedQueryTerms:
+    """Interest seed papers widen what the feed fetches."""
+
+    def test_seed_ids_follow_authored_ids_and_seed_topics_come_after_interests(self):
+        from types import SimpleNamespace
+
+        from researcher_profiles.openalex import profile_query_terms
+
+        seeds = [
+            SimpleNamespace(openalex_id="W2", topics=["T5", "T6"]),
+            SimpleNamespace(openalex_id="W1", topics=["T6"]),
+            SimpleNamespace(openalex_id=None, topics=["T7"]),
+        ]
+        prof = SimpleNamespace(
+            metadata=_md(field="Genomics"),
+            papers=[_paper("Mine", openalex_id="https://openalex.org/W1")],
+            seed_papers=seeds,
+        )
+        terms = profile_query_terms(prof)
+        assert terms["seed_work_ids"] == ["W1", "W2"]
+        assert terms["source"] == "seeds"
+        assert terms["topics"] == ["T6", "T5", "T7"]
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            pytest.param("W123", ("openalex", "W123"), id="bare-w-id"),
+            pytest.param("https://openalex.org/w5", ("openalex", "W5"), id="openalex-url"),
+            pytest.param("10.1038/nature1", ("doi", "10.1038/nature1"), id="bare-doi"),
+            pytest.param("doi:10.1093/X.y", ("doi", "10.1093/X.y"), id="doi-prefix"),
+            pytest.param("https://doi.org/10.1101/2020.1", ("doi", "10.1101/2020.1"), id="doi-org"),
+            pytest.param("http://dx.doi.org/10.5281/z.5", ("doi", "10.5281/z.5"), id="dx-doi"),
+            pytest.param("Smith 2020", None, id="garbage"),
+        ],
+    )
+    def test_parse_work_ref(self, text, expected):
+        from researcher_profiles.openalex import parse_work_ref
+
+        assert parse_work_ref(text) == expected
+
+    def test_split_work_refs(self):
+        from researcher_profiles.openalex import split_work_refs
+
+        refs, bad = split_work_refs("W1, 10.1093/a;\n nope 10.1093/A\tW1")
+        assert refs == [("openalex", "W1"), ("doi", "10.1093/a")]
+        assert bad == ["nope"]
+
+    def test_dois_from_bibtex(self):
+        from researcher_profiles.openalex import dois_from_bibtex
+
+        bib = """
+        @article{smith2020, title = {A}, doi = {10.1093/abc}}
+        @misc{nodoi, title = "B"}
+        @inproceedings{jones2021, url = {https://doi.org/10.1101/xyz}}
+        @article{quoted, doi = "https://doi.org/10.1038/q1"}
+        @comment{ignored}
+        """
+        assert dois_from_bibtex(bib) == (["10.1093/abc", "10.1101/xyz", "10.1038/q1"], ["nodoi"])
