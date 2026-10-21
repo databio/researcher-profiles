@@ -1,0 +1,243 @@
+{
+  "$defs": {
+    "SeedPaperRecord": {
+      "additionalProperties": true,
+      "description": "One interest seed paper: a work that defines what the person wants to study.\n\nLives in ``sources/seed_papers.jsonld``. A seed asserts interest, never\nauthorship: it is deliberately **not** a :class:`PaperRecord`, carries no\nauthorship, full text, summary or citation fields, and never appears in\nthe publication list or the synthesized narrative. It feeds the interest\nsignal only (the embedding index, the centroid, feed ranking, matching).",
+      "properties": {
+        "@context": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "@Context"
+        },
+        "@id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "@Id"
+        },
+        "@type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "ScholarlyArticle",
+          "title": "@Type"
+        },
+        "abstract": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Abstract"
+        },
+        "added_via": {
+          "default": "owner",
+          "enum": [
+            "owner",
+            "interview",
+            "feed_upvote",
+            "migration"
+          ],
+          "title": "Added Via",
+          "type": "string"
+        },
+        "dateCreated": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Datecreated"
+        },
+        "datePublished": {
+          "anyOf": [
+            {
+              "pattern": "^\\s*\\d+\\s*$",
+              "type": "string"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Datepublished"
+        },
+        "doi": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Doi"
+        },
+        "isPartOf": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "description": "A Periodical node.",
+              "properties": {
+                "@id": {
+                  "type": "string"
+                },
+                "@type": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ispartof"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "openalex_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Openalex Id"
+        },
+        "topics": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Topics",
+          "type": "array"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "SeedPaperRecord",
+      "type": "object"
+    }
+  },
+  "additionalProperties": true,
+  "description": "Top-level model for ``sources/seed_papers.jsonld`` (a ``Collection``).\n\nOptional, owner curated, ``private`` by role default. Consumers must never\nlist its entries as the person's works.",
+  "properties": {
+    "@context": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": "https://profiles.databio.org/context/v1.jsonld",
+      "title": "@Context"
+    },
+    "@id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "@Id"
+    },
+    "@type": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": "Collection",
+      "title": "@Type"
+    },
+    "about": {
+      "anyOf": [
+        {
+          "additionalProperties": true,
+          "properties": {
+            "@id": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "About"
+    },
+    "conformsTo": {
+      "default": "https://profiles.databio.org/context/v1.jsonld",
+      "title": "Conformsto",
+      "type": "string"
+    },
+    "hasPart": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/SeedPaperRecord"
+      },
+      "title": "Haspart",
+      "type": "array"
+    }
+  },
+  "title": "SeedPapersDocument",
+  "type": "object"
+}

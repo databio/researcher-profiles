@@ -884,3 +884,37 @@ class TestServedLinksResolve:
         assert (
             api_client.get("http://testserver/api/v1/nope/personality/SOUL.md").status_code == 404
         )
+
+
+class TestSeedPaperRoutes:
+    """The ``seed-papers`` routes: interest, never works, private by default."""
+
+    def test_add_list_remove(self, make_api_client, fixture_profiles_root):
+        c = make_api_client(fixture_profiles_root(SLUG), token="secret-token")
+        op = {"Authorization": "Bearer secret-token"}
+        r = c.post(
+            f"/api/v1/profiles/{SLUG}/seed-papers",
+            json={"records": [{"title": "A seed", "doi": "10.1093/seed.1"}]},
+            headers=op,
+        )
+        assert r.status_code == 201, r.text
+        assert r.json()["added"] == ["doi:10.1093/seed.1"]
+
+        assert c.get(f"/api/v1/profiles/{SLUG}/seed-papers").status_code == 404
+        listed = c.get(f"/api/v1/profiles/{SLUG}/seed-papers", headers=op).json()
+        assert [s["title"] for s in listed["seed_papers"]] == ["A seed"]
+
+        r = c.delete(f"/api/v1/profiles/{SLUG}/seed-papers/doi:10.1093/seed.1", headers=op)
+        assert r.status_code == 200, r.text
+        assert c.get(f"/api/v1/profiles/{SLUG}/seed-papers", headers=op).json() == {
+            "seed_papers": []
+        }
+
+    def test_a_malformed_body_is_a_400(self, make_api_client, fixture_profiles_root):
+        c = make_api_client(fixture_profiles_root(SLUG), token="secret-token")
+        r = c.post(
+            f"/api/v1/profiles/{SLUG}/seed-papers",
+            json={"records": [{"title": "No id"}]},
+            headers={"Authorization": "Bearer secret-token"},
+        )
+        assert r.status_code == 400

@@ -1156,6 +1156,15 @@ operator bearer token. A host that runs the
 | `POST` | `/api/v1/profiles/{slug}/works` | Add one new work; an existing `paper_id` is a `409`. |
 | `PATCH` | `/api/v1/profiles/{slug}/works/{paper_id}` | Patch owner-editable fields of one work. |
 | `DELETE` | `/api/v1/profiles/{slug}/works/{paper_id}` | Remove one work from the corpus. |
+| `POST` | `/api/v1/profiles/{slug}/seed-papers` | Add interest seed papers, `{"records": [...]}` of already-resolved metadata (a title plus an `openalex_id` or `doi`). Returns `added`, `already_seed`, `already_authored`, `over_cap`. |
+| `DELETE` | `/api/v1/profiles/{slug}/seed-papers/{seed_id}` | Remove one seed by `seed_id` (`W…` or `doi:<doi>`). |
+
+`GET /api/v1/profiles/{slug}/seed-papers` (the read surface) lists the interest
+seed papers: papers that define the person's interests, never works they wrote.
+It is gated on the tier of `sources/seed_papers.jsonld`, `private` by default,
+so the public gets a `404`. Seeds feed the centroid and the feed query, never
+the works list, the narrative, or any search hit (`seed_abstract` chunks are
+rank-only).
 
 To read a work before editing it, use the public
 `GET /api/v1/profiles/{slug}/papers/{paper_id}?view=full`.

@@ -17,7 +17,7 @@ only, never bare ``Exception``.
 """
 
 import hashlib
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ValidationError
@@ -38,9 +38,12 @@ from ..schema import (
     Training,
     effective_interests,
     interests_from_text,
+    self_reported_stage,
 )
+from ..schema._career import SELF_REPORT_EVIDENCE
 from ..schema._common import RENAMED_TIERS
 from ..schema.jsonld import canonical_dumps
+from ..utils.clock import utc_now_iso
 
 if TYPE_CHECKING:  # pragma: no cover
     from . import ResearcherProfile
@@ -153,6 +156,56 @@ def _merge_object_fields(doc: ProfileDocument, patch: dict[str, Any]) -> dict[st
         if isinstance(raw, dict) and current is not None:
             out[key] = {**current.model_dump(mode="json"), **raw}
     return out
+
+
+#: Stage keys the server stamps on an owner edit; a caller's values are ignored.
+_STAMPED_STAGE_KEYS = ("source", "confidence", "evidence", "as_of")
+
+
+def _today() -> date:
+    """The edit clock's date (the ``dateModified`` wall clock, never a pinned epoch)."""
+    return date.fromisoformat(utc_now_iso()[:10])
+
+
+def _stamp_career_stage(
+    doc: ProfileDocument, patch: dict[str, Any], today: date
+) -> dict[str, Any]:
+    """Make an owner edit of ``career_stage`` the owner's own answer.
+
+    - ``career_stage: null`` clears the stage, untouched here.
+    - a dict naming a ``career_level`` becomes :func:`self_reported_stage`
+      for that level, with the patch's other fact keys laid over it;
+    - a dict with ``career_level: null`` withdraws the answer: it merges as
+      usual but goes back to ``source: inferred`` so a build may infer again;
+    - a dict without ``career_level`` edits facts only and is stamped as the
+      owner's answer.
+
+    ``source``, ``confidence``, ``evidence`` and ``as_of`` are always the
+    server's; whatever the caller sent for them is dropped.
+    """
+    raw = patch.get("career_stage")
+    if not isinstance(raw, dict):
+        return patch
+    facts = {k: v for k, v in raw.items() if k not in _STAMPED_STAGE_KEYS}
+    existing = doc.career_stage
+    if "career_level" in facts and facts["career_level"] is not None:
+        level = facts.pop("career_level")
+        try:
+            stage = self_reported_stage(level, existing, today)
+        except ValueError as e:
+            raise EditError(f"career_stage is not a valid CareerStage: {e}") from e
+        stamped = {**stage.model_dump(mode="json"), **facts}
+    elif "career_level" in facts:
+        stamped = {**facts, "source": "inferred"}
+    else:
+        stamped = {
+            **facts,
+            "source": "self_reported",
+            "confidence": "high",
+            "as_of": today.isoformat(),
+            "evidence": SELF_REPORT_EVIDENCE,
+        }
+    return {**patch, "career_stage": stamped}
 
 
 def _coerce_structured(patch: dict[str, Any]) -> dict[str, Any]:
@@ -321,7 +374,9 @@ class EditManager:
             )
         if not patch:
             return self._profile.metadata
-        coerced = _coerce_structured(_merge_object_fields(self._profile.metadata, patch))
+        doc = self._profile.metadata
+        stamped = _stamp_career_stage(doc, patch, _today())
+        coerced = _coerce_structured(_merge_object_fields(doc, stamped))
         if "interests" in coerced or "not_interests" in coerced:
             coerced = _declare_text_interests(self._profile.metadata, coerced)
         updated = self._profile.metadata.model_copy(update=coerced)

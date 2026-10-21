@@ -26,6 +26,7 @@ from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
 from typing import Any, Iterable, Mapping, Optional
 
+from ..embeddings.chunking import RANK_ONLY_SOURCE_TYPES
 from ..privacy import ViewerTier, chunk_source_tiers, tier_allows
 from ._projection import _visible_hits
 
@@ -334,7 +335,8 @@ def semantic_hits(
     Restricted to ``source_types`` (and to one source, usually a paper, when
     ``source_id`` is given), then filtered by the caller's tier per chunk
     (``chunk_source_tiers``). ``hits`` are ``FlatHit``s carrying no text;
-    ``note`` is set on every fallback and the hits are then ``[]``. When no
+    ``note`` is set on every fallback and the hits are then ``[]``. Rank-only
+    source types (interest seed papers) are never returned. When no
     note is returned, semantic search ran (even if nothing matched).
     """
     import numpy as np
@@ -349,7 +351,9 @@ def semantic_hits(
         return [], note
     if not same_space(name, index.backend_spec) or vec.shape[0] != index.dim:
         return [], NOTE_MISMATCH
-    wanted = set(source_types)
+    # Rank-only chunks (interest seed papers) shape the centroid but are never
+    # a hit: they are not the researcher's own text.
+    wanted = set(source_types) - RANK_ONLY_SOURCE_TYPES
     rows = [
         i
         for i, c in enumerate(index.chunks)

@@ -253,12 +253,34 @@
     },
     "CareerStage": {
       "additionalProperties": true,
-      "description": "Date-anchored career-stage and eligibility facts (``rp:careerStage``).\n\nStores anchor facts, not verdicts. Eligibility (NIH ESI, K99, NSF CAREER,\n...) depends on an application due date, so the profile records the dated\nfacts an evaluator applies a rule to, never \"is_esi: true\". ``None`` and\n``\"unknown\"`` are legal everywhere so an evaluator can say \"can't\ndetermine\" instead of guessing.\n\nOut of scope (use ``notes`` or ask the human): citizenship /\nvisa status, postdoc research-months accounting, ESI extensions.",
+      "description": "Date-anchored career-stage and eligibility facts (``rp:careerStage``).\n\nStores anchor facts, not verdicts. Eligibility (NIH ESI, K99, NSF CAREER,\n...) depends on an application due date, so the profile records the dated\nfacts an evaluator applies a rule to, never \"is_esi: true\". ``None`` and\n``\"unknown\"`` are legal everywhere so an evaluator can say \"can't\ndetermine\" instead of guessing.\n\n``source`` says who asserted the stage. A build infers it from CV, ORCID\nand grant evidence (``inferred``); the profile owner can state it\n(``self_reported``). A self-reported stage outranks any inferred one: a\nbuild, a merge or a lens may fill its empty facts but never replaces it\n(:func:`~researcher_profiles.schema.merge_career_stage`).\n\nOut of scope (use ``notes`` or ask the human): citizenship /\nvisa status, postdoc research-months accounting, ESI extensions.",
       "properties": {
         "as_of": {
           "description": "ISO date on which these facts were assessed. not the profile build date. Every fact below is a claim as of this date.",
           "title": "As Of",
           "type": "string"
+        },
+        "career_level": {
+          "anyOf": [
+            {
+              "enum": [
+                "undergraduate",
+                "graduate_student",
+                "postdoc",
+                "faculty",
+                "clinician",
+                "industry",
+                "other"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The person's coarse current career level. When source is 'inferred' a model guessed it from the evidence; null when unknown.",
+          "title": "Career Level"
         },
         "clinical_training_end_year": {
           "anyOf": [
@@ -360,6 +382,16 @@
           "default": null,
           "description": "Free text for anything the fields cannot carry: eligibility extensions, career gaps, MPI nuances, or citizenship if the researcher volunteered it.",
           "title": "Notes"
+        },
+        "source": {
+          "default": "inferred",
+          "description": "Who asserted this stage. 'self_reported' means the profile owner (or someone editing on their behalf) stated it, and a build must not replace it. Builders never write 'self_reported'.",
+          "enum": [
+            "self_reported",
+            "inferred"
+          ],
+          "title": "Source",
+          "type": "string"
         },
         "sources_checked": {
           "default": [],

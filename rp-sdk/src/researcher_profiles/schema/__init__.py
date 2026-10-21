@@ -28,7 +28,8 @@ and privacy tiers, the provenance labels, the tolerant ``_Base``) and
 models sit on top of those two: ``_parts`` (the nested nodes of the profile and
 the :class:`ArtifactRef` manifest entry), ``_proof`` (the verification envelope),
 ``_document`` (:class:`ProfileDocument` and its field groups) and ``_sources``
-(the ``sources/`` sidecars: papers, grants, summary frontmatter).
+(the ``sources/`` sidecars: papers, grants, summary frontmatter). ``_career``
+holds the pure career-level helpers over :class:`CareerStage`.
 """
 
 from scholarcore import CareerEntry, Training
@@ -48,6 +49,16 @@ from ._common import (
     Visibility,
     most_restrictive,
     role_default_visibility,
+)
+from ._career import (
+    CAREER_LEVELS,
+    TRAINEE_LEVELS,
+    CareerLevel,
+    career_level_is_self_reported,
+    career_level_of,
+    is_trainee,
+    merge_career_stage,
+    self_reported_stage,
 )
 from ._document import ANCHOR_FIELDS, DERIVED_FIELDS, DOCUMENT_FIELDS, ProfileDocument
 from ._identity import (
@@ -86,10 +97,14 @@ from ._proof import (
     strip_registry_issued_proofs,
 )
 from ._sources import (
+    SEED_PAPERS_MAX,
     GrantRecord,
     GrantsDocument,
     PaperRecord,
     PapersDocument,
+    SeedAddedVia,
+    SeedPaperRecord,
+    SeedPapersDocument,
     SummaryFile,
     TrialRecord,
     TrialsDocument,
@@ -107,6 +122,14 @@ __all__ = [
     "ArtifactRef",
     "CareerEntry",
     "CareerStage",
+    "CAREER_LEVELS",
+    "CareerLevel",
+    "TRAINEE_LEVELS",
+    "career_level_is_self_reported",
+    "career_level_of",
+    "is_trainee",
+    "merge_career_stage",
+    "self_reported_stage",
     "ConceptReference",
     "DERIVED_FIELDS",
     "DOCUMENT_FIELDS",
@@ -127,6 +150,10 @@ __all__ = [
     "RENAMED_TIERS",
     "ROLE_DEFAULT_VISIBILITY",
     "ResearchOutput",
+    "SEED_PAPERS_MAX",
+    "SeedAddedVia",
+    "SeedPaperRecord",
+    "SeedPapersDocument",
     "SectionVisibility",
     "SiteCapabilities",
     "SiteInfrastructure",

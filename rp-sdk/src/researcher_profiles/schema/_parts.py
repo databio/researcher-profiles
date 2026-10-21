@@ -75,6 +75,12 @@ class CareerStage(_Base):
     ``"unknown"`` are legal everywhere so an evaluator can say "can't
     determine" instead of guessing.
 
+    ``source`` says who asserted the stage. A build infers it from CV, ORCID
+    and grant evidence (``inferred``); the profile owner can state it
+    (``self_reported``). A self-reported stage outranks any inferred one: a
+    build, a merge or a lens may fill its empty facts but never replaces it
+    (:func:`~researcher_profiles.schema.merge_career_stage`).
+
     Out of scope (use ``notes`` or ask the human): citizenship /
     visa status, postdoc research-months accounting, ESI extensions.
     """
@@ -175,6 +181,32 @@ class CareerStage(_Base):
     )
     confidence: Literal["high", "medium", "low"] = Field(
         description="Overall confidence in the facts recorded here."
+    )
+    career_level: (
+        Literal[
+            "undergraduate",
+            "graduate_student",
+            "postdoc",
+            "faculty",
+            "clinician",
+            "industry",
+            "other",
+        ]
+        | None
+    ) = Field(
+        default=None,
+        description=(
+            "The person's coarse current career level. When source is "
+            "'inferred' a model guessed it from the evidence; null when unknown."
+        ),
+    )
+    source: Literal["self_reported", "inferred"] = Field(
+        default="inferred",
+        description=(
+            "Who asserted this stage. 'self_reported' means the profile owner (or "
+            "someone editing on their behalf) stated it, and a build must not "
+            "replace it. Builders never write 'self_reported'."
+        ),
     )
 
 

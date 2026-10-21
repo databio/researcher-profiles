@@ -83,6 +83,21 @@ rp where 0000-0002-1825-0097     # -> /path/to/voss-elena
 rp seek voss-elena                  # -> /path/to/voss-elena   (for $(...) pipelines)
 ```
 
+## Interest seed papers are not works
+
+`sources/seed_papers.jsonld` (role and write-unit kind `seed_papers`,
+`private` by role default) holds papers that define a person's interests:
+`SeedPaperRecord`, deliberately not a `PaperRecord` and with no authorship
+fields. `prof.seed_papers`, `prof.save_seed_papers`, `prof.add_seed_papers`
+and `prof.remove_seed_paper` are the profile API; `api/service.py` has
+`list_seed_papers`, `add_seed_papers` and `remove_seed_paper`, served at
+`GET|POST /api/v1/profiles/{slug}/seed-papers` and
+`DELETE .../seed-papers/{seed_id}`. Seeds are indexed as `seed_abstract`
+chunks at every level, which are rank-only (`RANK_ONLY_SOURCE_TYPES`): they
+shape `blend_centroid` and the feed query, and never appear as a works row,
+a paper count, a passage, a search hit or match evidence. A replace-mode push
+keeps the live seed file (`WITHHELD_CLASSES["seed_papers"]`).
+
 ## Tests
 
 ```bash

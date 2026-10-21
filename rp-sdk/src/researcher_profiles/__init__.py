@@ -50,9 +50,12 @@ from .profile.export import (
 )
 from .profile.write_unit import WriteContext, WriteHook
 from .schema import (
+    CAREER_LEVELS,
+    TRAINEE_LEVELS,
     Anchor,
     ArtifactRef,
     CareerEntry,
+    CareerLevel,
     CareerStage,
     GrantRecord,
     GrantsDocument,
@@ -67,7 +70,12 @@ from .schema import (
     ResearchOutput,
     SummaryFile,
     Training,
+    career_level_is_self_reported,
+    career_level_of,
+    is_trainee,
+    merge_career_stage,
     normalize_doi,
+    self_reported_stage,
 )
 from .schema.jsonld import CONTEXT_URL, PROFILE_FORMAT_IRI, canonical_dumps
 
@@ -160,6 +168,10 @@ __all__ = [
     "canonical_dumps",
     "CapabilityUnavailableError",
     "CareerEntry",
+    "CAREER_LEVELS",
+    "career_level_is_self_reported",
+    "career_level_of",
+    "CareerLevel",
     "CareerStage",
     "Chat",
     "Citation",
@@ -187,6 +199,7 @@ __all__ = [
     "Idea",
     "Identifier",
     "IngestResult",
+    "is_trainee",
     "InsufficientScope",
     "InterestConcept",
     "Invalid",
@@ -194,6 +207,7 @@ __all__ = [
     "LLMResponse",
     "Match",
     "MatchEvidence",
+    "merge_career_stage",
     "normalize_doi",
     "NotFound",
     "PaperBuildState",
@@ -223,6 +237,7 @@ __all__ = [
     "resolve_profiles_root",
     "Riff",
     "select_export_papers",
+    "self_reported_stage",
     "ServiceError",
     "SqlProfileStore",
     "SqlArtifactStorage",
@@ -232,6 +247,7 @@ __all__ = [
     "to_foaf",
     "Topic",
     "Training",
+    "TRAINEE_LEVELS",
     "TransactionRequired",
     "Turn",
     "UploadError",

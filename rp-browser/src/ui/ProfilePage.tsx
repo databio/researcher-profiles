@@ -91,7 +91,7 @@ export function ProfilePage({ url: urlProp, activeTab, onTabChange }: ProfilePag
   }, [url]);
 
   const slots = useShellSlots();
-  const tabCtx = { url, slug: detail?.slug ?? null, sameOrigin };
+  const tabCtx = { url, slug: detail?.slug ?? null, rid: detail?.rid ?? null, sameOrigin };
   const extraTabs = slots.profileTabs.filter((t) => t.enabled(tabCtx));
 
   useEffect(() => {
@@ -239,6 +239,7 @@ export function ProfilePage({ url: urlProp, activeTab, onTabChange }: ProfilePag
       {detail && !loading && (
         <div>
           <ProfileHeader metadata={detail.metadata} />
+          {slots.profileActions?.(tabCtx)}
 
           <div className="tab-bar mt-5 mb-6" role="tablist">
             {tabs.map((t) => (

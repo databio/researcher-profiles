@@ -880,3 +880,65 @@ class TestPushKeepsWithheld:
         body = r.json()
         assert set(body["push_modes"]) == set(PUSH_MODES)
         assert "manifest_splice" in body["features"]
+
+
+class TestPushKeepsSeedPapers:
+    """Owner-curated interest seeds live only on the server: a rebuild must not wipe them."""
+
+    def test_replace_keeps_seeds_and_indexes_them_prune_drops_them(
+        self, make_api_client, fixture_profile, tmp_path, fake_backend
+    ):
+        import sqlite3
+
+        from researcher_profiles import ResearcherProfile
+        from researcher_profiles.api.upload import build_profile_archive
+        from researcher_profiles.embeddings import build_index
+        from researcher_profiles.schema import SeedPaperRecord
+
+        src = fixture_profile(SLUG, drop_index=True)
+        build_index(src, backend=fake_backend)
+        server = tmp_path / "server"
+        server.mkdir()
+        http = make_api_client(server)
+        assert _put_archive(http, build_profile_archive(src).data).status_code == 200
+
+        live = ResearcherProfile.from_files(server / SLUG)
+        live.save_seed_papers(
+            [SeedPaperRecord(title="Seed", openalex_id="W9", abstract="Chromatin seed.")]
+        )
+
+        r = _put_archive(http, build_profile_archive(src).data)
+        assert r.status_code == 200, r.text
+        assert r.json()["kept"] == {"seed_papers": 1}
+        stored = server / SLUG
+        assert [s.seed_id for s in ResearcherProfile.from_files(stored).seed_papers] == ["W9"]
+        conn = sqlite3.connect(stored / ".cache" / "embeddings.sqlite")
+        seeds = conn.execute(
+            "SELECT source_id FROM chunks WHERE source_type = 'seed_abstract'"
+        ).fetchall()
+        conn.close()
+        assert seeds == [("W9",)]
+
+        r = _put_archive(http, build_profile_archive(src).data, mode="prune")
+        assert r.status_code == 200, r.text
+        assert not (stored / "sources" / "seed_papers.jsonld").exists()
+
+    def test_replace_keeps_seeds_in_a_sql_store(
+        self, make_api_client, fixture_profile, empty_sql_store, fake_backend
+    ):
+        from researcher_profiles.api.upload import build_profile_archive
+        from researcher_profiles.embeddings import build_index
+        from researcher_profiles.schema import SeedPaperRecord
+
+        src = fixture_profile(SLUG, drop_index=True)
+        build_index(src, backend=fake_backend)
+        http = make_api_client(empty_sql_store)
+        assert _put_archive(http, build_profile_archive(src).data).status_code == 200
+        empty_sql_store.get(SLUG).save_seed_papers(
+            [SeedPaperRecord(title="Seed", openalex_id="W9", abstract="Chromatin seed.")]
+        )
+
+        r = _put_archive(http, build_profile_archive(src).data)
+        assert r.status_code == 200, r.text
+        assert r.json()["kept"] == {"seed_papers": 1}
+        assert [s.seed_id for s in empty_sql_store.get(SLUG).seed_papers] == ["W9"]

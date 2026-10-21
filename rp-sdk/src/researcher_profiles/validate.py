@@ -24,6 +24,7 @@ from .schema import (
     GrantsDocument,
     PapersDocument,
     ProfileDocument,
+    SeedPapersDocument,
     SummaryFile,
     TrialsDocument,
 )
@@ -42,6 +43,7 @@ _SCHEMA_MODELS: dict[str, type] = {
     "papers_jsonld": PapersDocument,
     "grants_jsonld": GrantsDocument,
     "trials_jsonld": TrialsDocument,
+    "seed_papers_jsonld": SeedPapersDocument,
     "summary_file": SummaryFile,
 }
 
@@ -260,7 +262,13 @@ def validate_artifact(
         return result
 
     # JSON-LD artifacts only.
-    if schema_name in ("profile_jsonld", "papers_jsonld", "grants_jsonld", "trials_jsonld"):
+    if schema_name in (
+        "profile_jsonld",
+        "papers_jsonld",
+        "grants_jsonld",
+        "trials_jsonld",
+        "seed_papers_jsonld",
+    ):
         result.undeclared = undeclared_terms(doc, schema_name)
         result.violations = [_retired_term_violation(t) for t in retired_terms(doc)]
 
@@ -427,10 +435,14 @@ def validate_profile_dir(profile_dir: str | Path) -> ProfileValidationReport:
         (root / "sources" / "papers.jsonld", "papers_jsonld"),
         (root / "sources" / "grants.jsonld", "grants_jsonld"),
         (root / "sources" / "trials.jsonld", "trials_jsonld"),
+        (root / "sources" / "seed_papers.jsonld", "seed_papers_jsonld"),
     ]
     for path, schema_name in artifact_map:
-        # grants.jsonld and trials.jsonld are presence-conditional
-        if schema_name in ("grants_jsonld", "trials_jsonld") and not path.is_file():
+        # grants, trials and seed_papers are presence-conditional
+        if (
+            schema_name in ("grants_jsonld", "trials_jsonld", "seed_papers_jsonld")
+            and not path.is_file()
+        ):
             continue
         art_result = validate_artifact(path, schema_name)
         report.artifacts.append(art_result)

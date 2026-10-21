@@ -35,6 +35,8 @@ from researcher_profiles.schema import (
     Proof,
     ResearchInterest,
     ResearchOutput,
+    SeedPaperRecord,
+    SeedPapersDocument,
     Training,
 )
 from researcher_profiles.schema.jsonld import CONTEXT_URL, PROFILE_FORMAT_IRI
@@ -65,6 +67,8 @@ GLOBAL_MODELS = [
     PapersDocument,
     PaperRecord,
     GrantsDocument,
+    SeedPapersDocument,
+    SeedPaperRecord,
     ArtifactRef,
     Proof,
 ]
@@ -734,6 +738,7 @@ class TestStoragePurity:
             "save_papers": lambda: prof.save_papers([PaperRecord(paper_id="x", title="t")]),
             "save_grants": lambda: prof.save_grants([]),
             "save_trials": lambda: prof.save_trials([]),
+            "save_seed_papers": lambda: prof.save_seed_papers([]),
             "save_clinical_expertise": lambda: prof.save_clinical_expertise("# c\n"),
             "save_citations": lambda: prof.save_citations(None),
             "save_summary": lambda: prof.save_summary("x", "body"),

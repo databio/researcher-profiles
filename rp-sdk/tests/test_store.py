@@ -833,3 +833,65 @@ class TestSqlVectorsAtQueryTime:
         # The flat form travels instead, so the export is still rankable.
         assert (Path(root) / "jane-doe" / "embeddings" / "index.json").is_file()
         assert materialize_store_to_tempdir(request, indexed_sql_store) == root
+
+
+class TestSeedPapers:
+    """The interest seed list: a private-by-default collection, never authored works."""
+
+    SEEDS = [
+        {"title": "Seed one", "openalex_id": "W101", "abstract": "About chromatin."},
+        {"title": "Seed two", "doi": "10.1093/seed.two"},
+    ]
+
+    def _seeded(self, store):
+        from researcher_profiles.schema import SeedPaperRecord
+
+        store.create(ProfileDocument(name="Ada", rid=ADA, provenance="third_party"), slug="ada")
+        prof = store.get("ada")
+        prof.save_papers([PaperRecord(paper_id="mine2020", title="Mine", openalex_id="W900")])
+        prof.save_seed_papers([SeedPaperRecord.model_validate(s) for s in self.SEEDS])
+        return prof
+
+    def test_round_trips_and_exports(self, any_store, tmp_path):
+        self._seeded(any_store)
+        prof = any_store.get("ada")
+        assert [s.seed_id for s in prof.seed_papers] == ["W101", "doi:10.1093/seed.two"]
+        assert [p.paper_id for p in prof.papers] == ["mine2020"]  # seeds are never works
+        entry = next(
+            p for p in prof.build_manifest() if p.content_url == "sources/seed_papers.jsonld"
+        )
+        assert entry.role == "seed_papers"
+        assert entry.visibility == "private"
+        out = any_store.export_directory("ada", tmp_path / "out")
+        doc = json.loads((out / "sources" / "seed_papers.jsonld").read_text())
+        assert [e["name"] for e in doc["hasPart"]] == ["Seed one", "Seed two"]
+
+    def test_add_dedupes_against_seeds_and_authored_works_and_caps(self, any_store, monkeypatch):
+        from researcher_profiles.profile import researcher_profile as rp_mod
+        from researcher_profiles.schema import SeedPaperRecord
+
+        prof = self._seeded(any_store)
+        monkeypatch.setattr(rp_mod, "SEED_PAPERS_MAX", 3)
+        incoming = [
+            SeedPaperRecord.model_validate(r)
+            for r in (
+                {"title": "Again", "doi": "10.1093/SEED.TWO"},  # DOI case differs
+                {"title": "Mine", "openalex_id": "https://openalex.org/W900"},
+                {"title": "New", "openalex_id": "W102"},
+                {"title": "Too many", "openalex_id": "W103"},
+            )
+        ]
+        added, skipped = prof.add_seed_papers(incoming)
+        assert [s.seed_id for s in added] == ["W102"]
+        assert [(s.title, why) for s, why in skipped] == [
+            ("Again", "already_seed"),
+            ("Mine", "already_authored"),
+            ("Too many", "over_cap"),
+        ]
+        assert len(any_store.get("ada").seed_papers) == 3
+        assert prof.remove_seed_paper("W102") is True
+        assert prof.remove_seed_paper("W102") is False
+        assert [s.seed_id for s in any_store.get("ada").seed_papers] == [
+            "W101",
+            "doi:10.1093/seed.two",
+        ]

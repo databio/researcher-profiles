@@ -57,7 +57,9 @@ def shred_profile(rid: str, profile: "ResearcherProfile") -> list:
 
     Returns the :class:`ChunkVectorRow` list followed by the profile's
     :class:`ProfileVectorRow` centroid, or ``[]`` when the profile ships no
-    readable index. Never raises for a missing or broken index.
+    readable index. A profile whose every chunk is private still gets its
+    centroid row (with no chunk rows). Never raises for a missing or broken
+    index.
     """
     try:
         shredded = _from_sqlite(profile) or _from_flat(profile)
@@ -67,7 +69,9 @@ def shred_profile(rid: str, profile: "ResearcherProfile") -> list:
     if shredded is None:
         return []
     chunks, centroid_vec, dim, backend_spec = shredded
-    if not chunks:
+    # No public chunks but a centroid (say, a student whose only chunks are
+    # private interest seeds): still store the centroid, so the profile ranks.
+    if not chunks and centroid_vec is None:
         return []
 
     rows: list = [

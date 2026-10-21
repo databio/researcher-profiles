@@ -504,7 +504,7 @@ class SqliteEmbeddingIndex:
         return self.index_meta().get("backend_name", "")
 
     def centroid(self):
-        """The L2-normalized mean of every chunk vector, npz-cached.
+        """The profile vector (:func:`~.profile_vec.blend_centroid`), npz-cached.
 
         Imported lazily: numpy is the ``vectors`` extra, and the file-facts
         methods must work without it.

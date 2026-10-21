@@ -56,6 +56,9 @@ CHUNK_SOURCE_TYPE_ROLE: dict[str, str] = {
     "cv": "cv",
     "web": "web",
     "grant": "grant",
+    # Interest seed papers: a private seed list never ships chunk vectors
+    # whose source_id would reveal which papers the person follows.
+    "seed_abstract": "seed_papers",
 }
 
 #: Directory prefixes (relative to the profile content root) that no export
@@ -323,6 +326,7 @@ _CHUNK_SOURCE_ARTIFACT: dict[str, tuple[str, str]] = {
     "paper_abstract": ("sources/papers.jsonld", "works"),
     "cv": ("sources/cv.md", "cv"),
     "grant": ("sources/grants.jsonld", "grants"),
+    "seed_abstract": ("sources/seed_papers.jsonld", "seed_papers"),
 }
 
 

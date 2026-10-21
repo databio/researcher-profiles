@@ -63,15 +63,23 @@ from ..errors import (
     ProfileWriteError,
 )
 from ..schema import (
+    SEED_PAPERS_MAX,
     ArtifactRef,
     GrantRecord,
     PaperRecord,
     ProfileDocument,
+    SeedPaperRecord,
     TrialRecord,
+    normalize_doi,
     orcid_of,
 )
 from ..schema.jsonld import canonical_dumps
-from .storage import CLINICAL_EXPERTISE_URL, ArtifactStorage, DirectoryArtifactStorage
+from .storage import (
+    CLINICAL_EXPERTISE_URL,
+    SEED_PAPERS_URL,
+    ArtifactStorage,
+    DirectoryArtifactStorage,
+)
 from .write_unit import WriteContext, WriteHook, WriteUnit
 
 __all__ = [
@@ -113,6 +121,7 @@ class ResearcherProfile:
         self._papers: Any = UNSET
         self._grants: Any = UNSET
         self._trials: Any = UNSET
+        self._seed_papers: Any = UNSET
         self._citations: Any = UNSET
         self._summaries: Any = UNSET
 
@@ -486,6 +495,16 @@ class ResearcherProfile:
         return self._cached("_trials", self._storage.load_trials)
 
     @property
+    def seed_papers(self) -> list[SeedPaperRecord]:
+        """Interest seed papers from ``sources/seed_papers.jsonld``; empty when absent.
+
+        Papers that define the person's interests, never works they wrote:
+        they feed the interest signal (index, centroid, feed, matching) and
+        nothing that lists or synthesizes the person's own work.
+        """
+        return self._cached("_seed_papers", self._storage.load_seed_papers)
+
+    @property
     def clinical_expertise(self) -> str:
         """``personality/clinical_expertise.md``; ``""`` when absent."""
         return self._storage.artifact_text(CLINICAL_EXPERTISE_URL) or ""
@@ -682,10 +701,22 @@ class ResearcherProfile:
 
         Returns the re-parsed :class:`ProfileDocument`.
         """
+        candidate = self.metadata if doc is None else doc
+        previous, raw, reparsed = self._prepare_document(candidate)
+        with self.write_unit("document") as ctx:
+            self._write_document(previous, raw, reparsed)
+            self._storage.refresh_derived(ctx)
+            self._run_pre_commit_hooks(ctx)
+        return reparsed
+
+    def _prepare_document(self, candidate: ProfileDocument) -> tuple[dict, str, ProfileDocument]:
+        """``(previous, raw, reparsed)``: dump, stamp, canonicalize, re-validate.
+
+        A document that would fail to load raises here and never reaches the store.
+        """
         from ..schema import strip_registry_issued_from_document
         from ..utils.date_modified import stamp_date_modified
 
-        candidate = self.metadata if doc is None else doc
         # Registry-issued proofs are computed when served, never stored.
         # Stripping here keeps the cached document identical to the stored one.
         data = strip_registry_issued_from_document(
@@ -702,15 +733,14 @@ class ResearcherProfile:
                 f"refusing to persist an invalid profile document: {e}",
                 e,
             ) from e
+        return previous, raw, reparsed
 
-        with self.write_unit("document") as ctx:
-            if previous:
-                self._writes.register_compensation(lambda: self._storage.save_document(previous))
-            self._storage.save_document(json.loads(raw))
-            self._storage.refresh_derived(ctx)
-            self._run_pre_commit_hooks(ctx)
-            self._writes.defer_cache_update("_metadata", reparsed)
-        return reparsed
+    def _write_document(self, previous: dict, raw: str, reparsed: ProfileDocument) -> None:
+        """Persist a prepared document inside the open write unit."""
+        if previous:
+            self._writes.register_compensation(lambda: self._storage.save_document(previous))
+        self._storage.save_document(json.loads(raw))
+        self._writes.defer_cache_update("_metadata", reparsed)
 
     def save_expertise(self, text: str | None = None) -> None:
         """Persist the expertise narrative; ``None`` persists what is in memory."""
@@ -736,6 +766,90 @@ class ResearcherProfile:
         """Persist the clinical trials; ``None`` persists what is in memory."""
         value = self.trials if trials is None else trials
         self._persist_artifact("trials", value, self._storage.save_trials, "_trials")
+
+    def save_seed_papers(self, seeds: list[SeedPaperRecord] | None = None) -> None:
+        """Persist the interest seed papers; ``None`` persists what is in memory.
+
+        Also records the ``seed_papers`` manifest entry in the document when it
+        is missing (one write unit), so the part has a tier the owner can
+        change and a push keeps it on every backend.
+        """
+        value = self.seed_papers if seeds is None else seeds
+        prepared = self._with_manifest_entry(
+            SEED_PAPERS_URL, role="seed_papers", name="Interest seed papers"
+        )
+        with self.write_unit("seed_papers") as ctx:
+            self._storage.save_seed_papers(value)
+            if prepared is not None:
+                self._write_document(*prepared)
+            self._storage.refresh_derived(ctx)
+            self._run_pre_commit_hooks(ctx)
+            self._writes.defer_cache_update("_seed_papers", value)
+
+    def _with_manifest_entry(
+        self, content_url: str, *, role: str, name: str
+    ) -> tuple[dict, str, ProfileDocument] | None:
+        """The prepared document with a ``hasPart`` entry for ``content_url``, or ``None``.
+
+        ``None`` when the document already lists it.
+        """
+        md = self.metadata
+        if any(p.content_url == content_url for p in (*md.has_part, *md.subject_of)):
+            return None
+        entry = ArtifactRef(
+            type_="Collection",
+            name=name,
+            encoding_format="application/ld+json",
+            content_url=content_url,
+            role=role,
+        )
+        return self._prepare_document(md.model_copy(update={"has_part": [*md.has_part, entry]}))
+
+    def add_seed_papers(
+        self, records: list[SeedPaperRecord]
+    ) -> tuple[list[SeedPaperRecord], list[tuple[SeedPaperRecord, str]]]:
+        """Append new seeds and persist them in one write unit.
+
+        Returns ``(added, skipped)``. Each skipped record carries its reason:
+        ``already_seed`` (same ``seed_id``, OpenAlex id or DOI as a seed),
+        ``already_authored`` (an authored paper has that OpenAlex id or DOI),
+        or ``over_cap`` (the list already holds :data:`SEED_PAPERS_MAX`).
+        Nothing is written when nothing is added.
+        """
+        seeds = list(self.seed_papers)
+        seed_keys: set[str] = set()
+        for s in seeds:
+            seed_keys |= _work_keys(s.openalex_id, s.doi)
+        authored_keys: set[str] = set()
+        for p in self.papers:
+            authored_keys |= _work_keys(p.openalex_id, p.doi)
+
+        added: list[SeedPaperRecord] = []
+        skipped: list[tuple[SeedPaperRecord, str]] = []
+        for rec in records:
+            keys = _work_keys(rec.openalex_id, rec.doi)
+            if keys & authored_keys:
+                skipped.append((rec, "already_authored"))
+            elif keys & seed_keys:
+                skipped.append((rec, "already_seed"))
+            elif len(seeds) >= SEED_PAPERS_MAX:
+                skipped.append((rec, "over_cap"))
+            else:
+                seeds.append(rec)
+                seed_keys |= keys
+                added.append(rec)
+        if added:
+            self.save_seed_papers(seeds)
+        return added, skipped
+
+    def remove_seed_paper(self, seed_id: str) -> bool:
+        """Drop one seed by :attr:`SeedPaperRecord.seed_id`. ``False`` when absent."""
+        seeds = list(self.seed_papers)
+        keep = [s for s in seeds if s.seed_id != seed_id]
+        if len(keep) == len(seeds):
+            return False
+        self.save_seed_papers(keep)
+        return True
 
     def save_clinical_expertise(self, text: str) -> None:
         """Persist ``personality/clinical_expertise.md``."""
@@ -832,6 +946,7 @@ class ResearcherProfile:
         self._papers = UNSET
         self._grants = UNSET
         self._trials = UNSET
+        self._seed_papers = UNSET
         self._citations = UNSET
         self._summaries = UNSET
         backend_refresh = getattr(self._storage, "refresh", None)
@@ -859,3 +974,16 @@ class ResearcherProfile:
 
     def __hash__(self) -> int:
         return hash(self._identity())
+
+
+def _work_keys(openalex_id: str | None, doi: str | None) -> set[str]:
+    """Comparable identity keys for one work: bare OpenAlex id and lowercased DOI."""
+    keys: set[str] = set()
+    if openalex_id:
+        bare = str(openalex_id).strip().rstrip("/").rsplit("/", 1)[-1]
+        if bare:
+            keys.add("oa:" + bare.upper())
+    d = normalize_doi(doi) if doi else None
+    if d:
+        keys.add("doi:" + d.lower())
+    return keys
