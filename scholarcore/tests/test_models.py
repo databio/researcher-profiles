@@ -141,18 +141,27 @@ def test_person_ref_accepts_a_freshly_minted_local_rid():
     assert PersonRef.model_validate({"rid": minted}).rid == minted
 
 
-def test_paper_normalizes_doi_and_pmid_on_load():
+def test_paper_normalizes_identifiers_on_load():
     paper = Paper.model_validate(
-        {"title": "T", "doi": "https://doi.org/10.1234/AB", "pmid": "pmid:99"}
+        {
+            "title": "T",
+            "doi": "https://doi.org/10.1234/AB",
+            "pmid": "pmid:99",
+            "pmcid": "pmc9",
+            "arxiv_id": "arXiv:2401.1v2",
+        }
     )
     # Case is preserved on load; join keys compare with .lower().
     assert paper.doi == "10.1234/AB"
     assert paper.pmid == "99"
+    assert paper.pmcid == "PMC9"
+    assert paper.arxiv_id == "2401.1"
     assert Paper.model_validate(paper.model_dump(mode="json")) == paper
 
 
 def test_paper_pmid_carrying_no_digits_loads_as_none_rather_than_raising():
     assert Paper.model_validate({"title": "T", "pmid": "not-a-number"}).pmid is None
+    assert Paper.model_validate({"title": "T", "pmcid": "PMC12x"}).pmcid is None
 
 
 def test_papers_pasted_in_different_forms_share_one_join_key():

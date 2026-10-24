@@ -62,12 +62,25 @@ http://dx.doi.org/10.1101/gr.example
 doi:10.1101/gr.example
 ```
 
-`Paper.doi` normalizes on load, with any resolver prefix and scheme stripped, so
-those forms collapse to one written form. Case is preserved: some sources
-(OpenAlex among them) carry the publisher's original case, and consumers
-depend on it. DOIs are case-insensitive, so compare with `.lower()`, or call
-`normalize_doi(value, lowercase=True)`, when using one as a join key. PMIDs
-normalize the same way, to bare digits.
+`Paper.doi` normalizes on load, with any resolver prefix (with or without a
+scheme, so a bare `doi.org/` too), a `doi:` label after it, and a leading `/`
+stripped, so those forms collapse to one written form. Case is preserved: some
+sources (OpenAlex among them) carry the publisher's original case, and
+consumers depend on it. DOIs are case-insensitive, so compare with `.lower()`,
+or call `normalize_doi(value, lowercase=True)`, when using one as a join key.
+`lowercase=True` is the join key; downstream kernels (paperkit, lumenoia's
+`*_norm` columns) call it that way.
+
+The other paper identifiers normalize on load too:
+
+| Field | Canonical form | Example |
+|---|---|---|
+| `pmid` | bare digits, leading zeros kept | `pmid:0034416909` -> `0034416909` |
+| `pmcid` | `PMC<digits>`, uppercase, a `PMCID:` label and doubled `PMC` dropped, zeros kept | `pmcid:pmc9` -> `PMC9` |
+| `arxiv_id` | lowercase, `arxiv:` label, trailing `/` and version dropped | `arXiv:2401.12345v2` -> `2401.12345` |
+
+A value with stray characters (`PMID: 12,345`, `PMC123x`) fails closed: it
+loads as `None` rather than as the digits that survive a scrub.
 
 Normalization happens in the model rather than in each consumer because a join
 key that every caller has to remember to normalize is a join key that

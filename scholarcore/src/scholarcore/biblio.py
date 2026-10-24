@@ -11,7 +11,7 @@ from pydantic import field_validator
 
 from .affil import Affiliation
 from .base import ResearchOutput, ScholarModel
-from .identity import normalize_doi, normalize_pmid
+from .identity import normalize_arxiv_id, normalize_doi, normalize_pmcid, normalize_pmid
 from .person import PersonRef
 
 
@@ -106,9 +106,13 @@ class Paper(ResearchOutput):
         pmid: The work's PMID, normalized on load (bare digits, prefix
             stripped). A value carrying no digits loads as None rather than
             raising. See :func:`scholarcore.identity.normalize_pmid`.
-        pmcid: The PubMed Central id.
+        pmcid: The PubMed Central id, normalized on load to ``PMC<digits>``.
+            A value that is not one loads as None. See
+            :func:`scholarcore.identity.normalize_pmcid`.
         openalex_id: The OpenAlex work id.
-        arxiv_id: The arXiv id.
+        arxiv_id: The arXiv id, normalized on load (lowercase, ``arxiv:``
+            label and version dropped). See
+            :func:`scholarcore.identity.normalize_arxiv_id`.
         abstract: The work's abstract.
     """
 
@@ -134,3 +138,15 @@ class Paper(ResearchOutput):
     def _normalize_pmid(cls, v: Any) -> Any:
         """Normalize on load, mirroring ``doi``. Non-numeric input loads as None."""
         return normalize_pmid(v)
+
+    @field_validator("pmcid", mode="before")
+    @classmethod
+    def _normalize_pmcid(cls, v: Any) -> Any:
+        """Normalize on load, mirroring ``pmid``. A malformed id loads as None."""
+        return normalize_pmcid(v)
+
+    @field_validator("arxiv_id", mode="before")
+    @classmethod
+    def _normalize_arxiv_id(cls, v: Any) -> Any:
+        """Normalize on load, mirroring ``pmid``. An empty id loads as None."""
+        return normalize_arxiv_id(v)

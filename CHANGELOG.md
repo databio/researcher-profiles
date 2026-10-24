@@ -7,6 +7,18 @@ specification are tracked in `docs/rp-spec/CHANGELOG.md`.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the parts follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### scholarcore
+
+scholarcore 0.1.0 -> 0.2.0.
+
+- `normalize_pmcid` and `normalize_arxiv_id`, exported from `scholarcore`
+- `normalize_doi` strips a bare `doi.org/` or `dx.doi.org/` prefix, a `doi:`
+  label after a URL prefix, and a leading slash
+- `Paper` normalizes `pmcid` and `arxiv_id` on load; a malformed PMCID loads
+  as `None`
+
 ## [0.2.0] - 2026-10-12
 
 Releases `rp-sdk` 0.2.0, `rp-browser` 0.2.0, and `rp-ui-lib` 0.2.0, matching
