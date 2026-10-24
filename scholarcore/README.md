@@ -47,7 +47,9 @@ lookup, not an import cost.
 - Normalized DOI: a paper's identity, with any `doi.org/` resolver prefix and
   scheme stripped. Case is preserved, because some sources (OpenAlex among
   them) carry the publisher's original case; DOIs are case-insensitive, so
-  compare with `.lower()` when joining. See `normalize_doi()`.
+  compare with `.lower()` when joining. See `normalize_doi()`. PMID, PMCID
+  and arXiv id have normalizers too (`normalize_pmid()`, `normalize_pmcid()`,
+  `normalize_arxiv_id()`), and `Paper` applies all four on load.
 - `application_id`: an award's identity, assigned by whatever external
   system of record tracks the application.
 - `opportunity_number`: a funding opportunity's identity, assigned by

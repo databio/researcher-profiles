@@ -6,7 +6,9 @@ from scholarcore.identity import (
     is_local,
     is_rid,
     mint_local_rid,
+    normalize_arxiv_id,
     normalize_doi,
+    normalize_pmcid,
     normalize_pmid,
     orcid_of,
     validate_rid,
@@ -123,6 +125,9 @@ def test_mint_local_rid_is_unique_across_calls():
         ("  10.1234/example.doi  ", "10.1234/example.doi"),
         ("10.1234/doi.org/x", "10.1234/doi.org/x"),  # only a LEADING prefix is stripped
         ("https://doi.org/", None),  # a prefix with nothing after it
+        ("doi.org/10.1/X", "10.1/X"),  # a bare resolver prefix, no scheme
+        ("https://doi.org/doi:10.1/x", "10.1/x"),  # a label after the resolver
+        ("doi:/10.1/x", "10.1/x"),  # a leading slash after the label
         ("   ", None),
         (None, None),
         ("", None),
@@ -137,6 +142,10 @@ def test_normalize_doi_lowercase_option():
     """The lowercase option is for deduplication where case should be ignored."""
     assert normalize_doi("10.1234/EXAMPLE.DOI", lowercase=True) == "10.1234/example.doi"
     assert normalize_doi("https://doi.org/10.1234/MixedCase", lowercase=True) == "10.1234/mixedcase"
+    assert (
+        normalize_doi("https://doi.org/10.1038/Nature12373", lowercase=True)
+        == "10.1038/nature12373"
+    )
 
 
 @pytest.mark.parametrize(
@@ -151,6 +160,8 @@ def test_normalize_doi_lowercase_option():
         (0, "0"),  # falsy, but a real value
         ("PMC1234567", None),  # a PMCID is not a PMID
         ("12345678.0", None),  # not all digits
+        ("0034416909", "0034416909"),  # leading zeros kept: padding is a defect, not an alias
+        ("PMID: 12,345", None),  # stray characters fail closed, never scrubbed
         ("not-a-number", None),
         (None, None),
         ("", None),
@@ -159,3 +170,39 @@ def test_normalize_doi_lowercase_option():
 def test_normalize_pmid(raw, expected):
     assert normalize_pmid(raw) == expected
     assert normalize_pmid(expected) == expected, "normalization must be idempotent"
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("PMCID:PMC9", "PMC9"),
+        ("PMCID: PMC123", "PMC123"),
+        ("PMCPMC9999", "PMC9999"),  # repeated prefix collapsed
+        ("pmc0001234", "PMC0001234"),  # leading zeros kept
+        ("123456", "PMC123456"),
+        ("PMC123x", None),  # stray characters fail closed
+        ("PMC", None),
+        (None, None),
+        ("", None),
+    ],
+)
+def test_normalize_pmcid(raw, expected):
+    assert normalize_pmcid(raw) == expected
+    assert normalize_pmcid(expected) == expected, "normalization must be idempotent"
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("arXiv:2401.12345v2", "2401.12345"),
+        ("  2401.12345V1 ", "2401.12345"),
+        ("hep-th/9901001v2", "hep-th/9901001"),
+        ("2401.00001/", "2401.00001"),
+        ("2401.00001", "2401.00001"),
+        (None, None),
+        ("", None),
+    ],
+)
+def test_normalize_arxiv_id(raw, expected):
+    assert normalize_arxiv_id(raw) == expected
+    assert normalize_arxiv_id(expected) == expected, "normalization must be idempotent"

@@ -4,7 +4,8 @@ Each entity has exactly one join key:
 
 - Person: ``rid``, a canonical ORCID or an explicitly-prefixed
   ``local:`` id.
-- Paper: normalized DOI (primary) or PMID (secondary).
+- Paper: normalized DOI (primary) or PMID (secondary). PMCID and arXiv id
+  have normalizers too, for the downstream kernels that compare them.
 - Award: ``application_id`` (see :mod:`scholarcore.funding`).
 - Opportunity: ``opportunity_number`` (see :mod:`scholarcore.funding`).
 
@@ -25,8 +26,12 @@ _ORCID_RE = re.compile(r"^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$")
 #: with the ORCID namespace.
 LOCAL_RID_RE = re.compile(r"^local:[a-z0-9][a-z0-9-]*-[0-9a-f]{6}$")
 
-#: Prefixes a DOI is commonly pasted with. Stripped case-insensitively.
-_DOI_PREFIX_RE = re.compile(r"^(https?://(dx\.)?doi\.org/|doi:)", re.I)
+#: A resolver prefix a DOI is commonly pasted with, with or without a scheme.
+#: Stripped case-insensitively.
+_DOI_RESOLVER_RE = re.compile(r"^(https?://)?(dx\.)?doi\.org/", re.I)
+
+#: A ``doi:`` label, stripped case-insensitively after any resolver prefix.
+_DOI_LABEL_RE = re.compile(r"^doi:", re.I)
 
 #: Prefixes a PMID is commonly pasted with. Stripped case-insensitively.
 _PMID_PREFIX_RE = re.compile(r"^(https?://(www\.)?ncbi\.nlm\.nih\.gov/pubmed/|pmid:)", re.I)
@@ -149,21 +154,26 @@ def mint_local_rid(name: str) -> str:
 def normalize_doi(value: str | None, *, lowercase: bool = False) -> str | None:
     """Return the bare DOI carried by ``value``, or None.
 
-    Strips surrounding whitespace and a pasted resolver prefix
-    (``https://doi.org/``, ``http://dx.doi.org/``, ``doi:``).
+    Strips surrounding whitespace, one pasted resolver prefix
+    (``https://doi.org/``, ``http://dx.doi.org/``, or a bare ``doi.org/``),
+    then a ``doi:`` label, then any leading ``/``. Only a LEADING prefix is
+    stripped; a ``doi.org/`` inside the DOI is kept.
 
     Args:
         value: A raw DOI string, possibly with a resolver prefix.
         lowercase: If True, lowercase the DOI. Default is False to preserve
             case, since some systems (e.g. OpenAlex) preserve the original
-            case and consumers may depend on that.
+            case and consumers may depend on that. ``lowercase=True`` is the
+            join key: downstream kernels (paperkit, lumenoia's ``*_norm``
+            columns) call it that way.
 
     Returns:
         The normalized DOI (``10.xxxx/yyy``), or None if ``value`` is empty.
     """
     if not value:
         return None
-    doi = _DOI_PREFIX_RE.sub("", str(value).strip()).strip()
+    doi = _DOI_RESOLVER_RE.sub("", str(value).strip())
+    doi = _DOI_LABEL_RE.sub("", doi).lstrip("/").strip()
     if lowercase:
         doi = doi.lower()
     return doi or None
@@ -185,3 +195,51 @@ def normalize_pmid(value: str | int | None) -> str | None:
         return None
     pmid = _PMID_PREFIX_RE.sub("", str(value).strip()).strip()
     return pmid if pmid.isdigit() else None
+
+
+def normalize_pmcid(value: str | int | None) -> str | None:
+    """Return the PubMed Central id carried by ``value`` as ``PMC<digits>``, or None.
+
+    Uppercases, strips surrounding whitespace and a ``PMCID:`` label, and
+    collapses repeated leading ``PMC`` prefixes (``PMCPMC9999``). The rest
+    must be digits; leading zeros are kept, because a padded id is a data
+    defect to flag, not an alias.
+
+    Args:
+        value: A raw PMCID, with or without the ``PMC`` prefix.
+
+    Returns:
+        The normalized PMCID, or None if ``value`` is empty or is not
+        ``PMC`` followed by digits.
+    """
+    if value is None:
+        return None
+    pmcid = str(value).strip().upper()
+    if pmcid.startswith("PMCID:"):
+        pmcid = pmcid[len("PMCID:") :].strip()
+    while pmcid.startswith("PMC"):
+        pmcid = pmcid[3:].strip()
+    return f"PMC{pmcid}" if pmcid.isdigit() else None
+
+
+def normalize_arxiv_id(value: str | None) -> str | None:
+    """Return the versionless arXiv id carried by ``value``, or None.
+
+    Lowercases, strips surrounding whitespace, an ``arxiv:`` label, trailing
+    slashes, and a trailing version (``v1``, ``v2``), so every version of a
+    preprint is one id.
+
+    Args:
+        value: A raw arXiv id, new style (``2401.12345v2``) or old style
+            (``hep-th/9901001``).
+
+    Returns:
+        The normalized id, or None if ``value`` is empty.
+    """
+    if value is None:
+        return None
+    arxiv = str(value).strip().lower()
+    if arxiv.startswith("arxiv:"):
+        arxiv = arxiv[len("arxiv:") :]
+    arxiv = re.sub(r"v\d+$", "", arxiv.strip().rstrip("/")).strip()
+    return arxiv or None
