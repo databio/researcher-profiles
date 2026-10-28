@@ -113,17 +113,24 @@ mountApp(document.getElementById("root")!, {
 });
 ```
 
-`src/shell/slots.tsx` declares the six slots. Every one is empty by default,
-and empty is the standalone app:
+`src/slots.tsx` declares the slots. Every one is empty (or on) by default,
+and the defaults are the standalone app:
 
 | Slot | What it adds or replaces |
 |---|---|
-| `navExtras` | Extra links appended to the top nav. |
+| `brand` | The logo and app name at the left of the header. |
+| `nav` | The links at the left of the header (Browse, Validate, Skills). Style links with `navClass` from `AppLayout`. |
+| `navExtras` | Extra links beside About, on the right of the header. |
 | `headerRight` | The right-hand header cluster (identity, sign in, sign out). |
+| `showSources` | Whether Browse shows its sources sidebar (default on). |
 | `emptyScreen` | The zero-profile screen in Browse and the analysis views. |
+| `homeHero` | A logo and lede for the landing page. |
 | `homeActions` | The landing page's calls to action. |
+| `homeRedirect` | Where the landing page sends the visitor instead. |
 | `aboutNote` | A paragraph on the About page describing how this deployment is served. |
 | `profileTabs` | Extra tabs on a profile page, each with its own `enabled` predicate. |
+| `profileActions` | Controls in the profile header and on each Browse row (a Follow button, say). |
+| `aiExtra` | Extra content in a profile's "Use with your AI" panel. |
 
 `pageOf(pathname)` in `src/router.ts` returns `null` for any path this app does
 not serve, including a host's own routes, so mounting under a host never lights

@@ -27,7 +27,8 @@ import { EmbeddingsPanel } from "./EmbeddingsPanel";
 import { FilesPanel } from "./FilesPanel";
 import { InterestsPanel } from "./InterestsPanel";
 import { Copyable } from "./Copyable";
-import { useShellSlots } from "../slots";
+import { useShellSlots, type ProfileTabContext } from "../slots";
+import { CopyButton, talkToProfilePrompt } from "./Skills";
 import { Link, useSearchParams } from "react-router";
 import { navigate, buildPath, resolveProfileRef } from "../router";
 
@@ -240,6 +241,7 @@ export function ProfilePage({ url: urlProp, activeTab, onTabChange }: ProfilePag
         <div>
           <ProfileHeader metadata={detail.metadata} />
           {slots.profileActions?.(tabCtx)}
+          <UseWithAi ctx={tabCtx} />
 
           <div className="tab-bar mt-5 mb-6" role="tablist">
             {tabs.map((t) => (
@@ -315,5 +317,30 @@ export function ProfilePage({ url: urlProp, activeTab, onTabChange }: ProfilePag
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * A closed-by-default panel with the Skills page's "Talk to a profile" prompt,
+ * filled in with this profile, ready to paste into any AI assistant. A host
+ * adds to it through the `aiExtra` slot.
+ */
+export function UseWithAi({ ctx }: { ctx: ProfileTabContext }) {
+  const slots = useShellSlots();
+  const prompt = talkToProfilePrompt(ctx.url);
+  return (
+    <details className="ai-panel mt-4">
+      <summary className="ai-panel__summary">Use with your AI</summary>
+      <p className="text-subtle text-sm mb-2">
+        Paste this into Claude, ChatGPT or any AI assistant that can read web
+        pages. It will answer your questions as this researcher, citing their
+        papers.
+      </p>
+      <div className="skills-prompt-row">
+        <pre className="skills-prompt-box">{prompt}</pre>
+        <CopyButton text={prompt} />
+      </div>
+      {slots.aiExtra?.(ctx)}
+    </details>
   );
 }

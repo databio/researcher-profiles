@@ -1,8 +1,9 @@
 /**
  * The landing page: what a researcher profile is, before any sources. A host
- * can add a logo and lede (`homeHero`) and replace the calls to action.
+ * can add a logo and lede (`homeHero`), replace the calls to action, or send
+ * the visitor elsewhere (`homeRedirect`).
  */
-import { Link } from "react-router";
+import { Link, Navigate } from "react-router";
 import type { ReactNode } from "react";
 import { useShellSlots, type HomeAction } from "../slots";
 
@@ -35,6 +36,7 @@ function Cta({
 
 export function Home() {
   const slots = useShellSlots();
+  if (slots.homeRedirect) return <Navigate to={slots.homeRedirect} replace />;
 
   const actions: HomeAction[] = slots.homeActions ?? [
     { label: "Browse profiles", href: "/browse", primary: true },

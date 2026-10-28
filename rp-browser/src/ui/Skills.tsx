@@ -48,7 +48,15 @@ function skillUrl(path: string): string {
   return new URL(`skills/${path}`, document.baseURI).href;
 }
 
-function CopyButton({ text }: { text: string }) {
+/** The "Talk to a profile" prompt with one profile's base URL filled in. */
+export function talkToProfilePrompt(baseUrl: string): string {
+  const talk = SKILLS.find((s) => s.slug === "researcher-profile")!;
+  return talk.prompt
+    .replace("<SKILL_URL>", skillUrl(`${talk.slug}/SKILL.md`))
+    .replace("<profile base URL>", baseUrl);
+}
+
+export function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
   return (
     <button

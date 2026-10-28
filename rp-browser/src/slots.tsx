@@ -48,34 +48,50 @@ export interface HomeHero {
 export interface ShellSlots {
   /** Replaces the built-in logo and app name at the left of the header. */
   brand: ReactNode;
-  /** Extra links appended to the top nav. */
+  /** Extra links beside About, on the right of the header. */
   navExtras: ReactNode;
+  /**
+   * Replaces the built-in links at the left of the header (Browse, Validate,
+   * Skills); their routes stay either way. Style links with `navClass` from
+   * AppLayout.
+   */
+  nav: ReactNode | null;
   /** The right-hand header cluster (identity, sign in, sign out). */
   headerRight: ReactNode;
+  /** Show the Browse sources sidebar (source URLs, search tiers). */
+  showSources: boolean;
   /** Replaces the built-in zero-profile screen in Browse and the analysis views. */
   emptyScreen: ReactNode;
   /** A logo and lede for the landing page's hero. */
   homeHero: HomeHero | null;
   /** Replaces the landing page's calls to action. */
   homeActions: HomeAction[] | null;
+  /** Where the landing page sends a visitor instead (replacing history), or null to show it. */
+  homeRedirect: string | null;
   /** A paragraph on the About page describing how this deployment is served. */
   aboutNote: ReactNode;
   /** Extra tabs on the profile page. */
   profileTabs: ProfileTabSlot[];
   /** Controls a host renders in the profile header (for example a Follow button). */
   profileActions: ((ctx: ProfileTabContext) => ReactNode) | null;
+  /** Extra content at the end of the profile page's "Use with your AI" panel. */
+  aiExtra: ((ctx: ProfileTabContext) => ReactNode) | null;
 }
 
 const EMPTY: ShellSlots = {
   brand: null,
   navExtras: null,
+  nav: null,
   headerRight: null,
+  showSources: true,
   emptyScreen: null,
   homeHero: null,
   homeActions: null,
+  homeRedirect: null,
   aboutNote: null,
   profileTabs: [],
   profileActions: null,
+  aiExtra: null,
 };
 
 const Ctx = createContext<ShellSlots>(EMPTY);
