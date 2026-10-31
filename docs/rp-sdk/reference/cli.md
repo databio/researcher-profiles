@@ -900,7 +900,12 @@ ways:
   ([RFC 8628](https://www.rfc-editor.org/rfc/rfc8628)). `rp` picks this on its
   own over SSH (`SSH_CONNECTION` or `SSH_TTY` set), on Linux with no display
   (no `DISPLAY` or `WAYLAND_DISPLAY`), when it cannot open a browser, and when
-  the server offers no browser sign-in.
+  the server offers no browser sign-in, as long as the server offers a login
+  code (Prosopia does). Without one, `rp` prints the sign-in link instead and
+  waits for you to paste back the address the browser ends on.
+
+The login code is snapgate's shared OAuth client, vendored inside `rp-sdk`; it
+needs only the Python standard library.
 
 See [Command-line login](../../rp-spec/dynamic-api.md#142-command-line-login)
 for the wire protocol.
@@ -911,10 +916,10 @@ rp login [server] [--label NAME] [--device] [--no-browser] [--json]
 
 | Argument / flag | Default | Description |
 |---|---|---|
-| `server` | the server already logged in to | Server base URL, e.g. `https://profiles.example.org`. |
+| `server` | the server most recently logged in to | Server base URL, e.g. `https://profiles.example.org`. |
 | `--label NAME` | the machine's hostname | Name for this machine on the approval page and the server's Privacy page ("rp CLI on NAME"). |
 | `--device` | off (automatic over SSH or with no display) | Approve with a link and code on any device. |
-| `--no-browser` | off | Print the link only; do not open a browser. Without `--device`, open the link in a browser on this computer. |
+| `--no-browser` | off | Do not open a browser here. Open the printed link in a browser on any computer; when it ends on a page that does not load (`127.0.0.1`), paste that page's address back and press Enter. |
 | `--json` | off | Emit `{url, orcid, name}` as JSON. |
 
 ```console
@@ -939,16 +944,19 @@ logged in to https://profiles.example.org as Jane Doe; login stored in ~/.config
 ```
 
 The login is written to `~/.config/researcher-profiles/credentials.json` with
-mode `0600` (or under `$XDG_CONFIG_HOME` when that is set). It holds an access
-token that lives about an hour, a refresh token, when the access token
-expires, and the server it came from:
+mode `0600` (or under `$XDG_CONFIG_HOME` when that is set), one login per
+server. Each holds an access token that lives about an hour, a refresh token,
+when the access token expires, where to renew it, and who you are:
 
 ```json
-{"url": "https://profiles.example.org", "issuer": "https://profiles.example.org",
- "access_token": "rpa_...", "refresh_token": "rpr_...", "expires_at": 1767225600}
+{"version": 1, "logins": {"https://profiles.example.org": {
+  "server": "https://profiles.example.org", "issuer": "https://profiles.example.org",
+  "client_id": "rp-cli", "token_endpoint": "https://profiles.example.org/oauth/token",
+  "access_token": "rpa_...", "access_expires_at": 1767225600, "refresh_token": "rpr_...",
+  "extra": {"orcid": "0000-0002-1825-0097", "name": "Jane Doe"}, "ended_at": null}}}
 ```
 
-It is scoped to the one server it came from, and it can upload only the
+Each login is offered only to the server it came from, and it can upload only the
 profiles you own or edit. Commands renew the access token on their own when it
 has expired, and once more if the server answers `401`; each renewal saves the
 new refresh token (the server issues a new one every time) with an atomic
@@ -958,9 +966,8 @@ Once it is stored, [`push`](#push), `rp install`, `rp listr` and
 Privacy page as "rp CLI on <label>", where you can revoke it; logging in again
 from the same machine replaces the old one.
 
-A `credentials.json` written by an older `rp` holds a non-expiring `rpk_` key
-(`{"url": ..., "token": "rpk_..."}`). It keeps working, unchanged, until you
-run `rp login` again.
+A `credentials.json` written by an older `rp` is no longer read: commands say
+it is from an older version and to run `rp login`, which replaces it.
 
 A server that does not offer
 [command-line login](../../rp-spec/dynamic-api.md#142-command-line-login)
@@ -968,37 +975,37 @@ publishes no OAuth metadata (or none naming a device endpoint), and the
 command fails at once with
 `does not offer command-line login`. If you decline the request in the
 browser, or it expires before you approve it, the command stops and says so;
-run `rp login` again to start over. If the login later expires (90 days
-unused) or is revoked, commands fail with a `401` and say to run `rp login`
-again.
+run `rp login` again to start over. If the login later expires (unused too
+long) or is revoked, commands stop with one sentence, `rp: Your rp login for
+<server> has ended (signed out, revoked, or unused too long). Run rp login
+again.`, and the file keeps a note of when and why it ended.
 
 **Exit codes.** `0` ok · `1` the server refused, you declined, the request expired or timed out, or the server was unreachable
 · `2` no server URL was given and none is stored.
 
-Requires the `[client]` extra.
+Needs no extra. With the `[client]` extra, `rp` also asks the server who you
+are (`whoami`) and names you in the message.
 
 ---
 
 ## logout
 
-Sign out: revoke the stored login at the server
+Sign out: revoke a stored login at the server
 ([RFC 7009](https://www.rfc-editor.org/rfc/rfc7009) `revocation_endpoint`),
-then delete it. Takes no options.
+then delete it. With no argument, the server most recently logged in to.
 
 ```
-rp logout
+rp logout [server]
 ```
 
 ```console
 $ rp logout
-logged out; removed /home/jane/.config/researcher-profiles/credentials.json
+logged out of https://profiles.example.org; removed it from /home/jane/.config/researcher-profiles/credentials.json
 ```
 
-If the server cannot be reached, or offers no revocation endpoint, the file is
+If the server cannot be reached, or offers no revocation endpoint, the login is
 deleted anyway and `rp` says to revoke "rp CLI" on the server's Privacy page.
-A login from an older `rp` (an `rpk_` key) cannot be revoked from the command
-line; `rp logout` deletes it and reminds you to revoke the key on the Privacy
-page. Exits `0` whether or not a file was there; with nothing stored it prints
+Exits `0` whether or not a login was there; with nothing stored it prints
 `not logged in (nothing stored)`.
 
 ---

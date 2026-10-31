@@ -15,6 +15,25 @@ needs a server that registers the `rp-cli` client.
 
 ### rp-sdk
 
+rp-sdk 0.2.0 -> 0.3.0.
+
+- rp login uses snapgate's shared OAuth client (no httpx needed to log in).
+  Run `rp login` once; old credential files and `rpk_` login files are no
+  longer read. The client is vendored byte for byte at
+  `researcher_profiles/_vendor/snapgate_oauth_client` (MIT, standard library
+  only; re-vendor with `scripts/vendor-snapgate-oauth-client.sh`, `--check`
+  to compare). `credentials.json` keeps one login per server
+  (`{"version": 1, "logins": {...}}`), and a stored login is offered only to
+  its own server
+- A refresh that fails, or a login the server ended, is one plain error
+  (`rp: ...`, exit 1) instead of a note on stderr followed by a 401. An ended
+  login stays in the file with when and why it ended
+- `rp login --no-browser` prints the link and takes the address the browser
+  ends on, pasted at the terminal. `rp logout` takes an optional server
+- Removed: `Login`, `load_login`, `save_login`, `clear_login`,
+  `refresh_after_401`, `refresh_login`, `revoke_login`, `login`,
+  `prefer_device_flow` and the httpx login flow in
+  `researcher_profiles.cli.auth.credentials`
 - `rp login` finds its endpoints in the server's OAuth metadata
   (`/.well-known/oauth-authorization-server`, RFC 8414) instead of fixed
   `/api/auth/device` and `/api/auth/token` paths, and checks that the
@@ -31,13 +50,11 @@ needs a server that registers the `rp-cli` client.
   (`access_token`, `refresh_token`, `expires_at`, `issuer` in
   `credentials.json`, written atomically, mode 0600). Commands renew it when
   it has expired and once more on a 401, saving the rotated refresh token under
-  a file lock. A `credentials.json` from an older `rp` (`"token": "rpk_..."`)
-  keeps working unchanged until the next `rp login`
+  a file lock
 - `rp login` learns who you are from `whoami`; it no longer reads `orcid` or
   `name` from the token response
 - `rp logout` revokes the login at the server's `revocation_endpoint`
-  (RFC 7009) before deleting it. For an older `rpk_` login it says to revoke
-  the key on the Privacy page
+  (RFC 7009) before deleting it
 
 ### scholarcore
 

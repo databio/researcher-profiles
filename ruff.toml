@@ -15,6 +15,9 @@
 
 line-length = 100
 target-version = "py312"
+# Vendored byte for byte from snapgate (scripts/vendor-snapgate-oauth-client.sh):
+# never rewritten by this repo's rules (ARG, the py312 target).
+extend-exclude = ["rp-sdk/src/researcher_profiles/_vendor"]
 
 [lint]
 select = ["E", "F", "I", "ARG"]

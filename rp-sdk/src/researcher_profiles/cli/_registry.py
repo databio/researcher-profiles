@@ -93,22 +93,22 @@ def _registry_target(url_flag: str | None, token_flag: str | None) -> tuple[str 
     """``(url, token)`` for a registry command, where ``url`` may name several servers.
 
     ``RESEARCHER_PROFILES_REGISTRY_URL`` keeps its precedence over the stored
-    login for the URL; the stored key is offered only when the login's server
-    is among the registries actually being asked.
+    login for the URL; a stored login is offered only to its own server, the
+    first of the registries actually being asked that has one.
     """
     from ..client import REGISTRY_ENV_VAR, resolve_registries
-    from .auth.credentials import TOKEN_ENV_VAR, load_login, server_base, stored_token
+    from .auth.credentials import TOKEN_ENV_VAR, default_server, server_base, stored_token
 
-    login = load_login()
-    url = url_flag or os.environ.get(REGISTRY_ENV_VAR) or (login.url if login else None)
+    url = url_flag or os.environ.get(REGISTRY_ENV_VAR) or default_server()
     if token_flag:
         return url, token_flag
     env = os.environ.get(TOKEN_ENV_VAR) or None
     if env:
         return url, env
-    servers = {server_base(u) for u in resolve_registries(url)}
-    if login and login.url in servers:
-        return url, stored_token()
+    for server in dict.fromkeys(server_base(u) for u in resolve_registries(url)):
+        token = stored_token(server)
+        if token is not None:
+            return url, token
     return url, None
 
 

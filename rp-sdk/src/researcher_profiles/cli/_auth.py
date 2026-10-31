@@ -30,17 +30,18 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
         extra=(
             "Opens your browser to sign in (OAuth with PKCE, back to a one-time\n"
             "address on this computer). Over SSH, with no display, or with --device,\n"
-            "it prints a link and a code to approve on any device instead. The\n"
-            "login can push only the profiles you own or edit, renews itself, and\n"
-            f"is stored in {_CREDENTIALS_HINT}; rp push / install / listr / whoami\n"
-            "use it. With no argument, logs in again to the server already stored.\n"
+            "it prints a link and a code to approve on any device instead (when the\n"
+            "server offers one). The login can push only the profiles you own or\n"
+            f"edit, renews itself, and is stored in {_CREDENTIALS_HINT}, one per\n"
+            "server; rp push / install / listr / whoami use it for its own server.\n"
+            "With no argument, logs in again to the most recent server.\n"
         ),
     )
     p_login.add_argument(
         "server",
         nargs="?",
         default=None,
-        help="Server base URL (default: the server already logged in to)",
+        help="Server base URL (default: the server most recently logged in to)",
     )
     p_login.add_argument(
         "--label",
@@ -53,15 +54,25 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
         help="Use a login code to approve on another device (automatic over SSH)",
     )
     p_login.add_argument(
-        "--no-browser", action="store_true", help="Print the link only; do not open a browser"
+        "--no-browser",
+        action="store_true",
+        help="Do not open a browser here: open the printed link anywhere, then paste back "
+        "the address the browser ends on",
     )
     add_json(p_login, "Emit {url, orcid, name} as JSON")
 
-    add_subcommand(
+    p_logout = add_subcommand(
         sub,
         "logout",
         "Sign out: revoke the stored login at the server and forget it",
         "rp logout",
+        "rp logout https://profiles.example.org",
+    )
+    p_logout.add_argument(
+        "server",
+        nargs="?",
+        default=None,
+        help="Server base URL (default: the server most recently logged in to)",
     )
 
     p_whoami = add_subcommand(
@@ -78,10 +89,17 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
 
 def _cmd_login(args: argparse.Namespace) -> int:
     """Log in to a registry (loopback or device flow) and store the login."""
-    from .auth.credentials import LoginError, load_login, login, save_login, whoami
+    from .._vendor.snapgate_oauth_client import cli as oauth_cli
+    from .auth.credentials import (
+        LoginError,
+        _default_label,
+        cli_app,
+        credentials_path,
+        default_server,
+        server_base,
+    )
 
-    stored = load_login()
-    url = args.server or (stored.url if stored else None)
+    url = args.server or default_server()
     if not url:
         print(
             "no server URL given:\n  rp login https://profiles.example.org",
@@ -89,67 +107,54 @@ def _cmd_login(args: argparse.Namespace) -> int:
         )
         return EXIT_USAGE
     try:
-        result = login(
-            url,
-            label=args.label,
-            open_browser=not args.no_browser,
+        # Replaces any earlier login for this server; the old one is revoked
+        # only after this one succeeded.
+        cred = oauth_cli.login(
+            cli_app(),
+            server_base(url),
+            browser=not args.no_browser,
             device=True if args.device else None,
+            extra_params={"label": args.label or _default_label()},
         )
     except LoginError as e:
         print(f"login failed: {e}", file=sys.stderr)
         return EXIT_ERROR
-    path = save_login(result)
-    # The token response carries no identity; ask the server who this is.
-    try:
-        owner = whoami(result.url, result.access_token).get("owner") or {}
-    except LoginError:
-        owner = {}
+    # The token response carries no identity; login asked the server (whoami).
+    owner = cred.extra
     if args.as_json:
         print(
             json.dumps(
-                {"url": result.url, "orcid": owner.get("orcid"), "name": owner.get("name")},
+                {"url": cred.server, "orcid": owner.get("orcid"), "name": owner.get("name")},
                 indent=2,
             )
         )
         return EXIT_OK
     who = owner.get("name") or owner.get("orcid") or "you"
-    print(f"logged in to {result.url} as {who}; login stored in {path}", file=sys.stderr)
+    print(
+        f"logged in to {cred.server} as {who}; login stored in {credentials_path()}",
+        file=sys.stderr,
+    )
     print("Push your profile with:  rp push <profile-dir>", file=sys.stderr)
     return EXIT_OK
 
 
-def _cmd_logout(_args: argparse.Namespace) -> int:
-    """Revoke the stored login at the server, then delete it."""
-    from .auth.credentials import (
-        LoginError,
-        clear_login,
-        credentials_path,
-        load_login,
-        revoke_login,
-    )
+def _cmd_logout(args: argparse.Namespace) -> int:
+    """Revoke the stored login at the server, then forget it."""
+    from .._vendor.snapgate_oauth_client import cli as oauth_cli
+    from .auth.credentials import cli_app, credentials_path, default_server, server_base
 
-    stored = load_login()
-    if stored is not None:
-        if stored.refreshable:
-            try:
-                if not revoke_login(stored):
-                    print(
-                        f"note: {stored.url} did not confirm the sign-out; revoke "
-                        "'rp CLI' on its Privacy page if you need to",
-                        file=sys.stderr,
-                    )
-            except LoginError as e:
-                print(f"note: could not reach the server to sign out ({e})", file=sys.stderr)
-        else:
-            print(
-                f"note: this older login's key still works until you revoke it on "
-                f"{stored.url}'s Privacy page",
-                file=sys.stderr,
-            )
-    if clear_login():
-        print(f"logged out; removed {credentials_path()}")
-    else:
+    url = args.server or default_server()
+    if not url:
         print("not logged in (nothing stored)")
+        return EXIT_OK
+    url = server_base(url)
+    if not oauth_cli.logout(cli_app(), url):
+        print(
+            f"note: {url} did not confirm the sign-out; revoke 'rp CLI' on its Privacy "
+            "page if you need to",
+            file=sys.stderr,
+        )
+    print(f"logged out of {url}; removed it from {credentials_path()}")
     return EXIT_OK
 
 
