@@ -6,7 +6,7 @@ these tables through ``ArtifactStorage``. They cover the whole record plus
 
 The tables:
 
-- :class:`ProfileRow`        -> ``rp_profiles``        (PK: ``rid``)
+- :class:`ProfileRow`        -> ``rp_profiles``        (PK: ``profile_id``)
 - :class:`PaperRow`          -> ``rp_papers``          (one row per work)
 - :class:`GrantRow`          -> ``rp_grants``          (one row per award)
 - :class:`ExpertiseTopicRow` -> ``rp_expertise_topics``(one row per label)
@@ -14,15 +14,31 @@ The tables:
 - :class:`ChunkVectorRow`    -> ``rp_chunk_vectors``   (one row per chunk vector)
 - :class:`ProfileVectorRow`  -> ``rp_profile_vectors`` (one row per profile vector)
 - :class:`BuildStateRow`     -> ``rp_build_state``     (not published; droppable)
-- :class:`RidAliasRow`       -> ``rp_rid_aliases``     (retired rid -> its successor)
+- :class:`RidAliasRow`       -> ``rp_rid_aliases``     (retired rid -> its successor rid)
+- :class:`SlugAliasRow`      -> ``rp_slug_aliases``    (retired slug -> a live record)
 
-Identity: ``rid``, not ``slug``
--------------------------------
+Identity: ``profile_id``, ``rid`` and ``slug``
+----------------------------------------------
 
-``slug`` is a renameable display handle, so keying on it would make a rename a
-data migration. ``rid`` (a canonical ORCID or a ``local:`` id) is the stable
-identity; join on it. ``slug`` is unique per store, a store constraint and not
-an identity claim. Renaming touches zero child rows.
+Three names, three jobs:
+
+- ``profile_id`` is the record key: an integer the store assigns. Every child
+  row joins on it. It never changes, through a rename, a rid change or a
+  replace.
+- ``rid`` (a canonical ORCID or a ``local:`` id) is the subject: who the
+  profile is about. It is not unique: a store may hold several records about
+  one person (one per owner, ``uq_rp_profiles_rid_owner``), and at most one of
+  them is that person's own (``is_self``, ``uq_rp_profiles_self_rid``).
+- ``slug`` is the unique display handle a URL says. Renaming touches zero child
+  rows, and the old slug keeps resolving through ``rp_slug_aliases``.
+
+Ownership
+---------
+
+``owner_kind`` / ``owner_principal_id`` / ``is_self`` say who owns a record,
+as an :class:`Ownership`. The SDK leaves them nullable (a standalone store has
+no principals); a host that has principals makes them NOT NULL in its own
+migration.
 
 Document of record + derived projections
 ----------------------------------------
@@ -54,10 +70,12 @@ import json
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Iterator, Optional
 
-from sqlalchemy import DateTime, LargeBinary, UniqueConstraint
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, LargeBinary, UniqueConstraint, false
+from sqlalchemy import text as sql_text
 from sqlmodel import JSON, Column, Field, SQLModel
 
 from ..schema.jsonld import canonical_dumps
+from .protocol import Ownership
 
 if TYPE_CHECKING:  # pragma: no cover
     from sqlalchemy.engine import Engine
@@ -67,16 +85,18 @@ if TYPE_CHECKING:  # pragma: no cover
 
 __all__ = [
     "DEFAULT_MANIFEST_SLOT",
-    "SLUG_ALIAS_PREFIX",
+    "IDENTITY_COLUMNS",
     "ArtifactRow",
     "BuildStateRow",
     "ChunkVectorRow",
     "ExpertiseTopicRow",
     "GrantRow",
+    "Ownership",
     "PaperRow",
     "ProfileRow",
     "ProfileVectorRow",
     "RidAliasRow",
+    "SlugAliasRow",
     "content_hash_for",
     "create_all",
     "get_engine",
@@ -113,19 +133,59 @@ def content_hash_for(document: dict, soul: str) -> str:
     return f"sha256:{h.hexdigest()}"
 
 
-class ProfileRow(SQLModel, table=True):
-    """A whole profile document. Primary key: ``rid``.
+#: The ``rp_profiles`` columns a content write never touches: the record key,
+#: the subject, the handle and the owner. :meth:`ProfileRow.take_content` copies
+#: every other column.
+IDENTITY_COLUMNS = ("profile_id", "rid", "slug", "owner_kind", "owner_principal_id", "is_self")
 
-    ``document`` is the record; every other column is a projection written
-    only by :meth:`from_document`.
+
+class ProfileRow(SQLModel, table=True):
+    """A whole profile document. Primary key: ``profile_id``.
+
+    ``document`` is the record; every other column except
+    :data:`IDENTITY_COLUMNS` is a projection written only by
+    :meth:`from_document`.
     """
 
     __tablename__ = "rp_profiles"
+    __table_args__ = (
+        # At most one self profile per person, and per owner.
+        Index(
+            "uq_rp_profiles_self_rid",
+            "rid",
+            unique=True,
+            postgresql_where=sql_text("is_self"),
+            sqlite_where=sql_text("is_self"),
+        ),
+        Index(
+            "uq_rp_profiles_self_owner",
+            "owner_principal_id",
+            unique=True,
+            postgresql_where=sql_text("is_self"),
+            sqlite_where=sql_text("is_self"),
+        ),
+        # One record per owner per person, so ``profile_owned_by`` is well defined.
+        UniqueConstraint(
+            "rid", "owner_kind", "owner_principal_id", name="uq_rp_profiles_rid_owner"
+        ),
+    )
 
-    #: The identity: a canonical ORCID or a ``local:`` id.
-    rid: str = Field(primary_key=True)
+    #: The record key, assigned by the store. Every child row joins on it.
+    profile_id: Optional[int] = Field(default=None, primary_key=True)
+    #: The subject: a canonical ORCID or a ``local:`` id. Not unique.
+    rid: str = Field(index=True)
     #: Display handle. Unique within this store, never an identity claim.
     slug: str = Field(index=True, unique=True)
+
+    # the owner (see :class:`Ownership`; NULL in a store with no principals)
+
+    #: ``'user'`` or ``'team'``, in the host's vocabulary.
+    owner_kind: Optional[str] = Field(default=None, index=True)
+    #: The owning principal's id, in the host's principal table.
+    owner_principal_id: Optional[int] = Field(default=None, index=True)
+    #: Whether this is the owner's own profile (about the owner). Only a
+    #: ``'user'`` owner can have one.
+    is_self: bool = Field(default=False, sa_column_kwargs={"server_default": false()})
 
     # the record
 
@@ -211,7 +271,10 @@ class ProfileRow(SQLModel, table=True):
     ) -> "ProfileRow":
         """The one writer of ``document`` and every projection derived from it.
 
-        ``meta`` supplies the identity and the projections; ``document`` is the
+        Sets no identity column (:data:`IDENTITY_COLUMNS`): the caller supplies
+        ``profile_id``, ``rid``, ``slug`` and the owner, or copies the result
+        onto a live row with :meth:`take_content`. ``slug`` only names the
+        profile in an error. ``meta`` supplies the projections; ``document`` is the
         exact serialized payload to store, defaulting to ``meta``'s canonical
         dump. Pass it explicitly when ingesting a profile whose stored bytes
         must survive verbatim. A nested node's un-pruned ``null`` is content,
@@ -228,14 +291,25 @@ class ProfileRow(SQLModel, table=True):
             slug,
         )
         return cls(
-            rid=meta.rid,
-            slug=slug,
             document=payload,
             content_hash=content_hash_for(payload, soul),
             **_scalar_projection(meta),
             **_json_projection(meta),
             **_career_stage_projection(meta),
         )
+
+    def take_content(self, fresh: "ProfileRow") -> None:
+        """Copy every column of ``fresh`` except :data:`IDENTITY_COLUMNS` onto this row."""
+        for name in type(self).model_fields:
+            if name not in IDENTITY_COLUMNS:
+                setattr(self, name, getattr(fresh, name))
+
+    @property
+    def owner(self) -> Optional[Ownership]:
+        """The row's owner, or ``None`` in a store with no principals."""
+        if self.owner_kind is None or self.owner_principal_id is None:
+            return None
+        return Ownership(self.owner_kind, self.owner_principal_id, bool(self.is_self))
 
 
 def _scalar_projection(meta: "ProfileDocument") -> dict:
@@ -321,10 +395,10 @@ class PaperRow(SQLModel, table=True):
     """
 
     __tablename__ = "rp_papers"
-    __table_args__ = (UniqueConstraint("profile_rid", "ordinal", name="uq_rp_papers_position"),)
+    __table_args__ = (UniqueConstraint("profile_id", "ordinal", name="uq_rp_papers_position"),)
 
     id: Optional[int] = Field(default=None, primary_key=True)
-    profile_rid: str = Field(foreign_key="rp_profiles.rid", index=True)
+    profile_id: int = Field(foreign_key="rp_profiles.profile_id", index=True)
     #: Position in the collection's ``hasPart``. Re-rendering ``papers.jsonld``
     #: from these rows reproduces the original array order.
     ordinal: int = Field(default=0, index=True)
@@ -355,10 +429,10 @@ class PaperRow(SQLModel, table=True):
     url: Optional[str] = None
 
     @classmethod
-    def from_record(cls, profile_rid: str, paper: "PaperRecord", *, ordinal: int) -> "PaperRow":
+    def from_record(cls, profile_id: int, paper: "PaperRecord", *, ordinal: int) -> "PaperRow":
         """Build a row from a :class:`~researcher_profiles.schema.PaperRecord`."""
         return cls(
-            profile_rid=profile_rid,
+            profile_id=profile_id,
             ordinal=ordinal,
             record=paper.model_dump(mode="json"),
             paper_id=paper.paper_id,
@@ -395,11 +469,11 @@ class GrantRow(SQLModel, table=True):
 
     __tablename__ = "rp_grants"
     __table_args__ = (
-        UniqueConstraint("profile_rid", "grant_id", name="uq_rp_grants_profile_grant"),
+        UniqueConstraint("profile_id", "grant_id", name="uq_rp_grants_profile_grant"),
     )
 
     id: Optional[int] = Field(default=None, primary_key=True)
-    profile_rid: str = Field(foreign_key="rp_profiles.rid", index=True)
+    profile_id: int = Field(foreign_key="rp_profiles.profile_id", index=True)
     ordinal: int = Field(default=0, index=True)
     #: The whole ``GrantRecord``. The source of truth for this award.
     record: dict = Field(default_factory=dict, sa_column=Column(JSON))
@@ -418,10 +492,10 @@ class GrantRow(SQLModel, table=True):
     url: Optional[str] = None
 
     @classmethod
-    def from_record(cls, profile_rid: str, grant: "GrantRecord", *, ordinal: int) -> "GrantRow":
+    def from_record(cls, profile_id: int, grant: "GrantRecord", *, ordinal: int) -> "GrantRow":
         """Build a row from a :class:`~researcher_profiles.schema.GrantRecord`."""
         return cls(
-            profile_rid=profile_rid,
+            profile_id=profile_id,
             ordinal=ordinal,
             record=grant.model_dump(mode="json"),
             grant_id=grant.id,
@@ -448,7 +522,7 @@ class ExpertiseTopicRow(SQLModel, table=True):
     __tablename__ = "rp_expertise_topics"
 
     id: Optional[int] = Field(default=None, primary_key=True)
-    profile_rid: str = Field(foreign_key="rp_profiles.rid", index=True)
+    profile_id: int = Field(foreign_key="rp_profiles.profile_id", index=True)
     ordinal: int = Field(default=0, index=True)
     topic: str
 
@@ -456,7 +530,7 @@ class ExpertiseTopicRow(SQLModel, table=True):
 class ArtifactRow(SQLModel, table=True):
     """One file the profile contains. ``rp_artifacts`` is the manifest.
 
-    Keyed ``(profile_rid, content_url)``, the manifest's own address space.
+    Keyed ``(profile_id, content_url)``, the manifest's own address space.
 
     The columns mirror :class:`~researcher_profiles.schema.ArtifactRef` one for
     one, except ``ArtifactRef.bytes`` is ``size_bytes`` here (``bytes`` cannot
@@ -474,11 +548,11 @@ class ArtifactRow(SQLModel, table=True):
 
     __tablename__ = "rp_artifacts"
     __table_args__ = (
-        UniqueConstraint("profile_rid", "content_url", name="uq_rp_artifacts_address"),
+        UniqueConstraint("profile_id", "content_url", name="uq_rp_artifacts_address"),
     )
 
     id: Optional[int] = Field(default=None, primary_key=True)
-    profile_rid: str = Field(foreign_key="rp_profiles.rid", index=True)
+    profile_id: int = Field(foreign_key="rp_profiles.profile_id", index=True)
     #: The relative path, exactly as ``ArtifactRef.contentUrl``.
     content_url: str = Field(index=True)
 
@@ -510,7 +584,7 @@ class ArtifactRow(SQLModel, table=True):
     @classmethod
     def from_part(
         cls,
-        profile_rid: str,
+        profile_id: int,
         part: "ArtifactRef",
         *,
         manifest_slot: str = DEFAULT_MANIFEST_SLOT,
@@ -522,7 +596,7 @@ class ArtifactRow(SQLModel, table=True):
     ) -> "ArtifactRow":
         """Build a row from one manifest entry plus its body."""
         return cls(
-            profile_rid=profile_rid,
+            profile_id=profile_id,
             content_url=part.content_url,
             manifest_slot=manifest_slot,
             ordinal=ordinal,
@@ -600,7 +674,7 @@ class ChunkVectorRow(SQLModel, table=True):
     __tablename__ = "rp_chunk_vectors"
     __table_args__ = (
         UniqueConstraint(
-            "profile_rid",
+            "profile_id",
             "source_type",
             "source_id",
             "chunk_index",
@@ -609,7 +683,7 @@ class ChunkVectorRow(SQLModel, table=True):
     )
 
     id: Optional[int] = Field(default=None, primary_key=True)
-    profile_rid: str = Field(foreign_key="rp_profiles.rid", index=True)
+    profile_id: int = Field(foreign_key="rp_profiles.profile_id", index=True)
 
     #: Blob order: ``source_type, source_id, chunk_index``, assigned at insert
     #: so a read can restore the published row order without re-sorting.
@@ -642,7 +716,7 @@ class ProfileVectorRow(SQLModel, table=True):
 
     __tablename__ = "rp_profile_vectors"
 
-    profile_rid: str = Field(primary_key=True, foreign_key="rp_profiles.rid")
+    profile_id: int = Field(primary_key=True, foreign_key="rp_profiles.profile_id")
     kind: str = Field(default="centroid", primary_key=True)
 
     dim: int = 0
@@ -663,37 +737,56 @@ class BuildStateRow(SQLModel, table=True):
 
     __tablename__ = "rp_build_state"
 
-    profile_rid: str = Field(primary_key=True, foreign_key="rp_profiles.rid")
+    profile_id: int = Field(
+        sa_column=Column(
+            Integer, ForeignKey("rp_profiles.profile_id"), primary_key=True, autoincrement=False
+        )
+    )
     #: ``BuildState``'s own private counter. Build-local; never published.
     schema_version: int = 0
     state: dict = Field(default_factory=dict, sa_column=Column(JSON))
 
 
-#: ``RidAliasRow.old_rid`` prefix of a slug-only alias (no retired rid).
-SLUG_ALIAS_PREFIX = "slug:"
-
-
 class RidAliasRow(SQLModel, table=True):
-    """A retired rid (and its old slug) that now resolves to a live successor.
+    """A retired person identity that now resolves to its successor rid.
 
-    Written only by :meth:`SqlProfileStore.merge_into`, in the transaction that
-    deletes the retired profile. Lookups fall back to this table. Chains are
-    one hop. ``old_slug`` stays reserved so a new profile cannot take a handle
-    that still redirects.
+    A ``local:`` rid folded into an ORCID, say. Written only by
+    :meth:`SqlProfileStore.merge_into`, in the transaction that moves every
+    record about the retired rid onto the successor. Chains are one hop.
 
-    No foreign key onto ``rp_profiles``: the retired rid is gone by design, and
-    the successor is checked at read time.
+    No foreign key: the retired rid is gone by design, and a rid is a person,
+    not a row.
     """
 
     __tablename__ = "rp_rid_aliases"
 
-    #: ``old_rid`` is the retired rid, or ``slug:<old_slug>`` for a slug-only
-    #: alias: a live survivor's former slug after a merge moved it to a new one
-    #: (see :data:`SLUG_ALIAS_PREFIX`). No real rid starts with ``slug:``.
-
     old_rid: str = Field(primary_key=True)
-    old_slug: Optional[str] = Field(default=None, unique=True)
     successor_rid: str = Field(index=True)
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+
+
+class SlugAliasRow(SQLModel, table=True):
+    """A retired handle that still redirects to a live record.
+
+    Written by :meth:`SqlProfileStore.rename` and
+    :meth:`SqlProfileStore.merge_into`. ``store.get(old_slug)`` follows it, and
+    a new profile cannot take it. Deleted with its record.
+    """
+
+    __tablename__ = "rp_slug_aliases"
+
+    old_slug: str = Field(primary_key=True)
+    profile_id: int = Field(
+        sa_column=Column(
+            Integer,
+            ForeignKey("rp_profiles.profile_id", ondelete="CASCADE"),
+            nullable=False,
+            index=True,
+        )
+    )
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc),
         sa_column=Column(DateTime(timezone=True), nullable=False),

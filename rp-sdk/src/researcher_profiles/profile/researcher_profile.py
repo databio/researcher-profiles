@@ -334,6 +334,15 @@ class ResearcherProfile:
         return self._slug
 
     @property
+    def profile_id(self) -> int | None:
+        """The store's record key, when the backing store has one (SQL).
+
+        A rid says who a profile is about; a store may hold several records
+        about one person. ``profile_id`` names this record.
+        """
+        return self._storage.profile_id
+
+    @property
     def rid(self) -> str:
         """The identity of this profile: a canonical ORCID or a ``local:`` id.
 
@@ -962,7 +971,7 @@ class ResearcherProfile:
     def _identity(self) -> str:
         """The opaque identity token two profiles are compared on.
 
-        ``storage.key``: ``file:/abs/path``, ``db:<url>#<rid>``,
+        ``storage.key``: ``file:/abs/path``, ``db:<url>#<profile_id>``,
         ``api:<base>/<slug>``, ``static:<base>``. Compared, never parsed.
         """
         return self._storage.key

@@ -97,15 +97,25 @@ class TestStoreProtocol:
         both_stores.evict("jane-doe")
         assert both_stores.get("jane-doe").name == jane_doe.name
 
-    @pytest.mark.parametrize("ref_attr", ["slug", "rid", "orcid"])
-    def test_any_handle_finds_the_profile(self, both_stores, jane_doe, ref_attr):
-        """An ORCID rid *is* its ORCID, so a bare ORCID needs no separate index."""
-        ref = "jane-doe" if ref_attr == "slug" else getattr(jane_doe, ref_attr)
-        assert both_stores.resolve_slug(ref) == "jane-doe"
-        assert both_stores.rid_for(ref) == jane_doe.rid
-        assert both_stores.get(ref).name == jane_doe.name
+    def test_a_slug_finds_the_profile(self, both_stores, jane_doe):
+        assert both_stores.resolve_slug("jane-doe") == "jane-doe"
+        assert both_stores.get("jane-doe").name == jane_doe.name
 
-    @pytest.mark.parametrize("method", ["resolve_slug", "rid_for", "get"])
+    def test_a_rid_is_not_a_ref(self, both_stores, jane_doe):
+        """A store may hold several records about one person, so a rid is looked up, not resolved."""
+        with pytest.raises(ProfileNotFoundError):
+            both_stores.get(jane_doe.rid)
+        (about,) = both_stores.profiles_about(jane_doe.rid)
+        assert (about.rid, about.slug) == (jane_doe.rid, "jane-doe")
+        assert both_stores.get(about.ref).name == jane_doe.name
+        assert both_stores.profiles_about("0000-0002-9999-999X") == []
+
+    def test_the_self_profile_for_a_rid(self, fs_store, jane_doe):
+        """A directory corpus has no owners: its one profile about a person is that person's own."""
+        assert fs_store.self_profile_for(jane_doe.rid).slug == "jane-doe"
+        assert fs_store.self_profile_for("0000-0002-9999-999X") is None
+
+    @pytest.mark.parametrize("method", ["resolve_slug", "get"])
     def test_a_miss_raises(self, both_stores, method):
         """KeyError for the API 404 path, ProfileError for hosts: one clause each."""
         with pytest.raises(ProfileNotFoundError) as e:
@@ -181,14 +191,16 @@ class TestStoreProtocol:
         assert both_stores.exists("new-person") is False
         assert both_stores.list_slugs() == ["jane-doe"]
 
-    @pytest.mark.parametrize(
-        "rid, slug",
-        [("local:other-c3d4e5", "jane-doe"), ("0000-0002-1825-0097", "somewhere-else")],
-        ids=["slug-taken", "rid-taken"],
-    )
-    def test_create_refuses_a_taken_slug_or_rid(self, both_stores, rid, slug):
+    def test_create_refuses_a_taken_slug(self, both_stores):
         with pytest.raises(ProfileWriteError):
-            both_stores.create(_new_document(rid, "Clash"), slug=slug)
+            both_stores.create(_new_document("local:other-c3d4e5", "Clash"), slug="jane-doe")
+
+    def test_a_store_without_owners_refuses_a_second_profile_about_one_rid(self, both_stores):
+        """One record per person in a directory corpus and in a SQL store with no owners;
+        SQL with owners allows one per owner (``test_db``)."""
+        with pytest.raises(ProfileWriteError):
+            both_stores.create(_new_document("0000-0002-1825-0097", "Clash"), slug="somewhere-else")
+        assert both_stores.list_slugs() == ["jane-doe"]
 
     def test_create_bundle_installs_every_artifact_in_one_unit(self, both_stores):
         """Document, persona docs and free artifacts land together: no half-assembled profile."""
@@ -465,8 +477,9 @@ class TestRegistryProofStrip:
         store = empty_sql_store
         store.create(self._doc(self.LOCAL), slug="lee")
         store.merge_into(
-            self.LOCAL,
+            "lee",
             self._staged(tmp_path),
+            survivor_ref=None,
             survivor_rid=ADA,
             survivor_slug="lee",
             build_missing_index=False,
@@ -585,8 +598,8 @@ def file_storage(jane_doe_dir):
 
 @pytest.fixture
 def sql_storage(empty_sql_store, jane_doe):
-    rid = empty_sql_store.put(jane_doe)
-    return SqlArtifactStorage(empty_sql_store, rid, slug="jane-doe")
+    profile_id = empty_sql_store.put(jane_doe)
+    return SqlArtifactStorage(empty_sql_store, profile_id, slug="jane-doe", rid=jane_doe.rid)
 
 
 @pytest.fixture
@@ -699,11 +712,12 @@ class TestVerbatimArtifactBodies:
 
         # The manifest is what an ingest walks, so regenerate it before the store can hold the body.
         ResearcherProfile.from_files(jane_doe_dir).build_manifest(write=True)
-        rid = empty_sql_store.put(ResearcherProfile.from_files(jane_doe_dir))
-        sql_storage = SqlArtifactStorage(empty_sql_store, rid, slug="jane-doe")
+        prof = ResearcherProfile.from_files(jane_doe_dir)
+        profile_id = empty_sql_store.put(prof)
+        sql_storage = SqlArtifactStorage(empty_sql_store, profile_id, slug="jane-doe", rid=prof.rid)
         assert sql_storage.artifact_text(rel) == self.LONE_CR
-        assert empty_sql_store.artifact_bytes(rid, rel) == self.LONE_CR.encode("utf-8")
-        out = empty_sql_store.export_directory(rid, tmp_path / "out")
+        assert empty_sql_store.artifact_bytes(profile_id, rel) == self.LONE_CR.encode("utf-8")
+        out = empty_sql_store.export_directory(profile_id, tmp_path / "out")
         assert (out / rel).read_bytes() == self.LONE_CR.encode("utf-8")
 
 
@@ -712,8 +726,9 @@ class TestIdentityLookup:
 
     @pytest.mark.parametrize("ref", ["jane-doe", "RID", "nobody"], ids=["slug", "rid", "miss"])
     def test_path_for(self, fs_store, jane_doe, ref):
+        """A slug names a directory; a rid does not (``profiles_about`` looks it up)."""
         ref = jane_doe.rid if ref == "RID" else ref
-        if ref == "nobody":
+        if ref in ("nobody", jane_doe.rid):
             with pytest.raises(ProfileNotFoundError):
                 fs_store.path_for(ref)
         else:
@@ -731,7 +746,7 @@ class TestIdentityLookup:
         assert path.stat().st_mtime_ns == before
 
     def test_a_rootless_store_has_no_lookup_file(self, sql_store):
-        """Not a degradation: ``rid_for`` is one indexed query and always current."""
+        """Not a degradation: ``profiles_about`` is one indexed query and always current."""
         assert sql_store.write_lookup_index() is None
 
 
@@ -755,10 +770,10 @@ class TestDuplicateIdentity:
     @pytest.mark.parametrize(
         "op, match",
         [
-            (lambda s, rid: s.get(rid), "RID"),
+            (lambda s, rid: s.profiles_about(rid), "RID"),
             (lambda s, rid: s.write_lookup_index(), None),
         ],
-        ids=["get", "write_lookup_index"],
+        ids=["profiles_about", "write_lookup_index"],
     )
     def test_a_duplicate_rid_raises(self, duplicated_root, jane_doe, op, match):
         store = FilesystemProfileStore(duplicated_root)
@@ -789,8 +804,8 @@ class TestStaleRegistryIndex:
         john = ResearcherProfile.from_files(root / "john-smith")
         _write_index(root, {jane_doe.rid: "jane-doe"})  # as left before john-smith arrived
         store = FilesystemProfileStore(root)
-        assert store.resolve_slug(john.rid) == "john-smith"
-        assert store.resolve_slug(jane_doe.rid) == "jane-doe"
+        assert [r.slug for r in store.profiles_about(john.rid)] == ["john-smith"]
+        assert [r.slug for r in store.profiles_about(jane_doe.rid)] == ["jane-doe"]
 
     def test_a_fresh_index_is_still_used(self, fixture_profiles_root, jane_doe):
         root = fixture_profiles_root("jane-doe")

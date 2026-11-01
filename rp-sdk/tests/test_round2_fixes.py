@@ -287,7 +287,12 @@ def merged_x_into_y(make_sql_store, tmp_path):
     for rid, slug in ((X, "x"), (Y, "y"), (A, "a"), (B, "b")):
         store.create(_doc(rid, slug), slug=slug)
     store.merge_into(
-        "x", _stage(tmp_path, Y, "y"), survivor_rid=Y, survivor_slug="y", build_missing_index=False
+        "x",
+        _stage(tmp_path, Y, "y"),
+        survivor_ref="y",
+        survivor_rid=Y,
+        survivor_slug="y",
+        build_missing_index=False,
     )
     return store
 
@@ -300,11 +305,12 @@ class TestMergeSlugs:
             merged_x_into_y.merge_into(
                 "a",
                 _stage(tmp_path, B, "b"),
+                survivor_ref="b",
                 survivor_rid=B,
                 survivor_slug="x",
                 build_missing_index=False,
             )
-        assert merged_x_into_y.rid_for("x") == Y
+        assert merged_x_into_y.get("x").rid == Y
         assert merged_x_into_y.get("b").rid == B
 
     def test_survivor_old_slug_stays_an_alias(self, merged_x_into_y, tmp_path):
@@ -312,20 +318,22 @@ class TestMergeSlugs:
         store.merge_into(
             "a",
             _stage(tmp_path, B, "b"),
+            survivor_ref="b",
             survivor_rid=B,
             survivor_slug="c",
             build_missing_index=False,
         )
         assert store.get("c").rid == B
-        assert store.rid_for("b") == B
-        assert store.rid_for("a") == B
-        assert store.rid_for("x") == Y
+        assert store.get("b").rid == B
+        assert store.get("a").rid == B
+        assert store.get("x").rid == Y
 
     def test_survivor_may_take_back_its_own_old_slug(self, merged_x_into_y, tmp_path):
         store = merged_x_into_y
         store.merge_into(
             "a",
             _stage(tmp_path, B, "b"),
+            survivor_ref="b",
             survivor_rid=B,
             survivor_slug="c",
             build_missing_index=False,
@@ -334,12 +342,13 @@ class TestMergeSlugs:
         store.merge_into(
             "d",
             _stage(tmp_path, B, "b"),
+            survivor_ref="c",
             survivor_rid=B,
             survivor_slug="b",
             build_missing_index=False,
         )
         assert store.get("b").rid == B
-        assert store.rid_for("c") == B
+        assert store.get("c").rid == B
 
 
 # ---------------------------------------------------------------------------

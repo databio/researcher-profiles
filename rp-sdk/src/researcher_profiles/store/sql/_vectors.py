@@ -52,7 +52,7 @@ _SOURCE_ERRORS = (OSError, KeyError, ValueError, CapabilityUnavailableError)
 # ---------------------------------------------------------------------------
 
 
-def shred_profile(rid: str, profile: "ResearcherProfile") -> list:
+def shred_profile(profile_id: int, profile: "ResearcherProfile") -> list:
     """Every vector row ``profile`` contributes, ready to ``session.add``.
 
     Returns the :class:`ChunkVectorRow` list followed by the profile's
@@ -64,7 +64,7 @@ def shred_profile(rid: str, profile: "ResearcherProfile") -> list:
     try:
         shredded = _from_sqlite(profile) or _from_flat(profile)
     except _SOURCE_ERRORS:
-        logger.debug("no vector rows shredded for rid=%s", rid, exc_info=True)
+        logger.debug("no vector rows shredded for profile_id=%s", profile_id, exc_info=True)
         return []
     if shredded is None:
         return []
@@ -76,7 +76,7 @@ def shred_profile(rid: str, profile: "ResearcherProfile") -> list:
 
     rows: list = [
         ChunkVectorRow(
-            profile_rid=rid,
+            profile_id=profile_id,
             ordinal=i,
             source_type=str(c["source_type"]),
             source_id=str(c["source_id"]),
@@ -92,7 +92,7 @@ def shred_profile(rid: str, profile: "ResearcherProfile") -> list:
     if centroid_vec is not None:
         rows.append(
             ProfileVectorRow(
-                profile_rid=rid,
+                profile_id=profile_id,
                 kind="centroid",
                 dim=dim,
                 backend_spec=backend_spec,
@@ -197,33 +197,35 @@ def _pack(vec) -> bytes:
 # ---------------------------------------------------------------------------
 
 
-def chunk_rows(s: Session, rid: str) -> list[ChunkVectorRow]:
+def chunk_rows(s: Session, profile_id: int) -> list[ChunkVectorRow]:
     """One profile's chunk vectors in blob order."""
     return list(
         s.exec(
             select(ChunkVectorRow)
-            .where(ChunkVectorRow.profile_rid == rid)
+            .where(ChunkVectorRow.profile_id == profile_id)
             .order_by(ChunkVectorRow.ordinal, ChunkVectorRow.id)
         ).all()
     )
 
 
-def has_vectors(s: Session, rid: str) -> bool:
-    """Whether ``rid`` has any chunk vector. One row, not a blob."""
+def has_vectors(s: Session, profile_id: int) -> bool:
+    """Whether ``profile_id`` has any chunk vector. One row, not a blob."""
     return (
-        s.exec(select(ChunkVectorRow.id).where(ChunkVectorRow.profile_rid == rid).limit(1)).first()
+        s.exec(
+            select(ChunkVectorRow.id).where(ChunkVectorRow.profile_id == profile_id).limit(1)
+        ).first()
         is not None
     )
 
 
-def flat_bytes(s: Session, rid: str) -> Optional[tuple[bytes, bytes, bytes]]:
-    """``(index_json, blob, chunks_json)`` for ``rid``, or ``None``.
+def flat_bytes(s: Session, profile_id: int) -> Optional[tuple[bytes, bytes, bytes]]:
+    """``(index_json, blob, chunks_json)`` for ``profile_id``, or ``None``.
 
     The stored ``embeddings/index.json`` is the metadata base when present
     (it carries the probe vector); ``dim``, ``count``, ``rows`` and ``sha256``
     are always recomputed from the rows.
     """
-    rows = chunk_rows(s, rid)
+    rows = chunk_rows(s, profile_id)
     if not rows:
         return None
 
@@ -235,14 +237,14 @@ def flat_bytes(s: Session, rid: str) -> Optional[tuple[bytes, bytes, bytes]]:
     expected = len(rows) * dim * 4
     if len(blob) != expected:  # pragma: no cover - a short row is a corrupt write
         raise ValueError(
-            f"profile {rid}: chunk vectors total {len(blob)} bytes, expected "
+            f"profile {profile_id}: chunk vectors total {len(blob)} bytes, expected "
             f"count*dim*4 ({expected}); a row was written at the wrong dim"
         )
 
     index: dict[str, Any] = {}
     stored = s.exec(
         select(ArtifactRow)
-        .where(ArtifactRow.profile_rid == rid)
+        .where(ArtifactRow.profile_id == profile_id)
         .where(ArtifactRow.content_url == FLAT_INDEX_URL)
     ).first()
     if stored is not None and stored.text:
@@ -285,9 +287,9 @@ def flat_bytes(s: Session, rid: str) -> Optional[tuple[bytes, bytes, bytes]]:
     )
 
 
-def centroid(s: Session, rid: str) -> "np.ndarray | None":
+def centroid(s: Session, profile_id: int) -> "np.ndarray | None":
     """One profile's stored centroid, or ``None`` when it has no vectors."""
-    row = s.get(ProfileVectorRow, (rid, "centroid"))
+    row = s.get(ProfileVectorRow, (profile_id, "centroid"))
     if row is None or not row.vector:
         return None
     return _unpack(row.vector)
@@ -303,7 +305,7 @@ def centroids_matrix(s: Session) -> "tuple[list[str], np.ndarray] | None":
     rows = list(
         s.exec(
             select(ProfileRow.slug, ProfileVectorRow)
-            .join(ProfileVectorRow, ProfileVectorRow.profile_rid == ProfileRow.rid)
+            .join(ProfileVectorRow, ProfileVectorRow.profile_id == ProfileRow.profile_id)
             .where(ProfileVectorRow.kind == "centroid")
             .order_by(ProfileRow.slug)
         ).all()

@@ -74,6 +74,28 @@ def _add_host(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--host", help="Host name in credentials.toml")
 
 
+def store_dir_for_ref(store, ref: str) -> Path:
+    """A slug's directory, else the one profile about a rid (``rp where``'s rule).
+
+    A rid is not a ref, so it goes through ``profiles_about``. Raises
+    ``ProfileNotFoundError`` when nothing matches, ``ValueError`` naming the
+    candidates when several profiles are about the rid.
+    """
+    from ..store import ProfileNotFoundError
+
+    try:
+        return store.path_for(ref)
+    except ProfileNotFoundError:
+        about = store.profiles_about(ref)
+        if len(about) == 1:
+            return store.path_for(about[0].slug)
+        if not about:
+            raise
+        raise ValueError(
+            f"{len(about)} profiles are about {ref}: {', '.join(r.slug for r in about)}"
+        ) from None
+
+
 def profile_dir_for_ref(ref: str, root: str | None) -> Path | None:
     """Resolve a rid or slug to a directory, the way ``rp where`` does.
 
@@ -88,7 +110,7 @@ def profile_dir_for_ref(ref: str, root: str | None) -> Path | None:
     if not the_root.is_dir():
         return None
     try:
-        return FilesystemProfileStore(the_root).path_for(ref)
+        return store_dir_for_ref(FilesystemProfileStore(the_root), ref)
     except (ProfileNotFoundError, ValueError, OSError):
         return None
 

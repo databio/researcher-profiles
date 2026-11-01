@@ -113,8 +113,11 @@ See the [CLI reference](cli.md) for the commands that read these.
 ### Profile discovery and slugs
 
 - The server is built over a [`ProfileStore`](python-api.md#profilestore-researcher_profilesstore), and
-  every lookup goes through `store.resolve_slug(ref)`. Every route that
-  takes a `{slug}` accepts a **rid** there too.
+  every lookup goes through `store.get(ref)`: a slug, a former slug, or (on
+  SQL) a `profile_id`. Every route that takes a `{slug}` also accepts a
+  **rid**: the host's `hooks.resolve_ref` says which record it means, and
+  with no hook a rid names the one record about that person (several, or
+  none, is a 404).
 - `FilesystemProfileStore` lists every direct subdirectory of its root that
   contains a `profile.jsonld`; the directory name becomes the slug. It loads
   profiles lazily via `ResearcherProfile.from_files(<dir>)` and holds them in an
@@ -159,7 +162,8 @@ curl -H "Authorization: Bearer $RESEARCHER_PROFILES_TOKEN" \
 A profile's display handle (for example `jane-doe`, `john-smith`): a directory
 name on a filesystem store, or the `rp_profiles.slug` column on a SQL one. Slugs
 are used verbatim in URL paths with no server-side normalization, and a **rid**
-is accepted anywhere a slug is (`store.resolve_slug` tries both).
+is accepted anywhere a slug is (see "Profile discovery and slugs" for which
+record it names).
 Path-traversal characters produce a 404 because the store's lookup finds no
 matching profile.
 
@@ -467,6 +471,7 @@ without a restart.
 | `spliced` | integer | Manifest entries the server added back for kept files the incoming manifest did not list. Nonzero means the pushed document's manifest was incomplete. |
 | `manifest_counts` | object | `{role: count}` over the manifest the server holds *after* the commit: what a reader can now fetch. |
 | `mode` | string | The push mode that was applied: `replace`, `merge`, or `prune`. |
+| `kept_owner_fields` | array \| null | Fields the host kept from the owner's hand edits instead of taking the pushed value (Prosopia does this for any pusher but the owner or a co-owner). `null` when the host does not protect owner edits. |
 
 ```bash
 tar -C /path/to/profiles/jane-doe -czf - . | curl -X PUT \

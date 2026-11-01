@@ -337,9 +337,10 @@ nothing is spliced and the incoming manifest stands alone.
 | `spliced` | integer | Manifest entries the server added back for kept files (see Manifest splicing). Nonzero means the uploaded `profile.jsonld` was not the whole index |
 | `manifest_counts` | object | `{role: count}` over the manifest the server holds after the commit (`other` for entries with no role): what the profile now contains, not what the upload offered |
 | `mode` | string | The `mode` the upload ran under |
+| `kept_owner_fields` | array \| null | Fields the server kept from the owner's hand edits instead of the pushed value; `null` when the server does not protect owner edits |
 
-The last four fields describe archive uploads; a JSON upload returns their
-defaults.
+`kept`, `spliced`, `manifest_counts` and `mode` describe archive uploads; a
+JSON upload returns their defaults.
 
 **Status codes:** `200`, `400` (validation failure), `401`, `403` (see
 below), `413` (size cap exceeded).

@@ -108,7 +108,7 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
             f"rp db pull {_EG_SLUG} --to ./pulled",
         )
     )
-    d_pull.add_argument("ref", help="A rid or a slug")
+    d_pull.add_argument("ref", help="A slug, or #<profile_id>")
     d_pull.add_argument("--to", default=None, help="Destination directory (default: ./<slug>)")
     d_pull.add_argument(
         "--with-build",
@@ -119,10 +119,20 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
 
     _db_common(add_subcommand(db_sub, "list", "List the profiles in the store", "rp db list"))
 
+    d_about = _db_common(
+        add_subcommand(
+            db_sub,
+            "about",
+            "List the records about one person (a rid)",
+            "rp db about 0000-0002-1825-0097",
+        )
+    )
+    d_about.add_argument("rid", help="An ORCID or a local: rid")
+
     d_rm = _db_common(
         add_subcommand(db_sub, "rm", "Delete a profile and every child row", f"rp db rm {_EG_SLUG}")
     )
-    d_rm.add_argument("ref", help="A rid or a slug")
+    d_rm.add_argument("ref", help="A slug, or #<profile_id>")
 
 
 def _cmd_graph(args: argparse.Namespace) -> int:
@@ -190,12 +200,14 @@ def _db_push(store, url: str, args: argparse.Namespace) -> int:
     for target in targets:
         try:
             prof = ResearcherProfile.from_files(target)
-            rid = store.put(prof, include_binary=args.include_binary)
+            profile_id = store.put(prof, include_binary=args.include_binary)
         except (ProfileError, FileNotFoundError, NotADirectoryError, OSError) as e:
             failed += 1
             print(f"rp db push: {target}: {e}", file=sys.stderr)
             continue
-        pushed.append({"slug": prof.slug, "rid": rid, "path": str(target)})
+        pushed.append(
+            {"slug": prof.slug, "rid": prof.rid, "profile_id": profile_id, "path": str(target)}
+        )
     if args.as_json:
         print(json.dumps({"database_url": url, "pushed": pushed, "failed": failed}, indent=2))
     else:
@@ -210,20 +222,25 @@ def _db_pull(store, url: str, args: argparse.Namespace) -> int:
     from ..store import ProfileNotFoundError
 
     try:
-        rid = store.rid_for(args.ref)
-        with store.session() as s:
-            from ..store.db import ProfileRow
-
-            row = s.get(ProfileRow, rid)
-            slug = row.slug if row is not None else rid
+        prof = store.get(args.ref)
+        rid, slug = prof.rid, prof.slug
         dest = Path(args.to) if args.to else Path(slug)
-        out = store.export_directory(rid, dest, with_build=args.with_build)
+        out = store.export_directory(prof.profile_id, dest, with_build=args.with_build)
     except ProfileNotFoundError as e:
         print(f"rp db pull: {e}", file=sys.stderr)
         return EXIT_USAGE
     if args.as_json:
         print(
-            json.dumps({"database_url": url, "rid": rid, "slug": slug, "path": str(out)}, indent=2)
+            json.dumps(
+                {
+                    "database_url": url,
+                    "rid": rid,
+                    "profile_id": prof.profile_id,
+                    "slug": slug,
+                    "path": str(out),
+                },
+                indent=2,
+            )
         )
     else:
         print(f"pulled {slug} ({rid}) from {url} -> {out}")
@@ -240,8 +257,12 @@ def _db_list(store, url: str, args: argparse.Namespace) -> int:
                     "database_url": url,
                     "profiles": [
                         {
+                            "profile_id": r.profile_id,
                             "rid": r.rid,
                             "slug": r.slug,
+                            "owner_kind": r.owner_kind,
+                            "owner_principal_id": r.owner_principal_id,
+                            "is_self": r.is_self,
                             "name": r.name,
                             "level": r.level,
                             "date_modified": r.date_modified,
@@ -257,6 +278,43 @@ def _db_list(store, url: str, args: argparse.Namespace) -> int:
         print(f"# {url}")
         for r in rows:
             print(f"{r.slug:<24} {r.rid:<24} {r.level:<6} {r.date_modified or '-':<26} {r.name}")
+    return EXIT_OK
+
+
+def _db_about(store, url: str, args: argparse.Namespace) -> int:
+    """List the records about one person, the self profile first."""
+    refs = store.profiles_about(args.rid)
+    if args.as_json:
+        print(
+            json.dumps(
+                {
+                    "database_url": url,
+                    "rid": args.rid,
+                    "profiles": [
+                        {
+                            "profile_id": r.profile_id,
+                            "rid": r.rid,
+                            "slug": r.slug,
+                            "owner": None
+                            if r.owner is None
+                            else {
+                                "kind": r.owner.kind,
+                                "principal_id": r.owner.principal_id,
+                                "is_self": r.owner.is_self,
+                            },
+                        }
+                        for r in refs
+                    ],
+                },
+                indent=2,
+            )
+        )
+    else:
+        print(f"# {url}: {len(refs)} profile(s) about {args.rid}")
+        for r in refs:
+            owner = "-" if r.owner is None else f"{r.owner.kind}:{r.owner.principal_id}"
+            mark = " (self)" if r.owner is not None and r.owner.is_self else ""
+            print(f"#{r.profile_id:<6} {r.slug:<24} {owner}{mark}")
     return EXIT_OK
 
 
@@ -282,6 +340,7 @@ _DB_HANDLERS: dict[str, Callable[..., int]] = {
     "push": _db_push,
     "pull": _db_pull,
     "list": _db_list,
+    "about": _db_about,
     "rm": _db_rm,
 }
 

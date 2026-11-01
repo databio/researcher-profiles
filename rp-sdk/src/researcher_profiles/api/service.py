@@ -40,7 +40,7 @@ from ..privacy import (
 )
 from ..profile.edit import EditError, WorkNotFoundError, paper_version
 from ..schema import PaperRecord, SeedPaperRecord, most_restrictive
-from ..store import ProfileNotFoundError, ProfileStore
+from ..store import DuplicateIdentityError, ProfileNotFoundError, ProfileStore
 from ..utils.paths import STORE_CACHE_DIRNAME
 from ._cursor import decode_cursor, encode_cursor
 from ._limits import BATCH_IDS_CAP, PAPERS_LIMIT, clamp
@@ -66,6 +66,22 @@ logger = logging.getLogger(__name__)
 def profile_missing(ref: str) -> NotFound:
     """The not-found for "no such profile" and for "not for you": the same sentence."""
     return NotFound(f"profile {ref!r} not found")
+
+
+def sole_record_about(store: ProfileStore, rid: str) -> Optional[Any]:
+    """The store ref of the one record about ``rid``, else ``None``.
+
+    The API's ref resolution when the host installs no ``hooks.resolve_ref``:
+    a pasted rid reaches a profile when exactly one record is about that
+    person. None, or several, is a miss (404). Several is not a 409: which
+    records exist is only told after the visibility check, per record, so an
+    ambiguous rid must not confirm that hidden records exist.
+    """
+    try:
+        about = store.profiles_about(rid)
+    except DuplicateIdentityError:  # a directory corpus with two records about one rid
+        return None
+    return about[0].ref if len(about) == 1 else None
 
 
 class Service:
@@ -158,14 +174,32 @@ class Service:
         _store, prof, viewer = self.read(caller, ref)
         return prof, viewer
 
+    def lookup(self, store: ProfileStore, ref: str) -> Any:
+        """The profile ``ref`` names in ``store``: the store's own lookup, then
+        the host's ``hooks.resolve_ref`` for a ref the store does not resolve
+        (a host maps a pasted rid to the record it means). With no hook, a
+        rid with exactly one record about it names that record
+        (:func:`sole_record_about`). Raises ``ProfileNotFoundError``.
+        """
+        try:
+            return store.get(ref)
+        except (ProfileNotFoundError, KeyError):
+            hook = self.hooks.resolve_ref
+            alt = hook(store, ref) if hook is not None else sole_record_about(store, ref)
+            if alt is None:
+                raise
+            return store.get(alt)
+
     def read(self, caller: Caller, ref: str) -> tuple[ProfileStore, Any, ViewerTier]:
         """:meth:`load_visible`, plus the store view the profile came from."""
         store = self.store_for(caller)
         try:
-            prof = store.get(ref)
+            prof = self.lookup(store, ref)
         except (ProfileNotFoundError, KeyError) as e:
             raise profile_missing(ref) from e
-        ok, viewer = self.visible(caller, prof, ref)
+        # The live slug, not the ref sent: a retired slug or a host-resolved
+        # ref (a rid) names the same record, and the tier is per record.
+        ok, viewer = self.visible(caller, prof, prof.slug)
         if not ok:
             raise profile_missing(ref)
         return store, prof, viewer
@@ -231,9 +265,7 @@ def _find_paper(prof, paper_id: str, ref: str) -> PaperRecord:
 def _text_of(store: ProfileStore, ref: str, content_url: str) -> str:
     """One artifact's stored text; a ``NotFound`` that says so when its body was never pushed."""
     try:
-        return store.artifact_bytes(store.resolve_slug(ref), content_url).decode(
-            "utf-8", errors="replace"
-        )
+        return store.artifact_bytes(ref, content_url).decode("utf-8", errors="replace")
     except (ProfileNotFoundError, KeyError) as e:
         raise NotFound(
             f"{content_url!r} is listed for {ref!r} but its content was not uploaded"
@@ -327,7 +359,7 @@ def get_summaries(service: Service, caller: Caller, ref: str, ids: str) -> Summa
     store, prof, viewer = service.read(caller, ref)
     wanted = split_ids(ids)
     taken, rest = wanted[:BATCH_IDS_CAP], wanted[BATCH_IDS_CAP:]
-    sizes = SizeIndex(prof, viewer, store, store.resolve_slug(ref))
+    sizes = SizeIndex(prof, viewer, store, prof.slug)
     summaries = prof.summaries
     out: dict[str, str] = {}
     unavailable: dict[str, str] = {}
@@ -344,7 +376,7 @@ def get_summaries(service: Service, caller: Caller, ref: str, ids: str) -> Summa
 
 def _document(service: Service, store: ProfileStore, prof: Any, viewer: ViewerTier, ref: str):
     try:
-        return served_document_bytes(service, store, prof, viewer, store.resolve_slug(ref))
+        return served_document_bytes(service, store, prof, viewer, prof.slug)
     except (ProfileNotFoundError, KeyError) as e:
         raise profile_missing(ref) from e
 
@@ -364,7 +396,7 @@ def get_artifact(
     hard floors (``.cache/``, ``.keys/``) are ``Forbidden`` for everyone.
     """
     store, prof, viewer = service.read(caller, ref)
-    resolved = store.resolve_slug(ref)
+    resolved = prof.slug
     if artifact == "profile.jsonld":
         return _document(service, store, prof, viewer, resolved), None, prof, viewer, None
     effective = effective_tiers(prof.metadata)
@@ -409,7 +441,7 @@ def list_papers(
     store, prof, viewer = service.read(caller, ref)
     if not _works_visible(prof, viewer):
         raise profile_missing(ref)
-    sizes = SizeIndex(prof, viewer, store, store.resolve_slug(ref))
+    sizes = SizeIndex(prof, viewer, store, prof.slug)
     papers = [p for p in prof.papers if p.paper_id]
 
     if ids is not None:
@@ -513,11 +545,11 @@ def get_paper(service: Service, caller: Caller, ref: str, paper_id: str, *, view
     if not _works_visible(prof, viewer):
         raise profile_missing(ref)
     record = _find_paper(prof, paper_id, ref)
-    sizes = SizeIndex(prof, viewer, store, store.resolve_slug(ref))
+    sizes = SizeIndex(prof, viewer, store, prof.slug)
     sections = None
     if sizes.text(paper_id).available:
         try:
-            body = _text_of(store, ref, text_url(paper_id))
+            body = _text_of(store, prof.slug, text_url(paper_id))
         except NotFound:
             body = None
         if body is not None:
@@ -545,7 +577,7 @@ def read_paper_text(
     effective = effective_tiers(prof.metadata)
     if url not in effective or not tier_allows(viewer, effective[url]):
         raise NotFound(f"no full text {paper_id!r} for profile {ref!r}")
-    body = _text_of(store, ref, url)
+    body = _text_of(store, prof.slug, url)
     try:
         return page_text(body, section=section, offset=offset, max_chars=max_chars)
     except ValueError as e:
@@ -603,7 +635,7 @@ def read_profile_text(
             joined += head + (bodies[name] or "")
         page = page_text(joined, section=None, offset=offset, max_chars=max_chars)
         page.sections = spans
-    page.content_hash = _content_hash(store, store.resolve_slug(ref))
+    page.content_hash = _content_hash(store, prof.slug)
     return page
 
 
@@ -660,7 +692,7 @@ def _load_for_edit(service: Service, caller: Caller, ref: str, *, read_ok: bool 
     if service.hooks.edit_gate is None and not (caller.is_operator or service.open_mode):
         raise Unauthenticated("invalid or missing bearer token")
     try:
-        prof = service.store.get(ref)
+        prof = service.lookup(service.store, ref)
     except (ProfileNotFoundError, KeyError) as e:
         raise profile_missing(ref) from e
     require_edit(service, caller, prof, read_ok=read_ok, ref=ref)
@@ -782,7 +814,7 @@ def edit_metadata(
     patch.pop("base_hash", None)
     has_soul = "soul" in patch
     soul = patch.pop("soul", None)
-    _check_base_hash(store, store.resolve_slug(ref), base_hash)
+    _check_base_hash(store, prof.slug, base_hash)
     actions: list[tuple[str, list[str]]] = []
     if patch or not has_soul:
         actions.append(("metadata", sorted(patch)))
@@ -803,7 +835,7 @@ def edit_metadata(
                 prof.edit.set_soul(soul if soul is not None else "")
     except EditError as e:
         raise Invalid(str(e)) from e
-    resolved = store.resolve_slug(ref)
+    resolved = prof.slug
     new_hash = _content_hash(store, resolved)
     for action, fields in actions:
         _record(service, caller, prof, action, fields, new_hash)
@@ -837,7 +869,7 @@ def edit_work(
         updated = prof.edit.patch_work(paper_id, patch)
     except EditError as e:
         raise _work_edit_error(e) from e
-    resolved = store.resolve_slug(ref)
+    resolved = prof.slug
     new_hash = _content_hash(store, resolved)
     _record(service, caller, prof, "works", fields, new_hash)
     service.invalidate(resolved)
@@ -868,7 +900,7 @@ def add_work(service: Service, caller: Caller, ref: str, record: dict) -> EditRe
         added = prof.edit.add_work({**record, "paper_id": paper_id})
     except EditError as e:
         raise _work_edit_error(e) from e
-    resolved = store.resolve_slug(ref)
+    resolved = prof.slug
     new_hash = _content_hash(store, resolved)
     _record(service, caller, prof, "works", ["*"], new_hash)
     service.invalidate(resolved)
@@ -898,7 +930,7 @@ def remove_work(
         prof.edit.remove_work(paper_id)
     except EditError as e:
         raise _work_edit_error(e) from e
-    resolved = store.resolve_slug(ref)
+    resolved = prof.slug
     new_hash = _content_hash(store, resolved)
     _record(service, caller, prof, "works", [], new_hash)
     service.invalidate(resolved)
@@ -982,7 +1014,7 @@ def add_seed_papers(
             raise Invalid(f"seed record {i} is invalid: {e}") from e
     _write_scope(service, caller, prof, SEED_PAPERS_ROLE, {"count": len(parsed)})
     added, skipped = prof.add_seed_papers(parsed)
-    resolved = store.resolve_slug(ref)
+    resolved = prof.slug
     new_hash = _content_hash(store, resolved)
     if added:
         _record(service, caller, prof, SEED_PAPERS_ROLE, [s.seed_id for s in added], new_hash)
@@ -1006,7 +1038,7 @@ def remove_seed_paper(service: Service, caller: Caller, ref: str, seed_id: str) 
         raise NotFound(f"no seed paper {seed_id!r} in this profile")
     _write_scope(service, caller, prof, SEED_PAPERS_ROLE, {"seed_id": seed_id})
     prof.remove_seed_paper(seed_id)
-    resolved = store.resolve_slug(ref)
+    resolved = prof.slug
     new_hash = _content_hash(store, resolved)
     _record(service, caller, prof, SEED_PAPERS_ROLE, [seed_id], new_hash)
     service.invalidate(resolved)
@@ -1033,7 +1065,7 @@ def set_visibility(
     prof = _load_for_edit(service, caller, ref)
     artifacts = list(artifacts or [])
     sections = list(sections or [])
-    _check_base_hash(store, store.resolve_slug(ref), base_hash)
+    _check_base_hash(store, prof.slug, base_hash)
     _write_scope(
         service,
         caller,
@@ -1054,7 +1086,7 @@ def set_visibility(
         )
     except EditError as e:
         raise Invalid(str(e)) from e
-    resolved = store.resolve_slug(ref)
+    resolved = prof.slug
     new_hash = _content_hash(store, resolved)
     _record(service, caller, prof, "visibility", [], new_hash)
     service.invalidate(resolved)
@@ -1081,9 +1113,8 @@ def get_visibility(service: Service, caller: Caller, ref: str) -> VisibilityRepo
     profile whole is admitted too). Every row is a projection of
     ``privacy.explain_tiers`` and ``privacy.tier_allows``.
     """
-    store = service.store
     prof = _load_for_edit(service, caller, ref, read_ok=True)
-    resolved = store.resolve_slug(ref)
+    resolved = prof.slug
     explain = explain_tiers(prof.metadata)
     floor = service.floor(caller, prof, ref)
 

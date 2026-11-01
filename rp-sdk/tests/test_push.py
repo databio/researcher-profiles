@@ -85,6 +85,27 @@ class TestPush:
         assert OTHER in slugs
         assert api_client.get(f"/api/v1/profiles/{OTHER}").status_code == 200
 
+    def test_a_sql_push_names_its_record_and_the_host_owns_it(
+        self, make_api_client, empty_sql_store
+    ):
+        """``profile_id`` is on the wire; ``owner_for_push`` owns a create; a replace keeps both."""
+        from researcher_profiles.store import Ownership
+        from researcher_profiles.store.db import ProfileRow
+
+        http = make_api_client(empty_sql_store)
+        asked = []
+        http.app.state.owner_for_push = lambda request, slug, rid: (
+            asked.append((slug, rid)) or Ownership("user", 42, is_self=True)
+        )
+        first = http.put(f"/api/v1/profiles/{OTHER}", content=_other_tar())
+        assert first.status_code == 200, first.text
+        again = http.put(f"/api/v1/profiles/{OTHER}", content=_other_tar())
+        pid = first.json()["profile_id"]
+        assert pid is not None and again.json()["profile_id"] == pid
+        assert asked and asked[0][0] == OTHER
+        with empty_sql_store.session() as s:
+            assert s.get(ProfileRow, pid).owner == Ownership("user", 42, is_self=True)
+
     def test_push_overwrites_existing_profile(
         self, api_client, fixture_profiles_root, fixture_profile
     ):
@@ -942,3 +963,45 @@ class TestPushKeepsSeedPapers:
         assert r.status_code == 200, r.text
         assert r.json()["kept"] == {"seed_papers": 1}
         assert [s.seed_id for s in empty_sql_store.get(SLUG).seed_papers] == ["W9"]
+
+
+#: The push response fields a host fills through ``request.state``.
+HOST_REPORTED = pytest.mark.parametrize(
+    "field", ["kept_owner_fields", "stripped_fields"], ids=["kept", "stripped"]
+)
+
+
+class TestHostReportedFields:
+    """``kept_owner_fields`` and ``stripped_fields`` on the push response: what
+    the host reports on ``request.state``, or ``null``."""
+
+    @staticmethod
+    def _hook(field):
+        def hook(request, slug, rid):
+            setattr(request.state, field, ["summary"])
+
+        return hook
+
+    @HOST_REPORTED
+    def test_json_push_reports_what_the_host_set(self, make_api_client, tmp_path, field):
+        c = make_api_client(tmp_path)
+        c.app.state.push_gate = self._hook(field)
+        body = {"name": "Ada Lovelace", "rid": "local:ada-a1b2c3", "provenance": "synthetic"}
+        r = c.put("/api/v1/profiles/ada", json=body)
+        assert r.status_code == 200, r.text
+        assert r.json()[field] == ["summary"]
+
+    @HOST_REPORTED
+    def test_tarball_push_reports_what_the_host_set(self, api_client, field):
+        api_client.app.state.push_gate = self._hook(field)
+        r = api_client.put(f"/api/v1/profiles/{OTHER}", content=_other_tar())
+        assert r.status_code == 200, r.text
+        assert r.json()[field] == ["summary"]
+
+    @HOST_REPORTED
+    def test_without_a_hook_the_field_is_null(self, make_api_client, tmp_path, field):
+        c = make_api_client(tmp_path)
+        body = {"name": "Ada Lovelace", "rid": "local:ada-a1b2c3", "provenance": "synthetic"}
+        r = c.put("/api/v1/profiles/ada", json=body)
+        assert r.status_code == 200, r.text
+        assert r.json()[field] is None

@@ -13,10 +13,11 @@ from sqlmodel import select
 
 from researcher_profiles import ResearcherProfile, build_export_bundle
 from researcher_profiles.build_state import BUILD_STATE_PAPER_FIELDS
+from researcher_profiles.errors import ProfileWriteError
 from researcher_profiles.privacy import effective_tiers
 from researcher_profiles.profile import edit
-from researcher_profiles.schema import PaperRecord
-from researcher_profiles.store import ProfileNotFoundError
+from researcher_profiles.schema import PaperRecord, ProfileDocument
+from researcher_profiles.store import Ownership
 from researcher_profiles.store.db import (
     ArtifactRow,
     BuildStateRow,
@@ -26,11 +27,36 @@ from researcher_profiles.store.db import (
     PaperRow,
     ProfileRow,
     ProfileVectorRow,
+    RidAliasRow,
+    SlugAliasRow,
     content_hash_for,
 )
 from researcher_profiles.store.sql import SqlProfileStore
 
 from .factories import build_profile_dir
+
+ADA_ORCID = "0000-0002-1825-0097"
+LEE_LOCAL = "local:lee-local-abc123"
+
+
+def _doc(rid: str, name: str) -> ProfileDocument:
+    provenance = "synthetic" if rid.startswith("local:") else "third_party"
+    return ProfileDocument(name=name, rid=rid, provenance=provenance)
+
+
+def _staged(tmp_path: Path, rid: str, name: str) -> Path:
+    provenance = "synthetic" if rid.startswith("local:") else "third_party"
+    return build_profile_dir(
+        tmp_path / f"stage-{rid.replace(':', '-')}",
+        name=name,
+        rid=rid,
+        level="lite",
+        papers=False,
+        personality=False,
+        summaries=False,
+        provenance=provenance,
+    )
+
 
 RP_TABLES = {
     "rp_profiles",
@@ -44,7 +70,7 @@ RP_TABLES = {
 
 @pytest.fixture
 def jane_store(empty_sql_store, jane_doe) -> tuple[SqlProfileStore, str]:
-    """``jane-doe`` pushed into a store; returns ``(store, rid)``."""
+    """``jane-doe`` pushed into a store; returns ``(store, profile_id)``."""
     return empty_sql_store, empty_sql_store.put(jane_doe)
 
 
@@ -106,17 +132,66 @@ class TestSchema:
             for c in ProfileRow.metadata.tables["rp_papers"].constraints
             if c.__class__.__name__ == "UniqueConstraint"
         }
-        assert frozenset({"profile_rid", "paper_id"}) not in constrained
-        assert frozenset({"profile_rid", "ordinal"}) in constrained
+        assert frozenset({"profile_id", "paper_id"}) not in constrained
+        assert frozenset({"profile_id", "ordinal"}) in constrained
+
+    def test_profiles_are_keyed_by_profile_id_not_rid(self, empty_sql_store):
+        insp = inspect(empty_sql_store.engine)
+        assert insp.get_pk_constraint("rp_profiles")["constrained_columns"] == ["profile_id"]
+        assert ["rid"] not in [
+            u["column_names"] for u in insp.get_unique_constraints("rp_profiles")
+        ]
+        names = {i["name"] for i in insp.get_indexes("rp_profiles")} | {
+            u["name"] for u in insp.get_unique_constraints("rp_profiles")
+        }
+        assert {
+            "uq_rp_profiles_self_rid",
+            "uq_rp_profiles_self_owner",
+            "uq_rp_profiles_rid_owner",
+        } <= names
+        rid_index = next(
+            i for i in insp.get_indexes("rp_profiles") if i["name"] == "ix_rp_profiles_rid"
+        )
+        assert not rid_index["unique"]
+
+    def test_every_child_row_hangs_off_profile_id(self, empty_sql_store):
+        insp = inspect(empty_sql_store.engine)
+        for table in (
+            "rp_papers",
+            "rp_grants",
+            "rp_expertise_topics",
+            "rp_artifacts",
+            "rp_chunk_vectors",
+            "rp_profile_vectors",
+            "rp_build_state",
+            "rp_slug_aliases",
+        ):
+            fks = insp.get_foreign_keys(table)
+            assert [(fk["referred_table"], fk["referred_columns"]) for fk in fks] == [
+                ("rp_profiles", ["profile_id"])
+            ], table
+
+    def test_retired_slugs_and_rids_live_in_their_own_tables(self, empty_sql_store):
+        insp = inspect(empty_sql_store.engine)
+        assert {c["name"] for c in insp.get_columns("rp_rid_aliases")} == {
+            "old_rid",
+            "successor_rid",
+            "created_at",
+        }
+        assert {c["name"] for c in insp.get_columns("rp_slug_aliases")} == {
+            "old_slug",
+            "profile_id",
+            "created_at",
+        }
 
     def test_date_modified_is_nullable_and_never_defaulted(self, jane_store):
         """Most reference profiles have no ``dateModified``. Inventing one lies."""
         column = ProfileRow.metadata.tables["rp_profiles"].columns["date_modified"]
         assert column.nullable
         assert column.default is None and column.server_default is None
-        store, rid = jane_store
+        store, pid = jane_store
         with store.session() as s:
-            assert s.get(ProfileRow, rid).date_modified is None
+            assert s.get(ProfileRow, pid).date_modified is None
 
 
 class TestRoundTrip:
@@ -125,24 +200,25 @@ class TestRoundTrip:
     @pytest.mark.parametrize("which", ["jane", "deep"])
     def test_a_profile_round_trips_byte_for_byte(self, request, empty_sql_store, tmp_path, which):
         src = request.getfixturevalue("jane_doe_dir" if which == "jane" else "deep_dir")
-        rid = empty_sql_store.put(ResearcherProfile.from_files(src))
-        out = empty_sql_store.export_directory(rid, tmp_path / "out")
+        pid = empty_sql_store.put(ResearcherProfile.from_files(src))
+        out = empty_sql_store.export_directory(pid, tmp_path / "out")
         _assert_directory_round_trip(src, out)
 
     def test_a_second_put_replaces_rather_than_duplicates(self, empty_sql_store, jane_doe):
-        rid = empty_sql_store.put(jane_doe)
+        pid = empty_sql_store.put(jane_doe)
         empty_sql_store.put(jane_doe)
         with empty_sql_store.session() as s:
-            papers = s.exec(select(PaperRow).where(PaperRow.profile_rid == rid)).all()
+            papers = s.exec(select(PaperRow).where(PaperRow.profile_id == pid)).all()
         assert len(papers) == len(jane_doe.papers)
 
     def test_import_directory_is_sugar_for_put(self, empty_sql_store, jane_doe_dir, jane_doe):
-        assert empty_sql_store.import_directory(jane_doe_dir) == jane_doe.rid
+        pid = empty_sql_store.import_directory(jane_doe_dir)
+        assert empty_sql_store.get(pid).rid == jane_doe.rid
 
     def test_the_recorded_manifest_survives_ingest(self, empty_sql_store, jane_doe):
         """The store must not silently rewrite a published document's manifest."""
-        rid = empty_sql_store.put(jane_doe)
-        parts, subjects = empty_sql_store.manifest_from_rows(rid)
+        pid = empty_sql_store.put(jane_doe)
+        parts, subjects = empty_sql_store.manifest_from_rows(pid)
         assert [p.content_url for p in parts] == [p.content_url for p in jane_doe.metadata.has_part]
         assert [p.content_url for p in subjects] == [
             p.content_url for p in jane_doe.metadata.subject_of
@@ -152,7 +228,7 @@ class TestRoundTrip:
         store = empty_sql_store
         src = build_profile_dir(tmp_path / "indexed", index="sqlite")
         prof = ResearcherProfile.from_files(src)
-        rid = store.put(prof)
+        pid = store.put(prof)
         with store.session() as s:
             rows = {r.content_url: r for r in s.exec(select(ArtifactRow)).all()}
         sqlite_row = rows.get(".cache/embeddings.sqlite")
@@ -163,7 +239,7 @@ class TestRoundTrip:
         with store.session() as s:
             row = s.exec(
                 select(ArtifactRow)
-                .where(ArtifactRow.profile_rid == rid)
+                .where(ArtifactRow.profile_id == pid)
                 .where(ArtifactRow.content_url == ".cache/embeddings.sqlite")
             ).first()
         assert row.data == (src / ".cache" / "embeddings.sqlite").read_bytes()
@@ -197,8 +273,8 @@ class TestBackendParity:
         }
 
     def test_the_sql_profile_matches_the_filesystem_one(self, jane_store, jane_doe):
-        store, rid = jane_store
-        db = store.get(rid)
+        store, pid = jane_store
+        db = store.get(pid)
         assert self._snapshot(db) == self._snapshot(jane_doe)
         assert "build_state" not in build_export_bundle(db).model_dump()
         assert [p.content_url for p in db.build_manifest()] == [
@@ -210,8 +286,8 @@ class TestBackendParity:
         assert a == b
 
     def test_capabilities_needing_a_directory_are_refused(self, jane_store):
-        store, rid = jane_store
-        db = store.get(rid)
+        store, pid = jane_store
+        db = store.get(pid)
         for call in (
             lambda: db.validate(),
             lambda: db.index.search("x"),
@@ -226,14 +302,14 @@ class TestWrites:
     """The public write surface, through the storage layer, against SQL."""
 
     def test_a_metadata_patch_updates_rows_and_stamps(self, jane_store):
-        store, rid = jane_store
-        db = store.get(rid)
+        store, pid = jane_store
+        db = store.get(pid)
         before = db.content_hash()
 
         db.edit.patch_metadata({"field": "Systems Biology"})
 
         with store.session() as s:
-            row = s.get(ProfileRow, rid)
+            row = s.get(ProfileRow, pid)
         assert row.field == "Systems Biology"
         assert row.document["field"] == "Systems Biology"
         assert row.date_modified, "a content change must stamp dateModified"
@@ -242,33 +318,33 @@ class TestWrites:
 
     def test_set_soul_refreshes_the_content_hash(self, jane_store):
         """The digest spans document AND soul, so a soul-only write moves it."""
-        store, rid = jane_store
-        before = store.get(rid).content_hash()
-        store.get(rid).edit.set_soul("# A different soul\n")
-        after = store.get(rid)
+        store, pid = jane_store
+        before = store.get(pid).content_hash()
+        store.get(pid).edit.set_soul("# A different soul\n")
+        after = store.get(pid)
         assert after.soul == "# A different soul\n"
         assert after.content_hash() != before
         with store.session() as s:
-            assert s.get(ProfileRow, rid).content_hash == after.content_hash()
+            assert s.get(ProfileRow, pid).content_hash == after.content_hash()
 
     def test_set_visibility_reaches_the_artifact_rows(self, jane_store):
-        store, rid = jane_store
-        db = store.get(rid)
+        store, pid = jane_store
+        db = store.get(pid)
         db.edit.set_visibility(
             profile_visibility="limited",
             artifacts=[{"role": "soul", "visibility": "private"}],
         )
         with store.session() as s:
-            row = s.get(ProfileRow, rid)
+            row = s.get(ProfileRow, pid)
             soul = s.exec(
                 select(ArtifactRow)
-                .where(ArtifactRow.profile_rid == rid)
+                .where(ArtifactRow.profile_id == pid)
                 .where(ArtifactRow.content_url == "personality/SOUL.md")
             ).first()
         assert row.visibility == "limited"
         assert soul.visibility == "private"
         # And the document's manifest, regenerated from the rows, agrees.
-        assert store.get(rid).metadata.subject_of[0].visibility == "private"
+        assert store.get(pid).metadata.subject_of[0].visibility == "private"
 
     @pytest.mark.parametrize(
         "patch",
@@ -276,17 +352,17 @@ class TestWrites:
         ids=["out-of-scope-field", "invalid-document"],
     )
     def test_a_rejected_patch_leaves_every_row_untouched(self, jane_store, patch):
-        store, rid = jane_store
-        before = store.get(rid).content_hash()
+        store, pid = jane_store
+        before = store.get(pid).content_hash()
         with pytest.raises(edit.EditError):
-            store.get(rid).edit.patch_metadata(patch)
-        assert store.get(rid).content_hash() == before
+            store.get(pid).edit.patch_metadata(patch)
+        assert store.get(pid).content_hash() == before
 
     def test_save_papers_replaces_the_collection(self, jane_store):
-        store, rid = jane_store
-        db = store.get(rid)
+        store, pid = jane_store
+        db = store.get(pid)
         db.save_papers([PaperRecord(title="Only One", year=2030, paper_id="only2030")])
-        reloaded = store.get(rid)
+        reloaded = store.get(pid)
         assert [p.title for p in reloaded.papers] == ["Only One"]
 
     def test_duplicate_paper_ids_survive_ingest(self, empty_sql_store, tmp_path):
@@ -296,42 +372,134 @@ class TestWrites:
             {"name": "Second", "datePublished": "2020", "paper_id": "dup2020"},
         ]
         src = build_profile_dir(tmp_path / "dupes", papers=rows, summaries=False)
-        rid = empty_sql_store.put(ResearcherProfile.from_files(src))
-        assert [p.title for p in empty_sql_store.get(rid).papers] == ["First", "Second"]
+        pid = empty_sql_store.put(ResearcherProfile.from_files(src))
+        assert [p.title for p in empty_sql_store.get(pid).papers] == ["First", "Second"]
 
 
 class TestIdentity:
-    """``rid`` is identity; ``slug`` is a unique, renameable handle."""
+    """``profile_id`` is the record; ``rid`` the subject; ``slug`` a unique, renameable handle."""
 
-    def test_rename_moves_only_the_slug(self, jane_store):
-        """The slug/rid lookup before a rename is covered by test_store's any-handle table."""
-        store, rid = jane_store
-        store.rename(rid, "doe-jane")
+    def test_two_records_about_one_person_both_load(self, empty_sql_store):
+        """One record per owner per person: a rid is no longer a key."""
+        store = empty_sql_store
+        store.create(_doc(ADA_ORCID, "Ada"), slug="ada", owner=Ownership("user", 1, is_self=True))
+        store.create(
+            _doc(ADA_ORCID, "Ada (curated)"), slug="ada-curated", owner=Ownership("team", 7)
+        )
+        about = store.profiles_about(ADA_ORCID)
+        assert [r.slug for r in about] == ["ada", "ada-curated"]  # the self profile first
+        assert store.get("ada-curated").name == "Ada (curated)"
+        assert store.self_profile_for(ADA_ORCID).slug == "ada"
+        assert store.profile_owned_by(ADA_ORCID, Ownership("team", 7)).slug == "ada-curated"
+        assert store.profile_owned_by(ADA_ORCID, Ownership("team", 8)) is None
+
+    @pytest.mark.parametrize(
+        "second_owner",
+        [Ownership("user", 2, is_self=True), Ownership("user", 1, is_self=False)],
+        ids=["second-self-for-the-rid", "second-record-for-one-owner"],
+    )
+    def test_the_database_refuses_a_second_self_or_owner_record(
+        self, empty_sql_store, second_owner
+    ):
+        store = empty_sql_store
+        store.create(_doc(ADA_ORCID, "Ada"), slug="ada", owner=Ownership("user", 1, is_self=True))
+        with pytest.raises(ProfileWriteError):
+            store.create(_doc(ADA_ORCID, "Ada again"), slug="ada-2", owner=second_owner)
+        assert store.list_slugs() == ["ada"]
+
+    @pytest.mark.parametrize(
+        "first_owner, second_owner",
+        [(Ownership("user", 1, is_self=True), Ownership("user", 2, is_self=True)), (None, None)],
+        ids=["second-self-profile", "second-record-without-owners"],
+    )
+    def test_a_put_that_would_be_a_second_record_is_a_write_error(
+        self, empty_sql_store, jane_doe, first_owner, second_owner
+    ):
+        """Without owners, NULLs never collide in the database: the store refuses, as a directory does."""
+        store = empty_sql_store
+        store.put(jane_doe, owner=first_owner)
+        with pytest.raises(ProfileWriteError):
+            store.put(jane_doe, slug="jane-again", owner=second_owner)
+        assert store.list_slugs() == ["jane-doe"]
+        assert len(store.profiles_about(jane_doe.rid)) == 1
+
+    def test_a_put_on_a_live_slug_keeps_the_record_and_its_owner(self, empty_sql_store, jane_doe):
+        store = empty_sql_store
+        owner = Ownership("user", 3, is_self=True)
+        first = store.put(jane_doe, owner=owner)
+        second = store.put(jane_doe, owner=Ownership("user", 4))
+        assert first == second
         with store.session() as s:
-            assert s.get(ProfileRow, rid).slug == "doe-jane"
-            for model in (PaperRow, ExpertiseTopicRow, ArtifactRow):
-                rows = s.exec(select(model).where(model.profile_rid == rid)).all()
-                assert rows and all(r.profile_rid == rid for r in rows)
-        assert store.rid_for("doe-jane") == rid
-        assert store.rid_for(rid) == rid
-        with pytest.raises(ProfileNotFoundError, match="jane-doe"):
-            store.rid_for("jane-doe")
+            assert s.get(ProfileRow, first).owner == owner
 
-    def test_two_profiles_cannot_share_a_slug(self, jane_store, fixture_profile):
-        from sqlalchemy.exc import IntegrityError
-
-        store, _ = jane_store
+    def test_a_put_on_a_live_slug_with_another_rid_is_refused(self, jane_store, fixture_profile):
+        store, pid = jane_store
         other = ResearcherProfile.from_files(fixture_profile("john-smith"))
-        with pytest.raises(IntegrityError):
+        with pytest.raises(ProfileWriteError):
             store.put(other, slug="jane-doe")
+        assert store.get(pid).rid != other.rid
 
-    def test_delete_removes_every_child_row(self, jane_store):
-        store, rid = jane_store
-        store.delete(rid)
-        assert not store.exists(rid)
+    def test_a_rename_keeps_the_old_slug_resolving(self, jane_store):
+        store, pid = jane_store
+        store.rename(pid, "doe-jane")
+        with store.session() as s:
+            assert s.get(ProfileRow, pid).slug == "doe-jane"
+            for model in (PaperRow, ExpertiseTopicRow, ArtifactRow):
+                rows = s.exec(select(model).where(model.profile_id == pid)).all()
+                assert rows and all(r.profile_id == pid for r in rows)
+        assert store.get("jane-doe").profile_id == pid
+        assert store.resolve_slug("jane-doe") == "doe-jane"
+        assert store.alias_slugs() == {"jane-doe"}
+        assert store.get(f"#{pid}").slug == "doe-jane"
+
+    @pytest.mark.parametrize(
+        "write",
+        [
+            lambda s, d: s.get(s.put(ResearcherProfile.from_files(d), slug="jane-doe")),
+            lambda s, d: s.commit_directory("jane-doe", d),
+            lambda s, d: s.put_document("jane-doe", ResearcherProfile.from_files(d).metadata),
+        ],
+        ids=["put", "commit_directory", "put_document"],
+    )
+    def test_a_write_at_a_renamed_slug_replaces_the_record(self, jane_store, jane_doe_dir, write):
+        """A former slug about the same rid follows its alias; the record keeps its live slug."""
+        store, pid = jane_store
+        store.rename(pid, "doe-jane")
+        written = write(store, jane_doe_dir)
+        assert (written.profile_id, written.slug) == (pid, "doe-jane")
+        assert store.list_slugs() == ["doe-jane"]
+        assert store.alias_slugs() == {"jane-doe"}
+
+    @pytest.mark.parametrize(
+        "write",
+        [
+            lambda s, d: s.commit_directory("jane-doe", d),
+            lambda s, d: s.put_document("jane-doe", ResearcherProfile.from_files(d).metadata),
+        ],
+        ids=["commit_directory", "put_document"],
+    )
+    def test_a_write_at_a_renamed_slug_about_another_rid_is_refused(
+        self, jane_store, fixture_profile, write
+    ):
+        from researcher_profiles.store import RetiredRidError
+
+        store, pid = jane_store
+        store.rename(pid, "doe-jane")
+        with pytest.raises(RetiredRidError, match="former slug") as e:
+            write(store, fixture_profile("john-smith"))
+        assert e.value.successor_rid == store.get(pid).rid
+        assert store.list_slugs() == ["doe-jane"]
+
+    def test_delete_removes_every_child_row_and_slug_alias(self, jane_store):
+        store, pid = jane_store
+        store.rename(pid, "doe-jane")
+        store.delete(pid)
+        assert not store.exists(pid)
+        assert not store.exists("jane-doe")
         with store.session() as s:
             for model in (PaperRow, GrantRow, ExpertiseTopicRow, ArtifactRow, BuildStateRow):
-                assert not s.exec(select(model).where(model.profile_rid == rid)).all()
+                assert not s.exec(select(model).where(model.profile_id == pid)).all()
+            assert not s.exec(select(SlugAliasRow)).all()
 
     def test_from_db_is_bound_onto_the_base_class(self, empty_sql_store, jane_doe):
         empty_sql_store.put(jane_doe)
@@ -339,39 +507,166 @@ class TestIdentity:
         assert prof.rid == jane_doe.rid
 
 
+class TestMerge:
+    """``merge_into`` by record: the survivor keeps its ``profile_id``; aliases cover the rest."""
+
+    def _merge(self, store, tmp_path, retired, *, into, rid, slug, name="Lee"):
+        return store.merge_into(
+            retired,
+            _staged(tmp_path, rid, name),
+            survivor_ref=into,
+            survivor_rid=rid,
+            survivor_slug=slug,
+            build_missing_index=False,
+        )
+
+    def test_a_regular_merge_keeps_the_survivor_record(self, empty_sql_store, tmp_path):
+        store = empty_sql_store
+        store.create(_doc(LEE_LOCAL, "Lee Local"), slug="lee")
+        store.create(_doc(ADA_ORCID, "Lee Orcid"), slug="lee-orcid")
+        retired, survivor = store.profile_id_for("lee"), store.profile_id_for("lee-orcid")
+        result = self._merge(
+            store, tmp_path, "lee", into="lee-orcid", rid=ADA_ORCID, slug="lee-orcid"
+        )
+        assert result.profile_id == survivor
+        assert not store.exists(retired)
+        assert store.get("lee").profile_id == survivor  # the retired slug redirects
+        assert store.successor_rid(LEE_LOCAL) == ADA_ORCID
+        with store.session() as s:
+            assert {a.old_rid for a in s.exec(select(RidAliasRow)).all()} == {LEE_LOCAL}
+            assert {(a.old_slug, a.profile_id) for a in s.exec(select(SlugAliasRow)).all()} == {
+                ("lee", survivor)
+            }
+
+    def test_a_merge_between_records_about_one_person_writes_no_rid_alias(
+        self, empty_sql_store, tmp_path
+    ):
+        store = empty_sql_store
+        store.create(_doc(ADA_ORCID, "Ada"), slug="ada", owner=Ownership("user", 1, is_self=True))
+        store.create(_doc(ADA_ORCID, "Ada old"), slug="ada-old", owner=Ownership("user", 2))
+        seen = []
+        store.add_pre_commit_hook(
+            lambda ctx: (
+                seen.append((ctx.profile_id, ctx.retired_profile_id, ctx.retired_rid))
+                if ctx.kind == "merge"
+                else None
+            )
+        )
+        survivor, retired = store.profile_id_for("ada"), store.profile_id_for("ada-old")
+        self._merge(store, tmp_path, "ada-old", into="ada", rid=ADA_ORCID, slug="ada", name="Ada")
+        assert seen == [(survivor, retired, None)]
+        assert store.successor_rid(ADA_ORCID) is None
+        with store.session() as s:
+            assert not s.exec(select(RidAliasRow)).all()
+        assert store.get("ada-old").profile_id == survivor
+
+    def test_a_convert_keeps_the_record_and_changes_the_rid(self, empty_sql_store, tmp_path):
+        store = empty_sql_store
+        store.create(_doc(LEE_LOCAL, "Lee"), slug="lee", owner=Ownership("user", 1, is_self=True))
+        pid = store.profile_id_for("lee")
+        seen = []
+        store.add_pre_commit_hook(
+            lambda ctx: (
+                seen.append((ctx.profile_id, ctx.retired_profile_id, ctx.retired_rid))
+                if ctx.kind == "merge"
+                else None
+            )
+        )
+        result = self._merge(store, tmp_path, "lee", into=None, rid=ADA_ORCID, slug="lee")
+        assert seen == [(pid, None, LEE_LOCAL)]
+        assert result.profile_id == pid
+        assert store.get(pid).rid == ADA_ORCID
+        assert store.successor_rid(LEE_LOCAL) == ADA_ORCID
+        assert [r.profile_id for r in store.profiles_about(LEE_LOCAL)] == [pid]
+        with store.session() as s:
+            assert s.get(ProfileRow, pid).owner == Ownership("user", 1, is_self=True)
+
+    def test_a_convert_onto_a_rid_with_a_self_profile_is_refused(self, empty_sql_store, tmp_path):
+        store = empty_sql_store
+        store.create(_doc(LEE_LOCAL, "Lee"), slug="lee", owner=Ownership("user", 1, is_self=True))
+        store.create(_doc(ADA_ORCID, "Ada"), slug="ada", owner=Ownership("user", 2, is_self=True))
+        with pytest.raises(ProfileWriteError):
+            self._merge(store, tmp_path, "lee", into=None, rid=ADA_ORCID, slug="lee")
+        assert store.get("lee").rid == LEE_LOCAL
+
+
+class TestOwnership:
+    """The owner columns: set at creation, from the call or the store's resolver."""
+
+    def test_create_lands_the_owner_columns(self, empty_sql_store):
+        store = empty_sql_store
+        prof = store.create(_doc(ADA_ORCID, "Ada"), slug="ada", owner=Ownership("user", 5, True))
+        with store.session() as s:
+            row = s.get(ProfileRow, prof.profile_id)
+            assert (row.owner_kind, row.owner_principal_id, row.is_self) == ("user", 5, True)
+
+    def test_the_resolver_is_asked_when_no_owner_is_given(self, empty_sql_store, tmp_path):
+        store = empty_sql_store
+        asked = []
+        store.owner_resolver = lambda: asked.append(1) or Ownership("user", 9)
+        store.create(_doc(ADA_ORCID, "Ada"), slug="ada")
+        result = store.commit_directory("lee", _staged(tmp_path, LEE_LOCAL, "Lee"))
+        store.create(
+            _doc("local:explicit-abc123", "Explicit"), slug="explicit", owner=Ownership("team", 2)
+        )
+        assert len(asked) == 2
+        with store.session() as s:
+            assert s.get(ProfileRow, result.profile_id).owner == Ownership("user", 9)
+
+    def test_a_self_profile_must_be_owned_by_a_user(self):
+        with pytest.raises(ValueError):
+            Ownership("team", 1, is_self=True)
+
+    def test_a_failing_create_hook_leaves_no_row(self, empty_sql_store):
+        """The row is inserted on the unit's own session, so it rolls back with the unit."""
+        from researcher_profiles.errors import WriteHookError
+
+        store = empty_sql_store
+
+        def _explode(ctx):
+            if ctx.kind == "create":
+                assert ctx.profile_id is not None
+                raise RuntimeError("no")
+
+        store.add_pre_commit_hook(_explode)
+        with pytest.raises(WriteHookError):
+            store.create(_doc(ADA_ORCID, "Ada"), slug="ada", owner=Ownership("user", 1, True))
+        assert store.list_slugs() == []
+
+
 class TestBuildState:
     """Build state lives outside the published set, and stays droppable."""
 
     @pytest.fixture
     def contaminated(self, jane_store):
-        store, rid = jane_store
-        paper_id = store.get(rid).papers[0].paper_id
-        assert store.get(rid).set_paper_contaminated(paper_id, True)
-        return store, rid, paper_id
+        store, pid = jane_store
+        paper_id = store.get(pid).papers[0].paper_id
+        assert store.get(pid).set_paper_contaminated(paper_id, True)
+        return store, pid, paper_id
 
     def test_it_lives_in_its_own_table_not_the_document(self, contaminated):
-        store, rid, paper_id = contaminated
-        assert store.get(rid).build_state.is_contaminated(paper_id)
+        store, pid, paper_id = contaminated
+        assert store.get(pid).build_state.is_contaminated(paper_id)
         with store.session() as s:
-            assert s.get(BuildStateRow, rid) is not None
-            assert "contaminated" not in s.get(ProfileRow, rid).document
-        urls = [p.content_url for p in store.get(rid).build_manifest()]
+            assert s.get(BuildStateRow, pid) is not None
+            assert "contaminated" not in s.get(ProfileRow, pid).document
+        urls = [p.content_url for p in store.get(pid).build_manifest()]
         assert not any("build_state" in u for u in urls)
 
     def test_export_omits_it_unless_asked(self, contaminated, tmp_path):
-        store, rid, _ = contaminated
-        plain = store.export_directory(rid, tmp_path / "plain" / "jane-doe")
+        store, pid, _ = contaminated
+        plain = store.export_directory(pid, tmp_path / "plain" / "jane-doe")
         assert not (plain.parent / ".build").exists()
 
         with_build = store.export_directory(
-            rid, tmp_path / "withbuild" / "jane-doe", with_build=True
+            pid, tmp_path / "withbuild" / "jane-doe", with_build=True
         )
         assert (with_build.parent / ".build" / "jane-doe" / "meta").is_dir()
 
     def test_dropping_the_table_leaves_profiles_loadable(self, contaminated):
-        store, rid, _ = contaminated
+        store, pid, _ = contaminated
         BuildStateRow.__table__.drop(store.engine)
-        prof = store.get(rid)
+        prof = store.get(pid)
         assert prof.name and prof.papers
         assert prof.build_state.papers == {}
 
@@ -381,10 +676,10 @@ class TestPrivacy:
 
     def test_row_tiers_match_effective_tiers(self, empty_sql_store, deep_dir):
         prof = ResearcherProfile.from_files(deep_dir)
-        rid = empty_sql_store.put(prof)
+        pid = empty_sql_store.put(prof)
         expected = effective_tiers(prof.metadata)
         with empty_sql_store.session() as s:
-            rows = s.exec(select(ArtifactRow).where(ArtifactRow.profile_rid == rid)).all()
+            rows = s.exec(select(ArtifactRow).where(ArtifactRow.profile_id == pid)).all()
         for row in rows:
             assert row.visibility == expected[row.content_url], row.content_url
         roles = {p.content_url: p.role for p in prof.manifest()}
@@ -431,16 +726,16 @@ class TestSoulOnlyVectors:
         from .factories import refresh_manifest
 
         refresh_manifest(d)
-        rid = empty_sql_store.import_directory(d)
-        assert empty_sql_store.refresh_vectors(rid) is True
+        pid = empty_sql_store.import_directory(d)
+        assert empty_sql_store.refresh_vectors(pid) is True
         with empty_sql_store.session() as s:
-            chunks = s.exec(select(ChunkVectorRow).where(ChunkVectorRow.profile_rid == rid)).all()
+            chunks = s.exec(select(ChunkVectorRow).where(ChunkVectorRow.profile_id == pid)).all()
             centroids = s.exec(
-                select(ProfileVectorRow).where(ProfileVectorRow.profile_rid == rid)
+                select(ProfileVectorRow).where(ProfileVectorRow.profile_id == pid)
             ).all()
         assert chunks and {c.source_type for c in chunks} == {"soul"}
         assert [c.kind for c in centroids] == ["centroid"]
-        assert empty_sql_store.centroid(rid).shape == (fake_backend.dim,)
+        assert empty_sql_store.centroid(pid).shape == (fake_backend.dim,)
 
 
 class TestSeedOnlyVectors:
@@ -481,13 +776,13 @@ class TestSeedOnlyVectors:
 
         d = self._seed_only(tmp_path, fake_backend)
         prof = ResearcherProfile.from_files(d)
-        rows = shred_profile(prof.rid, prof)
+        rows = shred_profile(1, prof)
         assert [type(r) for r in rows] == [ProfileVectorRow]
 
-        rid = empty_sql_store.put(prof, include_binary=True)
+        pid = empty_sql_store.put(prof, include_binary=True)
         with empty_sql_store.session() as s:
             chunk_rows = s.exec(
-                select(ChunkVectorRow).where(ChunkVectorRow.profile_rid == rid)
+                select(ChunkVectorRow).where(ChunkVectorRow.profile_id == pid)
             ).all()
         assert chunk_rows == []  # private seed vectors never leave the build
-        assert empty_sql_store.centroid(rid).shape == (fake_backend.dim,)
+        assert empty_sql_store.centroid(pid).shape == (fake_backend.dim,)

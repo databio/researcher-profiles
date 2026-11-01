@@ -5,7 +5,7 @@ across every profile in a store; ``calibration`` is what makes a raw
 ``match.rank`` score comparable between peers. They live together because a
 calibration bug only ever shows up as a bad ranking.
 
-Identity resolution (``resolve_slug`` / ``rid_for`` / ``path_for`` /
+Identity resolution (``resolve_slug`` / ``profiles_about`` / ``path_for`` /
 ``write_lookup_index`` and duplicate-rid detection) is the store's own job and
 is tested in ``test_store.py``.
 """
@@ -623,7 +623,7 @@ class TestWritesInvalidateTheSnapshot:
         store = FilesystemProfileStore(two_indexed_root)
         _stub_centroids(store, monkeypatch)
         assert store.centroids.matrix.shape == (2, 4)
-        assert store.rid_for("one") == _RIDS[0]
+        assert store.get("one").rid == _RIDS[0]
 
         store.create(
             ProfileDocument(name="Three", rid=_RIDS[2], provenance="self_published"),
@@ -634,7 +634,7 @@ class TestWritesInvalidateTheSnapshot:
         # and the matrix rebuilt themselves.
         assert store.centroids.matrix.shape == (3, 4)
         assert store._rostered().slugs == ["one", "three", "two"]
-        assert store.rid_for("three") == _RIDS[2]
+        assert store.get("three").rid == _RIDS[2]
 
     def test_a_delete_through_the_store_narrows_the_matrix(
         self, two_indexed_root: Path, monkeypatch
@@ -648,7 +648,7 @@ class TestWritesInvalidateTheSnapshot:
         assert store.centroids.matrix.shape == (1, 4)
         assert store._rostered().slugs == ["two"]
         with pytest.raises(ProfileNotFoundError):
-            store.rid_for("one")
+            store.get("one")
 
     def test_a_write_through_a_handed_out_profile_moves_the_generation(
         self, two_indexed_root: Path
@@ -697,7 +697,7 @@ class TestSqlStoreInvalidation:
         )
         assert store.generation > gen
         assert store._rostered().slugs == ["one"]
-        assert store.rid_for("one") == _RIDS[0]
+        assert store.get("one").rid == _RIDS[0]
 
         store.delete("one")
         assert store._rostered().slugs == []

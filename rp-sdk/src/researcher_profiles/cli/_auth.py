@@ -175,7 +175,7 @@ def _cmd_whoami(args: argparse.Namespace) -> int:
         print(json.dumps({"url": url, **record}, indent=2))
         return EXIT_OK
     owner = record.get("owner") or {}
-    who = owner.get("name") or owner.get("orcid") or record.get("consumer") or "unknown"
+    who = owner.get("name") or owner.get("orcid") or record.get("app") or "unknown"
     print(
         f"{url}: {who}"
         + (f" ({owner['orcid']})" if owner.get("orcid") and owner.get("name") else "")

@@ -72,15 +72,23 @@ an index. Resolution order, highest first (every command uses the same one):
 
 ## Identity vs. name
 
-Identity is the rid: an ORCID, or a minted `local:` id for someone without it.
+A rid is a person: an ORCID, or a minted `local:` id for someone without it.
+A store may hold several records about one person (the SQL store keys records
+by an integer `profile_id` and allows one per owner), so a rid is never a
+`ref`: `store.get`, `exists` and `resolve_slug` take a slug (or, on SQL, a
+`profile_id` / `#<id>`), and rid lookups are explicit (`store.profiles_about`,
+`store.self_profile_for`, `store.profile_owned_by`). A directory corpus holds
+one record per person.
+
 The directory name is only a display handle. `voss-elena` and
 `0000-0002-1825-0097` are both valid directory names and both occur.
 `<root>/.cache/index.json` maps between them. Never infer meaning from a directory
 name; resolve it:
 
 ```bash
-rp where 0000-0002-1825-0097     # -> /path/to/voss-elena
+rp where 0000-0002-1825-0097     # -> /path/to/voss-elena   (the one profile about that rid)
 rp seek voss-elena                  # -> /path/to/voss-elena   (for $(...) pipelines)
+rp db about 0000-0002-1825-0097  # every record about that person in a SQL store
 ```
 
 ## Interest seed papers are not works

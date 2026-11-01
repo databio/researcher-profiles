@@ -20,7 +20,7 @@ if TYPE_CHECKING:  # pragma: no cover
 
 
 class ProfileNotFoundError(ProfileError, KeyError):
-    """No profile in the store answers to a given rid or slug.
+    """No profile in the store answers to a given ref (a slug or a ``profile_id``).
 
     Both a ``ProfileError`` and a ``KeyError``, so callers can catch it either
     way.
@@ -33,21 +33,28 @@ class ProfileNotFoundError(ProfileError, KeyError):
 
 
 class RetiredRidError(ProfileWriteError):
-    """A write targets a rid or slug that a merge retired.
+    """A write targets a rid a merge retired, or a slug a rename or merge retired.
 
     A retired rid or slug keeps resolving to its successor through an alias,
     so reusing it would silently hijack (or resurrect) that identity. A store
     that keeps aliases refuses such a write with this error. It is a
-    ``ProfileWriteError`` so routes map it to 409.
+    ``ProfileWriteError`` so routes map it to 409. ``successor_rid`` is who
+    the record the alias now leads to is about.
     """
 
     def __init__(
-        self, ref: str, successor_rid: str, *, rid: Optional[str] = None, slug: Optional[str] = None
+        self,
+        ref: str,
+        successor_rid: str,
+        *,
+        rid: Optional[str] = None,
+        slug: Optional[str] = None,
+        message: Optional[str] = None,
     ):
         self.rid = rid
         self.slug = slug
         self.successor_rid = successor_rid
-        self.message = (
+        self.message = message or (
             f"{ref!r} was retired by a merge into {successor_rid!r}; "
             "a retired rid or slug cannot be reused"
         )
@@ -66,11 +73,51 @@ class UploadError(ValueError):
 
 
 class DuplicateIdentityError(ValueError):
-    """Two profiles in one store claim the same ``rid``.
+    """Two profiles in one directory store claim the same ``rid``.
 
-    Only the filesystem backend can hit it: in SQL ``rid`` is the primary key,
+    Only the filesystem backend raises it: a directory corpus holds one record
+    per person. SQL allows several records about one person (one per owner),
     and a site's ``by-rid.json`` cannot hold two entries under one key.
     """
+
+
+@dataclass(frozen=True)
+class Ownership:
+    """Who owns a profile row. The host defines what a principal is.
+
+    The SDK checks one rule only: a self profile (``is_self``) is a person's
+    own, so its owner must be a ``'user'``.
+    """
+
+    #: ``'user'`` or ``'team'``, in the host's vocabulary.
+    kind: str
+    #: The owning principal's id, in the host's principal table.
+    principal_id: int
+    #: Whether the profile is about its owner.
+    is_self: bool = False
+
+    def __post_init__(self) -> None:
+        if self.is_self and self.kind != "user":
+            raise ValueError(f"a self profile must be owned by a user, not a {self.kind!r}")
+
+
+@dataclass(frozen=True)
+class ProfileRef:
+    """One record about a person, as :meth:`ProfileStore.profiles_about` lists it."""
+
+    #: The record key, or ``None`` on a backend that has none (a directory).
+    profile_id: int | None
+    #: Who the record is about.
+    rid: str
+    #: Its display handle; ``store.get(slug)`` loads it.
+    slug: str
+    #: Who owns it, or ``None`` on a backend with no owners.
+    owner: Ownership | None = None
+
+    @property
+    def ref(self) -> "int | str":
+        """What to pass to ``store.get``: the ``profile_id`` when there is one."""
+        return self.profile_id if self.profile_id is not None else self.slug
 
 
 @dataclass
@@ -98,14 +145,20 @@ class IngestResult:
     #: Which ``upload.PushMode`` the ingest ran under, and so what happened to
     #: the live files the archive did not carry.
     mode: str = "replace"
+    #: The record written, on a backend that has record keys (SQL).
+    profile_id: int | None = None
 
 
 @runtime_checkable
 class ProfileStore(Protocol):
     """A set of profiles, whatever they are stored in.
 
-    Every method takes ``ref``: a slug or a rid. Resolution is the store's job,
-    not the caller's.
+    Every method that takes a ``ref`` takes a **slug** (any backend, a retired
+    slug included where the backend keeps aliases) or an integer
+    **``profile_id``** (``#<id>`` as a string) on a backend that has one. A rid
+    is never a ref: a store may hold several records about one person, so "the
+    profile for this rid" is a question with an explicit answer
+    (:meth:`profiles_about`, :meth:`self_profile_for`, :meth:`profile_owned_by`).
     """
 
     # identity of the store itself
@@ -151,15 +204,33 @@ class ProfileStore(Protocol):
         """Every profile's display handle, sorted."""
         ...
 
-    def resolve_slug(self, ref: str) -> str:
-        """Map a slug or a rid to the slug. Raises :class:`ProfileNotFoundError`."""
+    def resolve_slug(self, ref: "str | int") -> str:
+        """Map a ref to the live slug. Raises :class:`ProfileNotFoundError`."""
         ...
 
-    def rid_for(self, ref: str) -> str:
-        """Map a slug or a rid to the rid. Raises :class:`ProfileNotFoundError`.
+    def profiles_about(self, rid: str) -> list[ProfileRef]:
+        """Every record about the person ``rid``, the self profile first.
 
-        ``rid`` is the identity cross-system mappings join on; ``slug`` is what
-        a URL says. A bare ORCID resolves too, because an ORCID rid is its ORCID.
+        A retired rid resolves through :meth:`successor_rid` first. A directory
+        store returns zero or one entry (it refuses two directories with one
+        rid, :class:`DuplicateIdentityError`); a published site returns what its
+        listing says.
+        """
+        ...
+
+    def self_profile_for(self, rid: str) -> Optional[ResearcherProfile]:
+        """The person's own profile (``is_self``), or ``None``.
+
+        A directory corpus has no owners: its one profile for ``rid`` IS the
+        person's record, so the filesystem and HTTP stores return that.
+        """
+        ...
+
+    def profile_owned_by(self, rid: str, owner: Ownership) -> Optional[ResearcherProfile]:
+        """The record about ``rid`` that ``owner`` owns, or ``None``.
+
+        SQL only; the other backends have no owners and raise
+        ``NotImplementedError``.
         """
         ...
 
@@ -167,15 +238,15 @@ class ProfileStore(Protocol):
         """Persist ``rid <-> slug`` so shell callers resolve without importing.
 
         Nothing writes it implicitly. Returns ``None`` on a store with no
-        directory; such a store answers through :meth:`rid_for` instead.
+        directory; such a store answers through :meth:`profiles_about` instead.
         """
         ...
 
-    def exists(self, ref: str) -> bool:
+    def exists(self, ref: "str | int") -> bool:
         """Whether ``ref`` names a profile in this store."""
         ...
 
-    def get(self, ref: str) -> ResearcherProfile:
+    def get(self, ref: "str | int") -> ResearcherProfile:
         """Load a profile. Raises :class:`ProfileNotFoundError`.
 
         The returned profile carries every hook registered through
@@ -192,12 +263,12 @@ class ProfileStore(Protocol):
         """
         ...
 
-    def successor_of(self, ref: str) -> Optional[str]:
-        """The live rid a retired rid or slug resolves to, or ``None``.
+    def successor_rid(self, rid: str) -> Optional[str]:
+        """The live rid a retired rid now resolves to, or ``None``.
 
-        ``None`` for a live profile, for an unknown ref, and on every backend
-        that cannot merge. ``get``, ``rid_for``, ``resolve_slug`` and ``exists``
-        already follow the alias; this says whether they had to.
+        ``None`` for a rid nothing retired, and on every backend that cannot
+        merge. :meth:`profiles_about` already follows it; this says whether it
+        had to.
         """
         ...
 
@@ -209,34 +280,43 @@ class ProfileStore(Protocol):
 
     def merge_into(
         self,
-        retired_ref: str,
+        retired_ref: "str | int",
         staging: Path,
         *,
+        survivor_ref: "str | int | None",
         survivor_rid: str,
         survivor_slug: str,
         build_missing_index: bool = True,
     ) -> IngestResult:
-        """Retire one profile into another in ONE write unit.
+        """Retire one record into another in ONE write unit.
 
-        Commits the staged survivor directory at ``survivor_rid`` (create or
-        replace), deletes the retired profile, and records an alias so the
-        retired rid and slug keep resolving to the survivor. Chains are kept
-        one hop. Pre-commit hooks see ``ctx.kind == "merge"``,
-        ``ctx.rid == survivor_rid`` and ``ctx.retired_rid`` /
-        ``ctx.retired_slug``. Only SQL implements it; the others raise
-        ``NotImplementedError``. Raises :class:`RetiredRidError` when
-        ``survivor_rid`` is itself retired.
+        ``survivor_ref`` names the live record that receives the staged
+        content; the retired record is deleted. ``None`` is a **convert**: the
+        retired record itself survives, under ``survivor_rid``. Either way the
+        staged directory's rid must be ``survivor_rid``. When the rid changes,
+        every other record about the retired rid moves to ``survivor_rid`` and
+        an alias keeps the retired rid resolving (:meth:`successor_rid`); a
+        retired slug keeps resolving to the survivor. Pre-commit hooks see
+        ``ctx.kind == "merge"``, ``ctx.profile_id`` (the survivor),
+        ``ctx.retired_profile_id`` (``None`` for a convert), ``ctx.retired_rid``
+        (``None`` when the rid did not change) and ``ctx.retired_slug``. Only
+        SQL implements it; the others raise ``NotImplementedError``. Raises
+        :class:`RetiredRidError` when ``survivor_rid`` is itself retired.
         """
         ...
 
-    def create(self, document: "ProfileDocument", *, slug: str) -> ResearcherProfile:
+    def create(
+        self, document: "ProfileDocument", *, slug: str, owner: Optional[Ownership] = None
+    ) -> ResearcherProfile:
         """Create a new profile from a validated document. Returns it.
 
-        Runs in one write unit of kind ``"create"``, so a pre-commit hook can
-        write an ownership row in the same transaction (no orphan window).
+        Runs in one write unit of kind ``"create"``. ``owner`` lands on the row
+        in the same transaction; when it is ``None`` a SQL store asks its
+        ``owner_resolver``. Backends with no owners ignore it.
 
-        Raises ``ProfileWriteError`` if ``slug`` or the document's rid is taken,
-        and :class:`RetiredRidError` for a retired rid or slug.
+        Raises ``ProfileWriteError`` if ``slug`` is taken (and, on a directory
+        store or for a SQL record with no owner, if the rid already has a
+        profile), and :class:`RetiredRidError` for a retired rid or slug.
         """
         ...
 
@@ -248,12 +328,12 @@ class ProfileStore(Protocol):
         expertise: Optional[str] = None,
         soul: Optional[str] = None,
         artifacts: Optional[dict[str, str]] = None,
+        owner: Optional[Ownership] = None,
     ) -> ResearcherProfile:
         """Create a profile and all of its authored artifacts in one write unit.
 
-        The document, persona documents, every artifact, the hook-written
-        ownership row and the derived digest land together, so no half-built
-        profile is ever readable.
+        The document, persona documents, every artifact, the owner and the
+        derived digest land together, so no half-built profile is ever readable.
 
         ``artifacts`` maps a manifest ``contentUrl`` to its text body; each key
         must appear in the document's ``hasPart`` or ``subjectOf``.
@@ -266,31 +346,46 @@ class ProfileStore(Protocol):
         """
         ...
 
-    def put_document(self, slug: str, document: "ProfileDocument") -> "ResearcherProfile":
+    def put_document(
+        self, slug: str, document: "ProfileDocument", *, owner: Optional[Ownership] = None
+    ) -> "ResearcherProfile":
         """Create-or-replace a profile's canonical profile.jsonld.
 
         Runs in one write unit (kind ``"create"`` if new, ``"edit"`` if it
         exists), so hooks fire and ``dateModified`` is stamped. Derived
         artifacts (``sources/``, ``.cache/``) are left untouched: this writes
-        the document, not the bundle.
+        the document, not the bundle. ``owner`` applies to a create only; a
+        replace keeps the row's owner and refuses a document with another rid.
+        Where slugs have aliases (SQL), a former slug replaces the record it
+        leads to when that record is about the document's rid.
 
         Returns the profile. Raises :class:`RetiredRidError` for a retired rid
         or slug.
         """
         ...
 
-    def delete(self, ref: str) -> str:
+    def delete(self, ref: "str | int") -> str:
         """Remove a profile and everything belonging to it. Returns its rid."""
         ...
 
     def commit_directory(
-        self, slug: str, staging: Path, *, build_missing_index: bool = False
+        self,
+        slug: str,
+        staging: Path,
+        *,
+        owner: Optional[Ownership] = None,
+        build_missing_index: bool = False,
     ) -> IngestResult:
         """Make a fully-staged profile directory live in this store.
 
         ``staging`` is a complete profile directory (``profile.jsonld`` at its
         root): the interchange format, not the storage format. "Live" is an
-        atomic rename for the filesystem, a transaction for SQL.
+        atomic rename for the filesystem, a transaction for SQL. A replace (the
+        slug is live) keeps the record, its ``profile_id`` and its owner, and
+        refuses a staged rid that differs; ``owner`` applies to a create only.
+        Where slugs have aliases (SQL), a former slug is a replace of the
+        record it leads to when that record is about the staged rid; the
+        record keeps its live slug, which the result names.
 
         ``build_missing_index`` asks for a best-effort embedding-index build
         afterwards; a backend with no filesystem ignores it.

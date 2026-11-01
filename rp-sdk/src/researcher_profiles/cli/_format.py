@@ -17,6 +17,7 @@ from ._shared import (
     add_json,
     add_subcommand,
     resolve_profile_arg,
+    store_dir_for_ref,
 )
 
 
@@ -292,7 +293,7 @@ def _write_manifest(args: argparse.Namespace, prof, root: Path) -> int:
 
 
 def _cmd_where(args: argparse.Namespace) -> int:
-    """Print the profile directory a rid or slug resolves to."""
+    """Print the profile directory a slug names, or the one profile about a rid."""
     from ..store import ProfileNotFoundError
     from ..store.config import resolve_profiles_root
     from ..store.files import FilesystemProfileStore
@@ -302,7 +303,7 @@ def _cmd_where(args: argparse.Namespace) -> int:
         root_path = Path(root).expanduser()
         if not root_path.is_dir():
             raise FileNotFoundError(f"profiles root does not exist: {root_path}")
-        path = FilesystemProfileStore(root_path).path_for(args.ref)
+        path = store_dir_for_ref(FilesystemProfileStore(root_path), args.ref)
     except (FileNotFoundError, ProfileNotFoundError, ValueError) as e:
         lines = [f"rp where: nothing matches {args.ref!r}"]
         # A bare KeyError just repeats the ref; only new detail gets a line.

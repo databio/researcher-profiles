@@ -152,7 +152,7 @@ class ArtifactStorage(abc.ABC):
     def key(self) -> str:
         """Stable identity for ``__eq__`` / ``__hash__`` / ``__repr__``.
 
-        ``file:/abs/path`` | ``db:<url>#<rid>`` | ``api:<base>/<slug>`` |
+        ``file:/abs/path`` | ``db:<url>#<profile_id>`` | ``api:<base>/<slug>`` |
         ``static:<base>``. Opaque: compared, never parsed.
         """
 
@@ -168,6 +168,12 @@ class ArtifactStorage(abc.ABC):
 
         Lets a write unit name the profile while its document is being replaced.
         """
+
+    @property
+    def profile_id(self) -> int | None:
+        """The store's record key for this profile, or ``None`` on a backend
+        with none (a directory, a published site)."""
+        return None
 
     @property
     @abc.abstractmethod

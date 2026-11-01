@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, Optional
 
 from pydantic import ValidationError
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlmodel import Session, select
 
 from ...build_state import BuildState
@@ -59,20 +59,30 @@ class SqlArtifactStorage(ArtifactStorage):
     ``None``; capabilities that need one refuse.
     """
 
-    def __init__(self, store: "SqlProfileStore", rid: str, *, slug: str):
+    def __init__(self, store: "SqlProfileStore", profile_id: Optional[int], *, slug: str, rid: str):
         self._store = store
+        #: The record key. ``None`` only for a profile being created, until its
+        #: first write unit inserts :attr:`pending_row`.
+        self._profile_id = profile_id
         self._rid = rid
         self._slug = slug
+        #: The bare ``rp_profiles`` row a create inserts when its first write
+        #: unit opens, on that unit's session (see :meth:`new_write_context`).
+        self.pending_row: Optional[ProfileRow] = None
         #: The session of the open write unit, or ``None``. Every writer goes
         #: through this; a second connection inside a unit would deadlock
         #: against rows the unit already holds.
         self.session: Optional[Session] = None
         #: Extra :class:`WriteContext` fields for the next unit this storage
-        #: opens (``merge_into`` sets ``retired_rid`` / ``retired_slug``).
+        #: opens (``merge_into`` sets ``retired_profile_id``, ``retired_rid``
+        #: and ``retired_slug``).
         self.context_extra: dict[str, Any] = {}
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
-        return f"SqlArtifactStorage(url={self._store.url!r}, rid={self._rid!r})"
+        return (
+            f"SqlArtifactStorage(url={self._store.url!r}, profile_id={self._profile_id!r}, "
+            f"rid={self._rid!r})"
+        )
 
     # ------------------------------------------------------------------
     # Identity
@@ -80,7 +90,14 @@ class SqlArtifactStorage(ArtifactStorage):
 
     @property
     def key(self) -> str:
-        return f"db:{self._store.url}#{self._rid}"
+        if self._profile_id is None:  # a create whose row is not inserted yet
+            return f"db:{self._store.url}#new:{self._slug}"
+        return f"db:{self._store.url}#{self._profile_id}"
+
+    @property
+    def profile_id(self) -> Optional[int]:
+        """The ``rp_profiles`` record key."""
+        return self._profile_id
 
     @property
     def slug(self) -> str:
@@ -88,7 +105,7 @@ class SqlArtifactStorage(ArtifactStorage):
 
     @property
     def rid_hint(self) -> str:
-        """The row key, known without reading a document.
+        """The subject's rid, known without reading a document.
 
         Lets a write unit name the profile while its document is replaced.
         """
@@ -102,7 +119,7 @@ class SqlArtifactStorage(ArtifactStorage):
     def locate(self, *parts: str) -> str:
         """Display-only locator: a ``db://`` reference naming the row."""
         tail = "/".join(parts)
-        base = f"db://{self._store.url}#{self._rid}"
+        base = f"db://{self._store.url}#{self._profile_id}"
         return f"{base}/{tail}" if tail else base
 
     # ------------------------------------------------------------------
@@ -131,12 +148,15 @@ class SqlArtifactStorage(ArtifactStorage):
             )
         return self.session
 
+    def _get_row(self, s: Session) -> Optional[ProfileRow]:
+        return None if self._profile_id is None else s.get(ProfileRow, self._profile_id)
+
     def _profile_row(self, s: Session) -> ProfileRow:
-        row = s.get(ProfileRow, self._rid)
+        row = self._get_row(s)
         if row is None:
             raise ProfileLoadError(
                 self.locate("profile.jsonld"),
-                f"no rp_profiles row with rid={self._rid!r}",
+                f"no rp_profiles row with profile_id={self._profile_id!r}",
             )
         return row
 
@@ -156,7 +176,7 @@ class SqlArtifactStorage(ArtifactStorage):
         """
         try:
             with self._read() as s:
-                row = s.get(ProfileRow, self._rid)
+                row = self._get_row(s)
                 doc = dict(row.document or {}) if row is not None else {}
         except SQLAlchemyError:  # pragma: no cover - an unreadable predecessor is no predecessor
             return {}
@@ -190,7 +210,7 @@ class SqlArtifactStorage(ArtifactStorage):
         row = self._profile_row(s)
         payload = dict(data)
 
-        rows = {r.content_url: r for r in artifact_rows(s, self._rid)}
+        rows = {r.content_url: r for r in artifact_rows(s, self._profile_id)}
         try:
             incoming = ProfileDocument.model_validate(payload)
         except (ValidationError, ValueError) as e:  # pragma: no cover - save_profile validated
@@ -213,15 +233,12 @@ class SqlArtifactStorage(ArtifactStorage):
         fresh = ProfileRow.from_document(
             meta, slug=row.slug, document=payload, soul=self.artifact_text(SOUL_URL) or ""
         )
-        for name in type(row).model_fields:
-            if name in ("rid", "slug"):
-                continue
-            setattr(row, name, getattr(fresh, name))
+        row.take_content(fresh)
         s.add(row)
         s.flush()
 
     def _manifest_rows(self, s: Session) -> tuple[list[ArtifactRef], list[ArtifactRef]]:
-        rows = artifact_rows(s, self._rid)
+        rows = artifact_rows(s, self._profile_id)
         return (
             [r.to_part() for r in rows if r.manifest_slot != "subjectOf"],
             [r.to_part() for r in rows if r.manifest_slot == "subjectOf"],
@@ -230,7 +247,7 @@ class SqlArtifactStorage(ArtifactStorage):
     def content_hash(self) -> str:
         """The stored ``content_hash`` column, refreshed by :meth:`refresh_derived`."""
         with self._read() as s:
-            row = s.get(ProfileRow, self._rid)
+            row = self._get_row(s)
             if row is None or not row.content_hash:
                 return content_hash_for(
                     (row.document if row is not None else {}) or {},
@@ -245,7 +262,7 @@ class SqlArtifactStorage(ArtifactStorage):
     def _artifact_row(self, s: Session, content_url: str) -> Optional[ArtifactRow]:
         return s.exec(
             select(ArtifactRow)
-            .where(ArtifactRow.profile_rid == self._rid)
+            .where(ArtifactRow.profile_id == self._profile_id)
             .where(ArtifactRow.content_url == content_url)
         ).first()
 
@@ -260,7 +277,7 @@ class SqlArtifactStorage(ArtifactStorage):
             if row is None:
                 return None
             if row.rendered:
-                return render_collection(s, self._rid, row)
+                return render_collection(s, self._profile_id, row)
             return row.text
 
     def artifact_bytes(self, content_url: str) -> Optional[bytes]:
@@ -269,7 +286,7 @@ class SqlArtifactStorage(ArtifactStorage):
             if row is None:
                 return None
             if row.rendered:
-                body = render_collection(s, self._rid, row)
+                body = render_collection(s, self._profile_id, row)
                 return None if body is None else body.encode("utf-8")
             if row.text is not None:
                 return row.text.encode("utf-8")
@@ -327,7 +344,7 @@ class SqlArtifactStorage(ArtifactStorage):
             )
             ordinal = self._next_ordinal(s, manifest_slot)
             row = ArtifactRow.from_part(
-                self._rid, part, manifest_slot=manifest_slot, ordinal=ordinal, text=text
+                self._profile_id, part, manifest_slot=manifest_slot, ordinal=ordinal, text=text
             )
         else:
             row.text = text
@@ -335,7 +352,7 @@ class SqlArtifactStorage(ArtifactStorage):
         s.flush()
 
     def _next_ordinal(self, s: Session, manifest_slot: str) -> int:
-        rows = [r for r in artifact_rows(s, self._rid) if r.manifest_slot == manifest_slot]
+        rows = [r for r in artifact_rows(s, self._profile_id) if r.manifest_slot == manifest_slot]
         return (max((r.ordinal for r in rows), default=-1)) + 1
 
     def _delete_artifact(self, content_url: str) -> None:
@@ -381,7 +398,7 @@ class SqlArtifactStorage(ArtifactStorage):
                 r.record
                 for r in s.exec(
                     select(PaperRow)
-                    .where(PaperRow.profile_rid == self._rid)
+                    .where(PaperRow.profile_id == self._profile_id)
                     .order_by(PaperRow.ordinal)
                 ).all()
             ]
@@ -392,11 +409,11 @@ class SqlArtifactStorage(ArtifactStorage):
 
     def save_papers(self, papers: list[PaperRecord]) -> None:
         s = self._require_session(PAPERS_URL)
-        for row in s.exec(select(PaperRow).where(PaperRow.profile_rid == self._rid)).all():
+        for row in s.exec(select(PaperRow).where(PaperRow.profile_id == self._profile_id)).all():
             s.delete(row)
         s.flush()
         for ordinal, paper in enumerate(papers):
-            s.add(PaperRow.from_record(self._rid, paper, ordinal=ordinal))
+            s.add(PaperRow.from_record(self._profile_id, paper, ordinal=ordinal))
         self._ensure_rendered_row(s, PAPERS_URL, name="Works", role="works")
         s.flush()
 
@@ -406,7 +423,7 @@ class SqlArtifactStorage(ArtifactStorage):
                 r.record
                 for r in s.exec(
                     select(GrantRow)
-                    .where(GrantRow.profile_rid == self._rid)
+                    .where(GrantRow.profile_id == self._profile_id)
                     .order_by(GrantRow.ordinal)
                 ).all()
             ]
@@ -417,11 +434,11 @@ class SqlArtifactStorage(ArtifactStorage):
 
     def save_grants(self, grants: list[GrantRecord]) -> None:
         s = self._require_session(GRANTS_URL)
-        for row in s.exec(select(GrantRow).where(GrantRow.profile_rid == self._rid)).all():
+        for row in s.exec(select(GrantRow).where(GrantRow.profile_id == self._profile_id)).all():
             s.delete(row)
         s.flush()
         for ordinal, grant in enumerate(grants):
-            s.add(GrantRow.from_record(self._rid, grant, ordinal=ordinal))
+            s.add(GrantRow.from_record(self._profile_id, grant, ordinal=ordinal))
         self._ensure_rendered_row(s, GRANTS_URL, name="Grants", role="grants")
         s.flush()
 
@@ -441,7 +458,7 @@ class SqlArtifactStorage(ArtifactStorage):
         )
         s.add(
             ArtifactRow.from_part(
-                self._rid,
+                self._profile_id,
                 part,
                 manifest_slot="hasPart",
                 ordinal=self._next_ordinal(s, "hasPart"),
@@ -479,7 +496,9 @@ class SqlArtifactStorage(ArtifactStorage):
 
     def load_summaries(self) -> Mapping[str, str]:
         with self._read() as s:
-            rows = s.exec(select(ArtifactRow).where(ArtifactRow.profile_rid == self._rid)).all()
+            rows = s.exec(
+                select(ArtifactRow).where(ArtifactRow.profile_id == self._profile_id)
+            ).all()
         keys: dict[str, str] = {}
         for row in rows:
             if row.role in SUMMARY_ROLES or row.content_url.endswith(SUMMARY_SUFFIX):
@@ -517,7 +536,7 @@ class SqlArtifactStorage(ArtifactStorage):
 
         try:
             with self._read() as s:
-                row = s.get(BuildStateRow, self._rid)
+                row = s.get(BuildStateRow, self._profile_id)
                 data = dict(row.state or {}) if row is not None else None
         except DatabaseError:
             return BuildState()
@@ -527,10 +546,10 @@ class SqlArtifactStorage(ArtifactStorage):
 
     def save_build_state(self, state: BuildState) -> None:
         s = self._require_session("build_state.json")
-        row = s.get(BuildStateRow, self._rid)
+        row = s.get(BuildStateRow, self._profile_id)
         payload = state.model_dump(mode="json", exclude_none=True)
         if row is None:
-            row = BuildStateRow(profile_rid=self._rid)
+            row = BuildStateRow(profile_id=self._profile_id)
         row.schema_version = int(state.schema_version)
         row.state = payload
         s.add(row)
@@ -553,9 +572,25 @@ class SqlArtifactStorage(ArtifactStorage):
         """Open a transaction and hand it to the unit.
 
         ``atomic=True``: everything inside this unit, hooks included, commits
-        or rolls back together.
+        or rolls back together. A profile being created inserts its bare row
+        (:attr:`pending_row`) here, on the unit's session, so the context
+        already carries its ``profile_id``; a database refusal (a second self
+        profile for the rid or the owner) is a ``ProfileWriteError``.
         """
         self.session = Session(self._store.engine)
+        if self.pending_row is not None:
+            row, self.pending_row = self.pending_row, None
+            try:
+                self.session.add(row)
+                self.session.flush()
+            except IntegrityError as e:
+                self.session.rollback()
+                self.session.close()
+                self.session = None
+                raise ProfileWriteError(
+                    self.locate("profile.jsonld"), f"create refused by the database: {e.orig}", e
+                ) from e
+            self._profile_id = int(row.profile_id)
         return WriteContext(
             profile=profile,
             slug=self._slug,
@@ -563,6 +598,7 @@ class SqlArtifactStorage(ArtifactStorage):
             kind=kind,
             session=self.session,
             atomic=True,
+            profile_id=self._profile_id,
             **self.context_extra,
         )
 
@@ -575,7 +611,7 @@ class SqlArtifactStorage(ArtifactStorage):
         s = self.session
         if s is None:  # pragma: no cover - only reachable outside a unit
             return
-        row = s.get(ProfileRow, self._rid)
+        row = self._get_row(s)
         if row is None:
             return
         row.content_hash = content_hash_for(row.document or {}, self.artifact_text(SOUL_URL) or "")

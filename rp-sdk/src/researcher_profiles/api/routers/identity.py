@@ -44,7 +44,8 @@ def resolve_identity(
     except ResolveError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     if result.created:
-        get_service(request).invalidate(store.resolve_slug(result.rid))
+        for ref in store.profiles_about(result.rid):
+            get_service(request).invalidate(ref.slug)
     payload = ResolveResponse(
         rid=result.rid,
         created=result.created,

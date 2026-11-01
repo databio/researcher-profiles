@@ -40,7 +40,7 @@ OTHER_SERVER = "https://other.example.org"
 SLUG = "jane-doe"
 _RealClient = httpx.Client
 WHOAMI = {
-    "consumer": "agent_abc",
+    "app": "agent_abc",
     "scopes": ["push_own", "read"],
     "owner": {"orcid": "0000-0002-1825-0097", "name": "Jane A. Doe"},
     "profiles": [{"slug": "jane-doe", "rid": "0000-0002-1825-0097", "role": "owner"}],

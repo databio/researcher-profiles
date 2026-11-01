@@ -261,7 +261,7 @@ _STORE_CONTRACT_WITHOUT_NUMPY = (
     "from researcher_profiles.store.files import FilesystemProfileStore\n"
     "s = FilesystemProfileStore('tests/fixtures')\n"
     "assert s.resolve_slug('jane-doe') == 'jane-doe'\n"
-    "assert s.rid_for('jane-doe')\n"
+    "assert s.get('jane-doe').rid\n"
     "assert s.path_for('jane-doe').name == 'jane-doe'\n"
     + _RESTORE_IMPORT
     + "assert ProfileStore is not None and VectorStore is not None\n"
