@@ -32,6 +32,7 @@ from ..utils.slug import SLUG_RE  # noqa: F401  (re-exported)
 
 if TYPE_CHECKING:  # pragma: no cover
     from ..schema import ArtifactRef
+    from ..store import Ownership
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +63,7 @@ SOURCES_MEMBERS = frozenset(
         "papers.jsonld",
         "grants.jsonld",
         "trials.jsonld",
+        "seed_papers.jsonld",
         "citations.json",
         "papers",
         "summaries",
@@ -352,6 +354,9 @@ def _is_fulltext_member(name: str) -> bool:
 WITHHELD_CLASSES: dict[str, Callable[[str], bool]] = {
     "fulltext": _is_fulltext_member,
     "index": lambda name: Path(name).parts[:2] == (CACHE_DIRNAME, "embeddings.sqlite"),
+    # Owner-curated interest seed papers. A rebuild never carries them, so a
+    # replace-mode push from a build must not wipe them.
+    "seed_papers": lambda name: name == "sources/seed_papers.jsonld",
 }
 
 #: What an ingest does with a live file the archive does not carry:
@@ -427,6 +432,7 @@ def ingest_archive(
     build_missing_index: bool = False,
     gate: "Callable[[str], None] | None" = None,
     mode: PushMode = "replace",
+    owner: "Ownership | Callable[[str], Ownership | None] | None" = None,
 ) -> IngestResult:
     """Validate, stage, and commit an uploaded profile tarball into ``store``.
 
@@ -435,8 +441,13 @@ def ingest_archive(
 
     ``gate`` is called with the staged profile's rid after extraction and
     before commit; whatever it raises aborts the ingest with nothing written.
-    The store upserts on rid, not slug, so any "may you write this profile"
-    check has to see the rid. See ``app.state.push_gate``.
+    The rid says who the profile is about, so any "may you write this
+    profile" check has to see it. See ``app.state.push_gate``.
+
+    ``owner`` is who owns the record if this push creates it (a replace keeps
+    the record's owner): an :class:`~researcher_profiles.store.Ownership`, or
+    a callable handed the staged rid after ``gate`` passed. It goes to
+    ``commit_directory``, so the record and its owner commit together.
 
     Absence from the tarball is not automatically a deletion: :data:`PushMode`
     says what it means. Kept files are merged into staging before commit, so
@@ -445,8 +456,12 @@ def ingest_archive(
     root = store.root
     with _staging_dir(root, slug) as staging:
         archive_names = extract_profile_archive(data, staging, include_fulltext=include_fulltext)
-        if gate is not None:
-            gate(_staged_rid(staging))
+        if gate is not None or callable(owner):
+            staged_rid = _staged_rid(staging)
+            if gate is not None:
+                gate(staged_rid)
+            if callable(owner):
+                owner = owner(staged_rid)
         kept_paths = _keep_omitted(store, slug, staging, archive_names, mode=mode)
         kept_flat = {rel for paths in kept_paths.values() for rel in paths}
         spliced = (
@@ -454,12 +469,34 @@ def ingest_archive(
             if kept_flat
             else 0
         )
-        result = store.commit_directory(slug, staging, build_missing_index=build_missing_index)
+        if "seed_papers" in kept_paths:
+            _reindex_kept_seeds(staging)
+        result = store.commit_directory(
+            slug, staging, owner=owner, build_missing_index=build_missing_index
+        )
         result.kept = {cls: len(paths) for cls, paths in kept_paths.items()}
         result.spliced = spliced
         result.mode = mode
         result.manifest_counts = _committed_manifest_counts(store, slug)
         return result
+
+
+def _reindex_kept_seeds(staging: Path) -> None:
+    """Fold kept seed papers into a staged index the archive shipped without them.
+
+    Incremental: only the new ``seed_abstract`` chunks are embedded. With no
+    staged index this is left to ``build_missing_index``. Best effort: a
+    failure leaves the archive's index as sent.
+    """
+    if not (staging / CACHE_DIRNAME / "embeddings.sqlite").is_file():
+        return
+    try:
+        from ..embeddings import build_index
+
+        build_index(staging)
+    # Boundary: anything the embedding stack raises leaves the push as sent.
+    except Exception:  # noqa: BLE001
+        logger.warning("could not index kept seed papers in %s", staging, exc_info=True)
 
 
 def _live_manifest(store: "ProfileStore", slug: str) -> dict[str, tuple[str, "ArtifactRef"]]:

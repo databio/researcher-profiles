@@ -32,8 +32,8 @@ The dynamic API categorizes routes by authentication requirement:
 | Read endpoints (list, record, files, papers, summaries, text, passages, content, collection) | No |
 | Search, match, persona, upload, archive, identity resolution | Yes |
 | Owner edit endpoints | Yes (owner-level) |
-| Command-line login (`/api/auth/*`) | No (see [section 14.2](#142-command-line-login)) |
-| Management endpoints (`/api/manage/*`) | Varies by endpoint (see [section 14](#14-management-api)) |
+| Command-line login (the authorize, device, token and revocation endpoints) | No (see [section 14.2](#142-command-line-login)) |
+| Management endpoints (`/api/v1/manage/*`) | Varies by endpoint (see [section 14](#14-management-api)) |
 
 A server MAY run in **open mode** (no token configured), in which case all
 routes accept any request.
@@ -337,9 +337,10 @@ nothing is spliced and the incoming manifest stands alone.
 | `spliced` | integer | Manifest entries the server added back for kept files (see Manifest splicing). Nonzero means the uploaded `profile.jsonld` was not the whole index |
 | `manifest_counts` | object | `{role: count}` over the manifest the server holds after the commit (`other` for entries with no role): what the profile now contains, not what the upload offered |
 | `mode` | string | The `mode` the upload ran under |
+| `kept_owner_fields` | array \| null | Fields the server kept from the owner's hand edits instead of the pushed value; `null` when the server does not protect owner edits |
 
-The last four fields describe archive uploads; a JSON upload returns their
-defaults.
+`kept`, `spliced`, `manifest_counts` and `mode` describe archive uploads; a
+JSON upload returns their defaults.
 
 **Status codes:** `200`, `400` (validation failure), `401`, `403` (see
 below), `413` (size cap exceeded).
@@ -871,51 +872,126 @@ A server MAY implement the management tier without the dynamic API, and vice
 versa. A server MAY offer further management endpoints beyond these four; they
 are outside this specification.
 
-### 14.1. The paths are normative
+### 14.1. Finding the endpoints
 
-Unlike the `/api/v1/` prefix in [section 1](#1-url-prefix), the paths in this
-section are fixed. Login endpoints live under `/api/auth/`; everything else
-lives under `/api/manage/`. A client discovers whether a server offers
-command-line login by calling `POST /api/auth/device` and reading the status.
-A server that mounts these endpoints elsewhere is not conforming.
-
-The fixed `/api/auth/` segment lets an operator protect every login route with
-one proxy rule (for example a rate limit). A server SHOULD keep any other route
-that signs a person in, such as its browser login, under the same prefix.
-
-Absence is the signal. A server that does not implement command-line login MUST
-let `POST /api/auth/device` answer `404`. A client that gets `404` there treats
-the server as offering no command-line login, reports that, and MUST NOT retry.
-
-A server MAY also publish
+The command-line login endpoints are found, not fixed. A server that offers
+command-line login MUST publish
 [RFC 8414](https://www.rfc-editor.org/rfc/rfc8414) authorization server
-metadata at `/.well-known/oauth-authorization-server` naming these endpoints as
-`device_authorization_endpoint` and `token_endpoint`, with
-`urn:ietf:params:oauth:grant-type:device_code` in `grant_types_supported`. A
-client MUST NOT depend on it: the fixed paths are authoritative, and on many
-hosts an unknown path answers `200` with an HTML page, so a missing metadata
-document is not a reliable absence signal.
+metadata at `/.well-known/oauth-authorization-server` on its base URL. The
+document MUST include:
+
+| Field | Value |
+|-------|-------|
+| `issuer` | The server's base URL, exactly as a client is given it |
+| `token_endpoint` | Absolute URL of the token endpoint |
+| `device_authorization_endpoint` | Absolute URL of the endpoint that starts a device login |
+| `grant_types_supported` | A list containing `urn:ietf:params:oauth:grant-type:device_code` and `refresh_token` |
+
+and SHOULD include:
+
+| Field | Value |
+|-------|-------|
+| `authorization_endpoint` | Absolute URL of the browser sign-in page (the loopback flow) |
+| `code_challenge_methods_supported` | A list containing `S256` |
+| `revocation_endpoint` | Absolute URL of an [RFC 7009](https://www.rfc-editor.org/rfc/rfc7009) revocation endpoint |
+
+A client reads every endpoint from this document and MUST NOT assume their
+paths. It MUST check that `issuer` equals the base URL it was given (RFC 8414
+§3.3) and stop if it does not. The reference implementation serves them at
+`/oauth/authorize`, `/oauth/token`, `/oauth/device_authorization` and
+`/oauth/revoke`.
+
+Absence is the signal. A server without command-line login answers `404` for
+the metadata, or publishes metadata with no `device_authorization_endpoint`. A
+client that gets either, or a body that is not a JSON object (some hosts answer
+every unknown path with `200` and an HTML page), treats the server as offering
+no command-line login, reports that, and MUST NOT retry. A server with no
+`authorization_endpoint` offers only the device flow.
+
+The identity echo endpoints ([section 14.3](#143-identity-echo)) are at fixed
+paths under `/api/v1/manage/`, unlike the `/api/v1/` prefix in
+[section 1](#1-url-prefix). A server that mounts them elsewhere is not
+conforming.
 
 ### 14.2. Command-line login
 
-The OAuth 2.0 Device Authorization Grant,
-[RFC 8628](https://www.rfc-editor.org/rfc/rfc8628). The client cannot receive a
-browser redirect, so the server issues two codes: a secret the client polls
-with, and a short code the person types or confirms in a browser. The wire
-format is RFC 8628's, so a stock OAuth device-flow client works unchanged. This
-section fixes the endpoint paths, pins the choices RFC 8628 leaves open, and
-adds a few fields. Where this section is silent, RFC 8628 and
-[RFC 6749](https://www.rfc-editor.org/rfc/rfc6749) apply.
+Command-line login is OAuth 2.0 for a native app
+([RFC 8252](https://www.rfc-editor.org/rfc/rfc8252)). The command line is one
+registered **public client**: `client_id` is `rp-cli`, it has no secret, and a
+server that offers command-line login MUST know it. A server MUST answer any
+other `client_id` at these endpoints with `invalid_client`. The client asks
+for the scope `profiles:push`: replace whole profiles the person holds an
+`owner` or `editor` role on (the `push_own` scope of
+[the key model](authentication.md#the-key-model)), and read what the person's
+account reaches. Where this section is silent,
+[RFC 6749](https://www.rfc-editor.org/rfc/rfc6749),
+[RFC 8628](https://www.rfc-editor.org/rfc/rfc8628) and RFC 8252 apply.
 
-What the client receives is not a short-lived access token but a long-lived
-`rpk_` API key with the `push_own` scope (see
-[the key model](authentication.md#the-key-model)), returned in the standard
-`access_token` field. It has no refresh token and does not expire until the
-person revokes it.
+A client signs in one of two ways. Both end at the same token response.
+
+- **Loopback (RECOMMENDED where a browser runs on the same machine).** The
+  authorization-code flow with PKCE (`S256`,
+  [RFC 7636](https://www.rfc-editor.org/rfc/rfc7636)) and a loopback redirect
+  (RFC 8252 §7.3).
+- **Device (for a machine with no browser).** The Device Authorization Grant,
+  RFC 8628. A client SHOULD use it when asked to, over SSH, when it cannot
+  open a browser, or when the server has no `authorization_endpoint`.
+
+What the client receives is a short-lived access token and a refresh token
+(RFC 6749 §5.1, §6), not a long-lived key. The access token is an account-family
+key (`rpa_`) holding `push_own`; it works on the REST endpoints a command line
+uses (pushes, `whoami`). The person SHOULD be able to see and revoke the
+login wherever the server lists their keys.
+
+Every endpoint in this section is **unauthenticated**: this is how a caller
+with no credential gets one. Requests use
+`application/x-www-form-urlencoded` bodies. A server MAY also accept the same
+fields as a JSON object at the device endpoints. All responses are JSON (the
+revocation endpoint's may be empty) and MUST carry `Cache-Control: no-store`
+(RFC 6749 §5.1).
+
+#### Loopback sign-in
+
+The client listens on the loopback interface at an ephemeral port, and opens
+the system browser at the `authorization_endpoint` with:
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `response_type` | yes | `code` |
+| `client_id` | yes | `rp-cli` |
+| `redirect_uri` | yes | `http://127.0.0.1:<port>/callback` (or `http://[::1]:<port>/callback`) |
+| `code_challenge`, `code_challenge_method` | yes | PKCE; the method MUST be `S256` |
+| `state` | yes | An unguessable value the client checks on return |
+| `scope` | no | `profiles:push` (the default) |
+| `label` | no | Extension. Display name for this machine. A client SHOULD send the hostname |
+
+The server registers `http://127.0.0.1/callback` and `http://[::1]/callback`
+for `rp-cli` and MUST accept any port on them (RFC 8252 §7.3), and nothing
+else: not `localhost`, not another path. It MUST NOT redirect to any other
+address; it shows an error page instead. It MUST require an authenticated
+person and an explicit approve control, and SHOULD offer a deny control. It
+redirects back with `code`, `state` and `iss`
+([RFC 9207](https://www.rfc-editor.org/rfc/rfc9207)), or with
+`error=access_denied`. The client MUST check `state`, and `iss` when present.
+
+The client trades the code at the `token_endpoint`:
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `grant_type` | yes | `authorization_code` |
+| `code` | yes | From the redirect |
+| `redirect_uri` | yes | The same value, port included |
+| `client_id` | yes | `rp-cli` |
+| `code_verifier` | yes | The PKCE verifier |
+
+A code works once. A server SHOULD revoke the login a code made when the code
+is presented again (RFC 6749 §4.1.2).
+
+#### Device sign-in
 
 ```
 client                          server                      person's browser
-  |  POST /api/auth/device         |                                |
+  |  POST device_authorization_endpoint                             |
   |------------------------------->|                                |
   |  200 {device_code, user_code,  |                                |
   |       verification_uri,        |                                |
@@ -925,30 +1001,25 @@ client                          server                      person's browser
   |  (print URI + user_code)       |    person opens the URI        |
   |                                |<-------------------------------|
   |                                |    person signs in, approves   |
-  |  POST /api/auth/token          |                                |
+  |  POST token_endpoint           |                                |
   |------------------------------->|                                |
   |  400 {"error": "authorization_pending"}                         |
   |<-------------------------------|                                |
   |  ... wait `interval` seconds, repeat ...                        |
-  |  200 {"access_token": "rpk_...", "token_type": "Bearer", ...}   |
+  |  200 {"access_token", "refresh_token", "expires_in", ...}       |
   |<-------------------------------|                                |
 ```
 
-Both endpoints are **unauthenticated**: this is how a caller with no credential
-gets one. Requests use `application/x-www-form-urlencoded` bodies (RFC 8628
-§3.1, §3.4). A server MAY also accept the same fields as a JSON object. All
-responses are JSON and MUST carry `Cache-Control: no-store` (RFC 6749 §5.1).
+##### POST device_authorization_endpoint
 
-#### POST /api/auth/device
-
-Start a login (the device authorization endpoint, RFC 8628 §3.1).
+Start a login (RFC 8628 §3.1).
 
 **Request parameters:**
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `client_id` | yes | Names the client software, e.g. `rp`. Grants nothing. A server MUST accept any non-empty value without prior registration (RFC 6749 §2.4) and MAY show it on the approval page. |
-| `scope` | no | Ignored by servers that mint only `push_own`. |
+| `client_id` | yes | `rp-cli` |
+| `scope` | no | `profiles:push` (the default). Any other value is `invalid_scope` |
 | `label` | no | Extension. Display name for this machine on the approval page. A client SHOULD send the hostname. Servers SHOULD trim it and MAY truncate it. |
 
 **Response 200** (RFC 8628 §3.2):
@@ -963,8 +1034,9 @@ Start a login (the device authorization endpoint, RFC 8628 §3.1).
 | `interval` | integer | RECOMMENDED | Seconds a client MUST wait between polls. Default `5` when absent. |
 
 Servers MAY include further fields; clients MUST ignore what they do not know.
-A client SHOULD open `verification_uri_complete` when present, and MUST also
-print `user_code` so the person can check it matches the one on the page.
+A client MUST print `user_code` so the person can check it matches the one on
+the page, and MAY open `verification_uri_complete` when a browser runs on the
+same machine.
 
 The `device_code` MUST be unguessable, MUST be stored hashed rather than in the
 clear, and MUST NOT be an API key: it grants nothing but the right to collect
@@ -978,18 +1050,19 @@ server MUST require an authenticated person to approve, and MUST NOT approve on
 the strength of the `user_code` alone: the person has to press an explicit
 approve control. The page SHOULD show the requesting `label` and the
 `user_code` so the person can spot a request they did not start (RFC 8628
-§5.4). It MAY offer a deny control. Servers SHOULD rate-limit code entry
+§5.4). It SHOULD offer a deny control; a denied request answers the next poll
+with `access_denied`. Servers SHOULD rate-limit code entry
 (RFC 8628 §5.1).
 
 **Status codes:** `200`; `400` with an OAuth error body for a malformed request;
-`404` (server does not offer command-line login); `429` or `503` when the
+`401 invalid_client` for a `client_id` other than `rp-cli`; `404` (server does
+not offer command-line login; a client MUST NOT retry); `429` or `503` when the
 server cannot open another request right now (the client SHOULD retry after
 `Retry-After`).
 
-#### POST /api/auth/token
+##### POST token_endpoint (device grant)
 
-Collect the result (the token endpoint, RFC 8628 §3.4). The `device_code` is
-the credential.
+Collect the result (RFC 8628 §3.4). The `device_code` is the credential.
 
 **Request parameters:**
 
@@ -997,25 +1070,11 @@ the credential.
 |-------|----------|-------------|
 | `grant_type` | yes | The literal `urn:ietf:params:oauth:grant-type:device_code` |
 | `device_code` | yes | From the start response |
-| `client_id` | yes | The same value sent to `/api/auth/device` |
+| `client_id` | yes | `rp-cli` |
 
-**Response 200, approved** (RFC 6749 §5.1):
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `access_token` | string | REQUIRED | The minted `rpk_` key. See [the key model](authentication.md#the-key-model). |
-| `token_type` | string | REQUIRED | `"Bearer"` |
-| `scope` | string | RECOMMENDED | Granted scopes, space-separated, e.g. `"push_own"` |
-| `orcid` | string \| null | RECOMMENDED | Extension. The approving person's identifier |
-| `name` | string \| null | RECOMMENDED | Extension. The approving person's display name |
-| `url` | string \| null | | Extension. The server's canonical base URL |
-
-The response carries no `expires_in` and no `refresh_token`, because the key
-does not expire on a schedule.
-
-**The approved response is returned exactly once.** The server MUST mint the key
-and invalidate the `device_code` in the same operation. A later request with
-the same `device_code` MUST get `expired_token`, not the key again.
+**The approved response is returned exactly once.** The server MUST mint the
+tokens and invalidate the `device_code` in the same operation. A later request
+with the same `device_code` MUST get `expired_token`, not the tokens again.
 
 **Response 400, not approved** (RFC 8628 §3.5) carries
 `{"error": "<code>", "error_description": "<optional text>"}`:
@@ -1040,7 +1099,41 @@ other `error` value it does not recognize as fatal, and MUST stop polling once
 
 Servers SHOULD purge expired requests.
 
-These two endpoints do not use the `{"detail": ...}` body of
+#### The token response
+
+Both flows end in the same `200` (RFC 6749 §5.1), and it carries only the
+standard fields:
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `access_token` | string | REQUIRED | An account-family key holding `push_own`. See [the key model](authentication.md#the-key-model). |
+| `token_type` | string | REQUIRED | `"Bearer"` |
+| `expires_in` | integer | REQUIRED | Seconds the access token lives. The reference server uses one hour |
+| `refresh_token` | string | REQUIRED | Buys the next pair |
+| `scope` | string | RECOMMENDED | Granted scopes, space-separated, e.g. `"profiles:read profiles:push"` |
+
+It names no person; a client that wants to say who signed in asks
+[`GET /api/v1/manage/whoami`](#get-apiv1managewhoami).
+
+#### Refresh and revocation
+
+The client renews the access token at the `token_endpoint` with
+`grant_type=refresh_token`, `refresh_token` and `client_id=rp-cli`
+(RFC 6749 §6), when it has expired and when a request answers `401`. The
+server SHOULD rotate the refresh token on every use and SHOULD treat a
+rotated-away token presented again (after a short grace window for
+overlapping calls) as stolen, revoking the whole login
+([RFC 9700](https://www.rfc-editor.org/rfc/rfc9700) §4.14). A client MUST
+store the new refresh token before using the new access token, and MUST NOT
+let two processes refresh with the same token. `invalid_grant` means the login
+expired or was revoked; the person logs in again.
+
+A server that offers `revocation_endpoint` accepts `token` (a refresh or
+access token), `client_id` and an optional `token_type_hint` (RFC 7009 §2.1),
+revokes the whole login the token belongs to, and answers `200` whatever the
+token. A client SHOULD call it on logout.
+
+These endpoints do not use the `{"detail": ...}` body of
 [section 13](#13-error-format); they use the OAuth error body above.
 
 ### 14.3. Identity echo
@@ -1049,10 +1142,11 @@ Two endpoints answer "what is this credential". They are split by key family
 (see [the key model](authentication.md#the-key-model)) because the answers have
 different shapes.
 
-#### GET /api/manage/whoami
+#### GET /api/v1/manage/whoami
 
-Describe an app-family (`rpk_`) key. Requires
-`Authorization: Bearer <key>`.
+Describe a push credential: an app-family (`rpk_`) key, or the access token of
+a [command-line login](#142-command-line-login) (an account-family key).
+Requires `Authorization: Bearer <key>`.
 
 **Response 200:**
 
@@ -1071,11 +1165,10 @@ Each `profiles` entry:
 | `rid` | string | |
 | `role` | string | `owner` or `editor` |
 
-**Status codes:** `200`; `400` when the credential belongs to the account family
-(the response SHOULD name the correct endpoint); `401` when the header is
-missing, malformed, or the key is unknown, revoked, or expired.
+**Status codes:** `200`; `401` when the header is missing, malformed, or the
+key is unknown, revoked, or expired.
 
-#### GET /api/manage/agent/whoami
+#### GET /api/v1/manage/agent/whoami
 
 Describe an account-family (`rpa_`) key: everything it may read and write.
 Requires `Authorization: Bearer <key>`. A key is expected to call this at the

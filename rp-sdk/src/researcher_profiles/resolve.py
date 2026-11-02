@@ -366,7 +366,7 @@ def _create_stub(store: Any, *, rid: str, name: str, affiliation: Optional[str])
             # A policy refusal, not a race: never retried, even if the rid exists.
             raise
         except (ProfileWriteError, FileExistsError) as e:
-            if store.exists(rid):
+            if store.profiles_about(rid):
                 return False
             last_error = e
     raise ResolveError(
@@ -456,9 +456,9 @@ def _resolve_by_rid(
         rid = validate_rid(rid)
     except ValueError as e:
         raise ResolveError(str(e)) from e
-    if store.exists(rid):
-        # ``rid_for`` follows a merge alias to the live successor.
-        return ResolveResult(rid=store.rid_for(rid), created=False, confidence="exact")
+    if store.profiles_about(rid):
+        # A merge-retired rid resolves to its live successor.
+        return ResolveResult(rid=store.successor_rid(rid) or rid, created=False, confidence="exact")
     if is_local(rid):
         # Never accept an outside local: rid (see module docstring, step 1).
         raise ResolveError(
@@ -567,10 +567,11 @@ def _mint_on_miss(
     key, and no affiliation conflict. Any other occupant is never handed out;
     a fresh random id is minted instead.
     """
-    if store.exists(mint_rid):
+    about = store.profiles_about(mint_rid)
+    if about:
         occupant = None
         try:
-            prof = store.get(mint_rid)
+            prof = store.get(about[0].ref)
             occupant = (
                 str(prof.name or ""),
                 prof.metadata.visibility,

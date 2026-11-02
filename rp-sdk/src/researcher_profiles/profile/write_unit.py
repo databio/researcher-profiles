@@ -44,8 +44,15 @@ class WriteContext:
     #: The ambient HTTP request when the write came from an API route; ``None``
     #: for CLI, pipeline, and out-of-process writes.
     request: Any | None = None
-    #: For ``kind == "merge"`` only: the rid and slug of the profile this write
-    #: retires into ``rid`` (``SqlProfileStore.merge_into``). ``None`` otherwise.
+    #: The record key of the profile being written, on a backend that has one
+    #: (SQL); ``None`` otherwise.
+    profile_id: int | None = None
+    #: For ``kind == "merge"`` only (``SqlProfileStore.merge_into``): the record
+    #: this write retires into ``profile_id`` (``None`` for a convert, where the
+    #: retired record itself survives), the rid it retires (``None`` when the
+    #: merge did not change the rid), and the retired record's slug. ``None``
+    #: for every other kind.
+    retired_profile_id: int | None = None
     retired_rid: str | None = None
     retired_slug: str | None = None
 

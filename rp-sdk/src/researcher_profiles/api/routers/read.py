@@ -297,6 +297,24 @@ def get_profile_artifact(
     )
 
 
+@public_router.get("/profiles/{slug}/seed-papers")
+def list_seed_papers(
+    slug: str,
+    response: Response,
+    service: Service = Depends(get_service),
+    caller: Caller = Depends(get_read_caller),
+) -> dict:
+    """The interest seed papers: papers that define the person's interests.
+
+    Never works they wrote. Gated on the tier of
+    ``sources/seed_papers.jsonld``, ``private`` by default: a caller below it
+    gets the profile's 404. Returns ``{"seed_papers": [...]}``.
+    """
+    rows = svc.list_seed_papers(service, caller, slug)
+    _no_store(response)
+    return {"seed_papers": rows}
+
+
 @public_router.get(
     "/profiles/{slug}/papers",
     response_model=PaperPage,

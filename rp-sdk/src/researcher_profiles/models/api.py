@@ -62,6 +62,9 @@ class ProfileSummary(_APIModel):
     #: consumers map onto their own users. ``None`` means the document failed
     #: to load.
     rid: Optional[str] = None
+    #: The store's record key, on a store that has one (SQL); ``None`` on a
+    #: directory store. A store may hold several records about one rid.
+    profile_id: Optional[int] = None
     name: str
     level: str = "full"
     affiliation: Optional[str] = None
@@ -242,6 +245,8 @@ class ProfileRecord(_APIModel):
 
     slug: str
     rid: Optional[str] = None
+    #: The store's record key (SQL); ``None`` on a directory store.
+    profile_id: Optional[int] = None
     #: The edit version token (``"sha256:<hex>"`` over document + SOUL).
     content_hash: Optional[str] = None
     view: Literal["record", "full"]
@@ -423,6 +428,16 @@ class PushResponse(_APIModel):
     # The ?mode= the push ran under: what happened to the live files the
     # archive did not carry (replace | merge | prune).
     mode: str = "replace"
+    # The store's record key for the pushed profile, on a store that has
+    # one (SQL); None on a directory store.
+    profile_id: Optional[int] = None
+    #: Fields the server kept from the owner's hand edits instead of taking the
+    #: pushed value; ``None`` when the host does not protect owner edits.
+    kept_owner_fields: Optional[list[str]] = None
+    #: Fields the host took out of the pushed document instead of refusing the
+    #: push (Prosopia: identity fields on a team's profile); ``None`` when the
+    #: host strips nothing from pushes to this profile.
+    stripped_fields: Optional[list[str]] = None
 
 
 class CapabilitiesResponse(_APIModel):
@@ -595,6 +610,23 @@ class EditResult(_APIModel):
     #: Work edits only: the paper's version after this write (``None`` after a
     #: delete).
     version: Optional[str] = None
+
+
+class SeedAddResult(_APIModel):
+    """Result of adding interest seed papers: what was added and why the rest was not."""
+
+    slug: str
+    rid: Optional[str] = None
+    #: ``seed_id`` of every seed added, in request order.
+    added: list[str] = []
+    #: Already in the seed list (same OpenAlex id or DOI).
+    already_seed: list[str] = []
+    #: Already one of the person's authored works: never also a seed.
+    already_authored: list[str] = []
+    #: How many were refused because the list is full (``SEED_PAPERS_MAX``).
+    over_cap: int = 0
+    #: The ``content_hash`` after this write.
+    content_hash: Optional[str] = None
 
 
 class ArtifactTier(_APIModel):
@@ -1024,6 +1056,7 @@ __all__ = [
     "ReviewerMatchResult",
     "CitationRefPayload",
     "EditResult",
+    "SeedAddResult",
     "HealthResponse",
     "IdeaList",
     "IdeaPayload",

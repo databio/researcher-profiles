@@ -130,6 +130,14 @@ _PART_SPECS: tuple[_FileSpec, ...] = (
     _FileSpec("sources/grants.jsonld", "Grants", "grants", JSONLD, type_="Collection"),
     # Optional clinical extension; ``limited`` by role default.
     _FileSpec("sources/trials.jsonld", "Clinical trials", "trials", JSONLD, type_="Collection"),
+    # Interest seed papers: interest, never authorship; ``private`` by role default.
+    _FileSpec(
+        "sources/seed_papers.jsonld",
+        "Interest seed papers",
+        "seed_papers",
+        JSONLD,
+        type_="Collection",
+    ),
     _FileSpec("sources/citations.json", "Citations", "citations", JSON),
     _FileSpec("sources/cv.md", "CV", "cv", MARKDOWN),
     _FileSpec("sources/interview.md", "Interview digest", "interview", MARKDOWN),

@@ -453,6 +453,9 @@ _TOPIC_ID_RE = re.compile(r"^(?:https://openalex\.org/)?([TC]\d+)$", re.IGNORECA
 #: filter values, and a specialist's most recent works carry the signal.
 _MAX_CITES_SEEDS = 100
 
+#: Most ORCID iDs OR-ed into one `author.orcid:` filter (followed authors).
+_MAX_AUTHOR_ORCIDS_PER_QUERY = 50
+
 #: OpenAlex ``type`` values that are not scholarly narrative outputs: bare
 #: software/code dumps, catch-all deposits, review reports, grant records, etc.
 #: ``dataset`` is kept: OpenAlex types some genuine method papers as datasets.
@@ -602,13 +605,44 @@ def _profile_papers(profile) -> list:
         return []
 
 
-def _term_sources(md, papers: list):
+def _profile_seed_papers(profile) -> list:
+    try:
+        return list(getattr(profile, "seed_papers", None) or [])
+    except (OSError, ProfileError, ValidationError):
+        logger.warning(
+            "could not read seed papers for %r; querying without them",
+            getattr(profile, "slug", profile),
+            exc_info=True,
+        )
+        return []
+
+
+#: How many OpenAlex topics drawn from the interest seed papers join the query.
+SEED_QUERY_TOPICS = 10
+
+
+def top_seed_topics(seeds: Iterable[Any], k: int = SEED_QUERY_TOPICS) -> list[str]:
+    """The ``k`` OpenAlex topic ids most common across ``seeds``.
+
+    Ties keep first appearance (seed order, then each seed's topic order).
+    """
+    counts: dict[str, int] = {}
+    for seed in seeds:
+        for t in dict.fromkeys(_get(seed, "topics") or []):
+            if t:
+                counts[t] = counts.get(t, 0) + 1
+    order = {t: i for i, t in enumerate(counts)}
+    return sorted(counts, key=lambda t: (-counts[t], order[t]))[: max(0, k)]
+
+
+def _term_sources(md, papers: list, seeds: list | None = None):
     """``(source, terms)`` in fallback order; later ones are built only if reached."""
     subfields = list(getattr(md, "subfields", None) or [])
     if getattr(md, "research_interests", None):
         ids, text = _typed_query_terms(md)
         if ids or text:
             yield "interests", ids + ([] if len(ids) >= SUBFIELDS_DROPPED_AT else subfields) + text
+    yield "seeds", top_seed_topics(seeds or [])
     yield "subfields", subfields + list(getattr(md, "interests", None) or [])
     yield "expertise", list(getattr(md, "expertise", None) or [])
     yield "field", [getattr(md, "field", None) or ""]
@@ -639,6 +673,8 @@ def profile_query_terms(profile) -> dict:
       topics, the top inferred topics by share of papers, the labels of other
       positively weighted interests, and ``subfields`` unless there are at
       least :data:`SUBFIELDS_DROPPED_AT` topic ids;
+    - ``seeds``: the OpenAlex topics most common across the interest seed
+      papers (:func:`top_seed_topics`);
     - ``subfields``: ``subfields`` + free-text ``interests``;
     - ``expertise``: the expertise entries;
     - ``field``: the profile's field;
@@ -650,12 +686,13 @@ def profile_query_terms(profile) -> dict:
     ids are never required.
 
     ``seed_work_ids`` are the OpenAlex work ids of the profile's own papers
-    (the citation neighborhood, usually higher precision for specialists),
-    whatever the source.
+    and then of its interest seed papers, deduped (the citation neighborhood,
+    usually higher precision for specialists), whatever the source.
     """
     papers = _profile_papers(profile)
+    seeds = _profile_seed_papers(profile)
     source, topics = "none", []
-    for name, terms in _term_sources(profile.metadata, papers):
+    for name, terms in _term_sources(profile.metadata, papers, seeds):
         terms = _dedupe_terms(terms)
         if terms:
             source, topics = name, terms
@@ -664,9 +701,13 @@ def profile_query_terms(profile) -> dict:
     text = [t for t in topics if not _TOPIC_ID_RE.match(t)][:MAX_FREE_TEXT_TERMS]
     keep = set(ids) | set(text)
     topics = [t for t in topics if t in keep]
-    seed_work_ids = [
-        str(oid).rsplit("/", 1)[-1] for p in papers if (oid := getattr(p, "openalex_id", None))
-    ]
+    seed_work_ids = list(
+        dict.fromkeys(
+            str(oid).rsplit("/", 1)[-1]
+            for p in (*papers, *seeds)
+            if (oid := getattr(p, "openalex_id", None))
+        )
+    )
     return {"topics": topics, "seed_work_ids": seed_work_ids, "source": source}
 
 
@@ -720,19 +761,127 @@ def fetch_work(client: "OpenAlexClient", openalex_id: str) -> PaperRecord | None
     return parse_work(raw)
 
 
+# ---------------------------------------------------------------------------
+# Resolving a pasted work reference (DOI / OpenAlex id / BibTeX)
+# ---------------------------------------------------------------------------
+
+_WORK_ID_RE = re.compile(
+    r"^(?:https?://(?:api\.)?openalex\.org/(?:works/)?)?(W\d+)/?$", re.IGNORECASE
+)
+_DOI_PREFIX_RE = re.compile(r"^(?:doi:\s*|https?://(?:dx\.)?doi\.org/)", re.IGNORECASE)
+_BARE_DOI_RE = re.compile(r"^10\.\d{4,9}/\S+$")
+
+
+def parse_work_ref(text: str) -> tuple[str, str] | None:
+    """``("openalex", "W123")`` or ``("doi", "10.x/y")`` for one pasted reference.
+
+    Accepts ``W123``, ``https://openalex.org/W123``, a bare DOI, ``doi:10.x/y``,
+    ``https://doi.org/10.x/y`` and ``https://dx.doi.org/10.x/y``. ``None`` when
+    it is neither.
+    """
+    t = (text or "").strip().strip("<>\"'")
+    if not t:
+        return None
+    m = _WORK_ID_RE.match(t)
+    if m:
+        return "openalex", m.group(1).upper()
+    doi = _DOI_PREFIX_RE.sub("", t).strip().rstrip(".")
+    if _BARE_DOI_RE.match(doi):
+        return "doi", doi
+    return None
+
+
+_REF_SPLIT_RE = re.compile(r"[\s,;]+")
+
+
+def split_work_refs(blob: str) -> tuple[list[tuple[str, str]], list[str]]:
+    """Split pasted text on whitespace, commas and semicolons into references.
+
+    Returns ``(refs, unrecognized)``: each recognized reference once, in order
+    (DOIs compared case-insensitively), and every token that was neither.
+    """
+    refs: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    unrecognized: list[str] = []
+    for token in _REF_SPLIT_RE.split(blob or ""):
+        if not token:
+            continue
+        ref = parse_work_ref(token)
+        if ref is None:
+            unrecognized.append(token)
+            continue
+        key = (ref[0], ref[1].lower())
+        if key not in seen:
+            seen.add(key)
+            refs.append(ref)
+    return refs, unrecognized
+
+
+_BIB_ENTRY_RE = re.compile(r"@\s*(\w+)\s*[{(]\s*([^,\s]*)\s*,", re.IGNORECASE)
+_BIB_DOI_RE = re.compile(r"\bdoi\s*=\s*[{\"]\s*([^}\"]+?)\s*[}\"]", re.IGNORECASE)
+_BIB_URL_DOI_RE = re.compile(
+    r"\burl\s*=\s*[{\"]\s*https?://(?:dx\.)?doi\.org/([^}\"\s]+)\s*[}\"]", re.IGNORECASE
+)
+_BIB_SKIP_TYPES = frozenset({"comment", "preamble", "string"})
+
+
+def dois_from_bibtex(text: str) -> tuple[list[str], list[str]]:
+    """``(dois, entries_without_doi)`` from a BibTeX file, no parser dependency.
+
+    Reads each ``@type{key, ...}`` entry's ``doi = {...}`` / ``doi = "..."``
+    field, or a ``url`` pointing at ``doi.org``. Entries with neither are
+    reported back by citation key, never guessed by title.
+    """
+    dois: list[str] = []
+    seen: set[str] = set()
+    missing: list[str] = []
+    entries = list(_BIB_ENTRY_RE.finditer(text or ""))
+    for i, m in enumerate(entries):
+        if m.group(1).lower() in _BIB_SKIP_TYPES:
+            continue
+        body = text[m.end() : entries[i + 1].start() if i + 1 < len(entries) else len(text)]
+        hit = _BIB_DOI_RE.search(body) or _BIB_URL_DOI_RE.search(body)
+        ref = parse_work_ref(hit.group(1)) if hit else None
+        if ref is None or ref[0] != "doi":
+            missing.append(m.group(2) or f"entry-{i + 1}")
+            continue
+        if ref[1].lower() not in seen:
+            seen.add(ref[1].lower())
+            dois.append(ref[1])
+    return dois, missing
+
+
+def resolve_work(client: "OpenAlexClient", kind: str, value: str) -> PaperRecord | None:
+    """Fetch one work by OpenAlex id (``kind="openalex"``) or DOI (``kind="doi"``).
+
+    Singleton lookups are free against the daily budget. ``None`` when the
+    work is missing or unparseable; a budget (429) or key (401) error raises.
+    """
+    if kind == "openalex":
+        return fetch_work(client, value)
+    if kind != "doi":
+        raise ValueError(f"kind must be 'openalex' or 'doi', got {kind!r}")
+    try:
+        raw = client.get(f"/works/https://doi.org/{value}")
+    except OpenAlexHTTPError:
+        return None
+    return parse_work(raw)
+
+
 def fetch_new_works(
     client: "OpenAlexClient",
     *,
     since,
     topics: list[str] | None = None,
     seed_work_ids: list[str] | None = None,
+    author_orcids: list[str] | None = None,
     per_page: int = 100,
     max_pages: int = 5,
     exclude_types: set[str] | frozenset[str] | None = None,
 ) -> list[PaperRecord]:
     """Query OpenAlex for works published since ``since`` relevant to a profile.
 
-    Two independent query modes, run separately (OpenAlex cannot OR across
+    Three independent query modes, run separately (OpenAlex cannot OR across
     filters) and deduped by OpenAlex id:
 
     - ``topics``: entity ids (``T…``/``C…``, bare or IRI) become ``topics.id:``
@@ -740,6 +889,9 @@ def fetch_new_works(
       ``title_and_abstract.search:`` filter.
     - ``seed_work_ids``: the profile's own works, as a ``cites:`` filter for
       new works citing them (capped at the first 100 seeds).
+    - ``author_orcids``: bare ORCID iDs, as ``author.orcid:`` filters (chunked
+      at :data:`_MAX_AUTHOR_ORCIDS_PER_QUERY`), one page per chunk whatever
+      ``max_pages`` is, to keep the OpenAlex cost bounded.
 
     ``since`` is a ``datetime.date`` or a ``YYYY-MM-DD`` string. Pagination is
     cursor-based, capped at ``max_pages`` pages per query mode; each page is
@@ -754,9 +906,10 @@ def fetch_new_works(
     shrinks the fetch so more real papers fit the page budget) and re-checked
     post-parse against :attr:`PaperRecord.type` as a guarantee.
 
-    Each work carries two extra fields saying why it was found: ``found_by``
-    (query kinds ``topic``, ``text``, ``cites``) and, for a citing work,
-    ``cites_works`` (which seed ids it references).
+    Each work carries extra fields saying why it was found: ``found_by``
+    (query kinds ``topic``, ``text``, ``cites``, ``followed``), for a citing
+    work ``cites_works`` (which seed ids it references), and ``author_orcids``
+    (the bare ORCID iDs of its authors, whichever query found it).
 
     A failure on any page (an ``OpenAlexError``) propagates and discards the
     works already collected.
@@ -764,12 +917,13 @@ def fetch_new_works(
     if exclude_types is None:
         exclude_types = DEFAULT_EXCLUDE_TYPES
     drop_types = {t.strip().lower() for t in exclude_types if t and t.strip()}
-    queries = _new_works_queries(since, topics, seed_work_ids, drop_types)
+    queries = _new_works_queries(since, topics, seed_work_ids, drop_types, author_orcids)
     seeds = {str(s).rsplit("/", 1)[-1] for s in (seed_work_ids or []) if s}
 
     by_key: dict[str, PaperRecord] = {}
     for kind, filt in queries:
-        for raw in _iter_work_results(client, filt, per_page=per_page, max_pages=max_pages):
+        pages = 1 if kind == "followed" else max_pages
+        for raw in _iter_work_results(client, filt, per_page=per_page, max_pages=pages):
             rec = _accept_new_work(raw, drop_types)
             if rec is None:
                 continue
@@ -779,11 +933,17 @@ def fetch_new_works(
 
 
 def _tag_found_by(rec: PaperRecord, kind: str, raw: dict, seeds: set[str]) -> None:
-    """Set ``found_by`` and ``cites_works`` (see :func:`fetch_new_works`)."""
+    """Set ``found_by``, ``cites_works`` and ``author_orcids`` (see :func:`fetch_new_works`)."""
     found = list(getattr(rec, "found_by", None) or [])
     if kind not in found:
         found.append(kind)
     rec.found_by = found
+    orcids = set(getattr(rec, "author_orcids", None) or [])
+    for a in raw.get("authorships") or []:
+        oid = ((a or {}).get("author") or {}).get("orcid")
+        if oid:
+            orcids.add(str(oid).rsplit("/", 1)[-1])
+    rec.author_orcids = sorted(orcids)
     if kind == "cites":
         refs = {str(r).rsplit("/", 1)[-1] for r in raw.get("referenced_works") or []}
         rec.cites_works = sorted(seeds & refs)
@@ -794,8 +954,9 @@ def _new_works_queries(
     topics: list[str] | None,
     seed_work_ids: list[str] | None,
     drop_types: set[str],
+    author_orcids: list[str] | None = None,
 ) -> list[tuple[str, str]]:
-    """``(kind, filter)`` per query mode: topic ids, free text, then cites."""
+    """``(kind, filter)`` per query mode: topic ids, free text, cites, then followed authors."""
     since_str = since.isoformat() if hasattr(since, "isoformat") else str(since)
     base_filter = f"from_publication_date:{since_str}"
     type_clause = "".join(f",type:!{t}" for t in sorted(drop_types))
@@ -808,8 +969,12 @@ def _new_works_queries(
     if seeds:
         cites = "|".join(seeds[:_MAX_CITES_SEEDS])
         queries.append(("cites", f"{base_filter},cites:{cites}{type_clause}"))
+    orcids = [str(o).rsplit("/", 1)[-1] for o in (author_orcids or []) if o]
+    for i in range(0, len(orcids), _MAX_AUTHOR_ORCIDS_PER_QUERY):
+        chunk = "|".join(orcids[i : i + _MAX_AUTHOR_ORCIDS_PER_QUERY])
+        queries.append(("followed", f"{base_filter},author.orcid:{chunk}{type_clause}"))
     if not queries:
-        raise ValueError("fetch_new_works needs topics and/or seed_work_ids")
+        raise ValueError("fetch_new_works needs topics and/or seed_work_ids (or author_orcids)")
     return queries
 
 

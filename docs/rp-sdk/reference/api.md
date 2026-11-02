@@ -113,8 +113,11 @@ See the [CLI reference](cli.md) for the commands that read these.
 ### Profile discovery and slugs
 
 - The server is built over a [`ProfileStore`](python-api.md#profilestore-researcher_profilesstore), and
-  every lookup goes through `store.resolve_slug(ref)`. Every route that
-  takes a `{slug}` accepts a **rid** there too.
+  every lookup goes through `store.get(ref)`: a slug, a former slug, or (on
+  SQL) a `profile_id`. Every route that takes a `{slug}` also accepts a
+  **rid**: the host's `hooks.resolve_ref` says which record it means, and
+  with no hook a rid names the one record about that person (several, or
+  none, is a 404).
 - `FilesystemProfileStore` lists every direct subdirectory of its root that
   contains a `profile.jsonld`; the directory name becomes the slug. It loads
   profiles lazily via `ResearcherProfile.from_files(<dir>)` and holds them in an
@@ -159,7 +162,8 @@ curl -H "Authorization: Bearer $RESEARCHER_PROFILES_TOKEN" \
 A profile's display handle (for example `jane-doe`, `john-smith`): a directory
 name on a filesystem store, or the `rp_profiles.slug` column on a SQL one. Slugs
 are used verbatim in URL paths with no server-side normalization, and a **rid**
-is accepted anywhere a slug is (`store.resolve_slug` tries both).
+is accepted anywhere a slug is (see "Profile discovery and slugs" for which
+record it names).
 Path-traversal characters produce a 404 because the store's lookup finds no
 matching profile.
 
@@ -467,6 +471,7 @@ without a restart.
 | `spliced` | integer | Manifest entries the server added back for kept files the incoming manifest did not list. Nonzero means the pushed document's manifest was incomplete. |
 | `manifest_counts` | object | `{role: count}` over the manifest the server holds *after* the commit: what a reader can now fetch. |
 | `mode` | string | The push mode that was applied: `replace`, `merge`, or `prune`. |
+| `kept_owner_fields` | array \| null | Fields the host kept from the owner's hand edits instead of taking the pushed value (Prosopia does this for any pusher but the owner or a co-owner). `null` when the host does not protect owner edits. |
 
 ```bash
 tar -C /path/to/profiles/jane-doe -czf - . | curl -X PUT \
@@ -1156,6 +1161,15 @@ operator bearer token. A host that runs the
 | `POST` | `/api/v1/profiles/{slug}/works` | Add one new work; an existing `paper_id` is a `409`. |
 | `PATCH` | `/api/v1/profiles/{slug}/works/{paper_id}` | Patch owner-editable fields of one work. |
 | `DELETE` | `/api/v1/profiles/{slug}/works/{paper_id}` | Remove one work from the corpus. |
+| `POST` | `/api/v1/profiles/{slug}/seed-papers` | Add interest seed papers, `{"records": [...]}` of already-resolved metadata (a title plus an `openalex_id` or `doi`). Returns `added`, `already_seed`, `already_authored`, `over_cap`. |
+| `DELETE` | `/api/v1/profiles/{slug}/seed-papers/{seed_id}` | Remove one seed by `seed_id` (`W…` or `doi:<doi>`). |
+
+`GET /api/v1/profiles/{slug}/seed-papers` (the read surface) lists the interest
+seed papers: papers that define the person's interests, never works they wrote.
+It is gated on the tier of `sources/seed_papers.jsonld`, `private` by default,
+so the public gets a `404`. Seeds feed the centroid and the feed query, never
+the works list, the narrative, or any search hit (`seed_abstract` chunks are
+rank-only).
 
 To read a work before editing it, use the public
 `GET /api/v1/profiles/{slug}/papers/{paper_id}?view=full`.
@@ -1354,11 +1368,11 @@ all calls to one persona before switching where possible.
 
 ## The management tier is not implemented here
 
-`rp login` calls the command-line login endpoints (`/api/auth/device` and
-`/api/auth/token`), and `rp whoami`, `rp agent`, and `rp profile` call endpoints
-under `/api/manage/`, all specified in
+`rp login` calls the command-line login endpoints its server names in
+`/.well-known/oauth-authorization-server`, and `rp whoami`, `rp agent`, and
+`rp profile` call endpoints under `/api/v1/manage/`, all specified in
 [Management API](../../rp-spec/dynamic-api.md#14-management-api). The server in
 this package does not implement them: it has no accounts, no identity provider,
-and no key store, so `POST /api/auth/device` answers `404` and the client
+and no key store, so it publishes no OAuth metadata and the client
 reports that the server offers no command-line login. Point those commands at a
 server that implements the management tier.

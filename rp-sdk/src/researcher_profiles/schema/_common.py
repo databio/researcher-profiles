@@ -94,6 +94,9 @@ ROLE_DEFAULT_VISIBILITY: dict[str, Visibility] = {
     # Trial participation is site and patient-adjacent detail, so it starts
     # limited. The ``clinical_expertise`` narrative is authored for publication.
     "trials": "limited",
+    # Interest seed papers: an owner-curated reading list ("papers that define
+    # my interests"), private by default. Never authorship, never works.
+    "seed_papers": "private",
 }
 
 #: No role carries a hard privacy floor: every artifact's tier is the owner's

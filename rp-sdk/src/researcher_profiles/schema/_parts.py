@@ -66,6 +66,22 @@ class PaperStats(_Base):
     year_max: int = 0
 
 
+CurrentRank = Literal[
+    "assistant_professor",
+    "associate_professor",
+    "professor",
+    "research_faculty",
+    "staff_scientist",
+    "postdoc",
+    "graduate_student",
+    "undergraduate",
+    "clinician",
+    "industry",
+    "other",
+]
+"""A person's current rank or position (``CareerStage.current_rank``)."""
+
+
 class CareerStage(_Base):
     """Date-anchored career-stage and eligibility facts (``rp:careerStage``).
 
@@ -74,6 +90,12 @@ class CareerStage(_Base):
     facts an evaluator applies a rule to, never "is_esi: true". ``None`` and
     ``"unknown"`` are legal everywhere so an evaluator can say "can't
     determine" instead of guessing.
+
+    ``source`` says who asserted the stage. A build infers it from CV, ORCID
+    and grant evidence (``inferred``); the profile owner can state it
+    (``self_reported``). A self-reported stage outranks any inferred one: a
+    build, a merge or a lens may fill its empty facts but never replaces it
+    (:func:`~researcher_profiles.schema.merge_career_stage`).
 
     Out of scope (use ``notes`` or ask the human): citizenship /
     visa status, postdoc research-months accounting, ESI extensions.
@@ -121,19 +143,13 @@ class CareerStage(_Base):
         default=None,
         description="Year of the first independent faculty/PI appointment.",
     )
-    current_rank: (
-        Literal[
-            "assistant_professor",
-            "associate_professor",
-            "professor",
-            "research_faculty",
-            "staff_scientist",
-            "postdoc",
-            "student",
-            "other",
-        ]
-        | None
-    ) = Field(default=None, description="Current academic rank; null if unknown.")
+    current_rank: CurrentRank | None = Field(
+        default=None,
+        description=(
+            "The person's current rank or position. When source is 'inferred' "
+            "a model guessed it from the evidence; null if unknown."
+        ),
+    )
     tenure_status: Literal["tenured", "untenured_tenure_track", "non_tenure_track", "unknown"] = (
         Field(
             description=(
@@ -175,6 +191,14 @@ class CareerStage(_Base):
     )
     confidence: Literal["high", "medium", "low"] = Field(
         description="Overall confidence in the facts recorded here."
+    )
+    source: Literal["self_reported", "inferred"] = Field(
+        default="inferred",
+        description=(
+            "Who asserted this stage. 'self_reported' means the profile owner (or "
+            "someone editing on their behalf) stated it, and a build must not "
+            "replace it. Builders never write 'self_reported'."
+        ),
     )
 
 

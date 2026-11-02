@@ -22,7 +22,7 @@ from researcher_profiles.client import (
 from researcher_profiles.embeddings.cache import SearchHit
 from researcher_profiles.models.results import Match, MatchEvidence
 from researcher_profiles.schema import ProfileDocument, Proof
-from researcher_profiles.store import FilesystemProfileStore
+from researcher_profiles.store import FilesystemProfileStore, Ownership
 from researcher_profiles.store.db import ProfileRow
 
 from .factories import (
@@ -122,6 +122,31 @@ class TestServerCore:
         assert me["name"]
         # ProfileSummary surfaces the depth tier; fixture has no level -> "full".
         assert me["level"] == "full"
+
+    def test_a_rid_names_its_one_record_unless_the_host_hook_decides(self, api_client):
+        """A rid is not a store ref. With no ``hooks.resolve_ref`` (a host like village), the
+        one record about that person answers; an installed hook replaces that default."""
+        rid = api_client.get(f"/api/v1/profiles/{SLUG}").json()["rid"]
+        r = api_client.get(f"/api/v1/profiles/{rid}")
+        assert r.status_code == 200, r.text
+        assert r.json()["slug"] == SLUG
+        assert api_client.get("/api/v1/profiles/0000-0002-9999-999X").status_code == 404
+        api_client.app.state.hooks.resolve_ref = lambda store, ref: None
+        assert api_client.get(f"/api/v1/profiles/{rid}").status_code == 404
+
+    def test_a_rid_with_several_records_is_a_404_without_a_host_hook(
+        self, empty_sql_store, make_api_client
+    ):
+        """Which record a rid means is the host's call; not a 409, which would confirm hidden records."""
+        for slug, owner in (
+            ("ada", Ownership("user", 1, is_self=True)),
+            ("ada-curated", Ownership("team", 7)),
+        ):
+            doc = ProfileDocument(name="Ada", rid=_PROOF_ORCID, provenance="third_party")
+            empty_sql_store.create(doc, slug=slug, owner=owner)
+        c = make_api_client(empty_sql_store)
+        assert c.get("/api/v1/profiles/ada").status_code == 200
+        assert c.get(f"/api/v1/profiles/{_PROOF_ORCID}").status_code == 404
 
     def test_profile_detail(self, api_client):
         r = api_client.get(f"/api/v1/profiles/{SLUG}")
@@ -304,7 +329,7 @@ def _forge_stored_proof(store) -> None:
     """Write a proof with an attacker's issuer into the stored document, as a bad import would."""
     forged = {**_proof().model_dump(mode="json"), "issuer": "https://evil.example"}
     with store.session() as s:
-        row = s.get(ProfileRow, _PROOF_ORCID)
+        row = s.get(ProfileRow, store.profile_id_for("ada"))
         row.document = {**row.document, "proof": [forged]}
         s.add(row)
         s.commit()
@@ -460,7 +485,12 @@ class TestRegistryProofsServed:
             summaries=False,
         )
         store.merge_into(
-            "lee", staged, survivor_rid=_PROOF_ORCID, survivor_slug="ada", build_missing_index=False
+            "lee",
+            staged,
+            survivor_ref="ada",
+            survivor_rid=_PROOF_ORCID,
+            survivor_slug="ada",
+            build_missing_index=False,
         )
         c = make_api_client(store)
         c.app.state.hooks.registry_proofs = lambda rid: (
@@ -884,3 +914,37 @@ class TestServedLinksResolve:
         assert (
             api_client.get("http://testserver/api/v1/nope/personality/SOUL.md").status_code == 404
         )
+
+
+class TestSeedPaperRoutes:
+    """The ``seed-papers`` routes: interest, never works, private by default."""
+
+    def test_add_list_remove(self, make_api_client, fixture_profiles_root):
+        c = make_api_client(fixture_profiles_root(SLUG), token="secret-token")
+        op = {"Authorization": "Bearer secret-token"}
+        r = c.post(
+            f"/api/v1/profiles/{SLUG}/seed-papers",
+            json={"records": [{"title": "A seed", "doi": "10.1093/seed.1"}]},
+            headers=op,
+        )
+        assert r.status_code == 201, r.text
+        assert r.json()["added"] == ["doi:10.1093/seed.1"]
+
+        assert c.get(f"/api/v1/profiles/{SLUG}/seed-papers").status_code == 404
+        listed = c.get(f"/api/v1/profiles/{SLUG}/seed-papers", headers=op).json()
+        assert [s["title"] for s in listed["seed_papers"]] == ["A seed"]
+
+        r = c.delete(f"/api/v1/profiles/{SLUG}/seed-papers/doi:10.1093/seed.1", headers=op)
+        assert r.status_code == 200, r.text
+        assert c.get(f"/api/v1/profiles/{SLUG}/seed-papers", headers=op).json() == {
+            "seed_papers": []
+        }
+
+    def test_a_malformed_body_is_a_400(self, make_api_client, fixture_profiles_root):
+        c = make_api_client(fixture_profiles_root(SLUG), token="secret-token")
+        r = c.post(
+            f"/api/v1/profiles/{SLUG}/seed-papers",
+            json={"records": [{"title": "No id"}]},
+            headers={"Authorization": "Bearer secret-token"},
+        )
+        assert r.status_code == 400

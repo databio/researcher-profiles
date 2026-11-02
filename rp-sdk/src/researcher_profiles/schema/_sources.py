@@ -1,8 +1,9 @@
-"""Everything under ``sources/``: the two JSON-LD ``Collection`` sidecars
-(``papers.jsonld``, ``grants.jsonld``) with their records, and the markdown
-summary frontmatter.
+"""Everything under ``sources/``: the JSON-LD ``Collection`` sidecars
+(``papers.jsonld``, ``grants.jsonld``, ``trials.jsonld``, ``seed_papers.jsonld``)
+with their records, and the markdown summary frontmatter.
 """
 
+from datetime import UTC, datetime
 from typing import Any, ClassVar, Literal
 
 from pydantic import (
@@ -370,6 +371,161 @@ class TrialsDocument(_CollectionDocument):
                 else None
             ),
         )
+
+
+# ---------------------------------------------------------------------------
+# sources/seed_papers.jsonld
+# ---------------------------------------------------------------------------
+
+#: Most interest seed papers one profile may hold. Adds beyond it are refused.
+SEED_PAPERS_MAX = 200
+
+#: Longest seed abstract kept, in characters. It is the embedding input only.
+SEED_ABSTRACT_MAX = 8000
+
+#: How a seed reached the list.
+SeedAddedVia = Literal["owner", "interview", "feed_upvote", "migration"]
+
+
+def _bare_openalex_id(value: Any) -> str | None:
+    """``https://openalex.org/W1`` / ``w1`` / ``W1`` -> ``W1``; ``None`` when empty."""
+    if value is None:
+        return None
+    text = str(value).strip().rstrip("/")
+    if not text:
+        return None
+    tail = text.rsplit("/", 1)[-1]
+    return tail[:1].upper() + tail[1:]
+
+
+class SeedPaperRecord(JsonLdModel):
+    """One interest seed paper: a work that defines what the person wants to study.
+
+    Lives in ``sources/seed_papers.jsonld``. A seed asserts interest, never
+    authorship: it is deliberately **not** a :class:`PaperRecord`, carries no
+    authorship, full text, summary or citation fields, and never appears in
+    the publication list or the synthesized narrative. It feeds the interest
+    signal only (the embedding index, the centroid, feed ranking, matching).
+    """
+
+    type_: str | None = Field(default="ScholarlyArticle", alias="@type")
+
+    name: str = Field(validation_alias=AliasChoices("name", "title"))
+    year: GYear = Field(default=None, alias="datePublished")
+    #: Display only.
+    journal: PeriodicalName = Field(default=None, alias="isPartOf")
+    #: Bare OpenAlex work id (``W…``).
+    openalex_id: str | None = None
+    #: Bare DOI (``10.x/y``), case preserved.
+    doi: str | None = None
+    #: The embedding input, capped at :data:`SEED_ABSTRACT_MAX` characters.
+    abstract: str | None = None
+    #: OpenAlex topic ids (``T…``), for the feed query.
+    topics: list[str] = []
+    added_at: datetime | None = Field(default=None, alias="dateCreated")
+    added_via: SeedAddedVia = "owner"
+
+    @property
+    def title(self) -> str:
+        """The seed's ``name``."""
+        return self.name
+
+    @property
+    def seed_id(self) -> str:
+        """Identity within the list: the bare OpenAlex id, else ``doi:<doi>``."""
+        return self.openalex_id or f"doi:{self.doi}"
+
+    @field_validator("year", mode="before")
+    @classmethod
+    def _coerce_year(cls, v: Any) -> Any:
+        if isinstance(v, str):
+            v = v.strip()
+            return int(v) if v.isdigit() else None
+        return v
+
+    @field_validator("journal", mode="before")
+    @classmethod
+    def _flatten_journal(cls, v: Any) -> Any:
+        if isinstance(v, dict):
+            return v.get("name")
+        return v
+
+    @field_validator("openalex_id", mode="before")
+    @classmethod
+    def _bare_openalex(cls, v: Any) -> Any:
+        return _bare_openalex_id(v)
+
+    @field_validator("doi", mode="before")
+    @classmethod
+    def _normalize_doi(cls, v: Any) -> Any:
+        return normalize_doi(v) if isinstance(v, str) else v
+
+    @field_validator("abstract", mode="before")
+    @classmethod
+    def _cap_abstract(cls, v: Any) -> Any:
+        if isinstance(v, str):
+            v = v.strip()[:SEED_ABSTRACT_MAX]
+            return v or None
+        return v
+
+    @model_validator(mode="after")
+    def _needs_an_identifier(self) -> "SeedPaperRecord":
+        if not (self.openalex_id or self.doi):
+            raise ValueError("a seed paper needs an OpenAlex id or a DOI")
+        return self
+
+    @classmethod
+    def from_paper(cls, rec: PaperRecord, *, added_via: SeedAddedVia) -> "SeedPaperRecord":
+        """A seed carrying only ``rec``'s lightweight metadata, stamped now.
+
+        Authorship, full text, summary and citation fields are dropped.
+        """
+        return cls(
+            name=rec.name,
+            year=rec.year,
+            journal=rec.journal,
+            openalex_id=rec.openalex_id,
+            doi=rec.doi,
+            abstract=rec.abstract,
+            topics=list(rec.topics or []),
+            added_at=datetime.now(UTC),
+            added_via=added_via,
+        )
+
+    @field_serializer("year", when_used="unless-none")
+    def _ser_year(self, v: int) -> str:
+        return str(v)
+
+    @field_serializer("journal", when_used="unless-none")
+    def _ser_journal(self, v: str) -> dict[str, Any]:
+        return {"@type": "Periodical", "name": v}
+
+    @field_serializer("added_at", when_used="unless-none")
+    def _ser_added_at(self, v: datetime) -> str:
+        return v.isoformat()
+
+    def _jsonld_node(self, data: dict[str, Any]) -> dict[str, Any]:
+        if self.openalex_id:
+            data["@id"] = f"https://openalex.org/{self.openalex_id}"
+        else:
+            data["@id"] = f"https://doi.org/{self.doi}"
+        return data
+
+
+class SeedPapersDocument(_CollectionDocument):
+    """Top-level model for ``sources/seed_papers.jsonld`` (a ``Collection``).
+
+    Optional, owner curated, ``private`` by role default. Consumers must never
+    list its entries as the person's works.
+    """
+
+    _FILE_LABEL: ClassVar[str] = "seed_papers.jsonld"
+    has_part: list[SeedPaperRecord] = Field(default=[], alias="hasPart")
+
+    @property
+    def seed_papers(self) -> list[SeedPaperRecord]:
+        """Alias for :attr:`has_part`: the seeds in this collection."""
+        return self.has_part
 
 
 # ---------------------------------------------------------------------------

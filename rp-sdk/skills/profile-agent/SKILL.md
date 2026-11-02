@@ -51,11 +51,11 @@ any write, and again if a write is refused.
 rp agent whoami
 ```
 
-The answer (`GET /api/manage/agent/whoami`) looks like this:
+The answer (`GET /api/v1/manage/agent/whoami`) looks like this:
 
 ```json
 {
-  "principal": {"kind": "consumer", "label": "CV importer", "handle": "agent_7f3a91c2b40e", "...": "..."},
+  "principal": {"kind": "app", "label": "CV importer", "handle": "agent_7f3a91c2b40e", "...": "..."},
   "owner": {"orcid": "0000-0002-1825-0097", "name": "Jane Doe"},
   "profiles": [
     {"slug": "jane-doe", "rid": "0000-0002-1825-0097", "role": "owner",
@@ -92,7 +92,6 @@ in Settings. A new key reads everything and writes nothing.
 | `contact` | email | by `rp push` only |
 | `works` | the publication list | yes |
 | `paper_summary`, `paper_abstract`, `paper_fulltext`, `grants`, `cv`, `interview`, `web`, `trials`, `citations`, `other_files` | generated files | by `rp push` only |
-| `lenses` | the account's lenses | yes |
 
 You never read less than the public: anything the researcher shows the public
 you can read, whatever your table says.

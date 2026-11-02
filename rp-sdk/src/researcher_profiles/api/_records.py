@@ -167,6 +167,7 @@ def profile_record(
     record = ProfileRecord(
         slug=resolved,
         rid=getattr(prof, "rid", None),
+        profile_id=getattr(prof, "profile_id", None),
         content_hash=_content_hash(store, resolved),
         view=view,
         fields=fields,

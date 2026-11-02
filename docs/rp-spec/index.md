@@ -178,10 +178,18 @@ for grant eligibility evaluation:
 | `as_of` | REQUIRED | ISO date when facts were assessed |
 | `terminal_degree_year` | optional | Integer or null |
 | `first_r01_equivalent_year` | optional | First R01/DP1/DP2/etc. |
+| `current_rank` | optional | Current rank or position: `assistant_professor`, `associate_professor`, `professor`, `research_faculty`, `staff_scientist`, `postdoc`, `graduate_student`, `undergraduate`, `clinician`, `industry`, `other`; null when unknown |
 | `tenure_status` | REQUIRED | Enum value |
 | `independence` | REQUIRED | Enum value |
 | `evidence` | REQUIRED | Citation of sources |
 | `confidence` | REQUIRED | `high`, `medium`, or `low` |
+| `source` | optional | Who asserted the stage: `self_reported` (the profile owner said so) or `inferred` (default; a builder guessed from evidence) |
+
+A self-reported stage outranks an inferred one. A builder, a merge or any
+other writer that produces an inferred stage MUST NOT replace a stored
+self-reported stage; it MAY fill only the facts the self-reported stage leaves
+null (the terminal-degree year and type together, never one without the
+other). Builders never write `self_reported`.
 
 ##### The `collaborators` array
 
@@ -362,6 +370,7 @@ by `role` (or `paperId`) and read its `contentUrl`.
 | `topics` | subjectOf | `personality/topics.json` |
 | `works` | hasPart | `sources/papers.jsonld` |
 | `grants` | hasPart | `sources/grants.jsonld` |
+| `seed_papers` | hasPart | `sources/seed_papers.jsonld` (tier `private` by default) |
 | `citations` | hasPart | `sources/citations.json` |
 | `paper_summary` | hasPart | `sources/summaries/<paper_id>.summary.md` |
 | `paper_fulltext` | hasPart | `sources/papers/<paper_id>.md` |
@@ -457,6 +466,7 @@ These files hold data that is too large, or the wrong shape, to embed in JSON.
   sources/
     papers.jsonld             # REQUIRED. Works collection
     grants.jsonld             # when grant records exist
+    seed_papers.jsonld        # interest seed papers (optional). PRIVATE by default
     citations.json            # citation graph (optional)
     summaries/<paper_id>.summary.md
     papers/<paper_id>.md      # full text. PRIVATE by default
@@ -511,6 +521,37 @@ Build fields (`status`, `contaminated`) stay in `.build/`, never here.
 | `identifier` | Award number |
 | `role` | `pi`, `co_pi`, `co_i`, `other` |
 | `status` | `funded`, `pending`, `completed` |
+
+#### Interest seed papers
+
+`sources/seed_papers.jsonld` is an optional `Collection` of papers that define
+the person's research interests: papers they admire, build on, or want to work
+near. It asserts **interest, never authorship**. It is reached via the
+`seed_papers` manifest entry, and its default tier is `private`; the owner may
+re-tier it.
+
+Each `hasPart` entry is a `ScholarlyArticle` node carrying only lightweight
+metadata:
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `@type` | REQUIRED | `ScholarlyArticle` |
+| `@id` | REQUIRED | OpenAlex IRI > DOI IRI |
+| `name` | REQUIRED | Paper title |
+| `openalex_id` / `doi` | one REQUIRED | Bare OpenAlex work id (`W…`) or bare DOI |
+| `datePublished` | optional | Year as string |
+| `isPartOf` | optional | `Periodical` node, for display |
+| `abstract` | optional | At most 8000 characters; the embedding input |
+| `topics` | optional | OpenAlex topic ids (`T…`) |
+| `dateCreated` | optional | When the seed was added |
+| `added_via` | optional | `owner`, `interview`, `feed_upvote` or `migration` |
+
+Seeds carry no authors, full text, summary or citation counts. Consumers MUST
+NOT list seed papers as the person's works, count them as publications, or
+feed them into a synthesized narrative of the person's own work. A consumer
+MAY use them as an interest signal (ranking, matching, recommendation). Seed
+chunks in a published embedding index (`source_type` `seed_abstract`) take the
+tier of the seed list and MUST NOT be shown as the person's own text.
 
 #### Text artifacts
 

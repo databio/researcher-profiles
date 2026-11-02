@@ -66,7 +66,10 @@ def _score_for_query(profile, text: str) -> float:
         centroid_score = float(qvec @ (centroid / cn))
     chunk_score = 0.0
     try:
-        hits = profile.index.search(text, k=3)
+        from .llm import _source_type_kwargs
+
+        # Own text only: interest seed papers are not the researcher's work.
+        hits = profile.index.search(text, k=3, **_source_type_kwargs(None))
         if hits:
             chunk_score = float(np.mean([h.score for h in hits]))
     except (IndexNotBuiltError, CapabilityUnavailableError):

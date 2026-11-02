@@ -93,7 +93,7 @@ replaces, and it lands only if every part it changes is `write`. Its 403 adds
 
 A host serves one discovery endpoint; rp-sdk does not.
 
-`GET /api/manage/agent/whoami`: any valid agent key. Returns the key's
+`GET /api/v1/manage/agent/whoami`: any valid agent key. Returns the key's
 identity, owner, parts table, "Replace whole profiles" switch, the profiles the
 account reaches (each with the parts the key may write there), and the acts no
 key may ever do (`never_delegable`). `rp agent whoami` prints it. There is no

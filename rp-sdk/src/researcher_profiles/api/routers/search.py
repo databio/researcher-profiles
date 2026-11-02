@@ -569,7 +569,7 @@ def rank_works_for_profile(
         raise HTTPException(status_code=500, detail=f"work ranking failed: {e}") from e
 
     return RankWorksResponse(
-        slug=store.resolve_slug(slug),
+        slug=prof.slug,
         rid=getattr(prof, "rid", None),
         works=[RankedWorkPayload(**r.to_dict()) for r in ranked],
         k_applied=k,

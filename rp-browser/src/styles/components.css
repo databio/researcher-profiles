@@ -10,8 +10,17 @@
 
 /* === APP SHELL ========================================================== */
 
-.app-header__nav {
+.app-header__left {
   margin-right: auto;
+}
+
+.app-header__search {
+  width: 16rem;
+  max-width: 100%;
+}
+
+.app-header__search .input-row__field {
+  width: 100%;
 }
 
 .app-header {
@@ -1000,6 +1009,23 @@
   margin-bottom: var(--space-4);
   padding-bottom: var(--space-3);
   border-bottom: 1px solid var(--rp-color-border);
+}
+
+/* "Use with your AI": a closed-by-default panel under the profile header. */
+.ai-panel {
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--rp-color-border);
+  border-radius: var(--radius-md);
+}
+
+.ai-panel__summary {
+  cursor: pointer;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+}
+
+.ai-panel[open] .ai-panel__summary {
+  margin-bottom: var(--space-2);
 }
 
 .profile-chrome__origin {

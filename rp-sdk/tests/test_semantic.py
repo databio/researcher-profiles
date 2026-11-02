@@ -239,3 +239,44 @@ class TestSingleProfileOnly:
         assert hidden.json()["detail"].replace(SLUG, "") == missing.json()["detail"].replace(
             "nobody-here", ""
         )
+
+
+class TestSeedPapersAreRankOnly:
+    """An interest seed's abstract is never returned as the researcher's own text."""
+
+    def test_owner_search_never_returns_a_seed(self, tmp_path, concept_backend, make_api_client):
+        from researcher_profiles.schema import SeedPapersDocument
+        from researcher_profiles.schema.jsonld import canonical_dumps
+
+        root = tmp_path / "profiles"
+        d = build_profile_dir(
+            root / SLUG,
+            rid="0000-0001-2345-6789",
+            papers=PAPERS,
+            summaries=SUMMARIES,
+        )
+        doc = SeedPapersDocument.model_validate(
+            {
+                "hasPart": [
+                    {
+                        "title": "Protein folding atlas",
+                        "openalex_id": "W5",
+                        "abstract": "Protein folding protein folding.",
+                    }
+                ]
+            }
+        )
+        (d / "sources" / "seed_papers.jsonld").write_text(
+            canonical_dumps(doc.model_dump(mode="json")), encoding="utf-8"
+        )
+        refresh_manifest(d)
+        SqliteEmbeddingIndex(d).build_index(backend=concept_backend)
+        client = make_api_client(root, token=TOKEN, tier_from_header=True)
+        r = client.post(
+            f"/api/v1/profiles/{SLUG}/search",
+            json={"query": "protein folding", "k": 20},
+            headers={**OP, "X-Tier": "private"},
+        )
+        assert r.status_code == 200, r.text
+        types = {h["source_type"] for h in r.json()["hits"]}
+        assert types and "seed_abstract" not in types

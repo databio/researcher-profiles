@@ -110,6 +110,14 @@ export function normalizeBase(url: string): string {
   return u;
 }
 
+/**
+ * The URL of a profile's document, `<base>profile.jsonld`. The base itself is
+ * a folder the server does not serve, so this is the link to copy or share.
+ */
+export function documentUrl(url: string): string {
+  return `${normalizeBase(url)}profile.jsonld`;
+}
+
 // ---------------------------------------------------------------------------
 // Link resolution
 // ---------------------------------------------------------------------------

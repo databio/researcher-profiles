@@ -40,6 +40,8 @@ from ..schema import (
     PaperRecord,
     PapersDocument,
     ProfileDocument,
+    SeedPaperRecord,
+    SeedPapersDocument,
     TrialRecord,
     TrialsDocument,
 )
@@ -55,6 +57,7 @@ SUMMARY_SUFFIX = ".summary.md"
 PAPERS_URL = "sources/papers.jsonld"
 GRANTS_URL = "sources/grants.jsonld"
 TRIALS_URL = "sources/trials.jsonld"
+SEED_PAPERS_URL = "sources/seed_papers.jsonld"
 SOUL_URL = "personality/SOUL.md"
 EXPERTISE_URL = "personality/expertise.md"
 CLINICAL_EXPERTISE_URL = "personality/clinical_expertise.md"
@@ -149,7 +152,7 @@ class ArtifactStorage(abc.ABC):
     def key(self) -> str:
         """Stable identity for ``__eq__`` / ``__hash__`` / ``__repr__``.
 
-        ``file:/abs/path`` | ``db:<url>#<rid>`` | ``api:<base>/<slug>`` |
+        ``file:/abs/path`` | ``db:<url>#<profile_id>`` | ``api:<base>/<slug>`` |
         ``static:<base>``. Opaque: compared, never parsed.
         """
 
@@ -165,6 +168,12 @@ class ArtifactStorage(abc.ABC):
 
         Lets a write unit name the profile while its document is being replaced.
         """
+
+    @property
+    def profile_id(self) -> int | None:
+        """The store's record key for this profile, or ``None`` on a backend
+        with none (a directory, a published site)."""
+        return None
 
     @property
     @abc.abstractmethod
@@ -264,6 +273,35 @@ class ArtifactStorage(abc.ABC):
             canonical_dumps(doc.model_dump(mode="json")),
             role="trials",
             name="Clinical trials",
+            encoding_format="application/ld+json",
+        )
+
+    def load_seed_papers(self) -> list[SeedPaperRecord]:
+        """Read ``sources/seed_papers.jsonld``; empty when absent."""
+        raw = self.artifact_text(SEED_PAPERS_URL)
+        if raw is None:
+            return []
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as e:
+            raise ProfileLoadError(self.locate(SEED_PAPERS_URL), f"JSON parse error: {e}", e) from e
+        try:
+            return SeedPapersDocument.model_validate(data or {}).has_part
+        except (ValidationError, ValueError) as e:
+            raise ProfileLoadError(self.locate(SEED_PAPERS_URL), f"schema error: {e}", e) from e
+
+    def save_seed_papers(self, seeds: list[SeedPaperRecord]) -> None:
+        """Write ``sources/seed_papers.jsonld`` from ``seeds``.
+
+        An empty list writes an empty collection, so the manifest entry and
+        the tier the owner chose for it survive removing the last seed.
+        """
+        doc = SeedPapersDocument(about=self._collection_about(), has_part=seeds)
+        self.write_artifact(
+            SEED_PAPERS_URL,
+            canonical_dumps(doc.model_dump(mode="json")),
+            role="seed_papers",
+            name="Interest seed papers",
             encoding_format="application/ld+json",
         )
 

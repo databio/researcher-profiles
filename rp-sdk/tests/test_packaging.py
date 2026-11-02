@@ -8,6 +8,8 @@ builds are in-process and session-scoped (about a second), and a ``slow`` label 
 """
 
 import fnmatch
+import subprocess
+import sys
 import tarfile
 import zipfile
 from pathlib import Path
@@ -130,6 +132,12 @@ class TestSkillPackaging:
         ("built_wheel", f"researcher_profiles/vocab/{MESH_FILE}"),
         # PEP 639: `license-files` only works if the sdist shipped LICENSE.
         ("wheel_from_sdist", "researcher_profiles-*.dist-info/licenses/LICENSE"),
+        # The vendored OAuth client behind `rp login`, with its own MIT license.
+        *[
+            (a, f"researcher_profiles/_vendor/snapgate_oauth_client/{m}")
+            for a in ("built_wheel", "wheel_from_sdist")
+            for m in ("__init__.py", "LICENSE")
+        ],
     ],
     ids=lambda v: v.rsplit("/", 1)[-1] if "/" in v else v,
 )
@@ -140,6 +148,40 @@ def test_member_ships_non_empty(artifact, member, request):
         found = fnmatch.filter(zf.namelist(), member)
         assert found, f"{artifact} ({wheel.name}) is missing {member}"
         assert zf.getinfo(found[0]).file_size > 0, f"{member} is empty in {artifact}"
+
+
+class TestVendoredOAuthClient:
+    """``rp login``'s OAuth client is vendored from snapgate: it ships, and it needs no extras."""
+
+    VENDORED = "src/researcher_profiles/_vendor/snapgate_oauth_client/"
+
+    def test_sdist_carries_it_and_its_license(self, built_sdist):
+        with tarfile.open(built_sdist) as tf:
+            names = tf.getnames()
+        for member in ("__init__.py", "LICENSE"):
+            assert any(n.endswith(self.VENDORED + member) for n in names), member
+
+    def test_imports_with_no_optional_extras(self):
+        """A bare install (no httpx, no extras) can import it and build ``rp login``."""
+        blocked = sorted({"httpx", "requests", "numpy", "fastapi", "sqlmodel", "anthropic"})
+        code = (
+            "import sys\n"
+            "class Blocker:\n"
+            "    def find_spec(self, name, path=None, target=None):\n"
+            f"        if name.split('.')[0] in {blocked!r}:\n"
+            "            raise ImportError(name + ' is blocked (bare install)')\n"
+            "        return None\n"
+            "sys.meta_path.insert(0, Blocker())\n"
+            "import researcher_profiles._vendor.snapgate_oauth_client as client\n"
+            "from researcher_profiles._vendor.snapgate_oauth_client import cli, testing\n"
+            "from researcher_profiles.cli.auth import credentials\n"
+            "credentials.cli_app()\n"
+            "print('OK', client.__version__)\n"
+        )
+        r = subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True, cwd=str(REPO_ROOT)
+        )
+        assert r.returncode == 0 and r.stdout.startswith("OK "), r.stderr
 
 
 class TestWheelIsSdkOnly:

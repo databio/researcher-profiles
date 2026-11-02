@@ -934,3 +934,143 @@ def test_citation_tags_of_every_paper_id_shape_are_stripped():
         "D [corces2016lineage] E [20261062] F [2005] G [interview]"
     )
     assert _strip_citations(text) == "A  B  C  D  E  F [2005] G [interview]"
+
+
+def _write_seeds(path: Path, seeds: list[dict]) -> None:
+    from researcher_profiles.schema import SeedPapersDocument
+    from researcher_profiles.schema.jsonld import canonical_dumps
+
+    doc = SeedPapersDocument.model_validate({"hasPart": seeds})
+    (path / "sources" / "seed_papers.jsonld").write_text(
+        canonical_dumps(doc.model_dump(mode="json")), encoding="utf-8"
+    )
+
+
+_SEEDS = [
+    {"title": "Seed one", "openalex_id": "W1", "abstract": "Chromatin accessibility."},
+    {"title": "Title only seed", "doi": "10.1093/seed.x"},
+]
+
+
+class TestSeedChunks:
+    """Interest seed papers are indexed at every level, and never count as papers."""
+
+    @pytest.mark.parametrize("level", ["lite", "full", "deep"])
+    def test_every_level_indexes_seed_abstracts(self, tmp_path, level):
+        from researcher_profiles.embeddings.chunking import PAPER_CHUNK_TYPES
+
+        d = build_profile_dir(
+            tmp_path / "p",
+            level=level,
+            papers=[{"paper_id": "a2020x", "title": "T", "abstract": "Own abstract."}],
+        )
+        _write_seeds(d, _SEEDS)
+        chunks = SqliteEmbeddingIndex(d)._enumerate_chunks()
+        seeds = [(c.source_id, c.text) for c in chunks if c.source_type == "seed_abstract"]
+        assert seeds == [
+            ("W1", "Seed one\n\nChromatin accessibility."),
+            ("doi:10.1093/seed.x", "Title only seed"),
+        ]
+        assert "seed_abstract" not in PAPER_CHUNK_TYPES
+
+    def test_seeds_never_count_as_papers(self, tmp_path):
+        d = build_profile_dir(
+            tmp_path / "p",
+            level="lite",
+            personality=False,
+            summaries=False,
+            papers=[{"paper_id": "a2020x", "title": "T", "abstract": "Own."}],
+        )
+        _write_seeds(d, _SEEDS)
+        idx = SqliteEmbeddingIndex(d)
+        idx.build_index(backend=FakeBackend())
+        n_chunks, n_papers = idx.counts()
+        assert (n_chunks, n_papers) == (3, 1)
+
+    def test_private_seeds_never_reach_the_flat_export(self, tmp_path):
+        d = build_profile_dir(tmp_path / "p")
+        _write_seeds(d, _SEEDS)
+        from .factories import refresh_manifest
+
+        refresh_manifest(d)
+        idx = SqliteEmbeddingIndex(d)
+        idx.build_index(backend=FakeBackend())
+        result = write_flat_export(d)
+        chunks = json.loads(result.chunks_path.read_text())
+        assert "seed_abstract" not in {c["source_type"] for c in chunks}
+        assert result.dropped >= 2
+
+
+class TestBlendCentroid:
+    """The one centroid rule: authored work dominates, seeds nudge."""
+
+    @pytest.mark.parametrize(
+        ("n_auth", "n_seed", "has_authored", "expected"),
+        [
+            pytest.param(0, 5, False, 1.0, id="pure-seed-profile"),
+            pytest.param(0, 10, True, 10 / 13, id="narrative-only-no-cap"),
+            pytest.param(2, 10, True, 0.4, id="few-papers-capped"),
+            pytest.param(20, 5, True, 5 / 65, id="twenty-papers"),
+            pytest.param(100, 10, True, 10 / 310, id="senior-with-upvotes"),
+            pytest.param(100, 0, True, 0.0, id="no-seeds"),
+        ],
+    )
+    def test_seed_share_worked_examples(self, n_auth, n_seed, has_authored, expected):
+        from researcher_profiles.embeddings.profile_vec import seed_share
+
+        assert seed_share(n_auth, n_seed, has_authored_chunks=has_authored) == pytest.approx(
+            expected
+        )
+
+    def test_no_seeds_is_the_plain_mean(self):
+        from researcher_profiles.embeddings.profile_vec import blend_centroid
+
+        rng = np.random.default_rng(0)
+        vecs = rng.normal(size=(5, 8)).astype(np.float32)
+        metas = [{"source_type": "paper_summary", "source_id": f"p{i}"} for i in range(5)]
+        mean = vecs.mean(axis=0)
+        np.testing.assert_allclose(
+            blend_centroid(vecs, metas), mean / np.linalg.norm(mean), rtol=1e-5
+        )
+
+    def test_seeds_only_gives_their_direction(self):
+        from researcher_profiles.embeddings.profile_vec import blend_centroid
+
+        vecs = np.array([[1, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=np.float32)
+        metas = [
+            {"source_type": "seed_abstract", "source_id": "W1"},
+            {"source_type": "seed_abstract", "source_id": "W1"},  # long abstract, one vote
+            {"source_type": "seed_abstract", "source_id": "W2"},
+        ]
+        out = blend_centroid(vecs, metas)
+        np.testing.assert_allclose(out, np.array([1, 1, 0]) / np.sqrt(2), rtol=1e-5)
+
+    def test_authored_work_dominates(self):
+        from researcher_profiles.embeddings.profile_vec import blend_centroid
+
+        # Two authored papers along x, ten seeds along y: seeds are capped at 40%.
+        vecs = np.array([[1, 0]] * 2 + [[0, 1]] * 10, dtype=np.float32)
+        metas = [{"source_type": "paper_abstract", "source_id": f"p{i}"} for i in range(2)] + [
+            {"source_type": "seed_abstract", "source_id": f"W{i}"} for i in range(10)
+        ]
+        out = blend_centroid(vecs, metas)
+        expected = np.array([0.6, 0.4]) / np.linalg.norm([0.6, 0.4])
+        np.testing.assert_allclose(out, expected, rtol=1e-5)
+
+    def test_a_cached_plain_mean_centroid_is_recomputed(self, indexed_profile):
+        """A centroid cached under the old rule is not trusted after an upgrade."""
+        from researcher_profiles.embeddings.profile_vec import (
+            CENTROID_RULE,
+            _load_cache_at,
+            _save_cache_at,
+        )
+
+        prof = ResearcherProfile.from_files(indexed_profile)
+        first = prof.index.embedding("centroid")
+        npz = cache_dir(indexed_profile) / "profile_vec.npz"
+        cache = _load_cache_at(npz)
+        assert str(cache["_centroid_rule"]) == CENTROID_RULE
+        del cache["_centroid_rule"]
+        cache["centroid"] = np.zeros_like(first)
+        _save_cache_at(npz, cache)
+        np.testing.assert_allclose(prof.index.embedding("centroid"), first, rtol=1e-6)

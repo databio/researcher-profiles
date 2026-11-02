@@ -1,39 +1,77 @@
-"""``rp login``: a stored push credential for one registry.
+"""``rp login``: stored, self-renewing push credentials, one per registry.
 
-``rp login <server>`` runs the OAuth 2.0 Device Authorization Grant
-(RFC 8628) and stores the returned key in
-``~/.config/researcher-profiles/credentials.json`` (mode 0600)::
+A thin adapter over snapgate's shared OAuth client, vendored byte for byte at
+``researcher_profiles/_vendor/snapgate_oauth_client`` (re-vendor with the
+monorepo's ``scripts/vendor-snapgate-oauth-client.sh``; never edit the copy).
+It needs only the standard library, so ``rp login`` works on a bare install.
 
-    {"url": "https://profiles.example.org", "token": "rpk_...", "orcid": ..., "name": ...}
+``rp login <server>`` reads the server's OAuth metadata (RFC 8414) and signs
+in as the registered public client ``rp-cli``, asking for the
+``profiles:push`` scope. Two ways:
 
-Scripts use ``RESEARCHER_PROFILES_TOKEN`` instead. This file holds a person's
-own ``push_own`` key; ``rpa_`` agent keys live in ``credentials.toml``
-(:mod:`researcher_profiles.cli.auth.agent`).
+- **Loopback + PKCE (the default; RFC 8252, RFC 7636).** ``rp`` listens on
+  ``http://127.0.0.1:<random port>/callback`` and opens the system browser at
+  the server's ``authorization_endpoint``.
+- **The device flow (RFC 8628).** ``rp login --device``, and automatically over
+  SSH or on Linux with no display, or when the browser cannot be opened, when
+  the server offers it (Prosopia does). It prints a link and a code to approve
+  on any device. With ``--no-browser`` (or over SSH at a server without a
+  device flow) ``rp`` prints the address and takes the address the browser
+  ends on, pasted at the terminal.
+
+The tokens are stored in ``~/.config/researcher-profiles/credentials.json``
+(mode 0600, written atomically), one login per server, in the shared client's
+format::
+
+    {"version": 1, "logins": {"https://profiles.example.org": {
+      "server": ..., "issuer": ..., "client_id": "rp-cli", "token_endpoint": ...,
+      "access_token": "rpa_...", "access_expires_at": 1767225600,
+      "refresh_token": "rpr_...", "extra": {"orcid": ..., "name": ...}, ...}}}
+
+A stored login is offered only to its own server. Commands refresh its access
+token when it has expired (or is about to), and once more when the server
+answers 401, under a lock, so two ``rp`` processes never present the same
+refresh token. A refresh that fails raises one plain sentence (``rp: ...``).
+``rp logout`` revokes the login at the server (RFC 7009) and forgets it. A file
+from an older ``rp`` (including the never-expiring ``rpk_`` key files) is no
+longer read: the error says to run ``rp login``, which replaces it.
+
+Scripts use ``RESEARCHER_PROFILES_TOKEN`` instead. ``rpa_`` keys minted on the
+Privacy page live in ``credentials.toml`` (:mod:`researcher_profiles.cli.auth.agent`).
 """
 
-import json
 import os
-import sys
-import time
-import webbrowser
-from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
+
+from ..._vendor.snapgate_oauth_client import (
+    ClientConfig,
+    Credential,
+    CredentialKey,
+    FileStore,
+    NotSignedIn,
+    OAuthClientError,
+    TokenSource,
+)
+from ..._vendor.snapgate_oauth_client import cli as oauth_cli
 
 TOKEN_ENV_VAR = "RESEARCHER_PROFILES_TOKEN"
 CREDENTIALS_FILENAME = "credentials.json"
 
+CONFIG = ClientConfig(
+    client_id="rp-cli",
+    app_name="rp",
+    scope="profiles:push",
+    resource_path=None,  # Prosopia: resource is optional; send none
+    relogin_hint="Run `rp login` again.",
+)
 
-class LoginError(Exception):
-    """The login flow did not produce a key (server error, timeout, denial)."""
+#: rp's callers keep catching ``LoginError``: every error the login raises.
+LoginError = OAuthClientError
 
 
-@dataclass(frozen=True)
-class Login:
-    url: str
-    token: str
-    orcid: Optional[str] = None
-    name: Optional[str] = None
+class TokenRejected(OAuthClientError, PermissionError):
+    """The server answered 401 to a stored or given token."""
 
 
 def config_dir() -> Path:
@@ -57,204 +95,99 @@ def server_base(url: str) -> str:
     return url
 
 
-def load_login(path: Optional[Path] = None) -> Optional[Login]:
-    """The stored login, or ``None`` when there is none or it is unreadable."""
-    p = path or credentials_path()
-    try:
-        raw = json.loads(p.read_text())
-    except (OSError, ValueError):
+def store() -> FileStore:
+    return FileStore(credentials_path(), login_command="rp login")
+
+
+def _logins() -> list[tuple[CredentialKey, Credential]]:
+    """Every live stored login. ``LoginError`` for a file from an older ``rp``."""
+    s = store()
+    found = []
+    for key in s.keys():
+        cred = s.load(key)
+        if cred is not None and not cred.ended:
+            found.append((key, cred))
+    return found
+
+
+def default_server() -> Optional[str]:
+    """The server of the most recently obtained live login, or ``None``."""
+    logins = _logins()
+    if not logins:
         return None
-    url, token = raw.get("url"), raw.get("token")
-    if not url or not token:
-        return None
-    return Login(url=server_base(url), token=token, orcid=raw.get("orcid"), name=raw.get("name"))
+    return max(logins, key=lambda kc: kc[1].obtained_at)[0].server
 
 
-def save_login(login: Login, path: Optional[Path] = None) -> Path:
-    """Write the login with owner-only permissions. Replaces any previous one."""
-    p = path or credentials_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    data = json.dumps(asdict(login), indent=2) + "\n"
-    fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as fh:
-        fh.write(data)
-    os.chmod(p, 0o600)
-    return p
-
-
-def clear_login(path: Optional[Path] = None) -> bool:
-    """Delete the stored login. True when a file was removed."""
-    p = path or credentials_path()
+def _identify(cred: Credential) -> dict:
+    """Who the new login is (``whoami``); unknown when the server will not say."""
     try:
-        p.unlink()
-    except FileNotFoundError:
-        return False
-    return True
+        owner = whoami(cred.server, cred.access_token).get("owner") or {}
+    except (OAuthClientError, ImportError, ValueError):
+        owner = {}
+    return {"orcid": owner.get("orcid"), "name": owner.get("name")}
 
 
-def resolve_url(explicit: Optional[str], path: Optional[Path] = None) -> Optional[str]:
-    """``--url`` if given, else the stored login's server, else ``None``."""
-    if explicit:
-        return explicit
-    login = load_login(path)
-    return login.url if login else None
+def cli_app() -> oauth_cli.CliApp:
+    """``rp login`` on the shared client. No ``token`` command."""
+    return oauth_cli.CliApp(
+        config=CONFIG, store=store(), login_command="rp login", identify=_identify
+    )
 
 
-def resolve_token(
-    explicit: Optional[str], url: Optional[str], path: Optional[Path] = None
-) -> Optional[str]:
+def resolve_url(explicit: Optional[str]) -> Optional[str]:
+    """``--url`` if given, else the most recent stored login's server, else ``None``."""
+    return explicit or default_server()
+
+
+def stored_token(url: str) -> Optional[str]:
+    """The stored login's access token for ``url``, refreshed first if it has expired.
+
+    ``None`` when nothing is stored for that server. A login that has ended, or
+    a refresh that fails, raises :data:`LoginError`.
+    """
+    source = TokenSource(CONFIG, store(), CredentialKey(server_base(url)))
+    try:
+        return source.access_token()
+    except NotSignedIn:
+        return None
+
+
+def resolve_token(explicit: Optional[str], url: Optional[str]) -> Optional[str]:
     """The credential for ``url``: ``--token`` > env var > stored login for that server.
 
-    The stored key is scoped to the server it came from, so it is offered
-    only when ``url`` is that server (or ``url`` is unset).
+    A stored token goes only to the server it came from. With no ``url``, the
+    most recent stored login's server.
     """
     if explicit:
         return explicit
     env = os.environ.get(TOKEN_ENV_VAR) or None
     if env:
         return env
-    login = load_login(path)
-    if login is None:
+    url = url or default_server()
+    return stored_token(url) if url else None
+
+
+def _stored_key_for(token: Optional[str]) -> Optional[CredentialKey]:
+    if not token:
         return None
-    if url is None or server_base(url) == login.url:
-        return login.token
-    return None
+    try:
+        logins = _logins()
+    except OAuthClientError:
+        return None
+    return next((key for key, cred in logins if cred.access_token == token), None)
 
 
-# --- the device flow -----------------------------------------------------------
+def with_token_refresh(token: Optional[str], call: Callable[[Optional[str]], Any]) -> Any:
+    """``call(token)``, retried once with a refreshed token if it raises ``PermissionError``.
 
-
-DEVICE_PATH = "/api/auth/device"
-TOKEN_PATH = "/api/auth/token"
-CLIENT_ID = "rp"
-SCOPE = "push_own"
-DEVICE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code"
-DEFAULT_INTERVAL = 5.0  # RFC 8628 §3.2, when the server sends no interval
-SLOW_DOWN_STEP = 5.0  # RFC 8628 §3.5
-START_ATTEMPTS = 3  # tries at /api/auth/device while it answers 429 or 503
-
-
-def login(
-    url: str,
-    *,
-    label: Optional[str] = None,
-    open_browser: bool = True,
-    timeout: float = 600.0,
-    client: Any = None,
-    out=None,
-    sleep: Optional[Callable[[float], None]] = None,
-) -> Login:
-    """Run the device authorization grant (RFC 8628) against ``url``; return the key.
-
-    ``POST /api/auth/device`` opens a request (retried on ``429``/``503``).
-    The user code and verification URL are printed on ``out`` (stderr by
-    default). Then ``POST /api/auth/token`` is polled every ``interval``
-    seconds until approval or until ``expires_in`` (or ``timeout``) runs out.
-    ``slow_down`` (or a ``429``) adds 5 seconds to the interval.
-
-    Raises :class:`LoginError` on a ``404`` (no command-line login), a refusal,
-    expiry, or any other failure. The result is not stored.
+    Remote calls raise ``PermissionError`` on a 401. Only a token that came from
+    a stored login is refreshed (the login's own ``TokenSource``); a token from
+    ``--token`` or the environment is used as given.
     """
-    import httpx
-
-    out = out or sys.stderr
-    base = server_base(url)
-    http = client if client is not None else httpx.Client(base_url=base, timeout=30.0)
-    try:
-        sleep = sleep or time.sleep
-        form = {"client_id": CLIENT_ID, "scope": SCOPE, "label": label or _default_label()}
-        for attempt in range(START_ATTEMPTS):
-            try:
-                r = http.post(DEVICE_PATH, data=form)
-            except httpx.HTTPError as e:
-                raise LoginError(f"{base}: {e}") from e
-            if r.status_code not in (429, 503) or attempt == START_ATTEMPTS - 1:
-                break
-            sleep(_retry_after(r) or DEFAULT_INTERVAL)  # busy: retry after Retry-After
-        if r.status_code == 404:
-            raise LoginError(f"{base} does not offer command-line login (no {DEVICE_PATH})")
-        if r.status_code != 200:
-            raise LoginError(f"{base}: login request refused ({_describe(r)})")
-        try:
-            start = r.json()
-            device_code = start["device_code"]
-            user_code = start["user_code"]
-            link = start.get("verification_uri_complete") or start["verification_uri"]
-            interval = (
-                DEFAULT_INTERVAL if start.get("interval") is None else float(start["interval"])
-            )
-            expires_in = float(start["expires_in"])
-        except (ValueError, KeyError, TypeError) as e:
-            raise LoginError(f"{base}: malformed login response: {r.text[:200]}") from e
-
-        print(f"Open this link in your browser to approve the login:\n\n  {link}\n", file=out)
-        print(f"Code: {user_code}", file=out)
-        if open_browser:
-            try:
-                webbrowser.open(link)
-            except (webbrowser.Error, OSError):  # no browser is fine, the URL is printed
-                pass
-        print("Waiting for approval...", file=out)
-
-        poll = {"grant_type": DEVICE_GRANT_TYPE, "device_code": device_code, "client_id": CLIENT_ID}
-        deadline = time.monotonic() + min(timeout, expires_in)
-        while time.monotonic() < deadline:
-            sleep(interval)
-            try:
-                p = http.post(TOKEN_PATH, data=poll)
-            except httpx.HTTPError as e:
-                raise LoginError(f"{base}: {e}") from e
-            if p.status_code == 200:
-                body = _json(p)
-                token = body.get("access_token")
-                if not token:
-                    raise LoginError(f"{base}: approved response has no access_token")
-                return Login(url=base, token=token, orcid=body.get("orcid"), name=body.get("name"))
-            if p.status_code == 429:
-                interval = max(interval + SLOW_DOWN_STEP, _retry_after(p))
-                continue
-            error = _json(p).get("error") if p.status_code == 400 else None
-            if error == "authorization_pending":
-                continue
-            if error == "slow_down":
-                interval += SLOW_DOWN_STEP
-                continue
-            if error == "access_denied":
-                raise LoginError("the login was refused in the browser")
-            if error in ("expired_token", "invalid_grant"):
-                raise LoginError("login request expired or was already used; run rp login again")
-            raise LoginError(f"{base}: login failed ({_describe(p)})")
-        raise LoginError("timed out waiting for approval; run rp login again")
-    finally:
-        if client is None:
-            http.close()
-
-
-def _json(r: Any) -> dict:
-    """The response body as a dict, or ``{}`` when it is not a JSON object."""
-    try:
-        body = r.json()
-    except ValueError:
-        return {}
-    return body if isinstance(body, dict) else {}
-
-
-def _describe(r: Any) -> str:
-    """A short description of an error response: status plus the OAuth error, if any."""
-    body = _json(r)
-    error = body.get("error")
-    if error:
-        desc = body.get("error_description")
-        return f"{r.status_code} {error}" + (f": {desc}" if desc else "")
-    return f"{r.status_code}: {r.text[:200]}"
-
-
-def _retry_after(r: Any) -> float:
-    """``Retry-After`` in seconds (delta form only), or 0 when absent or unparseable."""
-    try:
-        return max(0.0, float(r.headers.get("retry-after", "")))
-    except ValueError:
-        return 0.0
+    key = _stored_key_for(token)
+    if key is None:
+        return call(token)
+    return TokenSource(CONFIG, store(), key).call(call)
 
 
 def _default_label() -> str:
@@ -267,18 +200,18 @@ def _default_label() -> str:
 
 
 def whoami(url: str, token: str, *, client: Any = None, timeout: float = 30.0) -> dict:
-    """``GET /api/manage/whoami`` with ``token``. Raises :class:`LoginError` on refusal."""
+    """``GET /api/v1/manage/whoami`` with ``token``. Raises :class:`TokenRejected` on a 401."""
     import httpx
 
     base = server_base(url)
     http = client if client is not None else httpx.Client(base_url=base, timeout=timeout)
     try:
         try:
-            r = http.get("/api/manage/whoami", headers={"Authorization": f"Bearer {token}"})
+            r = http.get("/api/v1/manage/whoami", headers={"Authorization": f"Bearer {token}"})
         except httpx.HTTPError as e:
             raise LoginError(f"{base}: {e}") from e
         if r.status_code == 401:
-            raise LoginError("token rejected; run rp login again")
+            raise TokenRejected("token rejected; run rp login again")
         if r.status_code >= 400:
             raise LoginError(f"{base}: whoami failed ({r.status_code}): {r.text[:200]}")
         return r.json()
@@ -288,17 +221,19 @@ def whoami(url: str, token: str, *, client: Any = None, timeout: float = 30.0) -
 
 
 __all__ = [
-    "Login",
+    "CONFIG",
     "LoginError",
     "TOKEN_ENV_VAR",
-    "clear_login",
+    "TokenRejected",
+    "cli_app",
     "config_dir",
     "credentials_path",
-    "load_login",
-    "login",
+    "default_server",
     "resolve_token",
     "resolve_url",
-    "save_login",
     "server_base",
+    "store",
+    "stored_token",
     "whoami",
+    "with_token_refresh",
 ]

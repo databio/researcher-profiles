@@ -15,7 +15,7 @@ from typing import Any, Literal
 import numpy as np
 
 from ..utils.paths import cache_dir
-from ._sqlite import IndexNotBuiltError, read_chunk_matrix, read_index_meta_path
+from ._sqlite import IndexNotBuiltError, read_chunk_matrix_with_meta, read_index_meta_path
 from .backends import get_backend
 
 logger = logging.getLogger(__name__)
@@ -28,6 +28,88 @@ def _normalize(v: np.ndarray) -> np.ndarray:
     if n < 1e-12:
         return v.astype(np.float32)
     return (v / n).astype(np.float32)
+
+
+#: An authored paper counts as this many interest seeds in the centroid blend:
+#: an authored paper is evidence of sustained work, a seed is one paste or click.
+AUTHORED_PAPER_WEIGHT = 3
+
+#: Whenever the person has any authored paper, seeds never exceed this share of
+#: the centroid direction, so authored work always dominates.
+SEED_SHARE_CAP = 0.4
+
+#: Bumped whenever the centroid rule changes, so cached centroids recompute.
+CENTROID_RULE = "blend-v1"
+
+#: Chunk source types that count as an interest seed in :func:`blend_centroid`.
+SEED_SOURCE_TYPES = frozenset({"seed_abstract"})
+
+
+def seed_share(n_auth: int, n_seed: int, *, has_authored_chunks: bool) -> float:
+    """The weight seeds get in the centroid, in ``[0, 1]``.
+
+    ``n_auth`` counts distinct authored papers (``PAPER_CHUNK_TYPES`` source
+    ids), ``n_seed`` distinct seeds. ``has_authored_chunks`` is whether any
+    non-seed chunk exists at all (papers, or a narrative with no papers).
+
+    Worked examples:
+
+    ===========================  ==========================
+    authored, seeds              share
+    ===========================  ==========================
+    (no authored chunks, 5)      1.0 (pure-seed profile)
+    (narrative only, 10)         10 / 13 = 0.77 (no cap)
+    (2 papers, 10)               min(10 / 16, 0.4) = 0.4
+    (20 papers, 5)               5 / 65 = 0.077
+    (100 papers, 10)             10 / 310 = 0.032
+    ===========================  ==========================
+    """
+    if n_seed <= 0:
+        return 0.0
+    if not has_authored_chunks:
+        return 1.0
+    share = n_seed / (n_seed + AUTHORED_PAPER_WEIGHT * max(n_auth, 1))
+    if n_auth > 0:
+        share = min(share, SEED_SHARE_CAP)
+    return share
+
+
+def blend_centroid(vectors: np.ndarray, metas: list[dict]) -> np.ndarray:
+    """The one centroid rule: authored chunks dominate, seeds nudge.
+
+    ``metas`` carries ``source_type`` and ``source_id`` per row of ``vectors``.
+    ``A`` is the mean of every non-seed chunk vector; ``S`` the mean over seeds
+    of each seed's own mean (one vote per seed, however long its abstract).
+    With no seed chunks the result is the plain normalized mean, the rule
+    before seeds existed. Otherwise it is ``unit((1 - w) * unit(A) + w * unit(S))``
+    with ``w`` from :func:`seed_share`. Blending the two unit means stops a
+    chunk-heavy side from winning by chunk count alone.
+    """
+    from .chunking import PAPER_CHUNK_TYPES
+
+    vecs = np.asarray(vectors, dtype=np.float32)
+    if vecs.ndim != 2 or vecs.shape[0] == 0:
+        raise ValueError("blend_centroid needs at least one vector")
+    seed_rows: dict[str, list[int]] = {}
+    auth_rows: list[int] = []
+    auth_papers: set[str] = set()
+    for i, m in enumerate(metas):
+        st = m.get("source_type")
+        sid = str(m.get("source_id"))
+        if st in SEED_SOURCE_TYPES:
+            seed_rows.setdefault(sid, []).append(i)
+        else:
+            auth_rows.append(i)
+            if st in PAPER_CHUNK_TYPES:
+                auth_papers.add(sid)
+    if not seed_rows:
+        return _normalize(vecs.mean(axis=0))
+    seed_mean = np.stack([vecs[rows].mean(axis=0) for rows in seed_rows.values()]).mean(axis=0)
+    share = seed_share(len(auth_papers), len(seed_rows), has_authored_chunks=bool(auth_rows))
+    if share >= 1.0:
+        return _normalize(seed_mean)
+    auth_unit = _normalize(vecs[auth_rows].mean(axis=0))
+    return _normalize((1.0 - share) * auth_unit + share * _normalize(seed_mean))
 
 
 def _resolve_backend(profile) -> Any:
@@ -101,7 +183,7 @@ def _scalar(value: Any) -> Any:
 
 
 def _cache_matches_index(cache: dict[str, Any], backend_name: str, dim: int) -> bool:
-    """Whether the cached vectors were built by this backend at this dim."""
+    """Whether the cached vectors were built by this backend at this dim and centroid rule."""
     cached_backend = str(_scalar(cache["_backend_name"])) if "_backend_name" in cache else ""
     cached_dim = 0
     if "_dim" in cache:
@@ -109,15 +191,20 @@ def _cache_matches_index(cache: dict[str, Any], backend_name: str, dim: int) -> 
             cached_dim = int(_scalar(cache["_dim"]))
         except (TypeError, ValueError):
             cached_dim = 0
-    return cached_backend == backend_name and cached_dim == dim
+    cached_rule = str(_scalar(cache["_centroid_rule"])) if "_centroid_rule" in cache else ""
+    return cached_backend == backend_name and cached_dim == dim and cached_rule == CENTROID_RULE
+
+
+def _fresh_cache(backend_name: str, dim: int) -> dict[str, Any]:
+    return {"_backend_name": backend_name, "_dim": dim, "_centroid_rule": CENTROID_RULE}
 
 
 def _centroid_vec(db_path: Path, dim: int) -> np.ndarray:
-    """Normalized mean of every chunk vector in the index."""
-    mat = read_chunk_matrix(db_path, dim)
+    """The index's centroid under :func:`blend_centroid`, over every chunk."""
+    mat, metas = read_chunk_matrix_with_meta(db_path, dim)
     if mat.shape[0] == 0:
         raise IndexNotBuiltError(f"Index {db_path} has no vectors")
-    return _normalize(mat.mean(axis=0))
+    return blend_centroid(mat, metas)
 
 
 def index_centroid(db_path: Path, cache_path: Path) -> np.ndarray:
@@ -134,7 +221,7 @@ def index_centroid(db_path: Path, cache_path: Path) -> np.ndarray:
         if "centroid" in cache:
             return np.asarray(cache["centroid"], dtype=np.float32)
     else:
-        cache = {"_backend_name": backend_name, "_dim": dim}
+        cache = _fresh_cache(backend_name, dim)
 
     vec = _centroid_vec(db_path, dim)
     cache["centroid"] = vec
@@ -202,7 +289,7 @@ def _profile_embedding_impl(profile, kind: str = "centroid") -> np.ndarray:
         return np.asarray(cache[kind], dtype=np.float32)
 
     if not backend_match:
-        cache = {"_backend_name": backend_name, "_dim": dim}
+        cache = _fresh_cache(backend_name, dim)
 
     if kind == "expertise":
         vec = _expertise_vec(profile, dim)

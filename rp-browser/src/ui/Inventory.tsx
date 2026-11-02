@@ -2,7 +2,8 @@ import { useStore, persistSources } from "../store";
 import type { ProfileCard } from "../store";
 import { useState, useMemo } from "react";
 import { Copyable } from "./Copyable";
-import { Link } from "react-router";
+import { documentUrl } from "../model/manifest";
+import { Link, useSearchParams } from "react-router";
 import { navigate, buildPath } from "../router";
 import { useShellSlots } from "../slots";
 
@@ -13,7 +14,11 @@ const EXAMPLE_URL =
 export function Inventory() {
   const { cards } = useStore();
   const slots = useShellSlots();
-  const [filter, setFilter] = useState("");
+  // The filter lives in ?q= so the header search and a shared link land here filtered.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const filter = searchParams.get("q") ?? "";
+  const setFilter = (q: string) =>
+    setSearchParams(q ? { q } : {}, { replace: true });
   const [sortKey, setSortKey] = useState<keyof ProfileCard>("name");
   const [sortAsc, setSortAsc] = useState(true);
 
@@ -75,6 +80,7 @@ export function Inventory() {
               <th onClick={() => toggleSort("level")}>Level{sortIndicator("level")}</th>
               <th onClick={() => toggleSort("paperCount")}>Papers{sortIndicator("paperCount")}</th>
               <th>Origin</th>
+              {slots.profileActions && <th aria-label="Actions" />}
             </tr>
           </thead>
           <tbody>
@@ -90,10 +96,21 @@ export function Inventory() {
                 <td>{c.level}</td>
                 <td>{c.paperCount}</td>
                 <td className="text-muted text-sm">
-                  <Copyable value={c.base} title="Copy profile URL">
+                  <Copyable value={documentUrl(c.base)} title="Copy profile URL">
                     {new URL(c.base).hostname}
                   </Copyable>
                 </td>
+                {slots.profileActions && (
+                  // A click here (a Follow button) must not open the profile.
+                  <td onClick={(e) => e.stopPropagation()}>
+                    {slots.profileActions({
+                      url: c.base,
+                      slug: c.slug,
+                      rid: c.rid,
+                      sameOrigin: new URL(c.base).origin === window.location.origin,
+                    })}
+                  </td>
+                )}
               </tr>
             ))}
           </tbody>

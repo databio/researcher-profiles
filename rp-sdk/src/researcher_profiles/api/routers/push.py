@@ -19,7 +19,7 @@ from ...schema import (
     mint_local_rid,
     validate_ref,
 )
-from ...store import ProfileStore
+from ...store import Ownership, ProfileStore
 from ..caller import Caller
 from ..deps import get_read_caller, get_service, get_store, require_scope
 from ..service import Service
@@ -94,6 +94,16 @@ def _push_gate(request: Request, slug: str, rid: str) -> None:
         gate(request, slug, rid)
 
 
+def _owner_for_push(request: Request, slug: str, rid: str) -> "Ownership | None":
+    """Ask the host who owns a record this push creates (``app.state.owner_for_push``).
+
+    ``None`` (the default, and a host with no owners) leaves the store to its
+    own ``owner_resolver``. A replace keeps the record's owner whatever this says.
+    """
+    hook = getattr(request.app.state, "owner_for_push", None)
+    return None if hook is None else hook(request, slug, rid)
+
+
 async def _put_profile_json(
     slug: str,
     request: Request,
@@ -157,7 +167,9 @@ async def _put_profile_json(
                 )
 
     try:
-        prof = store.put_document(slug, document)
+        prof = store.put_document(
+            slug, document, owner=_owner_for_push(request, slug, document.rid)
+        )
     except ProfileWriteError as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
 
@@ -170,6 +182,9 @@ async def _put_profile_json(
         name=prof.metadata.name,
         level=str(prof.level),
         indexed=False,  # JSON upsert never carries an embedding index
+        profile_id=prof.profile_id,
+        kept_owner_fields=getattr(request.state, "kept_owner_fields", None),
+        stripped_fields=getattr(request.state, "stripped_fields", None),
     )
 
 
@@ -204,6 +219,7 @@ async def _put_profile_tarball(
             include_fulltext=bool(getattr(request.app.state, "accept_fulltext", False)),
             gate=lambda rid: _push_gate(request, slug, rid),
             mode=mode,
+            owner=lambda rid: _owner_for_push(request, slug, rid),
         )
     except UploadError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
@@ -225,6 +241,9 @@ async def _put_profile_tarball(
         spliced=result.spliced,
         manifest_counts=result.manifest_counts,
         mode=result.mode,
+        profile_id=result.profile_id,
+        kept_owner_fields=getattr(request.state, "kept_owner_fields", None),
+        stripped_fields=getattr(request.state, "stripped_fields", None),
     )
 
 
@@ -254,7 +273,7 @@ def get_profile_archive(
         raise Invalid(str(e)) from e
     # The path below uses the resolved slug, never the caller's reference.
     store, prof, viewer = service.read(caller, slug)
-    slug = store.resolve_slug(slug)
+    slug = prof.slug
     root = store.root
     try:
         if root is not None:

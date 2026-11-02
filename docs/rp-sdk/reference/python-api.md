@@ -352,6 +352,14 @@ Also exported from `researcher_profiles.store`:
     options:
       heading_level: 3
 
+::: researcher_profiles.store.Ownership
+    options:
+      heading_level: 3
+
+::: researcher_profiles.store.ProfileRef
+    options:
+      heading_level: 3
+
 ::: researcher_profiles.store.ProfileNotFoundError
     options:
       heading_level: 3
@@ -433,6 +441,14 @@ filesystem backend implements.
       heading_level: 4
 
 ::: researcher_profiles.store.db.BuildStateRow
+    options:
+      heading_level: 4
+
+::: researcher_profiles.store.db.RidAliasRow
+    options:
+      heading_level: 4
+
+::: researcher_profiles.store.db.SlugAliasRow
     options:
       heading_level: 4
 

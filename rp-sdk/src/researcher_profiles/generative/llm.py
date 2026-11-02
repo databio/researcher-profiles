@@ -297,12 +297,16 @@ def _grounded(self, resp: LLMResponse) -> bool:
 def _source_type_kwargs(source_types: Optional[list[str]]) -> dict:
     """Retrieval kwargs for a caller limited to ``source_types``.
 
-    Empty for ``None``. The filter is applied at the query, not after, so
-    hidden chunks cannot crowd out the ones the caller may see.
+    ``None`` means every chunk type. Rank-only chunks (interest seed papers)
+    are always left out: they are not the researcher's own text, so they are
+    never evidence. The filter is applied at the query, not after, so hidden
+    chunks cannot crowd out the ones the caller may see.
     """
-    if source_types is None:
-        return {}
-    return {"filter": {"source_type": list(source_types)}}
+    from ..embeddings.chunking import RANK_ONLY_SOURCE_TYPES
+    from ..privacy import CHUNK_SOURCE_TYPE_ROLE
+
+    types = CHUNK_SOURCE_TYPE_ROLE if source_types is None else source_types
+    return {"filter": {"source_type": [st for st in types if st not in RANK_ONLY_SOURCE_TYPES]}}
 
 
 def _retrieval_errors() -> tuple[type[BaseException], ...]:

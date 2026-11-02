@@ -13,6 +13,7 @@ from pathlib import Path
 import numpy as np
 
 from ..embeddings._sqlite import read_chunk_matrix_with_meta, read_index_meta_path
+from ..embeddings.chunking import RANK_ONLY_SOURCE_TYPES
 from ..embeddings.profile_vec import _resolve_backend
 from ..models.results import Topic, _llm_call_errors
 from ..utils.clock import now_iso
@@ -37,7 +38,12 @@ def _load_all_chunk_vectors(profile) -> tuple[np.ndarray, list[dict]]:
     db_path = cache_dir(profile.require_directory("topics")) / "embeddings.sqlite"
     meta = read_index_meta_path(db_path)
     dim = int(meta.get("embedding_dim", "0") or 0)
-    return read_chunk_matrix_with_meta(db_path, dim)
+    mat, metas = read_chunk_matrix_with_meta(db_path, dim)
+    # Interest seed papers are rank-only: they never become the person's topics.
+    keep = [i for i, m in enumerate(metas) if m["source_type"] not in RANK_ONLY_SOURCE_TYPES]
+    if len(keep) == len(metas):
+        return mat, metas
+    return mat[keep], [metas[i] for i in keep]
 
 
 _WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9_-]{2,}")

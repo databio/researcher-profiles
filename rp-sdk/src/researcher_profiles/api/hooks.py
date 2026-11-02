@@ -31,6 +31,12 @@ never a ``Request``, so service functions can run them without HTTP.
 ``store_for(caller, store) -> ProfileStore``
     The per-caller read view of the store. ``None``: the store itself. Never
     used by an edit.
+``resolve_ref(store, ref) -> ref | None``
+    What a ref the store does not resolve means, for every read and edit
+    lookup: a host maps a pasted rid to the record it calls primary (a rid is
+    never a store ref). A ``None`` answer: the miss stands (404). No hook:
+    a rid with exactly one record about it names that record, else 404
+    (:func:`researcher_profiles.api.service.sole_record_about`).
 """
 
 from __future__ import annotations
@@ -62,6 +68,11 @@ class Hooks:
     record_edit: Optional[Callable[[Caller, Any, str, list[str], Optional[str]], None]] = None
     registry_proofs: Optional[Callable[[str], list]] = None
     store_for: Optional[Callable[[Caller, Any], Any]] = None
+    #: ``(store, ref) -> ref | None``: what a ref the store itself does not
+    #: resolve means (a host maps a pasted rid to the record it calls primary).
+    #: A ``None`` answer keeps the miss. Consulted by every read and edit
+    #: lookup. Unset: a rid with exactly one record about it names that record.
+    resolve_ref: Optional[Callable[[Any, str], Any]] = None
 
 
 __all__ = ["Hooks"]

@@ -18,6 +18,8 @@ from researcher_profiles.resolve import (
 from researcher_profiles.schema import ProfileDocument, is_local, is_rid
 from researcher_profiles.store import FilesystemProfileStore
 
+from .factories import profile_about
+
 # ORCID's documented sample ids, all checksum-valid.
 ORCID_A = "0000-0002-1825-0097"
 ORCID_B = "0000-0004-4600-113X"
@@ -109,7 +111,7 @@ def test_an_orcid_miss_mints_once_under_that_orcid(any_store):
     first = resolve_person(any_store, rid=ORCID_B, name="Ada Lovelace")
     assert first.rid == ORCID_B  # never a local: id when a valid ORCID is supplied
     assert (first.created, first.confidence) == (True, "exact")
-    doc = any_store.get(ORCID_B).metadata
+    doc = profile_about(any_store, ORCID_B).metadata
     assert (doc.provenance, doc.level, doc.visibility) == ("third_party", "lite", "limited")
 
     second = resolve_person(any_store, rid=ORCID_B)
@@ -197,7 +199,7 @@ def test_a_new_person_is_minted(any_store, seeds, name, affiliation):
     assert (r.created, r.confidence) == (True, "high")
     assert is_local(r.rid) and is_rid(r.rid) and len(r.rid) < 80
     assert r.rid == _deterministic_local_rid(name)
-    doc = any_store.get(r.rid).metadata
+    doc = profile_about(any_store, r.rid).metadata
     assert (doc.provenance, doc.affiliation) == ("third_party", affiliation)
 
 
@@ -338,7 +340,7 @@ def test_a_wedged_directory_does_not_make_a_person_unmintable(tmp_path):
     (tmp_path / "hopper-grace").mkdir()
     r = resolve_person(store, name="Grace Hopper")
     assert r.created is True
-    assert store.exists(r.rid)
+    assert store.profiles_about(r.rid)
 
 
 def test_the_mint_is_deterministic_across_stores(tmp_path, empty_sql_store):
@@ -375,14 +377,18 @@ class TestCreateRace:
         self, any_store, monkeypatch
     ):
         """A profile at the deterministic rid that cannot be parsed is not handed out on faith."""
+        from researcher_profiles.store import ProfileRef
+
         rid = _deterministic_local_rid("Grace Hopper")
-        real_exists, real_get = any_store.exists, any_store.get
+        real_about, real_get = any_store.profiles_about, any_store.get
         monkeypatch.setattr(
-            any_store, "exists", lambda ref: True if ref == rid else real_exists(ref)
+            any_store,
+            "profiles_about",
+            lambda r: [ProfileRef(None, rid, "occupant")] if r == rid else real_about(r),
         )
 
         def corrupt_get(ref):
-            if ref == rid:
+            if ref == "occupant":
                 raise ProfileLoadError("x", "corrupt document")
             return real_get(ref)
 

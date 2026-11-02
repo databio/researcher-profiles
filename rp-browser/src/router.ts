@@ -87,6 +87,17 @@ export function pageOf(pathname: string): Route["page"] | null {
   }
 }
 
+/** Whether a page belongs to the Browse area (its nav entry stays lit). */
+export function isBrowsePage(page: Route["page"] | null): boolean {
+  return (
+    page === "browse" ||
+    page === "clusters" ||
+    page === "topics" ||
+    page === "search" ||
+    page === "profile"
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Imperative navigation from non-hook code
 // ---------------------------------------------------------------------------

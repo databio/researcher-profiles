@@ -2,6 +2,7 @@
 
 import argparse
 import logging
+import sys
 from collections.abc import Callable
 
 from . import (
@@ -158,4 +159,15 @@ def main(argv: list[str] | None = None) -> int:
     if handler is None:
         # Unreachable: argparse rejects an unknown verb with exit 2 first.
         return EXIT_ERROR
-    return handler(args)
+    try:
+        return handler(args)
+    except Exception as e:
+        # A stored login that ended, or a refresh the server could not answer,
+        # reads as one plain sentence. Imported only here: the OAuth client
+        # (urllib.request) stays off every command's import path.
+        from .._vendor.snapgate_oauth_client import OAuthClientError
+
+        if not isinstance(e, OAuthClientError):
+            raise
+        print(f"rp: {e}", file=sys.stderr)
+        return EXIT_ERROR

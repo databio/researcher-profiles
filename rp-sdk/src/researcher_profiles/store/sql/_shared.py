@@ -53,32 +53,32 @@ def _is_memory_sqlite(url: str) -> bool:
     return tail in ("", "/", ":memory:", "/:memory:") or "mode=memory" in url
 
 
-def artifact_rows(s: Session, rid: str) -> list[ArtifactRow]:
+def artifact_rows(s: Session, profile_id: int) -> list[ArtifactRow]:
     """Every ``rp_artifacts`` row of one profile, in manifest order."""
     return list(
         s.exec(
             select(ArtifactRow)
-            .where(ArtifactRow.profile_rid == rid)
+            .where(ArtifactRow.profile_id == profile_id)
             .order_by(ArtifactRow.manifest_slot, ArtifactRow.ordinal, ArtifactRow.content_url)
         ).all()
     )
 
 
-def render_collection(s: Session, rid: str, art: ArtifactRow) -> Optional[str]:
+def render_collection(s: Session, profile_id: int, art: ArtifactRow) -> Optional[str]:
     """Re-render ``papers.jsonld`` / ``grants.jsonld`` from the tables."""
     envelope = dict(art.envelope or {})
     if art.content_url == PAPERS_URL:
         records = [
             r.record
             for r in s.exec(
-                select(PaperRow).where(PaperRow.profile_rid == rid).order_by(PaperRow.ordinal)
+                select(PaperRow).where(PaperRow.profile_id == profile_id).order_by(PaperRow.ordinal)
             ).all()
         ]
     elif art.content_url == GRANTS_URL:
         records = [
             r.record
             for r in s.exec(
-                select(GrantRow).where(GrantRow.profile_rid == rid).order_by(GrantRow.ordinal)
+                select(GrantRow).where(GrantRow.profile_id == profile_id).order_by(GrantRow.ordinal)
             ).all()
         ]
     else:  # pragma: no cover - only two collections are rendered

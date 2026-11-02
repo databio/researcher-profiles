@@ -420,17 +420,22 @@ def _cmd_push(args: argparse.Namespace) -> int:
     slug = args.slug or target.name
     print(f"source: {target}", file=sys.stderr)
     print(f"target: {url}/api/v1/profiles/{slug} (mode: {mode})", file=sys.stderr)
+    from .auth.credentials import with_token_refresh
+
     try:
-        result = push_profile(
-            url,
-            target,
-            slug=args.slug,
-            token=token,
-            include_fulltext=args.include_fulltext,
-            mode=mode,
-            only=args.only,
-            force=args.force,
-            dry_run=args.dry_run,
+        result = with_token_refresh(
+            token,
+            lambda t: push_profile(
+                url,
+                target,
+                slug=args.slug,
+                token=t,
+                include_fulltext=args.include_fulltext,
+                mode=mode,
+                only=args.only,
+                force=args.force,
+                dry_run=args.dry_run,
+            ),
         )
     except PushRefused as e:
         if isinstance(e, PushWouldRemove):

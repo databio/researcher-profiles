@@ -559,3 +559,10 @@ def tier_from_header(request):
     from researcher_profiles.api.caller import Caller
 
     return Caller(tier=request.headers.get("X-Tier", "public"))
+
+
+def profile_about(store, rid: str):
+    """The one profile ``store`` holds about ``rid`` (a rid is not a ref)."""
+    about = store.profiles_about(rid)
+    assert len(about) == 1, f"expected one profile about {rid!r}, got {about!r}"
+    return store.get(about[0].ref)

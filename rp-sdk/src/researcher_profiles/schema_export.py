@@ -57,6 +57,7 @@ from .schema import (
     GrantsDocument,
     PapersDocument,
     ProfileDocument,
+    SeedPapersDocument,
     SummaryFile,
     TrialsDocument,
 )
@@ -69,6 +70,8 @@ _SCHEMA_MODELS = {
     "papers_jsonld": PapersDocument,  # sources/papers.jsonld
     "grants_jsonld": GrantsDocument,  # sources/grants.jsonld
     "trials_jsonld": TrialsDocument,  # sources/trials.jsonld (optional, clinical)
+    # sources/seed_papers.jsonld (optional; interest, never authorship)
+    "seed_papers_jsonld": SeedPapersDocument,
     "summary_file": SummaryFile,  # sources/summaries/*.summary.md frontmatter
     # Published static-site artifacts. profile.jsonld and papers.jsonld are
     # the same documents authored and published, so the entries above cover both.

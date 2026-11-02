@@ -884,71 +884,128 @@ Requires the `[signing]` extra.
 
 ## login
 
-Log in to a profile server from the command line and store the key it mints.
-The server runs the OAuth 2.0 device authorization grant
-([RFC 8628](https://www.rfc-editor.org/rfc/rfc8628)): `rp` asks for a code
-(`POST /api/auth/device`), prints a link and a short user code, and polls
-(`POST /api/auth/token`) until you approve the request in a browser. See
-[Command-line login](../../rp-spec/dynamic-api.md#142-command-line-login) for
-the wire protocol.
+Log in to a profile server from the command line and store a login that
+renews itself. `rp` reads the server's OAuth metadata
+(`GET /.well-known/oauth-authorization-server`) and signs in as the registered
+OAuth client `rp-cli`, asking for the `profiles:push` scope, in one of two
+ways:
+
+- **In your browser (the default).** `rp` opens your browser at the server's
+  sign-in page and listens for the answer on a one-time address on this
+  computer, `http://127.0.0.1:<random port>/callback`, protected with PKCE
+  ([RFC 8252](https://www.rfc-editor.org/rfc/rfc8252)). You sign in and press
+  Allow; the command finishes by itself.
+- **With a code (`--device`).** `rp` prints a link and a short code, and polls
+  until you approve the request in a browser on any device
+  ([RFC 8628](https://www.rfc-editor.org/rfc/rfc8628)). `rp` picks this on its
+  own over SSH (`SSH_CONNECTION` or `SSH_TTY` set), on Linux with no display
+  (no `DISPLAY` or `WAYLAND_DISPLAY`), when it cannot open a browser, and when
+  the server offers no browser sign-in, as long as the server offers a login
+  code (Prosopia does). Without one, `rp` prints the sign-in link instead and
+  waits for you to paste back the address the browser ends on.
+
+The login code is snapgate's shared OAuth client, vendored inside `rp-sdk`; it
+needs only the Python standard library.
+
+See [Command-line login](../../rp-spec/dynamic-api.md#142-command-line-login)
+for the wire protocol.
 
 ```
-rp login [server] [--label NAME] [--no-browser] [--json]
+rp login [server] [--label NAME] [--device] [--no-browser] [--json]
 ```
 
 | Argument / flag | Default | Description |
 |---|---|---|
-| `server` | the server already logged in to | Server base URL, e.g. `https://profiles.example.org`. |
-| `--label NAME` | the machine's hostname | Name shown for this machine on the approval page. |
-| `--no-browser` | off | Print the link only; do not open a browser. |
+| `server` | the server most recently logged in to | Server base URL, e.g. `https://profiles.example.org`. |
+| `--label NAME` | the machine's hostname | Name for this machine on the approval page and the server's Privacy page ("rp CLI on NAME"). |
+| `--device` | off (automatic over SSH or with no display) | Approve with a link and code on any device. |
+| `--no-browser` | off | Do not open a browser here. Open the printed link in a browser on any computer; when it ends on a page that does not load (`127.0.0.1`), paste that page's address back and press Enter. |
 | `--json` | off | Emit `{url, orcid, name}` as JSON. |
 
 ```console
 $ rp login https://profiles.example.org
+Opened your browser to sign in. If it did not open, visit:
+
+  https://profiles.example.org/oauth/authorize?response_type=code&client_id=rp-cli&...
+
+Waiting for you to sign in...
+logged in to https://profiles.example.org as Jane Doe; login stored in ~/.config/researcher-profiles/credentials.json
+```
+
+```console
+$ rp login https://profiles.example.org --device
 Open this link in your browser to approve the login:
 
-  https://profiles.example.org/device?user_code=WQTX-9F4K
+  https://profiles.example.org/device?code=WQTX-9F4K
 
 Code: WQTX-9F4K
 Waiting for approval...
-logged in to https://profiles.example.org as Jane Doe; key stored in ~/.config/researcher-profiles/credentials.json
+logged in to https://profiles.example.org as Jane Doe; login stored in ~/.config/researcher-profiles/credentials.json
 ```
 
-The key is written to `~/.config/researcher-profiles/credentials.json` with
-mode `0600` (or under `$XDG_CONFIG_HOME` when that is set). It is scoped to the
-one server it came from, and it carries only `push_own`, so it can upload the
-profiles you own or edit and nothing else. Once it is stored,
-[`push`](#push), `rp install`, `rp listr` and [`whoami`](#whoami) need no
-flags at all.
+The login is written to `~/.config/researcher-profiles/credentials.json` with
+mode `0600` (or under `$XDG_CONFIG_HOME` when that is set), one login per
+server. Each holds an access token that lives about an hour, a refresh token,
+when the access token expires, where to renew it, and who you are:
+
+```json
+{"version": 1, "logins": {"https://profiles.example.org": {
+  "server": "https://profiles.example.org", "issuer": "https://profiles.example.org",
+  "client_id": "rp-cli", "token_endpoint": "https://profiles.example.org/oauth/token",
+  "access_token": "rpa_...", "access_expires_at": 1767225600, "refresh_token": "rpr_...",
+  "extra": {"orcid": "0000-0002-1825-0097", "name": "Jane Doe"}, "ended_at": null}}}
+```
+
+Each login is offered only to the server it came from, and it can upload only the
+profiles you own or edit. Commands renew the access token on their own when it
+has expired, and once more if the server answers `401`; each renewal saves the
+new refresh token (the server issues a new one every time) with an atomic
+write under a lock, so two `rp` commands at once do not trip over each other.
+Once it is stored, [`push`](#push), `rp install`, `rp listr` and
+[`whoami`](#whoami) need no flags at all. The server lists the login on its
+Privacy page as "rp CLI on <label>", where you can revoke it; logging in again
+from the same machine replaces the old one.
+
+A `credentials.json` written by an older `rp` is no longer read: commands say
+it is from an older version and to run `rp login`, which replaces it.
 
 A server that does not offer
 [command-line login](../../rp-spec/dynamic-api.md#142-command-line-login)
-answers `404` on `POST /api/auth/device`, and the command fails at once with
+publishes no OAuth metadata (or none naming a device endpoint), and the
+command fails at once with
 `does not offer command-line login`. If you decline the request in the
 browser, or it expires before you approve it, the command stops and says so;
-run `rp login` again to start over.
+run `rp login` again to start over. If the login later expires (unused too
+long) or is revoked, commands stop with one sentence, `rp: Your rp login for
+<server> has ended (signed out, revoked, or unused too long). Run rp login
+again.`, and the file keeps a note of when and why it ended.
 
 **Exit codes.** `0` ok · `1` the server refused, you declined, the request expired or timed out, or the server was unreachable
 · `2` no server URL was given and none is stored.
 
-Requires the `[client]` extra.
+Needs no extra. With the `[client]` extra, `rp` also asks the server who you
+are (`whoami`) and names you in the message.
 
 ---
 
 ## logout
 
-Delete the stored login. Takes no options.
+Sign out: revoke a stored login at the server
+([RFC 7009](https://www.rfc-editor.org/rfc/rfc7009) `revocation_endpoint`),
+then delete it. With no argument, the server most recently logged in to.
 
 ```
-rp logout
+rp logout [server]
 ```
 
 ```console
 $ rp logout
-logged out; removed /home/jane/.config/researcher-profiles/credentials.json
+logged out of https://profiles.example.org; removed it from /home/jane/.config/researcher-profiles/credentials.json
 ```
 
-Exits `0` whether or not a file was there; with nothing stored it prints
+If the server cannot be reached, or offers no revocation endpoint, the login is
+deleted anyway and `rp` says to revoke "rp CLI" on the server's Privacy page.
+Exits `0` whether or not a login was there; with nothing stored it prints
 `not logged in (nothing stored)`.
 
 ---
@@ -956,7 +1013,7 @@ Exits `0` whether or not a file was there; with nothing stored it prints
 ## whoami
 
 Ask a server who the stored token belongs to and which profiles it may push
-(`GET /api/manage/whoami`).
+(`GET /api/v1/manage/whoami`).
 
 ```
 rp whoami [--url BASE_URL] [--token TOKEN] [--json]
@@ -965,13 +1022,13 @@ rp whoami [--url BASE_URL] [--token TOKEN] [--json]
 | Option | Default | Description |
 |---|---|---|
 | `--url` | the stored login's server | Server base URL. |
-| `--token` | `RESEARCHER_PROFILES_TOKEN`, else the stored login's key | Bearer token. |
+| `--token` | `RESEARCHER_PROFILES_TOKEN`, else the stored login's access token (renewed if expired) | Bearer token. |
 | `--json` | off | Emit the server's identity record as JSON. |
 
 ```console
 $ rp whoami
 https://profiles.example.org: Jane Doe (0000-0002-1825-0097)
-scopes: push_own
+scopes: push_own, read
 can push:
   jane-doe	0000-0002-1825-0097	owner
 ```
@@ -986,8 +1043,8 @@ Requires the `[client]` extra.
 ## agent
 
 Introspect an **agent** credential: the `rpa_` API key an assistant holds to
-act for one person's account on one server. Distinct from [`login`](#login),
-which handles a person's own `rpk_` push key.
+act for one person's account on one server, stored in `credentials.toml`.
+Distinct from [`login`](#login), which handles a person's own push login.
 
 ```
 rp agent whoami [--host NAME] [--json]
@@ -996,7 +1053,7 @@ rp agent config [--host NAME]
 
 | Subcommand | Calls | Prints |
 |---|---|---|
-| `whoami` | `GET /api/manage/agent/whoami` | The key's label and handle, its owner, its parts table (which parts it may read and write), the "Replace whole profiles" switch, every profile the account reaches with the parts the key may write there, and the acts no key may ever do. |
+| `whoami` | `GET /api/v1/manage/agent/whoami` | The key's label and handle, its owner, its parts table (which parts it may read and write), the "Replace whole profiles" switch, every profile the account reaches with the parts the key may write there, and the acts no key may ever do. |
 | `config` | nothing (local) | Which credential resolved, and from where. |
 
 | Option | Description |

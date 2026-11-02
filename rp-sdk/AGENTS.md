@@ -72,16 +72,39 @@ an index. Resolution order, highest first (every command uses the same one):
 
 ## Identity vs. name
 
-Identity is the rid: an ORCID, or a minted `local:` id for someone without it.
+A rid is a person: an ORCID, or a minted `local:` id for someone without it.
+A store may hold several records about one person (the SQL store keys records
+by an integer `profile_id` and allows one per owner), so a rid is never a
+`ref`: `store.get`, `exists` and `resolve_slug` take a slug (or, on SQL, a
+`profile_id` / `#<id>`), and rid lookups are explicit (`store.profiles_about`,
+`store.self_profile_for`, `store.profile_owned_by`). A directory corpus holds
+one record per person.
+
 The directory name is only a display handle. `voss-elena` and
 `0000-0002-1825-0097` are both valid directory names and both occur.
 `<root>/.cache/index.json` maps between them. Never infer meaning from a directory
 name; resolve it:
 
 ```bash
-rp where 0000-0002-1825-0097     # -> /path/to/voss-elena
+rp where 0000-0002-1825-0097     # -> /path/to/voss-elena   (the one profile about that rid)
 rp seek voss-elena                  # -> /path/to/voss-elena   (for $(...) pipelines)
+rp db about 0000-0002-1825-0097  # every record about that person in a SQL store
 ```
+
+## Interest seed papers are not works
+
+`sources/seed_papers.jsonld` (role and write-unit kind `seed_papers`,
+`private` by role default) holds papers that define a person's interests:
+`SeedPaperRecord`, deliberately not a `PaperRecord` and with no authorship
+fields. `prof.seed_papers`, `prof.save_seed_papers`, `prof.add_seed_papers`
+and `prof.remove_seed_paper` are the profile API; `api/service.py` has
+`list_seed_papers`, `add_seed_papers` and `remove_seed_paper`, served at
+`GET|POST /api/v1/profiles/{slug}/seed-papers` and
+`DELETE .../seed-papers/{seed_id}`. Seeds are indexed as `seed_abstract`
+chunks at every level, which are rank-only (`RANK_ONLY_SOURCE_TYPES`): they
+shape `blend_centroid` and the feed query, and never appear as a works row,
+a paper count, a passage, a search hit or match evidence. A replace-mode push
+keeps the live seed file (`WITHHELD_CLASSES["seed_papers"]`).
 
 ## Tests
 

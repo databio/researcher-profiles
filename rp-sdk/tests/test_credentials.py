@@ -1,43 +1,89 @@
 """``rp login`` / ``logout`` / ``whoami`` and the stored-credential precedence.
 
-The device flow (RFC 8628: ``/api/auth/device`` then ``/api/auth/token``) is
-exercised against a stubbed server (an ``httpx`` mock transport), so this
-covers the CLI's side of the protocol: start, poll through pending /
-slow_down / 429 until approved or refused, store 0600, without a real server.
-The file also pins the agent ``ManagementClient`` wire contract from
+``rp login`` is a thin adapter over snapgate's shared OAuth client (vendored at
+``researcher_profiles._vendor.snapgate_oauth_client``), signing in as the
+registered OAuth client ``rp-cli``. These tests check rp's wiring against the
+client's ``FakeAuthorizationServer`` (snapgate's rules, plus the device flow
+Prosopia offers); the client's own mechanics (PKCE, the loopback listener,
+locking, refresh rotation, the device grant) are tested in snapgate. The file
+also pins the agent ``ManagementClient`` wire contract from
 ``cli/auth/agent.py``.
 """
 
 import json
 import stat
+import time
 from unittest.mock import MagicMock
-from urllib.parse import parse_qsl
 
 import httpx
 import pytest
 
+from researcher_profiles._vendor.snapgate_oauth_client import Credential, CredentialKey
+from researcher_profiles._vendor.snapgate_oauth_client import cli as oauth_cli
+from researcher_profiles._vendor.snapgate_oauth_client import source as oauth_source
+from researcher_profiles._vendor.snapgate_oauth_client.testing import FakeAuthorizationServer
 from researcher_profiles.cli import main
 from researcher_profiles.cli.auth import credentials as creds
 from researcher_profiles.cli.auth.agent import (
     AgentAPIError,
-    Credential,
     CredentialError,
     InsufficientAccessError,
     ManagementClient,
     resolve_credential,
+)
+from researcher_profiles.cli.auth.agent import (
+    Credential as AgentCredential,
 )
 
 SERVER = "https://people.example.org"
 OTHER_SERVER = "https://other.example.org"
 SLUG = "jane-doe"
 _RealClient = httpx.Client
+WHOAMI = {
+    "app": "agent_abc",
+    "scopes": ["push_own", "read"],
+    "owner": {"orcid": "0000-0002-1825-0097", "name": "Jane A. Doe"},
+    "profiles": [{"slug": "jane-doe", "rid": "0000-0002-1825-0097", "role": "owner"}],
+}
+
+
+def _save(server=SERVER, access="rpa_stored", obtained_at=None, **over):
+    """A stored login for ``server``, written straight to the store."""
+    now = int(time.time())
+    values = dict(
+        server=server,
+        issuer=server,
+        client_id="rp-cli",
+        token_endpoint=f"{server}/oauth/token",
+        revocation_endpoint=f"{server}/oauth/revoke",
+        resource=None,
+        scope="profiles:push",
+        access_token=access,
+        access_expires_at=now + 3600,
+        refresh_token="rpr_stored",
+        obtained_at=now if obtained_at is None else obtained_at,
+    )
+    values.update(over)
+    cred = Credential(**values)
+    creds.store().put(CredentialKey(server), cred)
+    return cred
+
+
+def _stored(server=SERVER):
+    return creds.store().load(CredentialKey(server))
 
 
 @pytest.fixture
-def stored(tmp_path):
-    login = creds.Login(url=SERVER, token="rpk_stored", orcid="0000-0002-1825-0097", name="Jane")
-    creds.save_login(login)
-    return login
+def stored():
+    return _save()
+
+
+@pytest.fixture(autouse=True)
+def _desktop(monkeypatch):
+    """A desktop session: a display, no SSH. Tests that need otherwise say so."""
+    monkeypatch.setenv("DISPLAY", ":0")
+    monkeypatch.delenv("SSH_CONNECTION", raising=False)
+    monkeypatch.delenv("SSH_TTY", raising=False)
 
 
 class TestConfigDir:
@@ -83,40 +129,17 @@ class TestConfigDir:
             resolve_credential()
 
 
-class TestStore:
-    def test_save_is_owner_only_and_round_trips(self, stored):
-        path = creds.credentials_path()
-        assert path.exists()
-        assert stat.S_IMODE(path.stat().st_mode) == 0o600
-        assert json.loads(path.read_text())["token"] == "rpk_stored"
-        assert creds.load_login() == stored
-
-    def test_missing_or_broken_file_is_none(self):
-        assert creds.load_login() is None
-        p = creds.credentials_path()
-        p.parent.mkdir(parents=True)
-        p.write_text("{not json")
-        assert creds.load_login() is None
-        p.write_text(json.dumps({"url": SERVER}))  # no token
-        assert creds.load_login() is None
-
-    def test_clear(self, stored):
-        assert creds.clear_login() is True
-        assert creds.load_login() is None
-        assert creds.clear_login() is False
-
-
 class TestPrecedence:
     @pytest.mark.parametrize(
         ("env", "flag", "url", "expected"),
         [
             ("env-token", "flag-token", SERVER, "flag-token"),
             ("env-token", None, SERVER, "env-token"),
-            (None, None, SERVER, "rpk_stored"),
-            (None, None, SERVER + "/", "rpk_stored"),
-            (None, None, SERVER + "/api/v1/profiles", "rpk_stored"),
-            (None, None, None, "rpk_stored"),
-            (None, None, OTHER_SERVER, None),  # a stored key never goes to another server
+            (None, None, SERVER, "rpa_stored"),
+            (None, None, SERVER + "/", "rpa_stored"),
+            (None, None, SERVER + "/api/v1/profiles", "rpa_stored"),
+            (None, None, None, "rpa_stored"),
+            (None, None, OTHER_SERVER, None),  # a stored login never goes to another server
         ],
         ids=[
             "flag-beats-env",
@@ -133,11 +156,20 @@ class TestPrecedence:
             monkeypatch.setenv(creds.TOKEN_ENV_VAR, env)
         assert creds.resolve_token(flag, url) == expected
 
-    def test_url_defaults_to_the_login(self, stored):
+    def test_url_defaults_to_the_most_recent_login(self, stored):
         assert creds.resolve_url(None) == SERVER
         assert creds.resolve_url("https://x") == "https://x"
-        creds.clear_login()
+        _save(OTHER_SERVER, access="rpa_other", obtained_at=stored.obtained_at + 10)
+        assert creds.resolve_url(None) == OTHER_SERVER
+        creds.store().put(CredentialKey(OTHER_SERVER), None)
+        creds.store().put(CredentialKey(SERVER), None)
         assert creds.resolve_url(None) is None
+
+    def test_each_login_goes_to_its_own_server(self, stored):
+        _save(OTHER_SERVER, access="rpa_other")
+        assert creds.resolve_token(None, SERVER) == "rpa_stored"
+        assert creds.resolve_token(None, OTHER_SERVER) == "rpa_other"
+        assert creds.resolve_token(None, "https://third.example.org") is None
 
 
 def _patch(monkeypatch, dotted, returns):
@@ -150,17 +182,26 @@ def _called_url(spy):
     return spy.call_args.kwargs.get("url") or spy.call_args.args[0]
 
 
+def _push_result():
+    from researcher_profiles.client import PushPlan, PushResult
+
+    return PushResult(
+        plan=PushPlan(slug="s", exists=False),
+        summary={"slug": "s", "name": "n", "level": "l", "indexed": False},
+    )
+
+
 class TestCliWiring:
     """The flags reach the library with the stored login filled in."""
 
     @pytest.mark.parametrize(
         ("argv", "target", "env", "url", "token", "exit_code"),
         [
-            (["push", "{tmp}"], "push_profile", None, SERVER, "rpk_stored", 0),
+            (["push", "{tmp}"], "push_profile", None, SERVER, "rpa_stored", 0),
             (["push", "{tmp}", "--url", OTHER_SERVER], "push_profile", None, OTHER_SERVER, None, 0),
-            (["install", "a"], "install_profile", None, SERVER, "rpk_stored", 0),
+            (["install", "a"], "install_profile", None, SERVER, "rpa_stored", 0),
             # an empty listing is a usage error (exit 2)
-            (["listr"], "list_registry", None, SERVER, "rpk_stored", 2),
+            (["listr"], "list_registry", None, SERVER, "rpa_stored", 2),
             # the env var keeps precedence for the URL, and the key stays home
             (["listr"], "list_registry", OTHER_SERVER, OTHER_SERVER, None, 2),
         ],
@@ -169,13 +210,8 @@ class TestCliWiring:
     def test_cli_passes_the_login(
         self, stored, monkeypatch, tmp_path, argv, target, env, url, token, exit_code
     ):
-        from researcher_profiles.client import PushPlan, PushResult
-
         returns = {
-            "push_profile": PushResult(
-                plan=PushPlan(slug="s", exists=False),
-                summary={"slug": "s", "name": "n", "level": "l", "indexed": False},
-            ),
+            "push_profile": _push_result(),
             "install_profile": {"slug": "a", "status": "present", "path": "/x"},
             "list_registry": [],
         }[target]
@@ -192,273 +228,176 @@ class TestCliWiring:
         assert main([str(tmp_path) if a == "{tmp}" else a for a in argv]) == 2
         assert "rp login" in capsys.readouterr().err
 
-    def test_logout(self, stored, capsys):
-        assert main(["logout"]) == 0
-        assert creds.load_login() is None
-        assert main(["logout"]) == 0
-        assert "not logged in" in capsys.readouterr().out
-
-
-class FakeServer:
-    """Enough of the RFC 8628 endpoints (``/api/auth/device`` + ``/api/auth/token``)
-    to drive ``rp login``.
-
-    ``replies`` scripts the token endpoint: each poll pops the next entry, an
-    OAuth ``error`` code (400), an int status (with an empty body), or
-    ``"ok"`` (the approved 200). When it runs out, polls get ``"ok"``.
-    """
-
-    VERIFY = f"{SERVER}/device"
-
-    def __init__(self, replies=("authorization_pending", "authorization_pending")):
-        self.replies = list(replies)
-        self.polls = 0
-        self.started: list[dict] = []
-        self.collected = False
-        self.complete_uri = True
-        self.interval: int | None = 0
-        self.retry_after: str | None = None
-
-    def handle(self, request: httpx.Request) -> httpx.Response:
-        path = request.url.path
-        if path == "/api/auth/device" and request.method == "POST":
-            assert request.headers["content-type"] == "application/x-www-form-urlencoded"
-            self.started.append(dict(parse_qsl(request.content.decode())))
-            body = {
-                "device_code": "rpd_secret",
-                "user_code": "ABCD-EFGH",
-                "verification_uri": self.VERIFY,
-                "expires_in": 600,
-            }
-            if self.complete_uri:
-                body["verification_uri_complete"] = f"{self.VERIFY}?user_code=ABCD-EFGH"
-            if self.interval is not None:
-                body["interval"] = self.interval
-            return httpx.Response(200, json=body)
-        if path == "/api/auth/token" and request.method == "POST":
-            assert request.headers["content-type"] == "application/x-www-form-urlencoded"
-            assert dict(parse_qsl(request.content.decode())) == {
-                "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
-                "device_code": "rpd_secret",
-                "client_id": "rp",
-            }
-            self.polls += 1
-            if self.collected:
-                return httpx.Response(400, json={"error": "expired_token"})
-            reply = self.replies.pop(0) if self.replies else "ok"
-            if isinstance(reply, int):
-                headers = {"Retry-After": self.retry_after} if self.retry_after else {}
-                return httpx.Response(reply, headers=headers)
-            if reply != "ok":
-                return httpx.Response(400, json={"error": reply})
-            self.collected = True
-            return httpx.Response(
-                200,
-                json={
-                    "access_token": "rpk_minted",
-                    "token_type": "Bearer",
-                    "scope": "push_own",
-                    "orcid": "0000-0002-1825-0097",
-                    "name": "Jane A. Doe",
-                    "url": SERVER,
-                },
-            )
-        if path == "/api/manage/whoami":
-            if request.headers.get("authorization") != "Bearer rpk_minted":
-                return httpx.Response(401, json={"detail": "bad"})
-            return httpx.Response(
-                200,
-                json={
-                    "consumer": "cli_abc",
-                    "scopes": ["push_own"],
-                    "owner": {"orcid": "0000-0002-1825-0097", "name": "Jane A. Doe"},
-                    "profiles": [
-                        {"slug": "jane-doe", "rid": "0000-0002-1825-0097", "role": "owner"}
-                    ],
-                },
-            )
-        return httpx.Response(404, json={"detail": "no such route"})
-
-    def client(self) -> httpx.Client:
-        return _RealClient(base_url=SERVER, transport=httpx.MockTransport(self.handle))
-
 
 @pytest.fixture
 def fake(monkeypatch):
-    """A FakeServer wired in as the httpx client every credential call builds."""
-    server = FakeServer()
-    monkeypatch.setattr(httpx, "Client", lambda *a, **kw: server.client())
+    """A Prosopia-like server (loopback and device flow), wired in as the OAuth
+    client's HTTP; the system browser is its stand-in; ``whoami`` (httpx) answers
+    its live access tokens, except any in ``fake.rejected``."""
+    server = FakeAuthorizationServer(
+        SERVER, client_id="rp-cli", scope="profiles:push", device=True, iss=True
+    )
+    server.device_interval = 0
+    server.approve_device(after_polls=1)
+    server.rejected = set()
+    monkeypatch.setattr(oauth_cli, "UrllibHttp", lambda *a, **k: server)
+    monkeypatch.setattr(oauth_source, "UrllibHttp", lambda *a, **k: server)
+    monkeypatch.setattr(oauth_cli.webbrowser, "open", server.opener())
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        token = request.headers.get("authorization", "").removeprefix("Bearer ")
+        if request.url.path != "/api/v1/manage/whoami":
+            return httpx.Response(404, json={"detail": "no such route"})
+        if not server.access_ok(token) or token in server.rejected:
+            return httpx.Response(401, json={"detail": "bad"})
+        return httpx.Response(200, json=WHOAMI)
+
+    monkeypatch.setattr(
+        httpx,
+        "Client",
+        lambda *a, **kw: _RealClient(base_url=SERVER, transport=httpx.MockTransport(handle)),
+    )
     return server
 
 
-def _login(**kw):
-    """Run the flow with no browser, recording every sleep."""
-    slept: list[float] = []
-    kw.setdefault("open_browser", False)
-    result = creds.login(SERVER, sleep=slept.append, **kw)
-    return result, slept
+def _sent(fake, call):
+    return [form for c, form in fake.calls if c == call]
 
 
-class TestLoginFlow:
-    def test_polls_until_approved(self, fake, capsys):
-        result, slept = _login(label="laptop")
-        assert result == creds.Login(
-            url=SERVER, token="rpk_minted", orcid="0000-0002-1825-0097", name="Jane A. Doe"
-        )
-        assert fake.polls == 3
-        assert fake.started == [{"client_id": "rp", "scope": "push_own", "label": "laptop"}]
-        assert slept == [0, 0, 0]
-        err = capsys.readouterr().err
-        assert f"{FakeServer.VERIFY}?user_code=ABCD-EFGH" in err and "Code: ABCD-EFGH" in err
+def _refreshes(fake):
+    return [f for f in _sent(fake, "POST /oauth/token") if f.get("grant_type") == "refresh_token"]
 
-    @pytest.mark.parametrize(
-        ("interval", "replies", "retry_after", "expected"),
-        [
-            (None, None, None, [5, 5, 5]),
-            (
-                0,
-                ["authorization_pending", "slow_down", "authorization_pending", "slow_down"],
-                None,
-                [0, 0, 5, 5, 10],
-            ),
-            (0, [429, "authorization_pending"], None, [0, 5, 5]),
-            (0, [429], "30", [0, 30]),
-        ],
-        ids=[
-            "interval-default-5s",
-            "slow-down-adds-5s-for-good",
-            "429-is-slow-down",
-            "429-honors-retry-after",
-        ],
-    )
-    def test_sleep_schedule(self, fake, interval, replies, retry_after, expected):
-        fake.interval = interval
-        if replies:
-            fake.replies = replies
-        fake.retry_after = retry_after
-        _, slept = _login()
-        assert slept == expected
 
-    @pytest.mark.parametrize(
-        ("complete_uri", "opened"),
-        [(True, [f"{FakeServer.VERIFY}?user_code=ABCD-EFGH"]), (False, [FakeServer.VERIFY])],
-    )
-    def test_open_browser(self, fake, monkeypatch, capsys, complete_uri, opened):
-        fake.complete_uri = complete_uri
-        got = []
-        monkeypatch.setattr(creds.webbrowser, "open", got.append)
-        _login(open_browser=True)
-        assert got == opened
-        assert "Code: ABCD-EFGH" in capsys.readouterr().err
-
-    @pytest.mark.parametrize(
-        ("replies", "match", "polls"),
-        [
-            (["authorization_pending", "access_denied"], "refused", 2),
-            (["expired_token"], "expired or was already used", 1),
-            (["invalid_grant"], "expired or was already used", 1),
-            (["unsupported_grant_type"], "login failed", 1),
-            (["something_new"], "login failed", 1),
-            ([500], "login failed", 1),
-            ([404], "login failed", 1),
-        ],
-        ids=[
-            "denied",
-            "expired",
-            "invalid-grant",
-            "unsupported-grant",
-            "unknown-code",
-            "http-500",
-            "http-404",
-        ],
-    )
-    def test_poll_ends_in_error(self, fake, replies, match, polls):
-        fake.replies = replies
-        with pytest.raises(creds.LoginError, match=match):
-            _login()
-        assert fake.polls == polls
-
-    def test_busy_start_is_retried_after_retry_after(self, fake, monkeypatch):
-        real = fake.handle
-        busy = [httpx.Response(503, headers={"Retry-After": "7"}), httpx.Response(429)]
-
-        def handle(request):
-            if request.url.path == "/api/auth/device" and busy:
-                return busy.pop(0)
-            return real(request)
-
-        fake.handle = handle
-        result, slept = _login()
-        assert result.token == "rpk_minted"
-        assert slept[:2] == [7, 5]  # Retry-After, then the default when absent
-        assert len(fake.started) == 1
-
-    @pytest.mark.parametrize(
-        ("status", "match", "calls"),
-        [
-            (503, "refused \\(503", ["/api/auth/device"] * creds.START_ATTEMPTS),
-            (404, "does not offer command-line login", ["/api/auth/device"]),  # no retry
-        ],
-        ids=["always-busy", "server-without-the-flow"],
-    )
-    def test_device_start_refused(self, monkeypatch, status, match, calls):
-        seen = []
-
-        def handle(request):
-            seen.append(request.url.path)
-            return httpx.Response(status)
-
-        monkeypatch.setattr(
-            httpx,
-            "Client",
-            lambda *a, **kw: _RealClient(base_url=SERVER, transport=httpx.MockTransport(handle)),
-        )
-        with pytest.raises(creds.LoginError, match=match):
-            _login()
-        assert seen == calls
-
-    def test_timeout(self, monkeypatch):
-        server = FakeServer(replies=["authorization_pending"] * 10**3)
-        monkeypatch.setattr(httpx, "Client", lambda *a, **kw: server.client())
-        clock = iter(range(0, 10**6))
-        monkeypatch.setattr(creds.time, "monotonic", lambda: next(clock))
-        with pytest.raises(creds.LoginError, match="timed out"):
-            creds.login(SERVER, open_browser=False, timeout=5, sleep=lambda _s: None)
-
-    def test_rp_login_stores_and_whoami_reads(self, fake, monkeypatch, capsys):
-        monkeypatch.setattr(creds.time, "sleep", lambda _s: None)
-        assert main(["login", SERVER, "--no-browser"]) == 0
-        stored = creds.load_login()
-        assert stored is not None and stored.token == "rpk_minted"
+class TestLoginWiring:
+    def test_login_sends_rps_client_scope_and_label_and_no_resource(self, fake, capsys):
+        assert main(["login", SERVER + "/", "--label", "laptop"]) == 0
+        (q,) = _sent(fake, "GET /oauth/authorize")
+        assert q["client_id"] == "rp-cli" and q["scope"] == "profiles:push"
+        assert q["label"] == "laptop" and "resource" not in q
+        (trade,) = _sent(fake, "POST /oauth/token")
+        assert trade["grant_type"] == "authorization_code" and "resource" not in trade
+        assert _sent(fake, "POST /oauth/device") == []
+        login = _stored()
+        assert login.client_id == "rp-cli" and login.resource is None
+        assert login.extra == {"orcid": "0000-0002-1825-0097", "name": "Jane A. Doe"}
         assert stat.S_IMODE(creds.credentials_path().stat().st_mode) == 0o600
-        assert "logged in to" in capsys.readouterr().err
+        err = capsys.readouterr().err
+        assert "as Jane A. Doe" in err and str(creds.credentials_path()) in err
 
-        assert main(["whoami"]) == 0
-        out = capsys.readouterr().out
-        assert "Jane A. Doe" in out and "jane-doe" in out
+    def test_label_defaults_to_the_hostname(self, fake):
+        assert main(["login", SERVER]) == 0
+        (q,) = _sent(fake, "GET /oauth/authorize")
+        assert q["label"] == creds._default_label()
 
-        assert main(["whoami", "--json"]) == 0
-        rec = json.loads(capsys.readouterr().out)
-        assert rec["url"] == SERVER and rec["scopes"] == ["push_own"]
+    @pytest.mark.parametrize("how", ["--device", "ssh"])
+    def test_device_flag_and_ssh_pick_the_device_flow(self, fake, monkeypatch, capsys, how):
+        opened = []
+        monkeypatch.setattr(oauth_cli.webbrowser, "open", opened.append)
+        argv = ["login", SERVER]
+        if how == "ssh":
+            monkeypatch.setenv("SSH_CONNECTION", "1.2.3.4 5 6.7.8.9 22")
+        else:
+            argv.append("--device")
+        assert main(argv + ["--label", "box"]) == 0
+        (start,) = _sent(fake, "POST /oauth/device")
+        assert start == {"client_id": "rp-cli", "scope": "profiles:push", "label": "box"}
+        assert _sent(fake, "GET /oauth/authorize") == [] and opened == []
+        assert "Code: ABCD-EFGH" in capsys.readouterr().err
+        assert _stored().extra["name"] == "Jane A. Doe"
 
-        # A later `rp login` with no server argument re-logs into the same server.
-        fake.collected = False
-        fake.polls = 0
-        assert main(["login", "--no-browser"]) == 0
-        assert fake.started[-1]["label"]  # the hostname, by default
+    def test_json_output(self, fake, capsys):
+        assert main(["login", SERVER, "--json"]) == 0
+        out = json.loads(capsys.readouterr().out)
+        assert out == {"url": SERVER, "orcid": "0000-0002-1825-0097", "name": "Jane A. Doe"}
 
-    def test_rp_login_reports_failure(self, fake, monkeypatch, capsys):
-        fake.collected = True
-        monkeypatch.setattr(creds.time, "sleep", lambda _s: None)
-        assert main(["login", SERVER, "--no-browser"]) == 1
+    def test_login_with_no_argument_logs_in_again_to_the_same_server(self, fake):
+        assert main(["login", SERVER]) == 0
+        first = _stored()
+        assert main(["login"]) == 0
+        assert _stored().access_token != first.access_token
+        assert not fake.access_ok(first.access_token)  # the old login, revoked after
+
+    def test_a_refused_login_reports_and_keeps_nothing(self, fake, monkeypatch, capsys):
+        monkeypatch.setattr(oauth_cli.webbrowser, "open", fake.opener(decision="deny"))
+        assert main(["login", SERVER]) == 1
         assert "login failed" in capsys.readouterr().err
-        assert creds.load_login() is None
+        assert _stored() is None
+
+    def test_logout_revokes_and_removes(self, fake, capsys):
+        assert main(["login", SERVER]) == 0
+        token = _stored().refresh_token
+        assert main(["logout"]) == 0
+        assert _sent(fake, "POST /oauth/revoke") == [
+            {"token": token, "token_type_hint": "refresh_token", "client_id": "rp-cli"}
+        ]
+        assert _stored() is None and fake.live_connections() == []
+        assert f"logged out of {SERVER}" in capsys.readouterr().out
+        assert main(["logout"]) == 0
+        assert "not logged in" in capsys.readouterr().out
+
+    def test_logout_the_server_did_not_confirm(self, fake, capsys):
+        from researcher_profiles._vendor.snapgate_oauth_client import TransportError
+
+        assert main(["login", SERVER]) == 0
+        fake.fail_next(TransportError)
+        assert main(["logout", SERVER]) == 0
+        assert _stored() is None
+        assert "Privacy page" in capsys.readouterr().err
+
+    def test_whoami_refreshes_on_401_and_retries(self, fake, capsys):
+        assert main(["login", SERVER]) == 0
+        old = _stored().access_token
+        fake.rejected.add(old)  # not expired by the clock, but the server says otherwise
+        assert main(["whoami"]) == 0
+        assert "Jane A. Doe" in capsys.readouterr().out
+        assert len(_refreshes(fake)) == 1 and _stored().access_token != old
+
+    def test_push_refreshes_on_401_through_with_token_refresh(self, fake, monkeypatch, tmp_path):
+        assert main(["login", SERVER]) == 0
+        old = _stored().access_token
+        spy = MagicMock(side_effect=[PermissionError("401"), _push_result()])
+        monkeypatch.setattr("researcher_profiles.client.push_profile", spy)
+        assert main(["push", str(tmp_path)]) == 0
+        new = _stored().access_token
+        assert [c.kwargs["token"] for c in spy.call_args_list] == [old, new] and new != old
+        (refresh,) = _refreshes(fake)
+        assert "scope" not in refresh and "resource" not in refresh
+
+    def test_a_given_token_is_never_refreshed(self, fake, capsys):
+        assert main(["login", SERVER]) == 0
+        assert main(["whoami", "--token", "rpa_mine"]) == 1
+        assert _refreshes(fake) == []
+
+    def test_a_login_that_ended_is_one_plain_error(self, fake, capsys):
+        _save(access_expires_at=int(time.time()) - 10)  # expired; the server knows no such token
+        assert main(["whoami"]) == 1
+        err = capsys.readouterr().err
+        assert err.startswith("rp: Your rp login for https://people.example.org has ended")
+        assert "Run `rp login` again." in err
+        assert _stored().ended_reason == "refused"
+
+    @pytest.mark.parametrize(
+        "old",
+        [
+            {"url": SERVER, "token": "rpk_old", "orcid": "x", "name": "J"},
+            {"url": SERVER, "access_token": "rpa_x", "refresh_token": "rpr_x", "expires_at": 1},
+        ],
+        ids=["rpk-key-file", "previous-rp-login"],
+    )
+    def test_an_old_format_file_says_run_rp_login(self, fake, tmp_path, capsys, old):
+        path = creds.credentials_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(old))
+        assert main(["push", str(tmp_path)]) == 1
+        assert "Run `rp login` to replace it." in capsys.readouterr().err
+        assert main(["login", SERVER]) == 0  # which replaces it
+        assert _stored().extra["name"] == "Jane A. Doe"
 
 
 def _management_client() -> tuple[ManagementClient, MagicMock]:
     """A management client with its one session replaced by a request recorder."""
     client = ManagementClient(
-        Credential(key="rpa_test", url="https://profiles.example.org", source="test")
+        AgentCredential(key="rpa_test", url="https://profiles.example.org", source="test")
     )
     session = MagicMock()
     client._session = session
@@ -471,7 +410,7 @@ class TestManagementClient:
     @pytest.mark.parametrize(
         "resource, method, args, kwargs, http_method, path, body",
         [
-            ("identity", "whoami", (), {}, "get", "/api/manage/agent/whoami", None),
+            ("identity", "whoami", (), {}, "get", "/api/v1/manage/agent/whoami", None),
             ("profile", "get", (SLUG,), {}, "get", f"/api/v1/profiles/{SLUG}?view=full", None),
             (
                 "profile",

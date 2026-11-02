@@ -93,41 +93,43 @@ def _registry_target(url_flag: str | None, token_flag: str | None) -> tuple[str 
     """``(url, token)`` for a registry command, where ``url`` may name several servers.
 
     ``RESEARCHER_PROFILES_REGISTRY_URL`` keeps its precedence over the stored
-    login for the URL; the stored key is offered only when the login's server
-    is among the registries actually being asked.
+    login for the URL; a stored login is offered only to its own server, the
+    first of the registries actually being asked that has one.
     """
     from ..client import REGISTRY_ENV_VAR, resolve_registries
-    from .auth.credentials import TOKEN_ENV_VAR, load_login, server_base
+    from .auth.credentials import TOKEN_ENV_VAR, default_server, server_base, stored_token
 
-    login = load_login()
-    url = url_flag or os.environ.get(REGISTRY_ENV_VAR) or (login.url if login else None)
+    url = url_flag or os.environ.get(REGISTRY_ENV_VAR) or default_server()
     if token_flag:
         return url, token_flag
     env = os.environ.get(TOKEN_ENV_VAR) or None
     if env:
         return url, env
-    servers = {server_base(u) for u in resolve_registries(url)}
-    if login and login.url in servers:
-        return url, login.token
+    for server in dict.fromkeys(server_base(u) for u in resolve_registries(url)):
+        token = stored_token(server)
+        if token is not None:
+            return url, token
     return url, None
 
 
 def _cmd_install(args: argparse.Namespace) -> int:
     """Pull profiles from a registry into the local cache."""
     from ..client import install_profile
+    from .auth.credentials import with_token_refresh
 
     url, token = _registry_target(args.url, args.token)
     rc = 0
     records = []
     for slug in args.slug:
+        used: list = []
+
+        def install(t, slug=slug, used=used):
+            used.append(t)
+            return install_profile(slug, url=url, root=args.root, token=t, force=args.force)
+
         try:
-            summary = install_profile(
-                slug,
-                url=url,
-                root=args.root,
-                token=token,
-                force=args.force,
-            )
+            summary = with_token_refresh(token, install)
+            token = used[-1]  # a refreshed token serves the remaining slugs
         except (ValueError, PermissionError, RuntimeError) as e:
             print(f"install failed for {slug}: {e}", file=sys.stderr)
             print(

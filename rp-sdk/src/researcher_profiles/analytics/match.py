@@ -16,7 +16,7 @@ from pydantic import ValidationError
 
 from ..embeddings._sqlite import IndexNotBuiltError
 from ..embeddings.backends import MissingEmbeddingBackendError
-from ..embeddings.chunking import PAPER_CHUNK_TYPES
+from ..embeddings.chunking import PAPER_CHUNK_TYPES, RANK_ONLY_SOURCE_TYPES
 from ..errors import CapabilityUnavailableError, ProfileError
 from ..generative.calibration import ensure_calibration, normalize_score
 from ..models.results import Match, MatchEvidence
@@ -303,17 +303,21 @@ class MatchManager:
 
         Fetches wider until ``k`` visible hits are found or the index runs
         out, so hidden chunks never displace visible ones from the top ``k``.
+        Rank-only chunks (interest seed papers) are never evidence: they are
+        not the researcher's own work.
         """
         index = self._store.vector_index(prof.slug)
-        if viewer is None:
-            return list(index.search(text, k=k))
-        tier = viewer(prof)
+        tier = viewer(prof) if viewer is not None else None
         md = getattr(prof, "metadata", None)
         fetch = max(k, 1)
         while True:
             hits = list(index.search(text, k=fetch))
-            tiers = chunk_source_tiers(md, {(h.source_type, h.source_id) for h in hits})
-            visible = [h for h in hits if tier_allows(tier, tiers[(h.source_type, h.source_id)])]
+            visible = [h for h in hits if h.source_type not in RANK_ONLY_SOURCE_TYPES]
+            if tier is not None:
+                tiers = chunk_source_tiers(md, {(h.source_type, h.source_id) for h in visible})
+                visible = [
+                    h for h in visible if tier_allows(tier, tiers[(h.source_type, h.source_id)])
+                ]
             if len(visible) >= k or len(hits) < fetch:
                 return visible[:k]
             fetch *= 4

@@ -185,8 +185,11 @@ class TestHttpStoreReads:
     def test_list_slugs_comes_from_index_json(self, http_store):
         assert http_store.list_slugs() == sorted(_RIDS)
 
-    def test_resolve_slug_accepts_a_rid(self, http_store):
-        assert http_store.resolve_slug(_RIDS["grace-hopper"]) == "grace-hopper"
+    def test_profiles_about_reads_by_rid(self, http_store):
+        """``by-rid.json`` answers ``profiles_about``; a rid is not a ref."""
+        (about,) = http_store.profiles_about(_RIDS["grace-hopper"])
+        assert about.slug == "grace-hopper"
+        assert http_store.self_profile_for(_RIDS["grace-hopper"]).slug == "grace-hopper"
 
     def test_resolve_slug_rejects_a_stranger(self, http_store):
         with pytest.raises(ProfileNotFoundError, match="nothing at"):
@@ -328,7 +331,7 @@ class TestRemoteStoreVectors:
         store = request.getfixturevalue(store_fixture)
         assert store.has_vector_index("ada-lovelace")
         assert not store.has_vector_index("not-a-profile")
-        assert store.has_vector_index(_RIDS["ada-lovelace"])
+        assert not store.has_vector_index(_RIDS["ada-lovelace"])  # a rid is not a ref
 
     @pytest.mark.parametrize("store_fixture", _REMOTE)
     def test_centroids_matrix_is_one_call_for_the_whole_roster(self, request, store_fixture):
@@ -413,12 +416,12 @@ class TestSqlStoreVectors:
         from researcher_profiles.store.db import ChunkVectorRow
 
         expected = public_chunk_keys(indexed_root / "ada-lovelace")
-        rid = sql_store.rid_for("ada-lovelace")
+        profile_id = sql_store.profile_id_for("ada-lovelace")
         with sql_store.session() as sess:
             rows = list(
                 sess.exec(
                     select(ChunkVectorRow)
-                    .where(ChunkVectorRow.profile_rid == rid)
+                    .where(ChunkVectorRow.profile_id == profile_id)
                     .order_by(ChunkVectorRow.ordinal)
                 ).all()
             )
@@ -430,9 +433,9 @@ class TestSqlStoreVectors:
         """``centroid`` reads ``rp_profile_vectors`` (whole index), never the public chunks."""
         from researcher_profiles.store.db import ProfileVectorRow
 
-        rid = sql_store.rid_for("ada-lovelace")
+        profile_id = sql_store.profile_id_for("ada-lovelace")
         with sql_store.session() as sess:
-            row = sess.get(ProfileVectorRow, (rid, "centroid"))
+            row = sess.get(ProfileVectorRow, (profile_id, "centroid"))
         assert np.allclose(sql_store.centroid("ada-lovelace"), np.frombuffer(row.vector, "<f4"))
 
     def test_the_rows_rebuild_the_published_blob_exactly(self, sql_store, indexed_root):
@@ -477,13 +480,13 @@ class TestSqlStoreVectors:
 
         from researcher_profiles.store.db import ChunkVectorRow, ProfileVectorRow
 
-        rid = sql_store.rid_for("ada-lovelace")
+        profile_id = sql_store.profile_id_for("ada-lovelace")
         sql_store.delete("ada-lovelace")
         with sql_store.session() as sess:
             assert not sess.exec(
-                select(ChunkVectorRow).where(ChunkVectorRow.profile_rid == rid)
+                select(ChunkVectorRow).where(ChunkVectorRow.profile_id == profile_id)
             ).all()
-            assert sess.get(ProfileVectorRow, (rid, "centroid")) is None
+            assert sess.get(ProfileVectorRow, (profile_id, "centroid")) is None
 
     def test_a_profile_with_only_the_flat_form_keeps_its_vectors(
         self, indexed_root, empty_sql_store

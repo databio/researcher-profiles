@@ -256,7 +256,7 @@ class IdentityClient:
 
     def whoami(self) -> dict:
         """The key's authority: its parts table, switch, and the profiles it reaches."""
-        return self._client._get("/api/manage/agent/whoami")
+        return self._client._get("/api/v1/manage/agent/whoami")
 
 
 class ProfileClient:
