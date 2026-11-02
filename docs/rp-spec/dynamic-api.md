@@ -338,6 +338,7 @@ nothing is spliced and the incoming manifest stands alone.
 | `manifest_counts` | object | `{role: count}` over the manifest the server holds after the commit (`other` for entries with no role): what the profile now contains, not what the upload offered |
 | `mode` | string | The `mode` the upload ran under |
 | `kept_owner_fields` | array \| null | Fields the server kept from the owner's hand edits instead of the pushed value; `null` when the server does not protect owner edits |
+| `stripped_fields` | array \| null | Fields the server removed from the pushed document instead of refusing the push; `null` when the server strips nothing from pushes to this profile |
 
 `kept`, `spliced`, `manifest_counts` and `mode` describe archive uploads; a
 JSON upload returns their defaults.

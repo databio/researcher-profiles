@@ -472,6 +472,7 @@ without a restart.
 | `manifest_counts` | object | `{role: count}` over the manifest the server holds *after* the commit: what a reader can now fetch. |
 | `mode` | string | The push mode that was applied: `replace`, `merge`, or `prune`. |
 | `kept_owner_fields` | array \| null | Fields the host kept from the owner's hand edits instead of taking the pushed value (Prosopia does this for any pusher but the owner or a co-owner). `null` when the host does not protect owner edits. |
+| `stripped_fields` | array \| null | Fields the host removed from the pushed document instead of refusing the push; `null` when the host strips nothing from pushes to this profile. |
 
 ```bash
 tar -C /path/to/profiles/jane-doe -czf - . | curl -X PUT \
