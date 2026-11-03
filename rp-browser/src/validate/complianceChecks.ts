@@ -3,10 +3,40 @@
  * dynamic API specs. Mirrors the Python conformance suite in spec/conformance/.
  */
 
+import type { Paged } from "@rp/ui-lib/types";
 import type { CheckResult } from "./types";
 import { fetchJson } from "../net/fetchJson";
 
 type Emit = (check: CheckResult) => void;
+
+/** `{results: [...], pagination: {page_size, ...}}`, the shared list envelope. */
+function asPaged(value: unknown): Paged<unknown> | null {
+  if (typeof value !== "object" || value === null) return null;
+  const v = value as Record<string, unknown>;
+  const p = v.pagination;
+  if (!Array.isArray(v.results) || typeof p !== "object" || p === null) {
+    return null;
+  }
+  if (typeof (p as Record<string, unknown>).page_size !== "number") return null;
+  return value as Paged<unknown>;
+}
+
+/** A page-based list: `pagination.page` and `page_size` are numbers. */
+function asPageBased(value: unknown): Paged<unknown> | null {
+  const page = asPaged(value);
+  return page && typeof page.pagination.page === "number" ? page : null;
+}
+
+/**
+ * A token-based list: no `pagination.page`, and `next_page_token` is a string
+ * or null (absent is allowed on the last page).
+ */
+function asTokenBased(value: unknown): Paged<unknown> | null {
+  const page = asPaged(value);
+  if (!page || page.pagination.page != null) return null;
+  const token = page.pagination.next_page_token;
+  return token == null || typeof token === "string" ? page : null;
+}
 
 // ---------------------------------------------------------------------------
 // Static API checks (given a profile base URL)
@@ -261,24 +291,22 @@ export async function dynamicApiChecks(
       : `GET /health failed: ${healthOutcome.ok ? "" : healthOutcome.detail}`,
   });
 
-  // GET /profiles: rp:profileList format
+  // GET /profiles: the page-based list envelope {results, pagination}.
   const profilesOutcome = await fetchJson<Record<string, unknown>>(
     `${base}/profiles`,
   );
-  const hasList =
-    profilesOutcome.ok && "rp:profileList" in profilesOutcome.value;
-  const hasProfiles =
-    profilesOutcome.ok &&
-    Array.isArray(profilesOutcome.value.profiles);
+  const profilesPage = profilesOutcome.ok
+    ? asPageBased(profilesOutcome.value)
+    : null;
   add({
     id: "dynamic-profiles-list",
     title: "Profile Listing Format",
     severity: "error",
-    passed: hasList && hasProfiles,
-    message: hasList
-      ? `GET /profiles returns rp:profileList v${profilesOutcome.ok ? profilesOutcome.value["rp:profileList"] : "?"}.`
+    passed: profilesPage !== null,
+    message: profilesPage
+      ? `GET /profiles returns page ${profilesPage.pagination.page} of ${String(profilesPage.pagination.total_pages ?? "?")} (${profilesPage.results.length} rows, page_size ${profilesPage.pagination.page_size}).`
       : profilesOutcome.ok
-        ? "GET /profiles is missing rp:profileList envelope (got bare data)."
+        ? "GET /profiles is missing the {results, pagination: {page, page_size}} envelope."
         : `GET /profiles failed: ${profilesOutcome.ok ? "" : profilesOutcome.detail}`,
   });
 
@@ -296,16 +324,12 @@ export async function dynamicApiChecks(
   });
 
   // Profile list entry validation
-  if (profilesOutcome.ok && Array.isArray(profilesOutcome.value.profiles)) {
-    const entries = profilesOutcome.value.profiles as unknown[];
-    const sample = entries.slice(0, 10);
-    const badEntries = sample.filter((e, i) => {
-      if (typeof e === "string") return false;
-      if (typeof e === "object" && e !== null) {
-        return !("url" in e) && !("list" in e);
-      }
-      return true;
-    });
+  if (profilesPage) {
+    const sample = profilesPage.results.slice(0, 10);
+    const badEntries = sample.filter(
+      (e) =>
+        typeof e !== "object" || e === null || !("url" in e) || !("slug" in e),
+    );
     add({
       id: "dynamic-profiles-entries",
       title: "Profile List Entries",
@@ -313,25 +337,17 @@ export async function dynamicApiChecks(
       passed: badEntries.length === 0,
       message:
         badEntries.length === 0
-          ? `Sampled ${sample.length} entries. All have url or list field.`
-          : `${badEntries.length} of ${sample.length} sampled entries lack url or list field.`,
+          ? `Sampled ${sample.length} entries. All have url and slug.`
+          : `${badEntries.length} of ${sample.length} sampled entries lack url or slug.`,
     });
   }
 
   // Discover a slug for further checks
   let slug: string | null = null;
-  if (profilesOutcome.ok) {
-    const profiles =
-      Array.isArray(profilesOutcome.value.profiles)
-        ? (profilesOutcome.value.profiles as unknown[])
-        : Array.isArray(profilesOutcome.value)
-          ? (profilesOutcome.value as unknown[])
-          : [];
-    for (const entry of profiles) {
-      if (typeof entry === "object" && entry !== null && "slug" in entry) {
-        slug = (entry as Record<string, unknown>).slug as string;
-        break;
-      }
+  for (const entry of profilesPage?.results ?? []) {
+    if (typeof entry === "object" && entry !== null && "slug" in entry) {
+      slug = (entry as Record<string, unknown>).slug as string;
+      break;
     }
   }
 
@@ -355,18 +371,13 @@ export async function dynamicApiChecks(
         : `GET /profiles/${slug} failed: ${detailOutcome.ok ? "" : detailOutcome.detail}`,
     });
 
-    // Papers endpoint
-    // A page of rows: {items: [...], total, limit_applied, next_cursor}.
+    // Papers endpoint: the token-based list envelope {results, pagination}.
     const papersOutcome = await fetchJson<unknown>(
       `${base}/profiles/${slug}/papers`,
     );
-    const papersPage =
-      papersOutcome.ok &&
-      typeof papersOutcome.value === "object" &&
-      papersOutcome.value !== null &&
-      Array.isArray((papersOutcome.value as Record<string, unknown>).items)
-        ? (papersOutcome.value as { items: unknown[]; total?: number })
-        : null;
+    const papersPage = papersOutcome.ok
+      ? asTokenBased(papersOutcome.value)
+      : null;
     add({
       id: "dynamic-papers",
       title: "Papers Endpoint",
@@ -374,8 +385,8 @@ export async function dynamicApiChecks(
       passed: papersPage !== null,
       message: papersOutcome.ok
         ? papersPage !== null
-          ? `GET /profiles/${slug}/papers returns a page of ${papersPage.items.length} rows (total ${String(papersPage.total ?? "?")}).`
-          : "Papers endpoint did not return a page ({items: [...]})."
+          ? `GET /profiles/${slug}/papers returns a page of ${papersPage.results.length} rows (total ${String(papersPage.pagination.total ?? "?")}${papersPage.pagination.next_page_token ? ", more pages" : ""}).`
+          : "Papers endpoint did not return a token-based page ({results, pagination: {page_size, next_page_token}})."
         : `GET /profiles/${slug}/papers failed: ${papersOutcome.ok ? "" : papersOutcome.detail}`,
     });
 

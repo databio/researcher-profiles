@@ -265,18 +265,26 @@ than sending a request it would answer `200` to and run as a `replace`.
 
 ### GET /api/v1/profiles
 
-List every profile the caller may see, in the `rp:profileList` envelope a
-static site publishes as `profiles.json`.
+The profiles the caller may see, in slug order, as one page-based list. This
+is not the `rp:profileList` envelope; a static site's `profiles.json` keeps
+that format.
 
-**Response 200** (`ProfileListResponse`):
+**Query:** `page` (from 0), `page_size` (default 100, clamped to 1000), and
+the filters `rid` (repeatable; any of these identities, each an ORCID or a
+`local:` id, else `400`), `clinical` (`true` or `false`), and `affiliation`
+(exact after trimming, ignoring case). Different filters AND together. Any
+other query parameter except `as` is a `400` `invalid_argument`.
+
+**To read one profile by ORCID, call `GET /api/v1/profiles/{orcid}`; do not
+list and scan.**
+
+**Response 200** (`Paged[ProfileListEntry]`):
 
 | Field | Type | Notes |
 |---|---|---|
-| `rp:profileList` | string | Envelope version, `"0.1"`. |
-| `name` | string \| null | The store's display name, when it has one. |
-| `url` | string | The request URL without its query string. |
-| `updated` | string | ISO 8601, when this response was built. |
-| `profiles` | list[`ProfileListEntry`] | One entry per visible profile. |
+| `results` | list[`ProfileListEntry`] | This page's rows. |
+| `pagination` | object | `{page, page_size, total, total_pages}`. `page_size` is the size used after clamping; `total` counts the matches this caller may see. |
+| `note` | string \| null | Set when `page_size` was clamped. |
 
 Each `ProfileListEntry`:
 
@@ -293,18 +301,16 @@ Each `ProfileListEntry`:
 | `summary_count` | integer | Papers that have a summary file. |
 | `fulltext_pct` | float | Percentage of papers with `status == "downloaded"`. |
 | `contaminated_count` | integer | Papers flagged `contaminated`. |
+| `clinical` | boolean | True when this caller can see a clinical facet: therapeutic areas, site capabilities, or a trials source. |
 
 Profiles that fail to load are logged and skipped. The response carries
 `Cache-Control: private, no-store` and `Vary: Authorization, Cookie`: who is in
-the list depends on who asked.
+the list depends on who asked. A page can shift if profiles change between
+requests.
 
 ```json
 {
-  "rp:profileList": "0.1",
-  "name": null,
-  "url": "http://127.0.0.1:8109/api/v1/profiles",
-  "updated": "2026-09-06T21:10:38+00:00",
-  "profiles": [
+  "results": [
     {
       "url": "http://127.0.0.1:8109/api/v1/profiles/jane-doe/content/",
       "slug": "jane-doe",
@@ -316,15 +322,21 @@ the list depends on who asked.
       "paper_count": 8,
       "summary_count": 5,
       "fulltext_pct": 62.5,
-      "contaminated_count": 0
+      "contaminated_count": 0,
+      "clinical": false
     }
-  ]
+  ],
+  "pagination": {"page": 0, "page_size": 100, "total": 1, "total_pages": 1},
+  "note": null
 }
 ```
 
-The SDK's `list_remote()` unwraps the envelope and returns the entries.
+The SDK's `list_remote()` walks every page and returns the rows.
+`researcher_profiles.client.iter_results(http, path, params)` walks any list
+endpoint, page-based or token-based.
 
-**Status codes:** `200`.
+**Status codes:** `200`, `400` (unknown parameter or malformed `rid`), `422`
+(`page` below 0 or `page_size` below 1).
 
 ---
 
@@ -679,16 +691,19 @@ this caller's viewer tier, all with indistinguishable bodies; `403` for the
 
 ### GET /api/v1/profiles/{slug}/papers
 
-One page of paper rows, gated on the tier of `sources/papers.jsonld`.
+Paper rows, token-based, gated on the tier of `sources/papers.jsonld`.
 
-**Query:** `limit` (default 20, clamped to 100), `cursor` (the previous page's
-`next_cursor`), `q` (rank by hybrid search), `year_min`, `missing_ids` (no DOI
-and no OpenAlex id), `has_text`, and `ids` (comma list, at most 20, no paging).
+**Query:** `page_size` (default 20, clamped to 100), `page_token` (the
+previous page's `pagination.next_page_token`), `q` (rank by hybrid search),
+`year_min`, `missing_ids` (no DOI and no OpenAlex id), `has_text`, and `ids`
+(comma list, at most 20, one page). Any other query parameter except `as` is
+a `400` `invalid_argument`.
 
-**Response 200** (`PaperPage`): `items` (rows), `total` (matching rows before
-paging), `limit_applied`, `next_cursor` (`null` on the last page), `has_more`,
-`filters_applied`, and with `q`: `search_mode_used` (`hybrid` or `keyword`)
-and `note` (why it fell back, in fixed text).
+**Response 200** (`PaperPage`): `results` (rows), `pagination`
+(`{page_size, total, next_page_token}`; `total` counts matching rows before
+paging; `next_page_token` is `null` on the last page), `filters_applied`,
+`note` (a clamped `page_size`, a search fallback, or a cut ranked list), and
+with `q`: `search_mode_used` (`hybrid` or `keyword`).
 
 Each row (`PaperRow`):
 
@@ -703,12 +718,14 @@ Each row (`PaperRow`):
 | `score`, `matched_by` | | Only with `q`: the fused score and which ranking kept the row (`keyword`, `semantic`). |
 
 Without `q`, rows are newest first (`year` desc, then `paper_id`) and the
-cursor is keyset. With `q`, keyword ranking (BM25 over title, summary, abstract
+token is keyset. With `q`, keyword ranking (BM25 over title, summary, abstract
 and journal) and semantic ranking (cosine over the stored summary and abstract
-vectors, kept at 0.30 or above) are merged by reciprocal rank (k = 60), and the
-cursor is an offset (rows can shift if the profile changes between pages). A
-cursor used with other filters is a `400` with
-`{"detail": {"error": "cursor_mismatch", ...}}`.
+vectors, kept at 0.30 or above) are merged by reciprocal rank (k = 60) and
+returned as one top-N page: `pagination` has no `total` and no
+`next_page_token`, and a `page_token` sent with `q` is a `400`. Narrow with
+`year_min` or `has_text`, or raise `page_size`, to see more. A `page_token`
+used with other filters is a `400` with
+`{"detail": {"error": "page_token_mismatch", ...}}`.
 
 **Status codes:** `200`, `400`, `404`.
 
@@ -1165,7 +1182,8 @@ operator bearer token. A host with accounts sets
 
 `GET /api/v1/profiles/{slug}/seed-papers` (the read surface) lists the interest
 seed papers: papers that define the person's interests, never works they wrote.
-It is gated on the tier of `sources/seed_papers.jsonld`, `private` by default,
+It is page-based (`page`, `page_size` default 100, clamped to 500), in
+`seed_id` order, answered as `{results, pagination, note}`. It is gated on the tier of `sources/seed_papers.jsonld`, `private` by default,
 so the public gets a `404`. Seeds feed the centroid and the feed query, never
 the works list, the narrative, or any search hit (`seed_abstract` chunks are
 rank-only).

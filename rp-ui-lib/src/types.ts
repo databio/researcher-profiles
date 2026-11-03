@@ -12,6 +12,7 @@ export interface ResearcherProfileWireContract {
   artifact_tier: ArtifactTier;
   artifact_visibility: ArtifactVisibility;
   file_list: FileList;
+  pagination: Pagination;
   paper_entry: PaperEntry;
   paper_page: PaperPage;
   paper_record_view: PaperRecordView;
@@ -21,6 +22,7 @@ export interface ResearcherProfileWireContract {
   passage_list: PassageList;
   passage_request: PassageRequest;
   profile_detail: ProfileDetail;
+  profile_list_entry: ProfileListEntry;
   profile_metadata: ProfileMetadataPayload;
   profile_parts: ProfileParts;
   profile_record: ProfileRecord;
@@ -75,6 +77,17 @@ export interface FileList {
   [k: string]: unknown;
 }
 /**
+ * Where one page sits. Page-based fields and ``next_page_token`` never mix.
+ */
+export interface Pagination {
+  next_page_token?: string | null;
+  page?: number | null;
+  page_size: number;
+  total?: number | null;
+  total_pages?: number | null;
+  [k: string]: unknown;
+}
+/**
  * One paper as the static publisher and ``rp-ui-lib`` list it.
  *
  * The HTTP read is :class:`PaperPage`.
@@ -94,19 +107,19 @@ export interface PaperEntry {
   [k: string]: unknown;
 }
 /**
- * ``GET /profiles/{slug}/papers``: one page of paper rows.
+ * ``GET /profiles/{slug}/papers``: one token-based page of paper rows.
+ *
+ * ``pagination.total`` counts matching rows before paging; it is absent for
+ * a ranked (``q``) page, which is one top-N page with no next token.
  */
 export interface PaperPage {
   filters_applied?: {
     [k: string]: unknown;
   };
-  has_more?: boolean;
-  items: PaperRow[];
-  limit_applied: number;
-  next_cursor?: string | null;
   note?: string | null;
+  pagination: Pagination;
+  results: PaperRow[];
   search_mode_used?: ("hybrid" | "keyword") | null;
-  total: number;
   [k: string]: unknown;
 }
 /**
@@ -329,6 +342,26 @@ export interface InterestEvidence {
   [k: string]: unknown;
 }
 /**
+ * One row of ``GET /profiles`` (a :class:`Paged` page of these).
+ *
+ * ``url`` is the profile's content base URL.
+ */
+export interface ProfileListEntry {
+  affiliation?: string | null;
+  clinical?: boolean;
+  contaminated_count?: number;
+  field?: string | null;
+  fulltext_pct?: number;
+  level?: string;
+  name: string;
+  paper_count?: number;
+  rid?: string | null;
+  slug: string;
+  summary_count?: number;
+  url: string;
+  [k: string]: unknown;
+}
+/**
  * Sizes of a profile's deeper parts, for this caller.
  */
 export interface ProfileParts {
@@ -473,3 +506,20 @@ export interface VisibilityReport {
   slug: string;
   [k: string]: unknown;
 }
+
+/**
+ * One page of a list endpoint: `{results, pagination, note}`.
+ *
+ * Page-based lists fill `pagination.page` and `total_pages`; token-based
+ * lists fill `pagination.next_page_token` (`null` on the last page).
+ */
+export interface Paged<T> {
+  results: T[];
+  pagination: Pagination;
+  note?: string | null;
+  [k: string]: unknown;
+}
+/**
+ * `GET /profiles`: one page-based page of profile rows.
+ */
+export type ProfileListPage = Paged<ProfileListEntry>;

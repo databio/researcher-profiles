@@ -31,6 +31,7 @@ from ..schema import (
 )
 from ..schema.jsonld import canonical_dumps
 from ._http import _compact, auth_headers
+from ._paging import walk_pages
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -422,18 +423,9 @@ class ApiArtifactStorage(ReadOnlyArtifactStorage):
         return self._detail().get("soul") or ""
 
     def _paper_rows(self) -> list[dict]:
-        """Every paper row, following the cursor 100 at a time."""
-        rows: list[dict] = []
-        cursor: Optional[str] = None
-        while True:
-            params: dict[str, Any] = {"limit": 100}
-            if cursor:
-                params["cursor"] = cursor
-            page = self._request("GET", self._api_path("papers"), params=params)
-            rows.extend(page.get("items") or [])
-            cursor = page.get("next_cursor")
-            if not cursor:
-                return rows
+        """Every paper row, following ``next_page_token`` 100 at a time."""
+        path = self._api_path("papers")
+        return list(walk_pages(lambda q: self._request("GET", path, params=q), page_size=100))
 
     def load_papers(self) -> list[PaperRecord]:
         """The whole records off the works file, indexed by the paged rows.

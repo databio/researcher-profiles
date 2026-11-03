@@ -276,7 +276,7 @@ class TestProfileGate:
         visible = _profile_visible(viewer, profile_tier)
 
         detail = _detail(c, viewer)
-        listing = _get(c, "/api/v1/profiles", viewer).json()["profiles"]
+        listing = _get(c, "/api/v1/profiles", viewer).json()["results"]
         jsonld = _get(c, f"/api/v1/profiles/{SLUG}/profile.jsonld", viewer)
         collection = _get(
             c, "/api/v1/collection.json", viewer
@@ -360,8 +360,8 @@ class TestPapersAndSummaries:
     def test_summary_available_reflects_this_viewer(self, shared_client):
         """It must not advertise a summary the caller would then 404 on."""
         c = shared_client(overrides={"paper_summary": "limited"})
-        anon = _get(c, f"/api/v1/profiles/{SLUG}/papers", "anonymous").json()["items"]
-        lab = _get(c, f"/api/v1/profiles/{SLUG}/papers", "consumer_lab").json()["items"]
+        anon = _get(c, f"/api/v1/profiles/{SLUG}/papers", "anonymous").json()["results"]
+        lab = _get(c, f"/api/v1/profiles/{SLUG}/papers", "consumer_lab").json()["results"]
         assert all(p["summary"] == {"available": False, "reason": "not_permitted"} for p in anon)
         assert any(p["summary"]["available"] for p in lab)
         assert not _summary_served(c, "anonymous")
@@ -694,7 +694,7 @@ class TestProfileCollection:
         doc = c.get(card["base"] + "profile.jsonld")
         assert doc.status_code == 200
         assert doc.json()["name"]
-        summary = _get(c, "/api/v1/profiles", "anonymous").json()["profiles"][0]
+        summary = _get(c, "/api/v1/profiles", "anonymous").json()["results"][0]
         for field in ("name", "level", "affiliation", "field", "paper_count", "summary_count"):
             assert card[field] == summary[field], field
 
@@ -724,7 +724,7 @@ class TestHostFloorHook:
         )
         # A public profile is hidden from an anonymous caller...
         assert _detail(c, "anonymous").status_code == 404
-        assert _get(c, "/api/v1/profiles", "anonymous").json()["profiles"] == []
+        assert _get(c, "/api/v1/profiles", "anonymous").json()["results"] == []
         # ...but the floor is a narrowing, not a blackout.
         assert _detail(c, "consumer_lab").status_code == 200
         assert _detail(c, "owner").status_code == 200

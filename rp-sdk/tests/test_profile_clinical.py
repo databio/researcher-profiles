@@ -69,6 +69,6 @@ def test_the_profile_list_carries_the_flag(tmp_path, make_api_client):
     )
     build_profile_dir(tmp_path / "root" / "res")
     c = make_api_client(tmp_path / "root")
-    entries = {p["slug"]: p for p in c.get("/api/v1/profiles").json()["profiles"]}
+    entries = {p["slug"]: p for p in c.get("/api/v1/profiles").json()["results"]}
     assert entries["doc"]["clinical"] is True
     assert entries["res"]["clinical"] is False

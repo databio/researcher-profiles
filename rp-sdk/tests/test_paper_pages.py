@@ -1,7 +1,7 @@
-"""Paged paper rows (``GET /profiles/{slug}/papers``) and their cursors (``api/_cursor.py``).
+"""Token-paged paper rows (``GET /profiles/{slug}/papers``) and their tokens (``api/_page_token.py``).
 
-A caller loops on ``next_cursor``: every row once, last page ``next_cursor: null``; a cursor is
-bound to its filters, so reusing it with others is a 400 ``cursor_mismatch``.
+A caller loops on ``pagination.next_page_token``: every row once, last page ``null``; a token
+is bound to its filters, so reusing it with others is a 400 ``page_token_mismatch``.
 """
 
 import pytest
@@ -50,64 +50,88 @@ def _walk(c, **params) -> list[str]:
     seen: list[str] = []
     page = _page(c, **params)
     while True:
-        seen += [row["paper_id"] for row in page["items"]]
-        if not page["has_more"]:
-            assert page.get("next_cursor") is None
+        seen += [row["paper_id"] for row in page["results"]]
+        token = page["pagination"].get("next_page_token")
+        if not token:
             return seen
-        page = _page(c, **params, cursor=page["next_cursor"])
+        page = _page(c, **params, page_token=token)
 
 
-class TestCursor:
-    def test_following_the_cursor_visits_every_row_once_newest_first(self, client):
-        first = _page(client, limit=20)
-        assert (first["total"], first["limit_applied"], first["has_more"]) == (N + 1, 20, True)
-        seen = _walk(client, limit=20)
+class TestPageToken:
+    def test_following_the_token_visits_every_row_once_newest_first(self, client):
+        first = _page(client, page_size=20)
+        assert first["pagination"]["page_size"] == 20
+        assert first["pagination"]["total"] == N + 1
+        assert first["pagination"]["next_page_token"]
+        seen = _walk(client, page_size=20)
         assert len(seen) == len(set(seen)) == N + 1
-        years = [r["year"] for r in _page(client, limit=100)["items"] if r.get("year")]
+        years = [r["year"] for r in _page(client, page_size=100)["results"] if r.get("year")]
         assert years == sorted(years, reverse=True)
         assert seen[-1] == "noyear"  # undated last
 
+    def test_page_size_may_change_between_pages(self, client):
+        token = _page(client, page_size=5)["pagination"]["next_page_token"]
+        second = _page(client, page_size=7, page_token=token)
+        assert len(second["results"]) == 7
+
     def test_filters_apply_before_paging(self, client):
-        seen = _walk(client, limit=5, missing_ids=True, year_min=2010)
+        seen = _walk(client, page_size=5, missing_ids=True, year_min=2010)
         expected = {r["paper_id"] for r in _papers() if "doi" not in r and r.get("year", 0) >= 2010}
         assert set(seen) == expected
-        page = _page(client, limit=5, missing_ids=True, year_min=2010)
+        page = _page(client, page_size=5, missing_ids=True, year_min=2010)
         assert page["filters_applied"] == {"missing_ids": True, "year_min": 2010}
-        assert page["total"] == len(expected)
+        assert page["pagination"]["total"] == len(expected)
 
     @pytest.mark.parametrize(
-        ("cursor_kind", "other"),
+        ("token_kind", "other"),
         [
             ("real", {"year_min": 2001}),
             ("real", {"missing_ids": True}),
-            ("real", {"q": "chromatin"}),
-            ("not-a-cursor", {}),
+            ("not-a-token", {}),
         ],
-        ids=["year_min", "missing_ids", "query", "garbled"],
+        ids=["year_min", "missing_ids", "garbled"],
     )
-    def test_a_cursor_is_bound_to_its_filters(self, client, cursor_kind, other):
-        cursor = _page(client, limit=5)["next_cursor"] if cursor_kind == "real" else cursor_kind
+    def test_a_token_is_bound_to_its_filters(self, client, token_kind, other):
+        token = (
+            _page(client, page_size=5)["pagination"]["next_page_token"]
+            if token_kind == "real"
+            else token_kind
+        )
         r = client.get(
-            f"/api/v1/profiles/{SLUG}/papers", params={"limit": 5, "cursor": cursor, **other}
+            f"/api/v1/profiles/{SLUG}/papers",
+            params={"page_size": 5, "page_token": token, **other},
         )
         assert r.status_code == 400
-        assert r.json()["detail"]["error"] == "cursor_mismatch"
+        assert r.json()["detail"]["error"] == "page_token_mismatch"
+
+    def test_old_parameter_names_are_refused(self, client):
+        r = client.get(f"/api/v1/profiles/{SLUG}/papers", params={"limit": 5})
+        assert r.status_code == 400
+        assert r.json()["detail"]["error"] == "invalid_argument"
 
 
 class TestRankedPages:
-    def test_a_query_ranks_and_pages_by_offset(self, client):
+    def test_a_query_is_one_top_n_page(self, client):
         """No index on this profile: keyword ranking, and the response says so."""
-        page = _page(client, q="chromatin", limit=4)
+        page = _page(client, q="chromatin", page_size=4)
         assert page["search_mode_used"] == "keyword"
         assert page["note"]
-        assert page["total"] == len([r for r in _papers() if "chromatin" in r["title"]])
-        assert all(row["matched_by"] == ["keyword"] for row in page["items"])
-        seen = _walk(client, q="chromatin", limit=4)
-        assert len(seen) == len(set(seen)) == page["total"]
+        assert page["pagination"] == {"page_size": 4}  # no total, no next token
+        assert len(page["results"]) == 4
+        assert all(row["matched_by"] == ["keyword"] for row in page["results"])
+
+    def test_a_query_takes_no_page_token(self, client):
+        token = _page(client, page_size=5)["pagination"]["next_page_token"]
+        r = client.get(
+            f"/api/v1/profiles/{SLUG}/papers",
+            params={"q": "chromatin", "page_token": token},
+        )
+        assert r.status_code == 400
+        assert r.json()["detail"]["error"] == "invalid_argument"
 
 
 class TestIds:
     def test_ids_read_those_rows_in_order(self, client):
         page = _page(client, ids="p007,p001,nobody")
-        assert [r["paper_id"] for r in page["items"]] == ["p007", "p001"]
-        assert page["limit_applied"] == 3
+        assert [r["paper_id"] for r in page["results"]] == ["p007", "p001"]
+        assert page["pagination"] == {"page_size": 3, "total": 2}

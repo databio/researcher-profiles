@@ -1,10 +1,11 @@
 """Caps on every caller-chosen count the HTTP API accepts.
 
 Clamp and report: a count above its cap is lowered to the cap, never refused,
-and the response says what ran (``limit_applied``, ``k_applied``, ...). The
-caps are stated in the docs and in tool descriptions, never as a schema
-``maximum``: some clients validate a request against the schema before
-sending it and would reject the call outright instead of getting the cap.
+and the response says what ran (``pagination.page_size``, ``limit_applied``,
+``k_applied``, ...). The caps are stated in the docs and in tool
+descriptions, never as a schema ``maximum``: some clients validate a request
+against the schema before sending it and would reject the call outright
+instead of getting the cap.
 """
 
 from __future__ import annotations

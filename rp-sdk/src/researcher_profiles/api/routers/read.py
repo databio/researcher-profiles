@@ -18,20 +18,26 @@ from ...models.api import (
     PaperPage,
     PaperRecordView,
     ProfileListEntry,
-    ProfileListResponse,
     ProfileRecord,
     SummaryBatch,
     TextPage,
 )
 from ...models.published import ProfileCard, ProfileCollection
 from ...privacy import ViewerTier
-from ...schema import validate_ref
+from ...schema import validate_ref, validate_rid
 from ...schema.jsonld import CONTEXT_URL
-from ...store import ProfileStore
 from .. import service as svc
 from .._projection import PUBLIC_DOCUMENT_MAX_AGE, VARY_ON_CREDENTIALS, _http_date
 from ..caller import Caller
-from ..deps import get_read_caller, get_service, get_store
+from ..deps import get_read_caller, get_service
+from ..paging import (
+    PAGE_PARAMS,
+    TOKEN_PARAMS,
+    PageRequest,
+    page_params,
+    paginate,
+    reject_unknown_params,
+)
 from ..service import Service
 from ._routers import public_router
 
@@ -61,25 +67,59 @@ def _cache_headers(
     return headers
 
 
+#: Query parameters every read route takes through ``get_read_caller``.
+READ_CALLER_PARAMS = frozenset({"as"})
+#: ``GET /profiles``: (default, max) rows per page. Rows are slim.
+PROFILES_PAGE = (100, 1000)
+#: ``GET /profiles/{slug}/seed-papers``: (default, max) rows per page.
+SEED_PAPERS_PAGE = (100, 500)
+
+
+def _rid_filter(values: list[str]) -> Optional[list[str]]:
+    """The ``rid`` filter values, canonical; a malformed one is a 400."""
+    if not values:
+        return None
+    out = []
+    for raw in values:
+        try:
+            out.append(validate_rid(raw.strip()))
+        except ValueError as e:
+            raise Invalid(str(e), code="invalid_argument") from None
+    return out
+
+
 @public_router.get("/profiles")
 def list_profiles(
     request: Request,
-    store: ProfileStore = Depends(get_store),
     service: Service = Depends(get_service),
     caller: Caller = Depends(get_read_caller),
+    paging: PageRequest = Depends(page_params(*PROFILES_PAGE)),
+    rid: list[str] = Query([]),
+    clinical: Optional[bool] = None,
+    affiliation: Optional[str] = None,
 ) -> Response:
-    """The profile list, in ``rp:profileList`` format, as a static ``profiles.json``.
+    """The profiles this caller may see, in slug order, page-based.
 
-    A profile this viewer may not see is absent. Never shared-cached, since
-    membership depends on who asked.
+    Returns ``{results: [ProfileListEntry], pagination, note}``. Filters are
+    exact and AND together: ``rid`` (repeatable; any of these identities),
+    ``clinical`` and ``affiliation`` (trimmed, ignoring case). ``total``
+    counts the matches this caller may see. An unknown query parameter is a
+    400. To read one profile by ORCID, ``GET /profiles/{orcid}``. Never
+    shared-cached, since membership depends on who asked.
     """
-    summaries = svc.list_profiles(service, caller)
+    reject_unknown_params(
+        request, READ_CALLER_PARAMS | PAGE_PARAMS | {"rid", "clinical", "affiliation"}
+    )
+    summaries = svc.list_profiles(
+        service,
+        caller,
+        rids=_rid_filter(rid),
+        clinical=clinical,
+        affiliation=affiliation,
+    )
     origin = _public_origin(request)
-    envelope = ProfileListResponse(
-        name=store.name if hasattr(store, "name") else None,
-        url=str(request.url.replace(query="")),
-        updated=datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        profiles=[
+    page = paginate(
+        [
             ProfileListEntry(
                 url=f"{origin}/api/v1/profiles/{s.slug}/content/",
                 slug=s.slug,
@@ -96,9 +136,10 @@ def list_profiles(
             )
             for s in summaries
         ],
+        paging,
     )
     return Response(
-        content=envelope.model_dump_json(by_alias=True),
+        content=page.model_dump_json(),
         media_type="application/json",
         headers={"Cache-Control": "private, no-store", "Vary": VARY_ON_CREDENTIALS},
     )
@@ -300,19 +341,24 @@ def get_profile_artifact(
 @public_router.get("/profiles/{slug}/seed-papers")
 def list_seed_papers(
     slug: str,
+    request: Request,
     response: Response,
     service: Service = Depends(get_service),
     caller: Caller = Depends(get_read_caller),
+    paging: PageRequest = Depends(page_params(*SEED_PAPERS_PAGE)),
 ) -> dict:
     """The interest seed papers: papers that define the person's interests.
 
     Never works they wrote. Gated on the tier of
     ``sources/seed_papers.jsonld``, ``private`` by default: a caller below it
-    gets the profile's 404. Returns ``{"seed_papers": [...]}``.
+    gets the profile's 404. Page-based ``{results, pagination}``, in
+    ``seed_id`` order.
     """
+    reject_unknown_params(request, READ_CALLER_PARAMS | PAGE_PARAMS)
     rows = svc.list_seed_papers(service, caller, slug)
+    rows.sort(key=lambda r: str(r.get("seed_id") or ""))
     _no_store(response)
-    return {"seed_papers": rows}
+    return paginate(rows, paging).model_dump(mode="json")
 
 
 @public_router.get(
@@ -322,36 +368,44 @@ def list_seed_papers(
 )
 def list_papers(
     slug: str,
+    request: Request,
     response: Response,
     service: Service = Depends(get_service),
     caller: Caller = Depends(get_read_caller),
-    limit: Optional[int] = None,
-    cursor: Optional[str] = None,
+    page_size: Optional[int] = None,
+    page_token: Optional[str] = None,
     q: Optional[str] = None,
     year_min: Optional[int] = None,
     missing_ids: bool = False,
     has_text: Optional[bool] = None,
     ids: Optional[str] = None,
 ) -> PaperPage:
-    """The works list as rich rows, paged, gated on the tier of ``sources/papers.jsonld``.
+    """The works list as rich rows, token-paged, gated on the tier of ``sources/papers.jsonld``.
 
+    Returns ``{results, pagination, filters_applied, search_mode_used, note}``.
     Each row carries identity, a short summary, the ``summary`` and ``text``
     sizes this caller may fetch (``{available, bytes, approx_tokens, reason}``),
     and the paper's ``version`` for an edit.
 
-    Without ``q``, rows are newest first (``year`` desc, then ``paper_id``),
-    paged with a keyset cursor. With ``q``, rows are ranked by hybrid search
-    (meaning, over the stored summary and abstract vectors, plus BM25 keywords
-    over title, summary, abstract and journal, merged by reciprocal rank),
-    paged with an offset cursor; ``search_mode_used`` and ``note`` say what
-    ran. ``year_min``, ``missing_ids`` (no DOI and no OpenAlex id) and
-    ``has_text`` filter before ranking. ``limit`` defaults to 20 and is
-    clamped to 100 (``limit_applied``). A cursor is bound to the filters it was
-    made under; reusing it with others is a 400 ``cursor_mismatch``.
+    Without ``q``, rows are newest first (``year`` desc, then ``paper_id``);
+    pass ``pagination.next_page_token`` back as ``page_token`` until it is
+    ``null``. With ``q``, rows are ranked by hybrid search (meaning, over the
+    stored summary and abstract vectors, plus BM25 keywords over title,
+    summary, abstract and journal, merged by reciprocal rank) and returned as
+    one top-N page with no ``total`` and no next token; ``search_mode_used``
+    and ``note`` say what ran. ``year_min``, ``missing_ids`` (no DOI and no
+    OpenAlex id) and ``has_text`` filter before ranking. ``page_size``
+    defaults to 20 and is clamped to 100 (``pagination.page_size``). A token
+    is bound to the filters it was made under; reusing it with others is a
+    400 ``page_token_mismatch``.
 
     ``ids`` (a comma list, at most 20) reads those rows only, in that order,
-    with no paging.
+    as one page.
     """
+    reject_unknown_params(
+        request,
+        READ_CALLER_PARAMS | TOKEN_PARAMS | {"q", "year_min", "missing_ids", "has_text", "ids"},
+    )
     page = svc.list_papers(
         service,
         caller,
@@ -360,8 +414,8 @@ def list_papers(
         year_min=year_min,
         missing_ids=missing_ids,
         has_text=has_text,
-        limit=limit,
-        cursor=cursor,
+        page_size=page_size,
+        page_token=page_token,
         ids=ids,
     )
     _no_store(response)

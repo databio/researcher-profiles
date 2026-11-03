@@ -23,6 +23,7 @@ from .models.api import (
     ArtifactTier,
     ArtifactVisibility,
     FileList,
+    Pagination,
     PaperEntry,
     PaperPage,
     PaperRecordView,
@@ -32,6 +33,7 @@ from .models.api import (
     PassageList,
     PassageRequest,
     ProfileDetail,
+    ProfileListEntry,
     ProfileMetadataPayload,
     ProfileParts,
     ProfileRecord,
@@ -106,6 +108,10 @@ class _WireBundle(BaseModel):
     profile_summary: ProfileSummary
     paper_entry: PaperEntry
     paper_summary: PaperSummary
+    # The list envelope's ``pagination`` (``Paged<T>`` is written by hand in
+    # gen-types.mjs: JSON Schema has no generics) and the ``GET /profiles`` row.
+    pagination: Pagination
+    profile_list_entry: ProfileListEntry
     # The sized HTTP reads: ``GET /profiles/{slug}`` and its sub-routes.
     profile_record: ProfileRecord
     profile_parts: ProfileParts

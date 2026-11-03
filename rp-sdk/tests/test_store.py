@@ -501,9 +501,9 @@ class TestCreateAppOverAStore:
         body = c.get("/health").json()
         assert body["store"] == both_stores.location
         assert body["profile_count"] == 1
-        assert [p["slug"] for p in c.get("/api/v1/profiles").json()["profiles"]] == ["jane-doe"]
+        assert [p["slug"] for p in c.get("/api/v1/profiles").json()["results"]] == ["jane-doe"]
         assert c.get("/api/v1/profiles/jane-doe").json()["fields"]["name"] == jane_doe.name
-        rows = c.get("/api/v1/profiles/jane-doe/papers").json()["items"]
+        rows = c.get("/api/v1/profiles/jane-doe/papers").json()["results"]
         assert len(rows) == len(jane_doe.papers)
         # Per-caller sizes come out the same from either backend.
         assert sum(r["summary"]["available"] for r in rows) == 5

@@ -109,15 +109,15 @@ profiles/<slug>/
 {embeddings_section}{collection_section}
 ## Wire format
 
-`index.json` matches `GET /api/v1/profiles` exactly. The per-profile files
-are the whole-profile static views; a hosted API serves the same data sized
-per caller:
+The files are whole static views; a hosted API serves the same data sized
+per caller, and answers every list one page at a time as
+`{{results, pagination}}`:
 
 | File | Closest API endpoint |
 |------|------------------------|
-| `index.json` | `GET /api/v1/profiles` (same shape) |
+| `index.json` | `GET /api/v1/profiles` (page-based: `?page=`, `pagination.total_pages`; filters `rid`, `clinical`, `affiliation`) |
 | `profiles/<slug>/profile.json` | `GET /api/v1/profiles/<slug>?view=full` (`fields` holds the metadata; the manifest is `GET .../files`) |
-| `profiles/<slug>/papers.json` | `GET /api/v1/profiles/<slug>/papers` (paged rows: `{{items, total, next_cursor}}`) |
+| `profiles/<slug>/papers.json` | `GET /api/v1/profiles/<slug>/papers` (token-based: pass `pagination.next_page_token` back as `page_token`) |
 | `profiles/<slug>/summaries/*.json` | `GET /api/v1/profiles/<slug>/summaries?ids=...` |
 
 ## JSON-LD

@@ -63,5 +63,26 @@ const ts = await compile(schema, "ResearcherProfileWireContract", {
   style: { singleQuote: false },
 });
 
-writeFileSync(typesPath, ts, "utf-8");
+// JSON Schema has no generics, so the list envelope is written here. It
+// mirrors researcher_profiles.models.api.Paged.
+const paged = `
+/**
+ * One page of a list endpoint: \`{results, pagination, note}\`.
+ *
+ * Page-based lists fill \`pagination.page\` and \`total_pages\`; token-based
+ * lists fill \`pagination.next_page_token\` (\`null\` on the last page).
+ */
+export interface Paged<T> {
+  results: T[];
+  pagination: Pagination;
+  note?: string | null;
+  [k: string]: unknown;
+}
+/**
+ * \`GET /profiles\`: one page-based page of profile rows.
+ */
+export type ProfileListPage = Paged<ProfileListEntry>;
+`;
+
+writeFileSync(typesPath, ts + paged, "utf-8");
 console.log(`[gen-types] wrote ${typesPath}`);

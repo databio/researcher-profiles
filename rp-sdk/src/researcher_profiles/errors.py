@@ -167,7 +167,7 @@ class Invalid(ServiceError):
     """The caller sent a value the function refuses (400).
 
     ``code`` is a stable machine code (``unknown_section``,
-    ``cursor_mismatch``), ``valid`` the values that would have worked.
+    ``page_token_mismatch``), ``valid`` the values that would have worked.
     """
 
     def __init__(

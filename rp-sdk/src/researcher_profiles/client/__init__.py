@@ -20,6 +20,7 @@ from ._http import (
     auth_headers,
 )
 from ._identity import resolve_rid
+from ._paging import iter_results, walk_pages
 from ._push import (
     PLAN_GROUPS,
     PushInsufficientAccess,
@@ -59,6 +60,8 @@ __all__ = [
     "PushWouldRemove",
     "push_profile",
     "resolve_rid",
+    "iter_results",
+    "walk_pages",
     "install_profile",
     "seek_profile",
     "list_installed",

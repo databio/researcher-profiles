@@ -23,6 +23,9 @@ and the parts follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Added seed papers, self-reported rank, typed research interests and a
   clinical flag.
 - Added `record_fields` and `push_response_extra` hooks.
+- Every list endpoint returns `{results, pagination}`, with `page` and
+  `page_size` (or `page_token` for papers). `GET /profiles` filters on
+  `rid`, `clinical` and `affiliation`; unknown parameters are a 400.
 
 ### scholarcore 0.2.0
 
@@ -33,10 +36,12 @@ and the parts follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Added host slots, an Interests tab, seed papers and rank.
 - "Copy link" copies the profile link.
+- Compliance checks read the paged list format.
 
 ### rp-ui-lib 0.3.0
 
 - Added research interest components. `research_interests` is now typed.
+- Added types for paged lists.
 
 ## [0.2.0] - 2026-10-12
 

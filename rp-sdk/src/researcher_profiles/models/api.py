@@ -5,9 +5,9 @@ The wire contract for ``researcher_profiles.api`` and
 on-disk models in ``schema/`` so the two can evolve independently.
 """
 
-from typing import Literal, Optional
+from typing import Generic, Literal, Optional, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_serializer
 
 from ..schema import ResearchInterest
 
@@ -17,12 +17,52 @@ class _APIModel(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Paging: the one list envelope (GA4GH ``PagedResponse``)
+# ---------------------------------------------------------------------------
+
+T = TypeVar("T")
+
+
+class Pagination(BaseModel):
+    """Where one page sits. Page-based fields and ``next_page_token`` never mix."""
+
+    #: Page-based only: this page's number, from 0.
+    page: Optional[int] = None
+    #: The page size actually used, after clamping.
+    page_size: int
+    #: Matching rows before paging; omitted when not meaningful (ranked search).
+    total: Optional[int] = None
+    #: Page-based only.
+    total_pages: Optional[int] = None
+    #: Token-based only: pass back as ``page_token``; ``null`` when done.
+    next_page_token: Optional[str] = None
+
+    @model_serializer(mode="wrap")
+    def _one_style(self, handler):
+        """Write only the fields of this page's style (and ``total`` when known)."""
+        out = handler(self)
+        drop = {"next_page_token"} if self.page is not None else {"page", "total_pages"}
+        if self.total is None:
+            drop.add("total")
+        return {k: v for k, v in out.items() if k not in drop}
+
+
+class Paged(BaseModel, Generic[T]):
+    """One page of a list endpoint: ``{results, pagination, note}``."""
+
+    results: list[T]
+    pagination: Pagination
+    #: Set when the server lowered ``page_size`` or left something out.
+    note: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
 # Profile resources
 # ---------------------------------------------------------------------------
 
 
 class ProfileListEntry(_APIModel):
-    """One entry in an ``rp:profileList`` response.
+    """One row of ``GET /profiles`` (a :class:`Paged` page of these).
 
     ``url`` is the profile's content base URL.
     """
@@ -42,16 +82,6 @@ class ProfileListEntry(_APIModel):
     #: non-empty site_capabilities block, or a trials source. Computed from the
     #: projected document, so a section the caller may not read never sets it.
     clinical: bool = False
-
-
-class ProfileListResponse(_APIModel):
-    """The ``rp:profileList`` envelope returned by ``GET /profiles``."""
-
-    rp_profileList: str = Field("0.1", alias="rp:profileList")
-    name: Optional[str] = None
-    url: Optional[str] = None
-    updated: Optional[str] = None
-    profiles: list[ProfileListEntry] = []
 
 
 class ProfileSummary(_APIModel):
@@ -278,14 +308,14 @@ class PaperRow(_APIModel):
 
 
 class PaperPage(_APIModel):
-    """``GET /profiles/{slug}/papers``: one page of paper rows."""
+    """``GET /profiles/{slug}/papers``: one token-based page of paper rows.
 
-    items: list[PaperRow]
-    #: Matching rows, before paging.
-    total: int
-    limit_applied: int
-    next_cursor: Optional[str] = None
-    has_more: bool = False
+    ``pagination.total`` counts matching rows before paging; it is absent for
+    a ranked (``q``) page, which is one top-N page with no next token.
+    """
+
+    results: list[PaperRow]
+    pagination: Pagination
     filters_applied: dict = {}
     #: Only when the request had ``q``.
     search_mode_used: Optional[Literal["hybrid", "keyword"]] = None
@@ -1061,6 +1091,8 @@ __all__ = [
     "PassageList",
     "PassageRequest",
     "PaperPage",
+    "Paged",
+    "Pagination",
     "PaperRecordView",
     "PaperRow",
     "ProfileDetail",

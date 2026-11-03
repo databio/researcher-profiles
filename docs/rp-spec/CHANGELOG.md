@@ -9,6 +9,10 @@
 - Command-line login endpoints are found through RFC 8414 OAuth metadata,
   not fixed paths. A server MAY list a `whoami_endpoint` there.
 - Removed lens, co-owner and Privacy page wording.
+- Every dynamic list returns `{results, pagination}`. Profiles and seed
+  papers page by number, papers by token. `page_size` is clamped, never
+  refused. `GET /profiles` filters on `rid`, `clinical` and `affiliation`;
+  an unknown query parameter is a 400.
 
 ## 0.2.0 - 2026-10-12
 

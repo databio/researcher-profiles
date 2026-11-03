@@ -20,7 +20,25 @@ curl -H "Authorization: Bearer $RESEARCHER_PROFILES_TOKEN" \
     http://127.0.0.1:8109/api/v1/profiles/jane-doe
 ```
 
-Both `GET /api/v1/profiles` (each list entry) and `GET /api/v1/profiles/{slug}`
+`GET /api/v1/profiles` answers one page, `{results, pagination, note}`, in
+slug order. Ask for the next page with `?page=1` (pages count from 0), and
+stop when `page + 1` reaches `pagination.total_pages`. `page_size` defaults to
+100; a larger one is lowered to 1000, and `note` says so. Filter with `rid`
+(repeat it for several), `clinical` or `affiliation`; an unknown parameter is
+a `400`:
+
+```bash
+curl "http://127.0.0.1:8109/api/v1/profiles?clinical=true&page_size=50"
+```
+
+To read one profile by ORCID, call `GET /api/v1/profiles/{orcid}` directly;
+do not list and scan.
+
+The papers list, `GET /api/v1/profiles/{slug}/papers`, pages by token
+instead: pass `pagination.next_page_token` back as `page_token` until it is
+`null`.
+
+Both `GET /api/v1/profiles` (each row in `results`) and `GET /api/v1/profiles/{slug}`
 (under `metadata`) include a `level` field, one of `lite`, `full`, or `deep` (see
 [profile depth levels](../profile-format.md#profile-depth-levels)). Clients can
 filter or branch on the tier: for example, skip persona calls for a `lite` profile,
@@ -65,12 +83,25 @@ with ResearcherProfile.from_api("http://127.0.0.1:8109", slug="jane-doe") as p:
     print(p.name)
 ```
 
-List remote profiles without loading each one:
+List remote profiles without loading each one. `list_remote` walks every page
+and returns all the rows:
 
 ```python
 summaries = ResearcherProfile.list_remote("http://127.0.0.1:8109", token="...")
 for s in summaries:
     print(s["slug"], s["name"], s["level"], s["paper_count"])
+```
+
+To walk any list endpoint yourself, page-based or token-based, use
+`iter_results` with an `httpx.Client`:
+
+```python
+import httpx
+from researcher_profiles.client import iter_results
+
+with httpx.Client(base_url="http://127.0.0.1:8109") as http:
+    for row in iter_results(http, "/api/v1/profiles", {"clinical": "true"}):
+        print(row["slug"])
 ```
 
 Each summary carries a `level`, so you can branch before making a persona call. A

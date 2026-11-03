@@ -111,3 +111,13 @@ See the
 [API reference](../reference/api.md#put-apiv1profilesslug) for validation
 rules and the size cap.
 
+## How the server answers lists
+
+Every list route answers one page as `{results, pagination, note}`.
+`GET /api/v1/profiles` and `.../seed-papers` page by number (`page`,
+`page_size`); `.../papers` pages by token (`page_token`, and
+`pagination.next_page_token` in the answer). An oversized `page_size` is
+lowered to the route's maximum, never refused, and `note` says so. A query
+parameter the route does not know is a `400`, so a mistyped filter fails
+instead of returning everything. See
+[Lists, paging and filters](../../rp-spec/dynamic-api.md#lists-paging-and-filters).

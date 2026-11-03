@@ -166,12 +166,11 @@ Each entry in `profiles` is one of:
 - An object with `list`: a nested profile list URL
 
 Object entries MAY include additional fields beyond `url` and `name`.
-The [dynamic API](dynamic-api.md#get-profiles) uses this same format with
-enriched entries (e.g. `slug`, `level`, `paper_count`). Consumers MUST
-ignore fields they do not recognize.
+Consumers MUST ignore fields they do not recognize. The
+[dynamic API](dynamic-api.md#get-profiles) does not use this format: its
+`GET /profiles` answers paged `{results, pagination}` rows.
 
-The format above is for a hand-authored list or one a dynamic server returns.
-It is not what `rp site` writes; that tool publishes a different, narrower set
+The format above is for a hand-authored list. It is not what `rp site` writes; that tool publishes a different, narrower set
 of files, listed below.
 
 ### What `rp site` actually publishes

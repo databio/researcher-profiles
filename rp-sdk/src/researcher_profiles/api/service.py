@@ -20,6 +20,7 @@ from ..models.api import (
     ArtifactTier,
     EditResult,
     FileList,
+    Pagination,
     PaperPage,
     ProfileSummary,
     SectionTierReport,
@@ -42,8 +43,8 @@ from ..profile.edit import EditError, WorkNotFoundError, paper_version
 from ..schema import PaperRecord, SeedPaperRecord, most_restrictive
 from ..store import ProfileNotFoundError, ProfileStore
 from ..utils.paths import STORE_CACHE_DIRNAME
-from ._cursor import decode_cursor, encode_cursor
 from ._limits import BATCH_IDS_CAP, PAPERS_LIMIT, clamp
+from ._page_token import decode_token, encode_token
 from ._passages import paper_passages, profile_passages
 from ._projection import (
     _content_hash,
@@ -59,6 +60,7 @@ from ._text import page_text, sections_of
 from .caller import Caller
 from .deps import TierFloor
 from .hooks import Hooks
+from .paging import clamp_note
 
 logger = logging.getLogger(__name__)
 
@@ -293,16 +295,33 @@ def works_visible(service: Service, caller: Caller, ref: str) -> tuple[Any, View
     return prof, viewer
 
 
-def list_profiles(service: Service, caller: Caller) -> list[ProfileSummary]:
-    """Every profile this caller may see, summarized. The one listing walk.
+def list_profiles(
+    service: Service,
+    caller: Caller,
+    *,
+    rids: Optional[list[str]] = None,
+    clinical: Optional[bool] = None,
+    affiliation: Optional[str] = None,
+) -> list[ProfileSummary]:
+    """Every profile this caller may see, summarized, in slug order. The one listing walk.
+
+    Filters are exact matches and AND together: ``rids`` (any of these
+    identities; a rid that is unknown or not visible is simply absent),
+    ``clinical``, and ``affiliation`` (trimmed, ignoring case). They run on the
+    projected summary, so a section the caller may not see never matches.
 
     A profile that fails to load or summarize is logged and counted, never
     mistaken for a private one; the listing still answers for the rest.
     """
     store = service.store_for(caller)
+    if rids is None:
+        slugs = store.list_slugs()
+    else:  # every record about each rid, not only the first
+        slugs = list(dict.fromkeys(ref.slug for rid in rids for ref in store.profiles_about(rid)))
+    want_aff = affiliation.strip().casefold() if affiliation is not None else None
     out: list[ProfileSummary] = []
     failed = 0
-    for slug in store.list_slugs():
+    for slug in slugs:
         try:
             prof = store.get(slug)
         # Boundary: one profile's load; the listing still answers for the rest.
@@ -312,14 +331,22 @@ def list_profiles(service: Service, caller: Caller) -> list[ProfileSummary]:
             continue
         try:
             ok, viewer = service.visible(caller, prof, slug)
-            if ok:
-                out.append(_profile_summary(prof, viewer))
+            if not ok:
+                continue
+            row = _profile_summary(prof, viewer)
         # Boundary: one profile's summary projection; the listing still answers.
         except Exception:
             failed += 1
             logger.exception("could not summarize profile %s", slug)
+            continue
+        if clinical is not None and row.clinical != clinical:
+            continue
+        if want_aff is not None and (row.affiliation or "").strip().casefold() != want_aff:
+            continue
+        out.append(row)
     if failed:
         logger.warning("listing omitted %d profile(s) that failed to load", failed)
+    out.sort(key=lambda r: r.slug)
     return out
 
 
@@ -416,22 +443,29 @@ def list_papers(
     year_min: Optional[int] = None,
     missing_ids: bool = False,
     has_text: Optional[bool] = None,
-    limit: Optional[int] = None,
-    cursor: Optional[str] = None,
+    page_size: Optional[int] = None,
+    page_token: Optional[str] = None,
     ids: Optional[str] = None,
 ):
-    """The works list as rich rows, paged (a :class:`PaperPage`).
+    """The works list as rich rows, token-paged (a :class:`PaperPage`).
 
-    Without ``q``, newest first with a keyset cursor; with ``q``, ranked by
-    hybrid search with an offset cursor. ``ids`` (a comma list, at most 20)
-    reads those rows only, in that order. A cursor made under other filters is
-    ``Invalid(code="cursor_mismatch")``.
+    Without ``q``, newest first with a keyset ``page_token``. With ``q``,
+    ranked by hybrid search and returned as one top-N page: no
+    ``next_page_token`` and no ``total``; a ``page_token`` sent with ``q`` is
+    ``Invalid``. ``ids`` (a comma list, at most 20) reads those rows only, in
+    that order. A token made under other filters is
+    ``Invalid(code="page_token_mismatch")``.
     """
     store, prof, viewer = service.read(caller, ref)
     if not _works_visible(prof, viewer):
         raise profile_missing(ref)
     sizes = SizeIndex(prof, viewer, store, prof.slug)
     papers = [p for p in prof.papers if p.paper_id]
+    default, cap = PAPERS_LIMIT
+    size = clamp(page_size, default, cap)
+    clamped = clamp_note(
+        page_size if page_size is not None else default, size, "walk pages with page_token"
+    )
 
     if ids is not None:
         wanted = split_ids(ids)
@@ -442,16 +476,14 @@ def list_papers(
         if len(wanted) > BATCH_IDS_CAP:
             note = f"Only the first {BATCH_IDS_CAP} ids were read."
         return PaperPage(
-            items=rows,
-            total=len(rows),
-            limit_applied=len(taken),
+            results=rows,
+            pagination=Pagination(page_size=len(taken), total=len(rows)),
             filters_applied={"ids": taken},
             note=note,
         )
 
     filters = {"q": q, "year_min": year_min, "missing_ids": missing_ids, "has_text": has_text}
     applied = {k: v for k, v in filters.items() if v not in (None, False, "")}
-    lim = clamp(limit, *PAPERS_LIMIT)
     if year_min is not None:
         papers = [p for p in papers if isinstance(p.year, int) and p.year >= year_min]
     if missing_ids:
@@ -462,28 +494,32 @@ def list_papers(
     if not q:
         papers.sort(key=lambda p: (-_year_key(p), p.paper_id))
         full_total = len(papers)
-        if cursor:
-            key = decode_cursor(cursor, filters).get("k")
+        if page_token:
+            key = decode_token(page_token, filters).get("k")
             if not (isinstance(key, list) and len(key) == 2):
-                decode_cursor("", filters)  # raises the cursor_mismatch Invalid
+                decode_token("", filters)  # raises the page_token_mismatch Invalid
             after = (-int(key[0]), str(key[1]))
             papers = [p for p in papers if (-_year_key(p), p.paper_id) > after]
-        page = papers[:lim]
-        more = len(papers) > lim
-        next_cursor = (
-            encode_cursor({"k": [_year_key(page[-1]), page[-1].paper_id]}, filters)
+        page = papers[:size]
+        more = len(papers) > size
+        next_token = (
+            encode_token({"k": [_year_key(page[-1]), page[-1].paper_id]}, filters)
             if more and page
             else None
         )
         return PaperPage(
-            items=[paper_row(prof, sizes, p) for p in page],
-            total=full_total,
-            limit_applied=lim,
-            next_cursor=next_cursor,
-            has_more=more,
+            results=[paper_row(prof, sizes, p) for p in page],
+            pagination=Pagination(page_size=size, total=full_total, next_page_token=next_token),
             filters_applied=applied,
+            note=clamped,
         )
 
+    if page_token:
+        raise Invalid(
+            "a ranked (q) list is one top-N page; it takes no page_token",
+            code="invalid_argument",
+            hint=f"narrow with year_min/has_text or raise page_size (max {cap})",
+        )
     from ._semantic import hybrid_rank_papers
 
     candidates = []
@@ -499,29 +535,25 @@ def list_papers(
             }
         )
     ranked, mode, note = hybrid_rank_papers(store, prof, viewer, q, candidates)
-    start = 0
-    if cursor:
-        start = decode_cursor(cursor, filters).get("o")
-        if not isinstance(start, int) or start < 0:
-            decode_cursor("", filters)
     by_id = {p.paper_id: p for p in papers}
-    window = ranked[start : start + lim]
     rows = []
-    for pid, score, matched_by in window:
+    for pid, score, matched_by in ranked[:size]:
         row = paper_row(prof, sizes, by_id[pid])
         row.score = round(score, 6)
         row.matched_by = list(matched_by)
         rows.append(row)
-    more = start + lim < len(ranked)
+    notes = [n for n in (note, clamped) if n]
+    if len(ranked) > size:
+        notes.append(
+            f"Top {size} of {len(ranked)} matches; narrow with year_min/has_text "
+            f"or raise page_size (max {cap})."
+        )
     return PaperPage(
-        items=rows,
-        total=len(ranked),
-        limit_applied=lim,
-        next_cursor=encode_cursor({"o": start + lim}, filters) if more else None,
-        has_more=more,
+        results=rows,
+        pagination=Pagination(page_size=size),
         filters_applied=applied,
         search_mode_used=mode,
-        note=note,
+        note=" ".join(notes) or None,
     )
 
 

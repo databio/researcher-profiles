@@ -29,7 +29,7 @@ def _get(c, path, tier, **params):
 def _rows(c, tier):
     r = _get(c, "/papers", tier)
     assert r.status_code == 200, r.text
-    return {row["paper_id"]: row for row in r.json()["items"]}
+    return {row["paper_id"]: row for row in r.json()["results"]}
 
 
 class TestReasons:

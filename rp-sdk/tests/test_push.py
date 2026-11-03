@@ -81,7 +81,7 @@ class TestPush:
         assert body["name"]
         assert body["indexed"] is False  # fixture has no embeddings.sqlite
 
-        slugs = [x["slug"] for x in api_client.get("/api/v1/profiles").json()["profiles"]]
+        slugs = [x["slug"] for x in api_client.get("/api/v1/profiles").json()["results"]]
         assert OTHER in slugs
         assert api_client.get(f"/api/v1/profiles/{OTHER}").status_code == 200
 

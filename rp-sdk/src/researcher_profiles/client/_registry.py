@@ -24,6 +24,7 @@ from ..errors import ProfileError
 from ..profile import ResearcherProfile
 from ..store.config import PROFILES_ROOT_ENV_VAR, resolve_profiles_root
 from ._http import _server_base, _split_profile_url, auth_headers
+from ._paging import iter_results
 
 logger = logging.getLogger(__name__)
 
@@ -52,10 +53,12 @@ def _fetch_profiles(
     token: Optional[str],
     timeout: float,
     client: Any = None,
+    **filters: Any,
 ) -> list[dict]:
-    """GET ``/api/v1/profiles`` from one server and return the parsed list.
+    """Every row of ``/api/v1/profiles`` on one server, walking its pages.
 
-    Raises on any transport or HTTP failure; ``PermissionError`` on 401, so a
+    ``filters`` are the listing's query filters (``rid``, ``clinical``,
+    ``affiliation``). Raises on any transport or HTTP failure; ``PermissionError`` on 401, so a
     private registry is distinguishable from an unreachable one. An injected
     ``client`` is never closed.
     """
@@ -72,14 +75,7 @@ def _fetch_profiles(
         )
     )
     try:
-        resp = http.get("/api/v1/profiles")
-        if resp.status_code == 401:
-            raise PermissionError(resp.text)
-        resp.raise_for_status()
-        data = resp.json()
-        if isinstance(data, dict) and "profiles" in data:
-            return data["profiles"]
-        return data
+        return list(iter_results(http, "/api/v1/profiles", filters))
     finally:
         if client is None:
             http.close()

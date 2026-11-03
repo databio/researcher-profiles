@@ -114,8 +114,8 @@ class TestServerCore:
         r = api_client.get("/api/v1/profiles")
         assert r.status_code == 200
         data = r.json()
-        assert "rp:profileList" in data
-        items = data["profiles"]
+        assert data["pagination"]["page"] == 0
+        items = data["results"]
         slugs = [x["slug"] for x in items]
         assert SLUG in slugs
         me = [x for x in items if x["slug"] == SLUG][0]
@@ -198,7 +198,7 @@ class TestServerCore:
 
         client = make_api_client(root)
         page = client.get(f"/api/v1/profiles/{SLUG}/papers").json()
-        by_id = {p["paper_id"]: p for p in page["items"]}
+        by_id = {p["paper_id"]: p for p in page["results"]}
         served = by_id["doe2016example"]
         assert served["doi"] == "10.1234/example.2016"
         assert served["openalex_id"] == "W2000000001"
@@ -224,13 +224,13 @@ class TestServerCore:
         r = api_client.get(f"/api/v1/profiles/{SLUG}/papers")
         assert r.status_code == 200
         page = r.json()
-        papers = page["items"]
+        papers = page["results"]
         # The jane-doe fixture carries 8 papers, 5 of which have a summary file
         # in sources/summaries/. Asserting the join unconditionally is the point:
         # `if papers:` let this pass on an empty response.
         by_id = {p["paper_id"]: p for p in papers}
         assert len(by_id) == 8
-        assert (page["total"], page["limit_applied"], page["has_more"]) == (8, 20, False)
+        assert page["pagination"] == {"page_size": 20, "total": 8}
         assert by_id["doe2016example"]["title"] == (
             "ExampleOverlap: enrichment analysis of example region sets"
         )
@@ -938,13 +938,11 @@ class TestSeedPaperRoutes:
 
         assert c.get(f"/api/v1/profiles/{SLUG}/seed-papers").status_code == 404
         listed = c.get(f"/api/v1/profiles/{SLUG}/seed-papers", headers=op).json()
-        assert [s["title"] for s in listed["seed_papers"]] == ["A seed"]
+        assert [s["title"] for s in listed["results"]] == ["A seed"]
 
         r = c.delete(f"/api/v1/profiles/{SLUG}/seed-papers/doi:10.1093/seed.1", headers=op)
         assert r.status_code == 200, r.text
-        assert c.get(f"/api/v1/profiles/{SLUG}/seed-papers", headers=op).json() == {
-            "seed_papers": []
-        }
+        assert c.get(f"/api/v1/profiles/{SLUG}/seed-papers", headers=op).json()["results"] == []
 
     def test_a_malformed_body_is_a_400(self, make_api_client, fixture_profiles_root):
         c = make_api_client(fixture_profiles_root(SLUG), token="secret-token")

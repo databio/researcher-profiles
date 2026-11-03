@@ -30,8 +30,14 @@ Route handlers
     see ``__all__``. The profile, paper, text and passage handlers take the
     ``Service`` and a ``Caller`` (``deps.get_service``,
     ``deps.get_read_caller``); the rest take the store and the viewer tier.
-    ``list_profiles`` returns a ``Response`` carrying the ``rp:profileList``
-    envelope, not a list of models.
+    ``list_profiles`` returns a ``Response`` carrying one paged
+    ``{results, pagination}`` envelope, not a list of models.
+
+Paging
+    ``api.paging``: the one list envelope (``Paged``, ``Pagination``), the
+    page-based and token-based request dependencies, ``paginate`` and
+    ``reject_unknown_params``. A host's own list routes use these so every
+    list on one server pages the same way.
 
 Service layer
     ``Service`` and its functions (``api.service``) hold every permission
@@ -79,6 +85,17 @@ from ._projection import (
 from .app import create_app
 from .caller import ANONYMOUS, Caller
 from .hooks import Hooks
+from .paging import (
+    Paged,
+    PageRequest,
+    Pagination,
+    page_params,
+    page_request,
+    paged_from_sql,
+    paginate,
+    reject_unknown_params,
+    sql_window,
+)
 from .routers._routers import edit_router, public_router, router
 from .routers.generative import ask_profile, innovate_profile, review_profile, riff_profile
 from .routers.read import (
@@ -95,6 +112,9 @@ __all__ = [
     "ANONYMOUS",
     "Caller",
     "Hooks",
+    "PageRequest",
+    "Paged",
+    "Pagination",
     "Service",
     "artifact_visible",
     "ask_profile",
@@ -108,7 +128,12 @@ __all__ = [
     "list_papers",
     "list_profiles",
     "metadata_payload",
+    "page_params",
+    "page_request",
+    "paged_from_sql",
+    "paginate",
     "public_router",
+    "reject_unknown_params",
     "review_profile",
     "riff_profile",
     "router",
@@ -116,5 +141,6 @@ __all__ = [
     "served_document",
     "served_document_bytes",
     "service_error_response",
+    "sql_window",
     "withheld",
 ]

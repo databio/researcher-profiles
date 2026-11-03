@@ -30,19 +30,18 @@ def client(root, make_api_client):
 @pytest.mark.parametrize(
     "params, applied, rows, note",
     [
-        ({"limit": 10_000}, 100, 100, False),
+        ({"page_size": 10_000}, 100, 100, True),
         ({}, 20, 20, False),
-        ({"limit": 0}, 1, 1, False),
+        ({"page_size": 0}, 1, 1, False),
         ({"ids": ",".join(f"p{i:03d}" for i in range(25))}, 20, 20, True),
     ],
     ids=["huge", "default", "zero", "row-batch"],
 )
 def test_the_page_size_is_clamped_and_reported(client, params, applied, rows, note):
     page = client.get(f"/api/v1/profiles/{SLUG}/papers", params=params).json()
-    assert page["limit_applied"] == applied
-    assert len(page["items"]) == rows
-    if note:
-        assert page["note"]
+    assert page["pagination"]["page_size"] == applied
+    assert len(page["results"]) == rows
+    assert bool(page.get("note")) is note
 
 
 def test_a_summary_batch_reads_at_most_twenty_and_names_the_rest(client):

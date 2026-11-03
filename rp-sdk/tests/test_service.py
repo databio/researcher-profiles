@@ -208,8 +208,8 @@ class TestReads:
 
     def test_a_foreign_cursor_is_invalid(self, service):
         with pytest.raises(Invalid) as e:
-            svc.list_papers(service, Caller(is_operator=True), SLUG, cursor="bm90LWEtY3Vyc29y")
-        assert e.value.code == "cursor_mismatch"
+            svc.list_papers(service, Caller(is_operator=True), SLUG, page_token="bm90LWEtY3Vyc29y")
+        assert e.value.code == "page_token_mismatch"
 
 
 class TestStoreFor:

@@ -84,45 +84,63 @@ server MAY never return this.
 These endpoints require no authentication. Responses are projected through the
 caller's viewer tier.
 
+### Lists, paging and filters
+
+Every list endpoint answers with one envelope:
+
+```json
+{"results": [...], "pagination": {...}, "note": null}
+```
+
+A list is either page-based or token-based:
+
+- **Page-based**: the caller sends `page` (from 0) and `page_size`. The
+  response has `pagination = {page, page_size, total, total_pages}`. Walk
+  `page` until `page + 1 >= total_pages`.
+- **Token-based**: the caller sends `page_token` and `page_size`. The
+  response has `pagination = {page_size, total, next_page_token}`. Pass
+  `next_page_token` back as `page_token` until it is `null`.
+
+A server MUST clamp an oversized `page_size` to the route's maximum, not
+refuse it. `pagination.page_size` is the size actually used, and `note` says
+when it was lowered. `page_size` below 1 or `page` below 0 is `422`.
+
+Filters are exact matches on the field of the same name in the result row.
+Different parameters AND together; a repeated parameter ORs its values. A
+query parameter the route does not know is `400` with code
+`invalid_argument`, never silently ignored. A page-based list can shift if
+the data changes between pages.
+
+**To read one profile by ORCID, call `GET /profiles/{orcid}`; do not list
+and scan.**
+
 ### GET /profiles
 
-List all visible profiles in
-[`rp:profileList`](static-api.md#8-profile-lists) format, the same envelope
-used by static servers, so consumers can treat both interchangeably.
+The profiles this caller may see, in slug order. Page-based: `page_size`
+defaults to 100, at most 1000.
 
-**Response 200:**
+**Query filters:** `rid` (repeatable; any of these identities, each an ORCID
+or `local:` id, else `400`), `clinical` (boolean), `affiliation` (exact after
+trimming, ignoring case).
+
+**Response 200:** `{results, pagination, note}`. This is not the
+[`rp:profileList`](static-api.md#8-profile-lists) envelope; the static
+`profiles.json` file keeps that format. Each row in `results`:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `rp:profileList` | string | Format version string |
-| `name` | string | Server or organization name |
-| `url` | string | Canonical URL of this listing |
-| `updated` | string | ISO 8601 timestamp of last change |
-| `profiles` | array | Profile entries (see below) |
-
-Each entry in `profiles` is an object with `url` (the profile's base URL)
-and optional enrichment fields that a dynamic server MAY include:
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `url` | string | REQUIRED | Profile base URL, from which `profile.jsonld` and every relative `contentUrl` resolve |
-| `name` | string | RECOMMENDED | Display name |
-| `slug` | string | | Profile identifier |
-| `rid` | string \| null | | The researcher ID this profile describes |
-| `level` | string | | `lite`, `full`, or `deep` |
-| `affiliation` | string \| null | | |
-| `field` | string \| null | | |
-| `paper_count` | integer | | Number of papers |
-| `summary_count` | integer | | Papers with a summary |
-| `fulltext_pct` | float | | Percentage with downloaded full text |
-| `contaminated_count` | integer | | Papers flagged as contaminated |
-
-A static server serves the same format as a `profiles.json` file with entries
-as plain URL strings or `{url, name}` objects. A dynamic server enriches
-entries with summary fields. Consumers MUST accept both forms.
-
-Nested lists (`{list: ...}`) are also valid entries, per the
-[profile list](static-api.md#8-profile-lists) format.
+| `url` | string | Profile base URL, from which `profile.jsonld` and every relative `contentUrl` resolve |
+| `slug` | string | Profile identifier |
+| `rid` | string \| null | The researcher ID this profile describes |
+| `name` | string | Display name |
+| `level` | string | `lite`, `full`, or `deep` |
+| `affiliation` | string \| null | |
+| `field` | string \| null | |
+| `paper_count` | integer | Number of papers |
+| `summary_count` | integer | Papers with a summary |
+| `fulltext_pct` | float | Percentage with downloaded full text |
+| `contaminated_count` | integer | Papers flagged as contaminated |
+| `clinical` | boolean | True when this caller can see a clinical facet (therapeutic areas, site capabilities, or a trials source) |
 
 ### GET /profiles/{slug}
 
@@ -183,13 +201,14 @@ header reports the artifact's effective privacy tier.
 
 ### GET /profiles/{slug}/papers
 
-One page of the profile's papers. Query: `limit` (default 20, at most 100),
-`cursor`, `q`, `year_min`, `missing_ids`, `has_text`, `ids`. A server MUST
-clamp an oversized `limit` and report `limit_applied`, not refuse it.
+The profile's papers, token-based. Query: `page_size` (default 20, at most
+100), `page_token`, `q`, `year_min`, `missing_ids`, `has_text`, `ids`.
 
-**Response 200:** `{items, total, limit_applied, next_cursor, has_more,
-filters_applied}`, plus `search_mode_used` and `note` when `q` was given. Each
-item:
+**Response 200:** `{results, pagination, filters_applied, note}`, plus
+`search_mode_used` when `q` was given. Without `q`, rows are newest first.
+With `q`, rows are ranked and returned as one top-N page: `pagination` has no
+`total` and no `next_page_token`, and a `page_token` sent with `q` is `400`.
+`ids` (a comma list) reads those rows only, as one page. Each row:
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -200,8 +219,14 @@ item:
 | `summary`, `text` | object | Sizes for this caller, as in `parts` above |
 | `version` | string | The paper's version token for edits |
 
-A `cursor` is bound to the filters it was made under; reusing it with others
-returns `400`.
+A `page_token` is bound to the filters it was made under; reusing it with
+others returns `400` with code `page_token_mismatch`.
+
+### GET /profiles/{slug}/seed-papers
+
+The interest seed papers (papers that define the person's interests, never
+works they wrote), in `seed_id` order. Page-based: `page_size` defaults to
+100, at most 500. **Response 200:** `{results, pagination, note}`.
 
 ### GET /profiles/{slug}/papers/{paper_id}
 
@@ -734,7 +759,7 @@ Each `artifacts` entry:
 |-------|------|-------------|
 | `content_url` | string | Identifies the artifact |
 | `role` | string \| null | Manifest role |
-| `name` | string \| null | Display name |
+| `name` | string | Display name |
 | `paper_id` | string \| null | Set for per-paper artifacts |
 | `declared` | string | The tier written on the manifest entry |
 | `effective` | string | What governs after the profile default and the derivation rule |
