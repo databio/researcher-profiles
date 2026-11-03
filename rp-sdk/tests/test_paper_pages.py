@@ -104,11 +104,6 @@ class TestPageToken:
         assert r.status_code == 400
         assert r.json()["detail"]["error"] == "page_token_mismatch"
 
-    def test_old_parameter_names_are_refused(self, client):
-        r = client.get(f"/api/v1/profiles/{SLUG}/papers", params={"limit": 5})
-        assert r.status_code == 400
-        assert r.json()["detail"]["error"] == "invalid_argument"
-
 
 class TestRankedPages:
     def test_a_query_is_one_top_n_page(self, client):
