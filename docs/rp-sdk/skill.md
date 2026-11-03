@@ -198,7 +198,6 @@ the same way:
 |---|---|
 | `researcher_profiles/skill/SKILL.md` | Reading and answering questions from a published profile (`rp skill --install`) |
 | `skills/publish-profile/SKILL.md` | Publishing profiles as a static site on Cloudflare, S3, nginx, or GitHub Pages |
-| `skills/profile-agent/SKILL.md` | Acting as a researcher's agent with a scoped `rpa_` key |
 
 ## Where to look next
 

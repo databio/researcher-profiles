@@ -27,7 +27,7 @@ rp <subcommand> [options]
 | [`listr`](#listr) | List profiles available on a registry | `[client]` |
 | [`login`](#login) | Log in to a profile server and store a push key | `[client]` |
 | [`logout`](#logout) | Forget the stored login | core |
-| [`whoami`](#whoami) | Show who the stored login is and what it may push | `[client]` |
+| [`whoami`](#whoami) | Show who the stored login is, if the server says | core |
 | [`skill`](#skill) | Print or install the consumer skill for reading published profiles | core |
 | [`where`](#where) | Print the profile directory for a rid or a slug | core |
 | [`mint-local-id`](#mint-local-id) | Mint a `local:` rid for a researcher who has no ORCID | core |
@@ -35,8 +35,6 @@ rp <subcommand> [options]
 | [`manifest`](#manifest) | Show or regenerate a profile's manifest | core |
 | [`sign`](#sign) | Sign a profile's `profile.jsonld` with a `key_signature` proof | `[signing]` |
 | [`sign-verify`](#sign-verify) | Verify the `key_signature` proof(s) on a `profile.jsonld` against a JWK Set | `[signing]` |
-| [`agent`](#agent) | Agent credential and identity commands | `[client]` |
-| [`profile`](#profile) | Agent profile editing (pull, diff, push, visibility) | `[client]` |
 
 The table above lists every verb the parser registers. Every row has a
 dedicated section below with its flags, exit codes, and a worked example.
@@ -423,7 +421,7 @@ rp push <profile> [--root DIR] [--url BASE_URL] [--slug SLUG] [--token TOKEN]
 | `--token` | Bearer token. Default: `RESEARCHER_PROFILES_TOKEN`, else the stored login's key for that server. |
 | `--dry-run` | Print what the push would add, change, remove, and keep, then stop. Uploads nothing. |
 | `--force` | Push even though it removes files the server holds. |
-| `--only PATH ...` | Send only these profile-relative files. `profile.jsonld` travels too, but its manifest is taken from the server, so nothing else changes. Inline sections (name, expertise) still come from the local document; to change one field only, use [`rp work patch`](#work). Implies `--merge`. |
+| `--only PATH ...` | Send only these profile-relative files. `profile.jsonld` travels too, but its manifest is taken from the server, so nothing else changes. Inline sections (name, expertise) still come from the local document; to change one field only, use the server's metadata edit endpoint ([`PATCH /profiles/{slug}/metadata`](../../rp-spec/dynamic-api.md#patch-profilesslugmetadata)). Implies `--merge`. |
 | `--merge` | Keep every server-side file this push does not carry. |
 | `--prune` | Delete every server-side file this push does not carry, including withheld fulltext and the index. Cannot combine with `--only` or `--merge`. |
 | `--include-fulltext` | Also upload `sources/papers/` extracted fulltext. Off by default. |
@@ -473,24 +471,25 @@ pushed jane-doe: +0 ~1 -0 (kept 10) name=Jane A. Doe, level=lite, indexed=True
 server now holds 11 artifacts: citations 1, expertise 1, paper_fulltext 2, paper_summary 5, soul 1, works 1
 ```
 
-**Pushing with an API key.** An `rpa_` key (or app key) without the "Replace
-whole profiles" switch may still push to a profile it may write. The server
+**Pushing with an API key.** On a server with
+[per-part access](../../rp-spec/authentication.md#per-part-access), a key that may
+not replace whole profiles may still push to a profile it may write. The server
 compares the push with the profile it replaces, part by part, and lands it only
 if every part it changes is Write in the key's table. Otherwise it writes
 nothing and `rp push` names what is in the way:
 
 ```console
-$ rp push profiles/jane-doe --url http://localhost:8109 --token rpa_...
+$ rp push profiles/jane-doe --url http://localhost:8109 --token <key>
 push refused [insufficient-access]: this key may not change every part this push touches
   needs Write on: summary
-  next: --only <file> to send only parts you may write, or have the account holder widen this key on the Privacy page
+  next: --only <file> to send only parts you may write, or have the account holder widen this key's access
 ```
 
 A change no part covers (what the public sees, a field such as
 `provenance_note`) is listed on its own `needs "Replace whole profiles" for:`
 line: only a key with that switch may make it. `rp push --only <file>` sends one file and keeps the
-rest, so a key with Write on `paper_summary` can update one summary. See
-[`rp agent whoami`](#agent) for the key's table.
+rest, so a key with Write on `paper_summary` can update one summary. The
+server says what the key's table holds; a host plugin for `rp` may print it.
 
 **Refusals.** Every refusal is one `push refused [<code>]: <what>` line, then any
 paths or parts involved, then a `next:` line with the flag or command to run.
@@ -901,7 +900,7 @@ ways:
   own over SSH (`SSH_CONNECTION` or `SSH_TTY` set), on Linux with no display
   (no `DISPLAY` or `WAYLAND_DISPLAY`), when it cannot open a browser, and when
   the server offers no browser sign-in, as long as the server offers a login
-  code (Prosopia does). Without one, `rp` prints the sign-in link instead and
+  code. Without one, `rp` prints the sign-in link instead and
   waits for you to paste back the address the browser ends on.
 
 The login code is snapgate's shared OAuth client, vendored inside `rp-sdk`; it
@@ -917,7 +916,7 @@ rp login [server] [--label NAME] [--device] [--no-browser] [--json]
 | Argument / flag | Default | Description |
 |---|---|---|
 | `server` | the server most recently logged in to | Server base URL, e.g. `https://profiles.example.org`. |
-| `--label NAME` | the machine's hostname | Name for this machine on the approval page and the server's Privacy page ("rp CLI on NAME"). |
+| `--label NAME` | the machine's hostname | Name for this machine on the server's approval page and its list of logins ("rp CLI on NAME"). |
 | `--device` | off (automatic over SSH or with no display) | Approve with a link and code on any device. |
 | `--no-browser` | off | Do not open a browser here. Open the printed link in a browser on any computer; when it ends on a page that does not load (`127.0.0.1`), paste that page's address back and press Enter. |
 | `--json` | off | Emit `{url, orcid, name}` as JSON. |
@@ -952,7 +951,7 @@ when the access token expires, where to renew it, and who you are:
 {"version": 1, "logins": {"https://profiles.example.org": {
   "server": "https://profiles.example.org", "issuer": "https://profiles.example.org",
   "client_id": "rp-cli", "token_endpoint": "https://profiles.example.org/oauth/token",
-  "access_token": "rpa_...", "access_expires_at": 1767225600, "refresh_token": "rpr_...",
+  "access_token": "...", "access_expires_at": 1767225600, "refresh_token": "...",
   "extra": {"orcid": "0000-0002-1825-0097", "name": "Jane Doe"}, "ended_at": null}}}
 ```
 
@@ -962,9 +961,9 @@ has expired, and once more if the server answers `401`; each renewal saves the
 new refresh token (the server issues a new one every time) with an atomic
 write under a lock, so two `rp` commands at once do not trip over each other.
 Once it is stored, [`push`](#push), `rp install`, `rp listr` and
-[`whoami`](#whoami) need no flags at all. The server lists the login on its
-Privacy page as "rp CLI on <label>", where you can revoke it; logging in again
-from the same machine replaces the old one.
+[`whoami`](#whoami) need no flags at all. A server SHOULD list the login
+where it lists your credentials ("rp CLI on <label>"), so you can revoke it;
+logging in again from the same machine replaces the old one.
 
 A `credentials.json` written by an older `rp` is no longer read: commands say
 it is from an older version and to run `rp login`, which replaces it.
@@ -983,8 +982,8 @@ again.`, and the file keeps a note of when and why it ended.
 **Exit codes.** `0` ok · `1` the server refused, you declined, the request expired or timed out, or the server was unreachable
 · `2` no server URL was given and none is stored.
 
-Needs no extra. With the `[client]` extra, `rp` also asks the server who you
-are (`whoami`) and names you in the message.
+Needs no extra. When the server's metadata lists a `whoami_endpoint`, `rp`
+asks it who you are and names you in the message.
 
 ---
 
@@ -1004,7 +1003,7 @@ logged out of https://profiles.example.org; removed it from /home/jane/.config/r
 ```
 
 If the server cannot be reached, or offers no revocation endpoint, the login is
-deleted anyway and `rp` says to revoke "rp CLI" on the server's Privacy page.
+deleted anyway and `rp` says to revoke "rp CLI" in your account settings there.
 Exits `0` whether or not a login was there; with nothing stored it prints
 `not logged in (nothing stored)`.
 
@@ -1012,8 +1011,10 @@ Exits `0` whether or not a login was there; with nothing stored it prints
 
 ## whoami
 
-Ask a server who the stored token belongs to and which profiles it may push
-(`GET /api/v1/manage/whoami`).
+Ask a server who the stored token belongs to. `rp` calls the `whoami_endpoint`
+the server lists in its OAuth metadata (see the spec's
+[command-line login](../../rp-spec/dynamic-api.md#14-command-line-login)); a
+server that lists none does not say.
 
 ```
 rp whoami [--url BASE_URL] [--token TOKEN] [--json]
@@ -1028,127 +1029,14 @@ rp whoami [--url BASE_URL] [--token TOKEN] [--json]
 ```console
 $ rp whoami
 https://profiles.example.org: Jane Doe (0000-0002-1825-0097)
-scopes: push_own, read
 can push:
   jane-doe	0000-0002-1825-0097	owner
 ```
 
-**Exit codes.** `0` ok · `1` the server rejected the token or could not be
-reached · `2` nothing is logged in and no `--url`/`--token` was given.
+The `can push` list appears when the server's answer has a `profiles` list.
 
-Requires the `[client]` extra.
+**Exit codes.** `0` ok · `1` the server rejected the token, could not be
+reached, or lists no `whoami_endpoint` · `2` nothing is logged in and no
+`--url`/`--token` was given.
 
----
-
-## agent
-
-Introspect an **agent** credential: the `rpa_` API key an assistant holds to
-act for one person's account on one server, stored in `credentials.toml`.
-Distinct from [`login`](#login), which handles a person's own push login.
-
-```
-rp agent whoami [--host NAME] [--json]
-rp agent config [--host NAME]
-```
-
-| Subcommand | Calls | Prints |
-|---|---|---|
-| `whoami` | `GET /api/v1/manage/agent/whoami` | The key's label and handle, its owner, its parts table (which parts it may read and write), the "Replace whole profiles" switch, every profile the account reaches with the parts the key may write there, and the acts no key may ever do. |
-| `config` | nothing (local) | Which credential resolved, and from where. |
-
-| Option | Description |
-|---|---|
-| `--host NAME` | Which `[hosts.<name>]` block in `credentials.toml` to use. Default: the file's `default =`, or `$RESEARCHER_PROFILES_AUTH_HOST`. |
-| `--json` | (`whoami`) Emit the server's response verbatim. |
-
-The credential resolves in four steps; the first hit wins
-(`researcher_profiles.agent.resolve_credential`):
-
-1. Explicit `key` and `url` arguments passed to `resolve_credential` in Python.
-   The command line has no `--key` / `--url`; it selects a host with `--host`.
-2. The `RESEARCHER_PROFILES_AGENT_KEY` and `RESEARCHER_PROFILES_API_URL` environment variables, both set.
-3. The nearest `.env` walked up from the working directory, same two names.
-4. `~/.config/researcher-profiles/credentials.toml`, which must be mode `0600`.
-
-A key's authority is one table: a level (`none`, `read`, or `write`) for each
-part of a profile (sections such as `summary` and `background`, files such as
-`paper_summary` and `cv`, and `lenses`), plus the "Replace whole profiles"
-switch. The account holder sets both on the server's Privacy page; nothing
-about them is stored in `credentials.toml`. A part `whoami` does not list is
-`none`.
-
-```console
-$ rp agent whoami
-Agent:   summary bot (agent_1a2b3c4d5e6f)
-Owner:   Jane Doe (0000-0002-1825-0097)
-Write:   paper_summary
-Read:    background, cv, expertise, focus, summary, works
-None:    every other part
-Replace whole profiles: off
-Profiles:
-  jane-doe (owner, published): writes paper_summary
-Never allowed:
-  publish: Publishing is a decision by the person the profile describes.
-  unpublish: Same decision, other direction.
-  change what the public sees: Only the owner decides what the public may read.
-  delete: Only the profile owner may delete a profile.
-  grant: Only the account holder may give access, including making another key.
-```
-
-**Exit codes.** `0` ok · `1` no credential resolved, or the server refused
-· `2` no subcommand was given.
-
-Requires the `[client]` extra.
-
----
-
-## profile
-
-Edit a profile through an agent credential, as a round trip through one local
-file. The target profile is not a command-line argument: it comes from
-`profile =` in the resolved `[hosts.<name>]` block of `credentials.toml`.
-
-```
-rp profile pull [-o FILE] [--host NAME]
-rp profile diff <file> [--host NAME]
-rp profile push <file> [--if-match HASH] [--force] [--dry-run] [--host NAME]
-rp profile visibility get|set [--tier TIER] [--host NAME]
-```
-
-| Option | Description |
-|---|---|
-| `-o`, `--output FILE` (`pull`) | Where to write the document. Default: `profile.md`. |
-| `--if-match HASH` (`push`) | Base hash to send instead of the one in the frontmatter. |
-| `--force` (`push`) | Send no `base_hash`, so the write is last-writer-wins. |
-| `--dry-run` (`push`) | Print what would change and send nothing. |
-| `--tier TIER` (`visibility set`) | `public`, `limited`, or `private`. Required for `set`. |
-| `--host NAME` | Which `[hosts.<name>]` block to use. |
-
-The pull document is YAML frontmatter followed by the SOUL narrative as the
-body. The frontmatter carries `slug`, `rid`, `base_hash`, and every editable
-metadata field the server returned; the editable set is normative in
-[`PATCH /profiles/{slug}/metadata`](../../rp-spec/dynamic-api.md#patch-profilesslugmetadata).
-
-```console
-$ rp profile pull -o profile.md
-Wrote profile.md
-base_hash: sha256:6b1c...
-$ rp profile diff profile.md
-Would change: summary, soul
-$ rp profile push profile.md
-```
-
-`push` sends the frontmatter's `base_hash` by default, so an owner edit that
-landed since the pull returns `409` rather than silently overwriting it.
-Re-pull and re-apply, or pass `--force` to overwrite anyway. Changed
-metadata and the body go together, in one `PATCH /api/v1/profiles/{slug}/metadata`
-(the body as its `soul` field); visibility is never part of a push, only of
-`rp profile visibility set`, and an agent key may narrow a tier but never widen
-one.
-
-**Exit codes.** `0` ok · `1` no credential resolved, no `profile =` configured,
-the file is missing, or the server refused (including a `403` for a missing
-scope, which you should report rather than retry) · `2` no subcommand was
-given, or `set` was called with no `--tier`.
-
-Requires the `[client]` extra.
+Needs no extra.

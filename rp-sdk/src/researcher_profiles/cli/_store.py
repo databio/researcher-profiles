@@ -108,7 +108,7 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
             f"rp db pull {_EG_SLUG} --to ./pulled",
         )
     )
-    d_pull.add_argument("ref", help="A slug, or #<profile_id>")
+    d_pull.add_argument("ref", help="A slug, a rid, or #<profile_id>")
     d_pull.add_argument("--to", default=None, help="Destination directory (default: ./<slug>)")
     d_pull.add_argument(
         "--with-build",
@@ -132,7 +132,7 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
     d_rm = _db_common(
         add_subcommand(db_sub, "rm", "Delete a profile and every child row", f"rp db rm {_EG_SLUG}")
     )
-    d_rm.add_argument("ref", help="A slug, or #<profile_id>")
+    d_rm.add_argument("ref", help="A slug, a rid, or #<profile_id>")
 
 
 def _cmd_graph(args: argparse.Namespace) -> int:
@@ -260,9 +260,6 @@ def _db_list(store, url: str, args: argparse.Namespace) -> int:
                             "profile_id": r.profile_id,
                             "rid": r.rid,
                             "slug": r.slug,
-                            "owner_kind": r.owner_kind,
-                            "owner_principal_id": r.owner_principal_id,
-                            "is_self": r.is_self,
                             "name": r.name,
                             "level": r.level,
                             "date_modified": r.date_modified,
@@ -282,7 +279,7 @@ def _db_list(store, url: str, args: argparse.Namespace) -> int:
 
 
 def _db_about(store, url: str, args: argparse.Namespace) -> int:
-    """List the records about one person, the self profile first."""
+    """List the records about one person, oldest first."""
     refs = store.profiles_about(args.rid)
     if args.as_json:
         print(
@@ -295,13 +292,6 @@ def _db_about(store, url: str, args: argparse.Namespace) -> int:
                             "profile_id": r.profile_id,
                             "rid": r.rid,
                             "slug": r.slug,
-                            "owner": None
-                            if r.owner is None
-                            else {
-                                "kind": r.owner.kind,
-                                "principal_id": r.owner.principal_id,
-                                "is_self": r.owner.is_self,
-                            },
                         }
                         for r in refs
                     ],
@@ -312,9 +302,7 @@ def _db_about(store, url: str, args: argparse.Namespace) -> int:
     else:
         print(f"# {url}: {len(refs)} profile(s) about {args.rid}")
         for r in refs:
-            owner = "-" if r.owner is None else f"{r.owner.kind}:{r.owner.principal_id}"
-            mark = " (self)" if r.owner is not None and r.owner.is_self else ""
-            print(f"#{r.profile_id:<6} {r.slug:<24} {owner}{mark}")
+            print(f"#{r.profile_id:<6} {r.slug:<24} {r.rid}")
     return EXIT_OK
 
 

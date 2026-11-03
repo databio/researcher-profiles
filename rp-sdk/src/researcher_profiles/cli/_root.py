@@ -6,7 +6,6 @@ import sys
 from collections.abc import Callable
 
 from . import (
-    _agent,
     _auth,
     _corpus,
     _format,
@@ -16,7 +15,6 @@ from . import (
     _sign,
     _skill,
     _store,
-    _work,
 )
 from ._shared import EXIT_ERROR
 
@@ -31,7 +29,7 @@ CLI_PLUGIN_GROUP = "researcher_profiles.cli_plugins"
 #: The SDK's own verb groups, in the order ``rp --help`` lists them. Plugins
 #: register between the two tuples.
 _GROUPS_BEFORE_PLUGINS = (_corpus, _store, _format, _publish, _registry, _auth, _skill)
-_GROUPS_AFTER_PLUGINS = (_sign, _agent, _work)
+_GROUPS_AFTER_PLUGINS = (_sign,)
 _GROUPS = _GROUPS_BEFORE_PLUGINS + _GROUPS_AFTER_PLUGINS
 
 #: The SDK's own verbs: one name -> one handler returning an exit code.

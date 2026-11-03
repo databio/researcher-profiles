@@ -308,7 +308,11 @@ class TestFetchNewWorks:
         client, calls = self._stub(lambda p: {"results": [work], "meta": {"next_cursor": "more"}})
         orcids = [f"0000-0000-0000-{i:04d}" for i in range(120)]
         out = fetch_new_works(
-            client, since="2026-01-01", topics=None, seed_work_ids=None, author_orcids=orcids,
+            client,
+            since="2026-01-01",
+            topics=None,
+            seed_work_ids=None,
+            author_orcids=orcids,
             max_pages=3,
         )
         filters = [c["filter"] for c in calls]

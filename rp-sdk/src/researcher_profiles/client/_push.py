@@ -108,12 +108,12 @@ class PushInsufficientAccess(PushRefused):
         if only:
             fix = (
                 "profile.jsonld travels with --only, so its sections must match the "
-                "server's; or have the account holder widen this key on the Privacy page"
+                "server's; or have the profile's owner widen this key's access"
             )
         else:
             fix = (
                 "--only <file> to send only parts you may write, or have the account "
-                "holder widen this key on the Privacy page"
+                "holder widen this key's access"
             )
         super().__init__(
             "this key may not change every part this push touches", fix=fix, details=details

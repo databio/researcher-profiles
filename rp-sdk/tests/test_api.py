@@ -22,7 +22,7 @@ from researcher_profiles.client import (
 from researcher_profiles.embeddings.cache import SearchHit
 from researcher_profiles.models.results import Match, MatchEvidence
 from researcher_profiles.schema import ProfileDocument, Proof
-from researcher_profiles.store import FilesystemProfileStore, Ownership
+from researcher_profiles.store import FilesystemProfileStore
 from researcher_profiles.store.db import ProfileRow
 
 from .factories import (
@@ -123,30 +123,36 @@ class TestServerCore:
         # ProfileSummary surfaces the depth tier; fixture has no level -> "full".
         assert me["level"] == "full"
 
-    def test_a_rid_names_its_one_record_unless_the_host_hook_decides(self, api_client):
-        """A rid is not a store ref. With no ``hooks.resolve_ref`` (a host like village), the
-        one record about that person answers; an installed hook replaces that default."""
+    def test_a_rid_names_its_record(self, api_client):
+        """A rid is a ref: the store resolves it to the one record about that person."""
         rid = api_client.get(f"/api/v1/profiles/{SLUG}").json()["rid"]
         r = api_client.get(f"/api/v1/profiles/{rid}")
         assert r.status_code == 200, r.text
         assert r.json()["slug"] == SLUG
         assert api_client.get("/api/v1/profiles/0000-0002-9999-999X").status_code == 404
-        api_client.app.state.hooks.resolve_ref = lambda store, ref: None
-        assert api_client.get(f"/api/v1/profiles/{rid}").status_code == 404
 
-    def test_a_rid_with_several_records_is_a_404_without_a_host_hook(
+    def test_a_rid_with_several_records_is_the_host_hooks_call(
         self, empty_sql_store, make_api_client
     ):
-        """Which record a rid means is the host's call; not a 409, which would confirm hidden records."""
-        for slug, owner in (
-            ("ada", Ownership("user", 1, is_self=True)),
-            ("ada-curated", Ownership("team", 7)),
-        ):
+        """On a store that keeps several records about one person, a bare rid is a 404
+        (not a 409, which would confirm hidden records) unless ``hooks.resolve_ref`` decides."""
+        from researcher_profiles.store.sql import SqlProfileStore
+
+        store = SqlProfileStore(empty_sql_store.engine, one_profile_per_rid=False)
+        for slug in ("ada", "ada-curated"):
             doc = ProfileDocument(name="Ada", rid=_PROOF_ORCID, provenance="third_party")
-            empty_sql_store.create(doc, slug=slug, owner=owner)
-        c = make_api_client(empty_sql_store)
+            store.create(doc, slug=slug)
+        c = make_api_client(store)
         assert c.get("/api/v1/profiles/ada").status_code == 200
         assert c.get(f"/api/v1/profiles/{_PROOF_ORCID}").status_code == 404
+        c.app.state.hooks.resolve_ref = lambda st, ref: (
+            "ada-curated" if ref == _PROOF_ORCID else None
+        )
+        assert c.get(f"/api/v1/profiles/{_PROOF_ORCID}").json()["slug"] == "ada-curated"
+
+    def test_a_host_adds_record_fields(self, api_client):
+        api_client.app.state.hooks.record_fields = lambda prof: {"host_key": prof.slug.upper()}
+        assert api_client.get(f"/api/v1/profiles/{SLUG}").json()["host_key"] == SLUG.upper()
 
     def test_profile_detail(self, api_client):
         r = api_client.get(f"/api/v1/profiles/{SLUG}")

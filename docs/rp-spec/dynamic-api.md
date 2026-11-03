@@ -33,7 +33,6 @@ The dynamic API categorizes routes by authentication requirement:
 | Search, match, persona, upload, archive, identity resolution | Yes |
 | Owner edit endpoints | Yes (owner-level) |
 | Command-line login (the authorize, device, token and revocation endpoints) | No (see [section 14.2](#142-command-line-login)) |
-| Management endpoints (`/api/v1/manage/*`) | Varies by endpoint (see [section 14](#14-management-api)) |
 
 A server MAY run in **open mode** (no token configured), in which case all
 routes accept any request.
@@ -337,8 +336,8 @@ nothing is spliced and the incoming manifest stands alone.
 | `spliced` | integer | Manifest entries the server added back for kept files (see Manifest splicing). Nonzero means the uploaded `profile.jsonld` was not the whole index |
 | `manifest_counts` | object | `{role: count}` over the manifest the server holds after the commit (`other` for entries with no role): what the profile now contains, not what the upload offered |
 | `mode` | string | The `mode` the upload ran under |
-| `kept_owner_fields` | array \| null | Fields the server kept from the owner's hand edits instead of the pushed value; `null` when the server does not protect owner edits |
-| `stripped_fields` | array \| null | Fields the server removed from the pushed document instead of refusing the push; `null` when the server strips nothing from pushes to this profile |
+A server may add its own fields to this response; a client ignores fields it
+does not know.
 
 `kept`, `spliced`, `manifest_counts` and `mode` describe archive uploads; a
 JSON upload returns their defaults.
@@ -346,10 +345,11 @@ JSON upload returns their defaults.
 **Status codes:** `200`, `400` (validation failure), `401`, `403` (see
 below), `413` (size cap exceeded).
 
-**Uploads by an app or account key.** A caller holding `push`, or `push_own`
-on a profile its person may write, replaces the profile outright. A server
+**Uploads by an app or key.** A caller allowed to
+[replace whole profiles](authentication.md#replacing-whole-profiles) (for
+example with an upload scope such as `push`) replaces the profile outright. A server
 implementing [per-part access](authentication.md#per-part-access) MUST also
-accept an upload from an app or account key that holds neither, when the
+accept an upload from an app or key without that power, when the
 target profile exists, the caller may write it, and the caller's table holds
 `write` on at least one part. Such an upload:
 
@@ -775,7 +775,7 @@ optimistic concurrency as metadata edits.
 | `artifacts_changed` | integer | How many manifest artifacts were re-tiered |
 | `content_hash` | string \| null | The hash AFTER this write, usable as the next `base_hash` |
 
-No app or account key may call this endpoint: it answers `403` with
+No app or key may call this endpoint: it answers `403` with
 `detail.error` `"not_delegable"`, whatever the key's table. What the public
 sees is the owner's decision alone.
 
@@ -862,16 +862,15 @@ machine-readable error code beyond the status.
 
 ---
 
-## 14. Management API
+## 14. Command-line login
 
-An OPTIONAL tier for servers that host profiles on behalf of the people they
-describe. It covers three things a file server has no need of: getting a
-credential onto a command line, and telling a caller what their credential is
-and what it may read and write.
+An OPTIONAL section for servers that host profiles on behalf of the people they
+describe: how a person gets a credential onto a command line (`rp login`).
+A file server has no need of it.
 
-A server MAY implement the management tier without the dynamic API, and vice
-versa. A server MAY offer further management endpoints beyond these four; they
-are outside this specification.
+A server MAY offer command-line login without the dynamic API, and vice
+versa. Whatever else a server offers to manage accounts and keys is outside
+this specification.
 
 ### 14.1. Finding the endpoints
 
@@ -895,6 +894,7 @@ and SHOULD include:
 | `authorization_endpoint` | Absolute URL of the browser sign-in page (the loopback flow) |
 | `code_challenge_methods_supported` | A list containing `S256` |
 | `revocation_endpoint` | Absolute URL of an [RFC 7009](https://www.rfc-editor.org/rfc/rfc7009) revocation endpoint |
+| `whoami_endpoint` | Extension. Absolute URL a client may `GET` with the new access token to learn who signed in (see [the token response](#the-token-response)) |
 
 A client reads every endpoint from this document and MUST NOT assume their
 paths. It MUST check that `issuer` equals the base URL it was given (RFC 8414
@@ -909,11 +909,6 @@ every unknown path with `200` and an HTML page), treats the server as offering
 no command-line login, reports that, and MUST NOT retry. A server with no
 `authorization_endpoint` offers only the device flow.
 
-The identity echo endpoints ([section 14.3](#143-identity-echo)) are at fixed
-paths under `/api/v1/manage/`, unlike the `/api/v1/` prefix in
-[section 1](#1-url-prefix). A server that mounts them elsewhere is not
-conforming.
-
 ### 14.2. Command-line login
 
 Command-line login is OAuth 2.0 for a native app
@@ -921,10 +916,8 @@ Command-line login is OAuth 2.0 for a native app
 registered **public client**: `client_id` is `rp-cli`, it has no secret, and a
 server that offers command-line login MUST know it. A server MUST answer any
 other `client_id` at these endpoints with `invalid_client`. The client asks
-for the scope `profiles:push`: replace whole profiles the person holds an
-`owner` or `editor` role on (the `push_own` scope of
-[the key model](authentication.md#the-key-model)), and read what the person's
-account reaches. Where this section is silent,
+for the scope `profiles:push`: upload whole profiles the person may write, and
+read what the person may read. Where this section is silent,
 [RFC 6749](https://www.rfc-editor.org/rfc/rfc6749),
 [RFC 8628](https://www.rfc-editor.org/rfc/rfc8628) and RFC 8252 apply.
 
@@ -939,10 +932,9 @@ A client signs in one of two ways. Both end at the same token response.
   open a browser, or when the server has no `authorization_endpoint`.
 
 What the client receives is a short-lived access token and a refresh token
-(RFC 6749 §5.1, §6), not a long-lived key. The access token is an account-family
-key (`rpa_`) holding `push_own`; it works on the REST endpoints a command line
-uses (pushes, `whoami`). The person SHOULD be able to see and revoke the
-login wherever the server lists their keys.
+(RFC 6749 §5.1, §6), not a long-lived key. The access token works on the REST
+endpoints a command line uses (uploads, the registry). The person SHOULD be
+able to see and revoke the login wherever the server lists their credentials.
 
 Every endpoint in this section is **unauthenticated**: this is how a caller
 with no credential gets one. Requests use
@@ -1107,14 +1099,18 @@ standard fields:
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `access_token` | string | REQUIRED | An account-family key holding `push_own`. See [the key model](authentication.md#the-key-model). |
+| `access_token` | string | REQUIRED | A bearer token acting for the person who approved, limited to `scope` |
 | `token_type` | string | REQUIRED | `"Bearer"` |
 | `expires_in` | integer | REQUIRED | Seconds the access token lives. The reference server uses one hour |
 | `refresh_token` | string | REQUIRED | Buys the next pair |
 | `scope` | string | RECOMMENDED | Granted scopes, space-separated, e.g. `"profiles:read profiles:push"` |
 
-It names no person; a client that wants to say who signed in asks
-[`GET /api/v1/manage/whoami`](#get-apiv1managewhoami).
+It names no person. A client that wants to say who signed in calls the
+`whoami_endpoint` from the metadata, when there is one, with the access token
+as a bearer token. The answer is a JSON object; a client reads `name` and
+`orcid` from its `owner` member, or from the top level when there is no
+`owner`, and ignores everything else. Without a `whoami_endpoint`, the client
+does not name the person.
 
 #### Refresh and revocation
 
@@ -1136,84 +1132,3 @@ token. A client SHOULD call it on logout.
 
 These endpoints do not use the `{"detail": ...}` body of
 [section 13](#13-error-format); they use the OAuth error body above.
-
-### 14.3. Identity echo
-
-Two endpoints answer "what is this credential". They are split by key family
-(see [the key model](authentication.md#the-key-model)) because the answers have
-different shapes.
-
-#### GET /api/v1/manage/whoami
-
-Describe a push credential: an app-family (`rpk_`) key, or the access token of
-a [command-line login](#142-command-line-login) (an account-family key).
-Requires `Authorization: Bearer <key>`.
-
-**Response 200:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `consumer` | string | REQUIRED | Stable name of the application or session holding the key |
-| `scopes` | list[string] | REQUIRED | Granted app scopes, sorted |
-| `owner` | object \| null | REQUIRED | `{orcid, name}` of the person the key was minted for, or `null` for an application key with no owning person |
-| `profiles` | array | REQUIRED | Profiles this key may write. Empty when `owner` is `null`. |
-
-Each `profiles` entry:
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `slug` | string | |
-| `rid` | string | |
-| `role` | string | `owner` or `editor` |
-
-**Status codes:** `200`; `401` when the header is missing, malformed, or the
-key is unknown, revoked, or expired.
-
-#### GET /api/v1/manage/agent/whoami
-
-Describe an account-family (`rpa_`) key: everything it may read and write.
-Requires `Authorization: Bearer <key>`. A key is expected to call this at the
-start of every session, before attempting any write, and again after a
-refusal.
-
-**Response 200:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `principal` | object | REQUIRED | The key itself (below) |
-| `owner` | object \| null | REQUIRED | `{orcid, name}` of the person whose account the key acts for |
-| `profiles` | array | REQUIRED | Every profile the account reaches (below) |
-| `parts` | object | REQUIRED | The key's [parts table](authentication.md#per-part-access): `{part: "read" \| "write"}`. A part left out is `none` |
-| `replace_profiles` | boolean | REQUIRED | Whether the key holds [Replace whole profiles](authentication.md#replace-whole-profiles) |
-| `never_delegable` | array | RECOMMENDED | [Acts no app or key may hold](authentication.md#acts-no-app-or-key-may-hold), as `{act, why}` objects, worded accurately for this key |
-
-`principal`:
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `kind` | string | `consumer` |
-| `label` | string \| null | Human label given when the key was minted |
-| `handle` | string | Stable machine identifier for this key |
-| `created_at` | string \| null | ISO 8601 |
-| `last_used_at` | string \| null | ISO 8601 |
-| `expires_at` | string \| null | ISO 8601, or null for no expiry |
-
-A server MAY add fields (for example numeric ids).
-
-Each `profiles` entry:
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `slug` | string \| null | |
-| `rid` | string | |
-| `role` | string | How the account reaches it: `owner`, `co-owner`, `editor`, or `permission` (a person granted the account a permission on their data) |
-| `writes` | list[string] | The parts the key may write here: the table's `write` parts where the account may write, else empty |
-| `published` | boolean | Present when the server tracks a publication decision |
-
-The table is the whole of the key's authority. It is not stored in the key and
-the account holder may change it at any time, so a client MUST NOT cache it
-across sessions.
-
-**Status codes:** `200`; `400` when the credential belongs to the app family;
-`401` when the header is missing or malformed, or the key is unknown, revoked,
-or expired.

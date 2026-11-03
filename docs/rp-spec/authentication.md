@@ -36,81 +36,37 @@ implement tiers treats all callers as `public`.
 When viewer tiers are active, responses SHOULD include an `X-RP-Viewer-Tier`
 header indicating the caller's effective tier.
 
-A tier is not a property of an API key. A server that implements
-[per-part access](#per-part-access) decides what a key reads from the key's
-parts table, not from a tier. The one exception: an app key (`rpk_`) MAY carry
-a minted tier that governs its reads of a profile no person has claimed, since
-no owner has set a table for it there.
+A tier is not a property of a credential. A server that implements
+[per-part access](#per-part-access) decides what a credential reads from its
+parts table, not from a tier.
 
 ---
 
-## The key model
+## Credentials and scopes
 
-A server that mints credentials SHOULD use prefixed, opaque bearer tokens so a
-key names its own family on sight. Two families are defined.
+How a server mints, stores and names its credentials is the server's business.
+A server that mints them SHOULD show a credential's plaintext exactly once,
+store only a hash of it, and reject an unknown, revoked or expired credential
+with the same response in all three cases, so probing learns nothing.
 
-| Prefix | Family | Held by | Purpose |
-|--------|--------|---------|---------|
-| `rpk_` | app | An application or a script | Read, push, and other whole-application powers |
-| `rpa_` | account | An assistant, a tool, or a person's own command line, acting for one person's whole account | Read and write, part by part, what that account reaches |
-
-Scopes name whole-application powers only. What a key may read and write of
-one profile is not a scope: it is the key's [parts table](#per-part-access).
-An `rpa_` key MUST NOT carry any app scope other than `read` and `push_own`
-(below), and a server MUST refuse a request that needs another app scope with
-[`insufficient_scope`](#insufficient-scope). On data endpoints the prefix is a
-label, never an authorization input: scopes and tables decide, and a key of
-either family is judged by what it holds. Only on
-[`GET /api/v1/manage/agent/whoami`](dynamic-api.md#get-apiv1manageagentwhoami)
-MUST a server refuse a key of the other family (an `rpk_` key) with `400`
-rather than `401`, naming the endpoint that would have worked.
-
-An account key is bound to a person's account, never to one profile. It
-reaches every profile the account owns, co-owns, or edits, and every profile
-of a person who granted the account a permission. It never writes where the
-account itself may not write.
-
-A key's plaintext MUST be shown exactly once, at mint time. A server MUST store
-only a hash of it, never the plaintext. A server SHOULD store a non-secret
-display prefix so a person can recognize a key in a list without revealing it.
-
-A server MUST reject a key that is unknown, revoked, or past its expiry, and
-MUST make those three cases indistinguishable in the response, so an attacker
-learns nothing from probing.
-
-### Scopes
-
-| Scope | Family | Grants |
-|-------|--------|--------|
-| `read` | either | Read profiles. What is read is decided by the key's table (or, for an app key on an unclaimed profile, its minted tier) |
-| `match` | app | Cross-profile matching |
-| `persona` | app | The persona endpoints |
-| `push` | app | Upload any profile |
-| `push_own` | either | Upload whole profiles the key's owning person holds an `owner` or `editor` role on. On an account key this is the ["Replace whole profiles"](#replace-whole-profiles) switch |
-| `resolve` | app | Resolve a person descriptor to a rid, minting an internal stub on a miss |
-
-A server MAY define other app scopes.
-
-`push_own` is what the [command-line login flow](dynamic-api.md#142-command-line-login)
-grants (as the OAuth scope `profiles:push`), and it is why the flow is safe to
-expose to any person with an account: a token that escapes can still only touch
-profiles that person already controls. The flow issues an account-family
-access token that lives about an hour, plus a rotating refresh token, so a
-leaked access token stops working soon and a replayed refresh token ends the
-login. Logins made by older servers hold a non-expiring `rpk_` key with
-`push_own`; clients keep using such a key until the person logs in again.
+A server MAY give a credential **scopes**: named whole-server powers such as
+reading profiles, matching across profiles, or uploading. What a credential
+may read and write of one profile is not a scope; it is the credential's
+[parts table](#per-part-access). A request that needs a scope the credential
+lacks is refused with [`insufficient_scope`](#insufficient-scope).
 
 ## Per-part access
 
 A server that lets people share parts of their profile with other software
-SHOULD decide every read and write by an app or account key **per part, per
+SHOULD decide every read and write by an app or key **per part, per
 audience**.
 
-An **audience** is the Public, one app, or one account key. A **part** is one
-section of the profile document, one kind of file (a manifest `role`), or, for
-apps and keys only, the account's lenses. Each audience holds one **level** per
-part: `none`, `read`, or `write`. `write` includes `read`. A part a table does
-not list is `none`.
+An **audience** is the Public or one credential (an app's, or a key acting for
+a person). A **part** is one section of the profile document or one kind of
+file (a manifest `role`). Each audience holds one **level** per part: `none`,
+`read`, or `write`. `write` includes `read`. A part a table does not list is
+`none`. Who sets each table, and how, is up to the server; the profile's owner
+SHOULD be the one who decides.
 
 ### The parts
 
@@ -137,21 +93,7 @@ Infrastructure roles (`profile`, `context`, `agent_entry_point`, `html`,
 `embedding_index`, `embedding_index_sqlite`, `embedding_chunks`) belong to no
 part.
 
-Apps and keys only: `lenses`.
-
 Every part is writable by an app or key holding `write` on it.
-
-### Who sets each table
-
-| Audience | Table set by | Covers |
-|----------|--------------|--------|
-| The Public | The profile's owner, per profile | Reads only. The Public reading any part is what "published" means |
-| An app (`rpk_`) | Each person, for that app | Every profile the person owns and every lens they wrote |
-| An account key (`rpa_`) | The person who minted it | Everything the key's account reaches |
-
-A key minted without a table reads every part and writes nothing. Only the
-account holder may change a key's table; no key may change a table, including
-its own.
 
 ### Reads
 
@@ -177,13 +119,12 @@ A write by an app or key MUST hold `write` on every part it touches:
 A write missing any of these MUST be refused with
 [`insufficient_access`](#insufficient-access) and MUST change nothing.
 
-### Replace whole profiles
+### Replacing whole profiles
 
-A separate switch, off by default. An app holds it in its table (the
-pseudo-part `replace_profiles`); an account key holds it as the `push_own`
-scope. With it on, an upload replaces the whole profile at once: it is not
-compared part by part, and it may change what no part covers, including what
-the Public reads.
+A server MAY let a credential replace a whole profile at once, without the
+part-by-part comparison. That power covers what no part covers, including
+what the Public reads, so a server SHOULD keep it off unless the owner turns
+it on.
 
 ### Acts no app or key may hold
 
@@ -195,18 +136,17 @@ decisions belonging to the person the profile describes.
 | Publish or unpublish | Publishing is a decision by the person the profile describes. |
 | Change what the public sees | Only the owner decides what the public may read. |
 | Delete the profile | Only the owner may delete a profile. |
-| Grant access | Only the account holder may give access, including minting another key. |
+| Grant access | Only the owner may give access, including minting another key. |
 
-"Change what the public sees" has one exception: a caller holding
-[Replace whole profiles](#replace-whole-profiles) writes the whole document,
+"Change what the public sees" has one exception: a caller allowed to
+[replace whole profiles](#replacing-whole-profiles) writes the whole document,
 including what it tells the Public. No edit endpoint may change it, whatever the
 caller holds.
 
-A server SHOULD publish this list at
-[`GET /api/v1/manage/agent/whoami`](dynamic-api.md#get-apiv1manageagentwhoami) as
-`never_delegable`, so a key can tell its user what it cannot be given. A request
-to perform one of these acts, or to change a metadata field no part covers,
-MUST return `403` with `detail.error` equal to `"not_delegable"` and a `hint`.
+A server SHOULD tell a credential which of these acts it cannot be given. A
+request to perform one of these acts, or to change a metadata field no part
+covers, MUST return `403` with `detail.error` equal to `"not_delegable"` and a
+`hint`.
 
 ## Refusal bodies
 
@@ -224,7 +164,7 @@ A write by an app or key that lacks `write` on a part it touches MUST return
 | `error` | string | The literal `"insufficient_access"` |
 | `required` | list[string] | Every part the write touches, sorted |
 | `missing` | list[string] | The parts in `required` the caller may not write, sorted |
-| `needs_replace` | list[string] | Uploads only. Changes no part covers (for example what the public sees, a field such as `provenance_note`, an infrastructure file), as short phrases. Only [Replace whole profiles](#replace-whole-profiles) allows them |
+| `needs_replace` | list[string] | Uploads only. Changes no part covers (for example what the public sees, a field such as `provenance_note`, an infrastructure file), as short phrases. Only [replacing the whole profile](#replacing-whole-profiles) allows them |
 | `hint` | string | One or two sentences naming what is missing and who can allow it |
 
 ```json
@@ -234,14 +174,14 @@ A write by an app or key that lacks `write` on a part it touches MUST return
     "required": ["paper_summary", "summary"],
     "missing": ["summary"],
     "needs_replace": [],
-    "hint": "This needs Write on summary. The account holder can allow it on the Privacy page."
+    "hint": "This needs Write on summary. The profile's owner can allow it."
   }
 }
 ```
 
 ### Insufficient scope
 
-A request whose key is valid but lacks a required [scope](#scopes) MUST return
+A request whose key is valid but lacks a required [scope](#credentials-and-scopes) MUST return
 `403` with:
 
 | Field | Type | Description |
@@ -259,7 +199,7 @@ A request whose key is valid but lacks a required [scope](#scopes) MUST return
     "required": ["match"],
     "granted": ["read"],
     "missing": ["match"],
-    "hint": "Consumer 'lab-app' lacks scope 'match'. Ask your operator to add it."
+    "hint": "This credential lacks scope 'match'. Ask the server's operator to add it."
   }
 }
 ```

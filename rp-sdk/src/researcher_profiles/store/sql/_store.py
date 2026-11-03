@@ -37,7 +37,6 @@ from ..db import (
 from ..hooks import _HookedStore
 from ..protocol import (
     IngestResult,
-    Ownership,
     ProfileNotFoundError,
     ProfileRef,
     RetiredRidError,
@@ -48,16 +47,14 @@ from ._shared import RENDERED_URLS, _is_memory_sqlite, _is_text, artifact_rows, 
 from ._storage import SqlArtifactStorage
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from collections.abc import Callable
-
     import numpy as np
 
     from ...embeddings.protocol import VectorIndex
 
 logger = logging.getLogger(__name__)
 
-#: What a ``ref`` may be: a slug (or a retired slug), an integer ``profile_id``,
-#: or ``"#<profile_id>"``.
+#: What a ``ref`` may be: a slug (or a retired slug), a rid (or a retired rid),
+#: an integer ``profile_id`` (the record key), or ``"#<profile_id>"``.
 Ref = str | int
 
 
@@ -72,17 +69,6 @@ def _as_profile_id(ref: Any) -> Optional[int]:
     return None
 
 
-def _owner_columns(owner: Optional[Ownership]) -> dict[str, Any]:
-    """The ``rp_profiles`` owner columns for ``owner`` (all empty for ``None``)."""
-    if owner is None:
-        return {"owner_kind": None, "owner_principal_id": None, "is_self": False}
-    return {
-        "owner_kind": owner.kind,
-        "owner_principal_id": owner.principal_id,
-        "is_self": bool(owner.is_self),
-    }
-
-
 class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
     """A set of profiles living in SQL tables.
 
@@ -91,19 +77,16 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
     the :class:`SqlArtifactStorage` behind a profile handed out by :meth:`get` opens
     its own for each read and each write unit.
 
-    ``owner_resolver`` (settable later) is asked for an :class:`Ownership`
-    whenever a method is about to insert a profile row without an explicit
-    ``owner``. With no resolver, or one that answers ``None``, the owner
-    columns stay NULL: fine in a standalone store, refused by a host database
-    that requires an owner.
+    ``one_profile_per_rid`` (default ``True``) holds at most one record per
+    person, like a directory corpus: a create about a rid that already has a
+    record is refused, and a rid is a ref. A host that keeps several records
+    about one person passes ``False``; then a bare rid is not a ref here: the
+    host says which record it means (the API's ``hooks.resolve_ref``),
+    :meth:`profiles_about` lists them, and records are addressed by slug or
+    key.
     """
 
-    def __init__(
-        self,
-        engine_or_url: Any,
-        *,
-        owner_resolver: "Optional[Callable[[], Optional[Ownership]]]" = None,
-    ):
+    def __init__(self, engine_or_url: Any, *, one_profile_per_rid: bool = True):
         if isinstance(engine_or_url, str):
             from sqlmodel import create_engine
 
@@ -125,7 +108,7 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
         # Profiles already handed out, held weakly so a later hook reaches
         # them without the store keeping anything alive.
         self._live: "weakref.WeakSet[ResearcherProfile]" = weakref.WeakSet()
-        self.owner_resolver = owner_resolver
+        self.one_profile_per_rid = one_profile_per_rid
         self._init_hooks()
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
@@ -173,19 +156,26 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
 
     # --- lookup -------------------------------------------------------------
 
-    @staticmethod
-    def _row_for(s: Session, ref: Ref) -> Optional[ProfileRow]:
+    def _row_for(self, s: Session, ref: Ref) -> Optional[ProfileRow]:
         """The live row ``ref`` names, or ``None``.
 
         An integer (or ``"#<id>"``) is a ``profile_id``; a string is a slug,
-        then a retired slug (``rp_slug_aliases``). A rid is never a ref.
+        then a retired slug (``rp_slug_aliases``), then, on a store that holds
+        one record per person, a rid (a retired rid through
+        ``rp_rid_aliases``). A slug can never be mistaken for a rid: the slug
+        is tried first. On a store with several records per person a bare rid
+        names nothing here; the host says which record it means.
         """
         profile_id = _as_profile_id(ref)
         if profile_id is not None:
             return s.get(ProfileRow, profile_id)
         if not isinstance(ref, str) or not ref:
             return None
-        return SqlProfileStore._slug_row(s, ref)
+        row = self._slug_row(s, ref)
+        if row is not None or not self.one_profile_per_rid:
+            return row
+        target = self._rid_successor(s, ref) or ref
+        return s.exec(select(ProfileRow).where(ProfileRow.rid == target)).first()
 
     @staticmethod
     def _slug_row(s: Session, slug: str) -> Optional[ProfileRow]:
@@ -211,22 +201,16 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
             ),
         )
 
-    def _refuse_second_ownerless(
-        self, s: Session, rid: str, slug: str, owner: Optional[Ownership]
-    ) -> None:
-        """Refuse an ownerless create about a rid that already has a record.
-
-        With owners the database allows one record per owner per person. With
-        none, NULL owners never collide, so nothing would stop a second record
-        about one person: the same rule a directory store applies.
-        """
-        if owner is not None:
+    def _refuse_second_record(self, s: Session, rid: str, slug: str) -> None:
+        """Refuse a create about a rid that already has a record, on a store
+        that holds one record per person (``one_profile_per_rid``)."""
+        if not self.one_profile_per_rid:
             return
         if s.exec(select(ProfileRow.profile_id).where(ProfileRow.rid == rid)).first() is not None:
             raise ProfileWriteError(
                 self.url,
                 f"cannot create {slug!r}: a profile with rid {rid!r} already exists, "
-                "and a store without owners holds one record per person",
+                "and this store holds one record per person",
             )
 
     def _require_row(self, s: Session, ref: Ref) -> ProfileRow:
@@ -237,7 +221,12 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
             tried = (
                 f"no rp_profiles row with profile_id={profile_id}"
                 if profile_id is not None
-                else f"no rp_profiles row with slug={ref!r}, and no retired slug {ref!r}"
+                else (
+                    f"no rp_profiles row with slug={ref!r}, no retired slug {ref!r}, "
+                    f"and no profile whose rid is {ref!r}"
+                    if self.one_profile_per_rid
+                    else f"no rp_profiles row with slug={ref!r}, and no retired slug {ref!r}"
+                )
             )
             raise ProfileNotFoundError(f"nothing in {self.url} matches {ref!r}: {tried}")
         return row
@@ -288,61 +277,17 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
     def profiles_about(self, rid: str) -> list[ProfileRef]:
         """See :meth:`~researcher_profiles.store.ProfileStore.profiles_about`.
 
-        Self profile first, then by ``profile_id``. Selects the identity
-        columns only, never a document.
+        By ``profile_id`` (oldest first). Selects the identity columns only,
+        never a document.
         """
         with self.session() as s:
             target = self._rid_successor(s, rid) or rid
             rows = s.exec(
-                select(
-                    ProfileRow.profile_id,
-                    ProfileRow.rid,
-                    ProfileRow.slug,
-                    ProfileRow.owner_kind,
-                    ProfileRow.owner_principal_id,
-                    ProfileRow.is_self,
-                )
+                select(ProfileRow.profile_id, ProfileRow.rid, ProfileRow.slug)
                 .where(ProfileRow.rid == target)
-                .order_by(ProfileRow.is_self.desc(), ProfileRow.profile_id)
+                .order_by(ProfileRow.profile_id)
             ).all()
-        return [
-            ProfileRef(
-                profile_id=pid,
-                rid=r,
-                slug=slug,
-                owner=(
-                    Ownership(kind, principal, bool(is_self))
-                    if kind is not None and principal is not None
-                    else None
-                ),
-            )
-            for pid, r, slug, kind, principal, is_self in rows
-        ]
-
-    def self_profile_for(self, rid: str) -> Optional[ResearcherProfile]:
-        """See :meth:`~researcher_profiles.store.ProfileStore.self_profile_for`."""
-        with self.session() as s:
-            target = self._rid_successor(s, rid) or rid
-            pid = s.exec(
-                select(ProfileRow.profile_id).where(
-                    ProfileRow.rid == target,
-                    ProfileRow.is_self == True,  # noqa: E712 - SQL expression
-                )
-            ).first()
-        return None if pid is None else self.get(pid)
-
-    def profile_owned_by(self, rid: str, owner: Ownership) -> Optional[ResearcherProfile]:
-        """See :meth:`~researcher_profiles.store.ProfileStore.profile_owned_by`."""
-        with self.session() as s:
-            target = self._rid_successor(s, rid) or rid
-            pid = s.exec(
-                select(ProfileRow.profile_id).where(
-                    ProfileRow.rid == target,
-                    ProfileRow.owner_kind == owner.kind,
-                    ProfileRow.owner_principal_id == owner.principal_id,
-                )
-            ).first()
-        return None if pid is None else self.get(pid)
+        return [ProfileRef(profile_id=pid, rid=r, slug=slug) for pid, r, slug in rows]
 
     def alias_slugs(self) -> set[str]:
         """Every retired slug."""
@@ -368,7 +313,7 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
             return self._row_for(s, ref) is not None
 
     def resolve_slug(self, ref: Ref) -> str:
-        """Map a ref (a slug, a retired slug or a ``profile_id``) to the live slug."""
+        """Map a ref (a slug, a rid, either retired, or a ``profile_id``) to the live slug."""
         with self.session() as s:
             return self._require_row(s, ref).slug
 
@@ -395,12 +340,6 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
             ResearcherProfile(SqlArtifactStorage(self, profile_id, slug=slug, rid=rid), eager=eager)
         )
 
-    def _owner_for_insert(self, owner: Optional[Ownership]) -> Optional[Ownership]:
-        """``owner``, else what :attr:`owner_resolver` says, else ``None``."""
-        if owner is not None:
-            return owner
-        return self.owner_resolver() if self.owner_resolver is not None else None
-
     # --- ingest -------------------------------------------------------------
 
     def put(
@@ -408,16 +347,14 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
         profile: ResearcherProfile,
         *,
         slug: Optional[str] = None,
-        owner: Optional[Ownership] = None,
         include_binary: bool = False,
     ) -> int:
         """Write ``profile`` into the store, in one transaction. Returns its ``profile_id``.
 
         Takes any ``ResearcherProfile``. Keyed on the slug: a live slug is a
-        replace (same record, same ``profile_id``, same owner; the rid must
-        match), and so is a former slug (renamed or merged) whose record is
-        about the same rid, which keeps that record's live slug. A new slug
-        is a create (owned by ``owner``, else the ``owner_resolver``). Every
+        replace (same record, same ``profile_id``; the rid must match), and so
+        is a former slug (renamed or merged) whose record is about the same
+        rid, which keeps that record's live slug. A new slug is a create. Every
         child row is replaced rather than diffed, so the rows always equal
         the source.
 
@@ -431,16 +368,14 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
         Raises :class:`RetiredRidError` when a create would reuse a rid a
         merge retired, or a former slug's record is about another rid;
         ``ProfileWriteError`` when a live slug's rid differs, or when a store
-        without owners already holds a record about the rid. That covers
+        that holds one record per person already holds one about the rid.
+        That covers
         :meth:`commit_directory` and :meth:`import_directory`.
         """
         handle = slug or profile.slug
-        # Resolved before the session opens: a resolver may read the host's
-        # own tables, and must not share this write's connection mid-transaction.
-        owner = self._owner_for_insert(owner)
         with self.session() as s:
             profile_id = self._write_profile_rows(
-                s, profile, slug=handle, owner=owner, include_binary=include_binary
+                s, profile, slug=handle, include_binary=include_binary
             )
             s.commit()
         self._bump_generation()
@@ -453,7 +388,6 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
         *,
         slug: str,
         include_binary: bool,
-        owner: Optional[Ownership] = None,
         row: Optional[ProfileRow] = None,
     ) -> int:
         """Write ``profile``'s rows on ``s``. Flushes, never commits. Returns the ``profile_id``.
@@ -461,8 +395,7 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
         ``row`` (else the live row ``slug`` names, through a former slug
         too) is replaced in place: its identity columns stay, its live slug
         included, and its content and children are rewritten. With no live
-        row a new one is inserted, owned by ``owner`` (already resolved by
-        the caller). The parent is never deleted and re-inserted, which would
+        row a new one is inserted. The parent is never deleted and re-inserted, which would
         mint a new ``profile_id`` and orphan every host row keyed on it.
         Shared by :meth:`put` and :meth:`merge_into`.
         """
@@ -491,17 +424,14 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
             self._delete_children(s, profile_id)
         else:
             self._refuse_retired(s, rid, slug)
-            self._refuse_second_ownerless(s, rid, slug, owner)
+            self._refuse_second_record(s, rid, slug)
             fresh.rid = rid
             fresh.slug = slug
-            for name, value in _owner_columns(owner).items():
-                setattr(fresh, name, value)
             s.add(fresh)
             # Flush the parent BEFORE any child. These tables have FK columns but
             # no `relationship()`, so SQLAlchemy may otherwise insert children
-            # first, and Postgres FKs are not deferrable. A second self profile
-            # for the rid or owner, or a second record for one owner about one
-            # person, is the database's refusal: a write error, not a crash.
+            # first, and Postgres FKs are not deferrable. A refusal by a host's
+            # own constraints is a write error, not a crash.
             try:
                 s.flush()
             except IntegrityError as e:
@@ -545,26 +475,17 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
         s.flush()
         return profile_id
 
-    def import_directory(
-        self, path: str | Path, *, owner: Optional[Ownership] = None, include_binary: bool = False
-    ) -> int:
+    def import_directory(self, path: str | Path, *, include_binary: bool = False) -> int:
         """Sugar for ``put(ResearcherProfile.from_files(path))``. Returns the ``profile_id``."""
-        return self.put(
-            ResearcherProfile.from_files(path), owner=owner, include_binary=include_binary
-        )
+        return self.put(ResearcherProfile.from_files(path), include_binary=include_binary)
 
     def commit_directory(
-        self,
-        slug: str,
-        staging: Path,
-        *,
-        owner: Optional[Ownership] = None,
-        build_missing_index: bool = False,
+        self, slug: str, staging: Path, *, build_missing_index: bool = False
     ) -> IngestResult:
         """Make a fully-staged profile directory live in this store.
 
-        One transaction, so a new record and its owner commit together or not
-        at all. A live ``slug`` is a replace, and so is a former slug about
+        One transaction, so a new record and its child rows commit together or
+        not at all. A live ``slug`` is a replace, and so is a former slug about
         the same rid (see :meth:`put`); the result names the live slug.
 
         A staged ``.cache/embeddings.sqlite`` is shredded into vector rows and
@@ -583,7 +504,7 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
             indexed = self._try_build_index(Path(staging))
             if indexed:
                 staged = ResearcherProfile.from_files(staging)
-        profile_id = self.put(staged, slug=slug, owner=owner, include_binary=True)
+        profile_id = self.put(staged, slug=slug, include_binary=True)
         return IngestResult(
             slug=self.resolve_slug(profile_id),
             rid=staged.metadata.rid,
@@ -611,8 +532,7 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
 
         Raises :class:`ProfileWriteError` when the retired and survivor
         records are the same, the survivor is not about ``survivor_rid``, a
-        convert keeps the rid or would make a second self profile, or the
-        staged rid is not ``survivor_rid``; :class:`RetiredRidError` when
+        convert keeps the rid, or the staged rid is not ``survivor_rid``; :class:`RetiredRidError` when
         ``survivor_rid`` was itself retired or ``survivor_slug`` redirects to
         another record; :class:`ProfileNotFoundError` when a ref names no live
         record; :class:`UploadError` when the staged directory does not load.
@@ -641,23 +561,10 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
                         f"not {survivor_rid!r}",
                     )
                 survivor_pid, survivor_old_slug = int(survivor.profile_id), survivor.slug
-            else:
-                if survivor_rid == retired_rid:
-                    raise ProfileWriteError(
-                        self.url, f"a convert must change the rid; {retired_rid!r} is unchanged"
-                    )
-                self_row = s.exec(
-                    select(ProfileRow.slug).where(
-                        ProfileRow.rid == survivor_rid,
-                        ProfileRow.is_self == True,  # noqa: E712 - SQL expression
-                    )
-                ).first()
-                if self_row is not None:
-                    raise ProfileWriteError(
-                        self.url,
-                        f"cannot convert {retired_slug!r} to {survivor_rid!r}: "
-                        f"{self_row!r} is already that person's own profile",
-                    )
+            elif survivor_rid == retired_rid:
+                raise ProfileWriteError(
+                    self.url, f"a convert must change the rid; {retired_rid!r} is unchanged"
+                )
             # A merge must never make a retired rid live again, nor take a slug
             # that still redirects to (or names) another record.
             self._refuse_retired(s, survivor_rid, None)
@@ -875,19 +782,13 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
             if tmp is not None:
                 shutil.rmtree(tmp, ignore_errors=True)
 
-    def _new_profile(
-        self, document: ProfileDocument, *, slug: str, owner: Optional[Ownership]
-    ) -> ResearcherProfile:
+    def _new_profile(self, document: ProfileDocument, *, slug: str) -> ResearcherProfile:
         """A profile whose bare row is inserted when its first write unit opens.
 
-        Refuses a taken slug, a retired slug and a retired rid, and, with no
-        owner, a rid that already has a record. A second self profile for the
-        rid or the owner is refused by the database, as a
-        ``ProfileWriteError``, when the unit opens.
+        Refuses a taken slug, a retired slug and a retired rid, and, on a store
+        that holds one record per person, a rid that already has a record.
         """
         rid = document.rid
-        # Resolved before the session opens; see :meth:`put`.
-        owner = self._owner_for_insert(owner)
         with self.session() as s:
             self._refuse_retired(s, rid, slug)
             if s.exec(select(ProfileRow.profile_id).where(ProfileRow.slug == slug)).first():
@@ -895,7 +796,7 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
                     self.url,
                     f"cannot create {slug!r}: a profile with that slug already exists in this store",
                 )
-            self._refuse_second_ownerless(s, rid, slug, owner)
+            self._refuse_second_record(s, rid, slug)
         storage = SqlArtifactStorage(self, None, slug=slug, rid=rid)
         storage.pending_row = ProfileRow(
             rid=rid,
@@ -903,20 +804,18 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
             document={},
             name=document.name,
             provenance=str(document.provenance),
-            **_owner_columns(owner),
         )
         return self._admit(ResearcherProfile(storage))
 
-    def create(
-        self, document: ProfileDocument, *, slug: str, owner: Optional[Ownership] = None
-    ) -> ResearcherProfile:
+    def create(self, document: ProfileDocument, *, slug: str) -> ResearcherProfile:
         """Create a new profile from a validated document, in one write unit.
 
         The row is inserted bare and then written through
         :meth:`ResearcherProfile.save_profile`, so it takes the same path as
-        every other write. ``owner`` (else the ``owner_resolver``) lands on it.
+        every other write, and a pre-commit hook can write a host's own rows
+        about it (an ownership row) in the same transaction.
         """
-        prof = self._new_profile(document, slug=slug, owner=owner)
+        prof = self._new_profile(document, slug=slug)
         with prof.write_unit("create"):
             prof.save_profile(document)
         return prof
@@ -929,10 +828,9 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
         expertise: str | None = None,
         soul: str | None = None,
         artifacts: dict[str, str] | None = None,
-        owner: Optional[Ownership] = None,
     ) -> ResearcherProfile:
         """Create a document and its authored artifacts in one transaction."""
-        prof = self._new_profile(document, slug=slug, owner=owner)
+        prof = self._new_profile(document, slug=slug)
         with prof.write_unit("create"):
             prof.save_profile(document)
             if expertise is not None:
@@ -962,9 +860,7 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
                 )
         return prof
 
-    def put_document(
-        self, slug: str, document: ProfileDocument, *, owner: Optional[Ownership] = None
-    ) -> ResearcherProfile:
+    def put_document(self, slug: str, document: ProfileDocument) -> ResearcherProfile:
         """See :meth:`~researcher_profiles.store.ProfileStore.put_document`.
 
         A former slug (renamed or merged) whose record is about the document's
@@ -977,7 +873,7 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
                 raise self._former_slug_error(slug, live, document.rid)
             existing = None if live is None else (int(live.profile_id), live.rid)
         if existing is None:
-            return self.create(document, slug=slug, owner=owner)
+            return self.create(document, slug=slug)
         profile_id, existing_rid = existing
         if document.rid != existing_rid:
             raise ProfileWriteError(

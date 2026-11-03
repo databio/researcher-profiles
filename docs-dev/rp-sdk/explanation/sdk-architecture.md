@@ -47,28 +47,22 @@ through `prof.require_directory(...)`, which raises
 The full contract, and how to write a hook that reacts to a write, is in
 [the storage seam reference](../developer/storage-seam.md).
 
-### Records, people and owners
+### Records and people
 
 One level up, a `ProfileStore` holds records. In the SQL store
 (`store/db.py`) a record's key is an integer `profile_id`; every child table
 (`rp_papers`, `rp_grants`, `rp_artifacts`, the vector and build-state tables)
 joins on it, so a rename or a rid change moves no child row. `rid` is the
-subject, who the record is about, and is not unique: a store may hold one
-record per owner per person (`uq_rp_profiles_rid_owner`), at most one of them
-the person's own (`is_self`, `uq_rp_profiles_self_rid`). A record with no owner
-gets no such guard from the database (NULLs never collide), so the store
-refuses an ownerless create about a rid that already has a record, as a
-directory store does.
+subject, who the record is about. By default a store holds one record per
+person, like a directory corpus. A host that keeps several records about one
+person (`SqlProfileStore(one_profile_per_rid=False)`) keeps whatever it knows
+about them (who owns which, for instance) in its own tables, written by a
+pre-commit hook in the same transaction, and says which record a bare rid
+means through the API's `hooks.resolve_ref`.
 
-The owner is three columns on the record (`owner_kind`, `owner_principal_id`,
-`is_self`), read and written as an `Ownership`. The SDK leaves them nullable
-and assigns no meaning to a principal; a host that has principals passes
-`owner=` to the creating calls or sets the store's `owner_resolver`, and makes
-the columns NOT NULL in its own migration.
-
-So a `ref` is a slug or a `profile_id`, never a rid. Rid lookups are explicit:
-`profiles_about(rid)`, `self_profile_for(rid)`, `profile_owned_by(rid, owner)`,
-`successor_rid(rid)`. Retired names live in two tables: `rp_rid_aliases` (a
+A `ref` is a slug, a rid, or (on SQL) a `profile_id` / `#<id>`. A rid names the
+one record about that person. `profiles_about(rid)` lists every record about a
+person and `successor_rid(rid)` follows a merge. Retired names live in two tables: `rp_rid_aliases` (a
 person identity folded into another) and `rp_slug_aliases` (an old handle that
 still redirects to a live record, written by `rename` and `merge_into`). The
 filesystem store holds one record per person and answers the same calls from

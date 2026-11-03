@@ -9,12 +9,12 @@ This gives the Researcher Profile HTTP interface three tiers:
    profile files. Any file server (S3, R2, GitHub Pages) can fulfill this.
 2. [Dynamic API](dynamic-api.md): OPTIONAL. Additional endpoints for advanced use, like
    listing, searching, matching, and interacting with profiles programmatically.
-3. [Management API](dynamic-api.md#14-management-api): OPTIONAL. Endpoints for
-   obtaining and introspecting credentials: command-line login, and identity
-   echo, including what a key may read and write, part by part. A server that hosts profiles on behalf of the people
-   they describe needs these; a file server does not.
+3. [Command-line login](dynamic-api.md#14-command-line-login): OPTIONAL. How a
+   person gets a credential onto a command line. A server that hosts profiles
+   on behalf of the people they describe may offer it; a file server does not
+   need it.
 
-All servers MUST satisfy the static API. The dynamic and management tiers are
+All servers MUST satisfy the static API. The dynamic API and command-line login are
 independent of each other: a server MAY implement either, both, or neither.
 This division lets the basic HTTP service be met cheaply, without requiring
 any server setup.

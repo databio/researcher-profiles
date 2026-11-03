@@ -26,15 +26,15 @@ deployment.
 | `rp_build_state` | `BuildStateRow` | profile's build sidecar (not published) |
 | `rp_rid_aliases` | `RidAliasRow` | retired rid that now resolves to a successor |
 
-Every child table references its owner by `profile_rid`, a foreign key onto
-`rp_profiles.rid`.
+Every child table references its profile by `profile_id`, a foreign key onto
+`rp_profiles.profile_id`.
 
 The schema has three properties worth knowing:
 
-- `rid` is the primary key, and `slug` is a unique handle. `slug` is the display
+- `profile_id` is the primary key, and `slug` is a unique handle. `slug` is the display
   name and may be renamed; that rename is one `UPDATE` and touches zero child
   rows. Its uniqueness is a *store* constraint (one store cannot hold two
-  profiles under one handle), not an identity claim, so join on `rid`.
+  profiles under one handle), not an identity claim, so join on `profile_id`.
 - The JSON-LD document is stored whole and is the source of truth.
   `rp_profiles.document` holds the entire `profile.jsonld` payload; every scalar
   column beside it is a *derived projection*, rebuilt on every write and never
@@ -48,12 +48,12 @@ The schema has three properties worth knowing:
     ```
 
 - `rp_artifacts` is the manifest: one row per file, keyed by
-  `(profile_rid, content_url)` (the manifest's own address space), with the
+  `(profile_id, content_url)` (the manifest's own address space), with the
   body in `text` or `data`. That makes privacy a `WHERE` clause:
 
     ```sql
     SELECT content_url FROM rp_artifacts
-     WHERE profile_rid = :rid AND visibility = 'public';
+     WHERE profile_id = :profile_id AND visibility = 'public';
     ```
 
 - Vectors are rows, not a file. `rp_chunk_vectors` holds one embedded chunk each
@@ -177,15 +177,15 @@ rows in the same transaction. A raising hook rolls all of it back.
 store.merge_into(
     "jane-local",  # the retired profile, by slug or rid
     staging_dir,  # the merged survivor, as a profile directory
+    survivor_ref=None,  # None: the retired record itself survives, under the new rid
     survivor_rid="0000-0002-1825-0097",
     survivor_slug="doe-jane",
 )
 store.get("jane-local").rid  # -> "0000-0002-1825-0097": the old slug still resolves
-store.successor_of("jane-local")  # -> "0000-0002-1825-0097"
 store.alias_slugs()  # {"jane-local"}: retired slugs stay reserved
 ```
 
-After a merge, `get`, `rid_for`, `resolve_slug` and `exists` follow the alias
+After a merge, `get`, `resolve_slug` and `exists` follow the alias
 when a ref is not a live profile, so the old rid and slug keep working on every
 route, and `resolve_person` answers the successor for a retired rid instead of
 minting a stub. Chains stay one hop: a later merge re-points earlier aliases.
@@ -262,13 +262,13 @@ with store.session() as s:
     for row in s.exec(select(ProfileRow).where(ProfileRow.level == "deep")).all():
         print(row.slug, row.name, row.orcid, row.content_hash)
 
-    papers = s.exec(select(PaperRow).where(PaperRow.profile_rid == rid)).all()
+    papers = s.exec(select(PaperRow).where(PaperRow.profile_id == profile_id)).all()
 ```
 
 Do not assume either of these:
 
 - `paper_id` is not unique within a profile. It is a generated citekey, and
-  real corpora produce collisions, so papers are keyed by `(profile_rid, ordinal)`.
+  real corpora produce collisions, so papers are keyed by `(profile_id, ordinal)`.
 - `date_modified` is often NULL, and is never defaulted. A profile whose
   content never changed legitimately has no vintage; see
   [`date_modified`](https://github.com/databio/researcher-profiles/blob/master/rp-sdk/src/researcher_profiles/date_modified.py).

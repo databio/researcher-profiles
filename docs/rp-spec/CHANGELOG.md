@@ -2,23 +2,13 @@
 
 ## Unreleased
 
-Command-line login endpoints are found, not fixed. A server that offers
-command-line login publishes RFC 8414 metadata at
-`/.well-known/oauth-authorization-server` naming its
-`device_authorization_endpoint` and `token_endpoint`; clients read them from
-there and check `issuer`. The fixed `/api/auth/device` and `/api/auth/token`
-paths are gone. The approval page should offer a deny control.
+## 0.3.0 - 2026-11-03
 
-Management endpoints moved under `/api/v1/manage/` (were `/api/manage/`).
-
-Command-line login is a registered OAuth client. Clients sign in as the
-public client `rp-cli` with scope `profiles:push`, by the authorization-code
-flow with PKCE and a loopback redirect (RFC 8252; the server accepts any port
-on `http://127.0.0.1/callback` and `http://[::1]/callback`) or by the device
-flow. The server answers with a short-lived access token and a rotating
-refresh token (RFC 6749 section 5.1 fields only; no `orcid`, `name` or `url`);
-identity comes from `whoami`. Other client_ids get `invalid_client`. A server
-may offer RFC 7009 revocation, listed as `revocation_endpoint`.
+- Moved the hosted-service key rules and management API out of the spec.
+  The spec keeps per-part read and write access and the refusal bodies.
+- Command-line login endpoints are found through RFC 8414 OAuth metadata,
+  not fixed paths. A server MAY list a `whoami_endpoint` there.
+- Removed lens, co-owner and Privacy page wording.
 
 ## 0.2.0 - 2026-10-12
 

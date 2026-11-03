@@ -609,12 +609,12 @@ Artifact-to-table mapping:
   every write by exactly one writer, never read back into a model. They exist so
   a store can be queried (for example, "which profiles are `level=deep` with no
   R01-equivalent year"), not so it can be reconstructed.
-- `rid` is the primary key. `slug` is unique and indexed. That is a store
+- `profile_id` is the primary key. `slug` is unique and indexed. That is a store
   constraint (one store cannot hold two profiles under one handle), not an
   identity claim. `slug` is not part of `profile_jsonld`; it is the directory
   name, so ingest passes it explicitly. Every child table references
-  `profile_rid`.
-- Papers are keyed by position. There is no `UNIQUE(profile_rid, paper_id)`:
+  `profile_id`.
+- Papers are keyed by position. There is no `UNIQUE(profile_id, paper_id)`:
   `paper_id` is a generated citekey and collides within a real profile.
 - `date_modified` is nullable and never defaulted. Most published profiles
   legitimately carry no vintage, so the column stays empty rather than getting

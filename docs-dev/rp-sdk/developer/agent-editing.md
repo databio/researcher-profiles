@@ -11,11 +11,10 @@ lives only in a route or only in a tool. rp-sdk supplies the hook points on
 `app.state.hooks` (`edit_gate`, `write_scope`, `record_edit`); the host
 supplies the credential format, the principal lookup, and the access rules.
 
-## The `rpa_` prefix
+## Key prefixes
 
-A host distinguishing agent keys from app keys can use a prefix convention
-(e.g. `rpa_` vs `rpk_`) so a leaked credential is identifiable from a log
-line. The format is up to the host, e.g. `rpa_<handle>_<random>`.
+A host distinguishing kinds of keys can use a prefix convention so a leaked
+credential is identifiable from a log line. The format is up to the host.
 
 ## What every edit function does, in order
 
@@ -79,30 +78,24 @@ that dict under `detail`; for example:
   "error": "insufficient_access",
   "required": ["background", "summary"],
   "missing": ["background"],
-  "hint": "This needs Write on background. The account holder can allow it on the Privacy page."
+  "hint": "This needs Write on background. The profile's owner can allow it."
 }
 ```
 
 A whole-profile push (`PUT /api/v1/profiles/{slug}`, what `rp push` sends) is
 gated the same way by such a host: the push is compared with the profile it
 replaces, and it lands only if every part it changes is `write`. Its 403 adds
-`needs_replace`, the changes no part covers, which only a key with the
-"Replace whole profiles" switch may make. `rp push` prints both lists.
+`needs_replace`, the changes no part covers, which only a key allowed to
+replace whole profiles may make. `rp push` prints both lists.
 
 ## Discovery
 
-A host serves one discovery endpoint; rp-sdk does not.
-
-`GET /api/v1/manage/agent/whoami`: any valid agent key. Returns the key's
-identity, owner, parts table, "Replace whole profiles" switch, the profiles the
-account reaches (each with the parts the key may write there), and the acts no
-key may ever do (`never_delegable`). `rp agent whoami` prints it. There is no
-separate catalog endpoint for keys; a host may list its parts on an
-account route of its own.
+A host SHOULD tell a key what it may do (its parts table, and the acts no key
+may hold); how is up to the host, and rp-sdk serves nothing for it. A host
+plugin for the `rp` command can print it.
 
 ## See also
 
 - `api/service.py`: the edit and read functions, `require_edit`
 - `api/hooks.py`: the hooks a host builds on; `api/caller.py`: the caller
 - `api/deps.py`: `get_caller`, `get_service`, `require_scope`
-- `rp-sdk/skills/profile-agent/SKILL.md`: the agent-facing instructions

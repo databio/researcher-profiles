@@ -81,8 +81,7 @@ fastembed = [
     "researcher-profiles[vectors]",
     "fastembed>=0.7.4",
 ]
-# HTTP client tier: RemoteResearcherProfile, remote rank_against, and the
-# ManagementClient behind `rp agent` and `rp profile`.
+# HTTP client tier: RemoteResearcherProfile and remote rank_against.
 client = [
     "httpx>=0.27",
 ]

@@ -31,7 +31,7 @@ from ..errors import ProfileWriteError
 from ..profile import ResearcherProfile
 from ._analytics import _AnalyticsAccessors
 from .hooks import _HookedStore
-from .protocol import IngestResult, Ownership, ProfileNotFoundError, ProfileRef
+from .protocol import IngestResult, ProfileNotFoundError, ProfileRef
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     import numpy as np
@@ -154,16 +154,19 @@ class HttpProfileStore(_HookedStore, _AnalyticsAccessors):
         return slugs
 
     def resolve_slug(self, ref: str) -> str:
-        """Check that ``ref`` is a published slug and return it.
+        """Map a slug or a rid to the slug.
 
-        A ref is a slug, never a rid; a rid is looked up with
-        :meth:`profiles_about`.
+        Slug first; a slug can never be mistaken for a rid.
         """
         if ref in self.list_slugs():
             return ref
-        raise ProfileNotFoundError(
-            f"nothing at {self.base_url} matches {ref!r}: no profile by that slug"
-        )
+        mapped = self._rid_lookup().get(ref)
+        if mapped is None:
+            raise ProfileNotFoundError(
+                f"nothing at {self.base_url} matches {ref!r}: no profile by that "
+                f"slug, and no profile whose rid is {ref!r}"
+            )
+        return mapped
 
     def _rid_lookup(self) -> dict[str, str]:
         """``rid -> slug`` from ``by-rid.json``, memoized.
@@ -188,14 +191,6 @@ class HttpProfileStore(_HookedStore, _AnalyticsAccessors):
         """What the site's ``by-rid.json`` lists for ``rid``: zero or one entry."""
         slug = self._rid_lookup().get(rid)
         return [] if slug is None else [ProfileRef(profile_id=None, rid=rid, slug=slug)]
-
-    def self_profile_for(self, rid: str) -> Optional[ResearcherProfile]:
-        """The one published profile about ``rid`` (a site has no owners)."""
-        slug = self._rid_lookup().get(rid)
-        return None if slug is None else self.get(slug)
-
-    def profile_owned_by(self, rid: str, owner: Ownership) -> Optional[ResearcherProfile]:  # noqa: ARG002
-        raise NotImplementedError("a published site has no owners")
 
     def exists(self, ref: str) -> bool:
         try:
@@ -429,13 +424,7 @@ class HttpProfileStore(_HookedStore, _AnalyticsAccessors):
 
     # Signatures mirror ``ProfileStore`` exactly so callers still type-check;
     # hence the unused arguments.
-    def create(
-        self,
-        document: "ProfileDocument",  # noqa: ARG002
-        *,
-        slug: str,  # noqa: ARG002
-        owner: Optional[Ownership] = None,  # noqa: ARG002
-    ) -> NoReturn:
+    def create(self, document: "ProfileDocument", *, slug: str) -> NoReturn:  # noqa: ARG002
         self._read_only("create")
 
     def create_bundle(
@@ -446,17 +435,10 @@ class HttpProfileStore(_HookedStore, _AnalyticsAccessors):
         expertise: "str | None" = None,  # noqa: ARG002
         soul: "str | None" = None,  # noqa: ARG002
         artifacts: "dict[str, str] | None" = None,  # noqa: ARG002
-        owner: Optional[Ownership] = None,  # noqa: ARG002
     ) -> NoReturn:
         self._read_only("create_bundle")
 
-    def put_document(
-        self,
-        slug: str,  # noqa: ARG002
-        document: "ProfileDocument",  # noqa: ARG002
-        *,
-        owner: Optional[Ownership] = None,  # noqa: ARG002
-    ) -> NoReturn:
+    def put_document(self, slug: str, document: "ProfileDocument") -> NoReturn:  # noqa: ARG002
         self._read_only("put_document")
 
     def delete(self, ref: str) -> NoReturn:  # noqa: ARG002
@@ -467,7 +449,6 @@ class HttpProfileStore(_HookedStore, _AnalyticsAccessors):
         slug: str,  # noqa: ARG002
         staging: Path,  # noqa: ARG002
         *,
-        owner: Optional[Ownership] = None,  # noqa: ARG002
         build_missing_index: bool = False,  # noqa: ARG002
     ) -> IngestResult:
         self._read_only("commit_directory")

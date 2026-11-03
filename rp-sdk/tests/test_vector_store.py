@@ -186,10 +186,10 @@ class TestHttpStoreReads:
         assert http_store.list_slugs() == sorted(_RIDS)
 
     def test_profiles_about_reads_by_rid(self, http_store):
-        """``by-rid.json`` answers ``profiles_about``; a rid is not a ref."""
+        """``by-rid.json`` answers ``profiles_about``, and a rid is a ref."""
         (about,) = http_store.profiles_about(_RIDS["grace-hopper"])
         assert about.slug == "grace-hopper"
-        assert http_store.self_profile_for(_RIDS["grace-hopper"]).slug == "grace-hopper"
+        assert http_store.resolve_slug(_RIDS["grace-hopper"]) == "grace-hopper"
 
     def test_resolve_slug_rejects_a_stranger(self, http_store):
         with pytest.raises(ProfileNotFoundError, match="nothing at"):
@@ -331,7 +331,7 @@ class TestRemoteStoreVectors:
         store = request.getfixturevalue(store_fixture)
         assert store.has_vector_index("ada-lovelace")
         assert not store.has_vector_index("not-a-profile")
-        assert not store.has_vector_index(_RIDS["ada-lovelace"])  # a rid is not a ref
+        assert store.has_vector_index(_RIDS["ada-lovelace"])  # a rid is a ref
 
     @pytest.mark.parametrize("store_fixture", _REMOTE)
     def test_centroids_matrix_is_one_call_for_the_whole_roster(self, request, store_fixture):

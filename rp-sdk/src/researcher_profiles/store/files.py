@@ -27,7 +27,6 @@ from .hooks import _HookedStore
 from .protocol import (
     DuplicateIdentityError,
     IngestResult,
-    Ownership,
     ProfileNotFoundError,
     ProfileRef,
     UploadError,
@@ -168,16 +167,21 @@ class FilesystemProfileStore(_HookedStore, _AnalyticsAccessors):
         return out
 
     def resolve_slug(self, ref: str) -> str:
-        """Check that ``ref`` names a profile directory and return it.
+        """Map a profile reference (a directory name or a rid) to a directory name.
 
-        A ref is a directory name (a slug), never a rid; a rid is looked up
-        with :meth:`profiles_about`.
+        Directory name first; a directory name can never be mistaken for a rid.
         """
-        if isinstance(ref, str) and ref and (self._root / ref / "profile.jsonld").is_file():
+        if not isinstance(ref, str) or not ref:
+            raise ProfileNotFoundError(f"nothing in {self._root} matches {ref!r}")
+        if (self._root / ref / "profile.jsonld").is_file():
             return ref
-        raise ProfileNotFoundError(
-            f"nothing in {self._root} matches {ref!r}: no directory by that name"
-        )
+        mapped = self._rid_map().get(ref)
+        if mapped is None:
+            raise ProfileNotFoundError(
+                f"nothing in {self._root} matches {ref!r}: no directory by that "
+                f"name, and no profile whose rid is {ref!r}"
+            )
+        return mapped
 
     def profiles_about(self, rid: str) -> list[ProfileRef]:
         """The one directory whose ``profile.jsonld`` names ``rid``, or nothing.
@@ -187,15 +191,6 @@ class FilesystemProfileStore(_HookedStore, _AnalyticsAccessors):
         """
         slug = self._rid_map().get(rid)
         return [] if slug is None else [ProfileRef(profile_id=None, rid=rid, slug=slug)]
-
-    def self_profile_for(self, rid: str) -> Optional[ResearcherProfile]:
-        """The one profile about ``rid``: a directory corpus has no owners, so
-        its profile for a person IS that person's record."""
-        slug = self._rid_map().get(rid)
-        return None if slug is None else self.get(slug)
-
-    def profile_owned_by(self, rid: str, owner: Ownership) -> Optional[ResearcherProfile]:  # noqa: ARG002
-        raise NotImplementedError("a directory store has no owners")
 
     def path_for(self, ref: str) -> Path:
         """The absolute profile directory for a slug. Numpy-free."""
@@ -337,13 +332,7 @@ class FilesystemProfileStore(_HookedStore, _AnalyticsAccessors):
     def _rid_taken(self, rid: str) -> bool:
         return rid in self._rid_map()
 
-    def create(
-        self,
-        document: ProfileDocument,
-        *,
-        slug: str,
-        owner: Optional[Ownership] = None,  # noqa: ARG002 - a directory has no owners
-    ) -> ResearcherProfile:
+    def create(self, document: ProfileDocument, *, slug: str) -> ResearcherProfile:
         """Create ``<root>/<slug>/`` and persist ``document`` into it.
 
         The write unit is not atomic here (``ctx.atomic`` is ``False``), so a
@@ -381,7 +370,6 @@ class FilesystemProfileStore(_HookedStore, _AnalyticsAccessors):
         expertise: str | None = None,
         soul: str | None = None,
         artifacts: dict[str, str] | None = None,
-        owner: Optional[Ownership] = None,  # noqa: ARG002 - a directory has no owners
     ) -> ResearcherProfile:
         """Create ``<root>/<slug>/`` with its document and every artifact.
 
@@ -429,13 +417,7 @@ class FilesystemProfileStore(_HookedStore, _AnalyticsAccessors):
         self._bump_generation()
         return self._admit(slug, prof)
 
-    def put_document(
-        self,
-        slug: str,
-        document: ProfileDocument,
-        *,
-        owner: Optional[Ownership] = None,  # noqa: ARG002 - a directory has no owners
-    ) -> ResearcherProfile:
+    def put_document(self, slug: str, document: ProfileDocument) -> ResearcherProfile:
         """See :meth:`~.protocol.ProfileStore.put_document`."""
         target = self._root / slug
         is_create = not target.exists()
@@ -482,12 +464,7 @@ class FilesystemProfileStore(_HookedStore, _AnalyticsAccessors):
         return rid
 
     def commit_directory(
-        self,
-        slug: str,
-        staging: Path,
-        *,
-        owner: Optional[Ownership] = None,  # noqa: ARG002 - a directory has no owners
-        build_missing_index: bool = False,
+        self, slug: str, staging: Path, *, build_missing_index: bool = False
     ) -> IngestResult:
         """Validate a staged directory loads, then atomically swap it live.
 

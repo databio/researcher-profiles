@@ -62,9 +62,6 @@ class ProfileSummary(_APIModel):
     #: consumers map onto their own users. ``None`` means the document failed
     #: to load.
     rid: Optional[str] = None
-    #: The store's record key, on a store that has one (SQL); ``None`` on a
-    #: directory store. A store may hold several records about one rid.
-    profile_id: Optional[int] = None
     name: str
     level: str = "full"
     affiliation: Optional[str] = None
@@ -245,8 +242,6 @@ class ProfileRecord(_APIModel):
 
     slug: str
     rid: Optional[str] = None
-    #: The store's record key (SQL); ``None`` on a directory store.
-    profile_id: Optional[int] = None
     #: The edit version token (``"sha256:<hex>"`` over document + SOUL).
     content_hash: Optional[str] = None
     view: Literal["record", "full"]
@@ -428,16 +423,8 @@ class PushResponse(_APIModel):
     # The ?mode= the push ran under: what happened to the live files the
     # archive did not carry (replace | merge | prune).
     mode: str = "replace"
-    # The store's record key for the pushed profile, on a store that has
-    # one (SQL); None on a directory store.
-    profile_id: Optional[int] = None
-    #: Fields the server kept from the owner's hand edits instead of taking the
-    #: pushed value; ``None`` when the host does not protect owner edits.
-    kept_owner_fields: Optional[list[str]] = None
-    #: Fields the host took out of the pushed document instead of refusing the
-    #: push (Prosopia: identity fields on a team's profile); ``None`` when the
-    #: host strips nothing from pushes to this profile.
-    stripped_fields: Optional[list[str]] = None
+    # A host may add its own top-level fields (see the push route's
+    # ``request.state.push_response_extra``).
 
 
 class CapabilitiesResponse(_APIModel):

@@ -14,7 +14,7 @@ in as the registered public client ``rp-cli``, asking for the
   the server's ``authorization_endpoint``.
 - **The device flow (RFC 8628).** ``rp login --device``, and automatically over
   SSH or on Linux with no display, or when the browser cannot be opened, when
-  the server offers it (Prosopia does). It prints a link and a code to approve
+  the server offers it. It prints a link and a code to approve
   on any device. With ``--no-browser`` (or over SSH at a server without a
   device flow) ``rp`` prints the address and takes the address the browser
   ends on, pasted at the terminal.
@@ -25,8 +25,8 @@ format::
 
     {"version": 1, "logins": {"https://profiles.example.org": {
       "server": ..., "issuer": ..., "client_id": "rp-cli", "token_endpoint": ...,
-      "access_token": "rpa_...", "access_expires_at": 1767225600,
-      "refresh_token": "rpr_...", "extra": {"orcid": ..., "name": ...}, ...}}}
+      "access_token": "...", "access_expires_at": 1767225600,
+      "refresh_token": "...", "extra": {"orcid": ..., "name": ...}, ...}}}
 
 A stored login is offered only to its own server. Commands refresh its access
 token when it has expired (or is about to), and once more when the server
@@ -36,8 +36,11 @@ refresh token. A refresh that fails raises one plain sentence (``rp: ...``).
 from an older ``rp`` (including the never-expiring ``rpk_`` key files) is no
 longer read: the error says to run ``rp login``, which replaces it.
 
-Scripts use ``RESEARCHER_PROFILES_TOKEN`` instead. ``rpa_`` keys minted on the
-Privacy page live in ``credentials.toml`` (:mod:`researcher_profiles.cli.auth.agent`).
+After signing in, ``rp`` says who you are when the server's metadata lists a
+``whoami_endpoint`` (see the spec's command-line login section); a server
+without one just goes unnamed.
+
+Scripts use ``RESEARCHER_PROFILES_TOKEN`` instead.
 """
 
 import os
@@ -62,7 +65,7 @@ CONFIG = ClientConfig(
     client_id="rp-cli",
     app_name="rp",
     scope="profiles:push",
-    resource_path=None,  # Prosopia: resource is optional; send none
+    resource_path=None,  # the resource indicator is optional; send none
     relogin_hint="Run `rp login` again.",
 )
 
@@ -118,12 +121,69 @@ def default_server() -> Optional[str]:
     return max(logins, key=lambda kc: kc[1].obtained_at)[0].server
 
 
-def _identify(cred: Credential) -> dict:
-    """Who the new login is (``whoami``); unknown when the server will not say."""
+#: The optional metadata field naming the identity endpoint (spec section 14).
+WHOAMI_FIELD = "whoami_endpoint"
+
+
+def _get_json(url: str, token: Optional[str] = None, timeout: float = 10.0) -> Optional[dict]:
+    """GET ``url`` as JSON with the standard library, or ``None`` on any failure."""
+    import json
+    import urllib.request
+
+    req = urllib.request.Request(url, headers={"Accept": "application/json"})
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
     try:
-        owner = whoami(cred.server, cred.access_token).get("owner") or {}
-    except (OAuthClientError, ImportError, ValueError):
-        owner = {}
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - http(s) only
+            data = json.loads(resp.read().decode("utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def whoami_endpoint(server: str) -> Optional[str]:
+    """The ``whoami_endpoint`` the server's OAuth metadata lists, or ``None``."""
+    meta = _get_json(server_base(server) + "/.well-known/oauth-authorization-server")
+    value = (meta or {}).get(WHOAMI_FIELD)
+    return value if isinstance(value, str) and value.startswith(("https://", "http://")) else None
+
+
+def whoami(endpoint: str, token: str, timeout: float = 30.0) -> dict:
+    """``GET endpoint`` (a server's ``whoami_endpoint``) with ``token``.
+
+    Raises :class:`TokenRejected` on a 401, so a stored login is refreshed and
+    retried; :data:`LoginError` on any other failure.
+    """
+    import json
+    import urllib.error
+    import urllib.request
+
+    req = urllib.request.Request(
+        endpoint, headers={"Accept": "application/json", "Authorization": f"Bearer {token}"}
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - http(s) only
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            raise TokenRejected("token rejected; run rp login again") from None
+        raise LoginError(f"{endpoint}: whoami failed ({e.code})") from None
+    except (OSError, ValueError) as e:
+        raise LoginError(f"{endpoint}: {e}") from None
+    if not isinstance(data, dict):
+        raise LoginError(f"{endpoint}: whoami answered something other than an object")
+    return data
+
+
+def _identify(cred: Credential) -> dict:
+    """Who the new login is, from the server's ``whoami_endpoint``; unknown without one.
+
+    The answer names the person as ``owner: {orcid, name}`` or at the top level.
+    """
+    url = whoami_endpoint(cred.server)
+    record = _get_json(url, cred.access_token) if url else None
+    record = record or {}
+    owner = record.get("owner") if isinstance(record.get("owner"), dict) else record
     return {"orcid": owner.get("orcid"), "name": owner.get("name")}
 
 
@@ -199,27 +259,6 @@ def _default_label() -> str:
         return "rp"
 
 
-def whoami(url: str, token: str, *, client: Any = None, timeout: float = 30.0) -> dict:
-    """``GET /api/v1/manage/whoami`` with ``token``. Raises :class:`TokenRejected` on a 401."""
-    import httpx
-
-    base = server_base(url)
-    http = client if client is not None else httpx.Client(base_url=base, timeout=timeout)
-    try:
-        try:
-            r = http.get("/api/v1/manage/whoami", headers={"Authorization": f"Bearer {token}"})
-        except httpx.HTTPError as e:
-            raise LoginError(f"{base}: {e}") from e
-        if r.status_code == 401:
-            raise TokenRejected("token rejected; run rp login again")
-        if r.status_code >= 400:
-            raise LoginError(f"{base}: whoami failed ({r.status_code}): {r.text[:200]}")
-        return r.json()
-    finally:
-        if client is None:
-            http.close()
-
-
 __all__ = [
     "CONFIG",
     "LoginError",
@@ -235,5 +274,6 @@ __all__ = [
     "store",
     "stored_token",
     "whoami",
+    "whoami_endpoint",
     "with_token_refresh",
 ]

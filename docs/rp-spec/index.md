@@ -628,9 +628,9 @@ reveals whether artifacts exist, but a consumer MUST validate rather than trust.
 - Profile creation: how to build is out of scope.
 - DIDs/Verifiable Credentials: identity uses a simpler proof envelope.
 - Accounts and identity providers: how a server authenticates a person
-  (institutional SSO, ORCID, e-mail) is out of scope. The
-  [management tier](dynamic-api.md#14-management-api) specifies only what a
-  credential looks like once issued.
+  (institutional SSO, ORCID, e-mail) is out of scope, and so is how a server
+  mints and manages keys. [Command-line login](dynamic-api.md#14-command-line-login)
+  specifies only how a command line obtains a credential.
 
 ## Research interests
 

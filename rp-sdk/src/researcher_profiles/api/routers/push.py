@@ -19,7 +19,7 @@ from ...schema import (
     mint_local_rid,
     validate_ref,
 )
-from ...store import Ownership, ProfileStore
+from ...store import ProfileStore
 from ..caller import Caller
 from ..deps import get_read_caller, get_service, get_store, require_scope
 from ..service import Service
@@ -94,14 +94,15 @@ def _push_gate(request: Request, slug: str, rid: str) -> None:
         gate(request, slug, rid)
 
 
-def _owner_for_push(request: Request, slug: str, rid: str) -> "Ownership | None":
-    """Ask the host who owns a record this push creates (``app.state.owner_for_push``).
+def _host_fields(request: Request) -> dict:
+    """Fields a host adds to the push response (``request.state.push_response_extra``).
 
-    ``None`` (the default, and a host with no owners) leaves the store to its
-    own ``owner_resolver``. A replace keeps the record's owner whatever this says.
+    A host's ``push_gate`` may report what it did to the push (for example
+    fields it kept or dropped) by setting a dict there; it is merged into the
+    response as extra top-level fields.
     """
-    hook = getattr(request.app.state, "owner_for_push", None)
-    return None if hook is None else hook(request, slug, rid)
+    extra = getattr(request.state, "push_response_extra", None)
+    return dict(extra) if isinstance(extra, dict) else {}
 
 
 async def _put_profile_json(
@@ -167,9 +168,7 @@ async def _put_profile_json(
                 )
 
     try:
-        prof = store.put_document(
-            slug, document, owner=_owner_for_push(request, slug, document.rid)
-        )
+        prof = store.put_document(slug, document)
     except ProfileWriteError as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
 
@@ -182,9 +181,7 @@ async def _put_profile_json(
         name=prof.metadata.name,
         level=str(prof.level),
         indexed=False,  # JSON upsert never carries an embedding index
-        profile_id=prof.profile_id,
-        kept_owner_fields=getattr(request.state, "kept_owner_fields", None),
-        stripped_fields=getattr(request.state, "stripped_fields", None),
+        **_host_fields(request),
     )
 
 
@@ -219,7 +216,6 @@ async def _put_profile_tarball(
             include_fulltext=bool(getattr(request.app.state, "accept_fulltext", False)),
             gate=lambda rid: _push_gate(request, slug, rid),
             mode=mode,
-            owner=lambda rid: _owner_for_push(request, slug, rid),
         )
     except UploadError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
@@ -241,9 +237,7 @@ async def _put_profile_tarball(
         spliced=result.spliced,
         manifest_counts=result.manifest_counts,
         mode=result.mode,
-        profile_id=result.profile_id,
-        kept_owner_fields=getattr(request.state, "kept_owner_fields", None),
-        stripped_fields=getattr(request.state, "stripped_fields", None),
+        **_host_fields(request),
     )
 
 

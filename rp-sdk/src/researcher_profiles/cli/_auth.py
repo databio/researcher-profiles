@@ -46,7 +46,7 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
     p_login.add_argument(
         "--label",
         default=None,
-        help="Name for this machine on the approve page and Privacy page (default: hostname)",
+        help="Name for this machine on the server's approve page (default: hostname)",
     )
     p_login.add_argument(
         "--device",
@@ -78,9 +78,13 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
     p_whoami = add_subcommand(
         sub,
         "whoami",
-        "Show who the stored login is and which profiles it may push",
+        "Show who the stored login is, if the server says",
         "rp whoami",
         "rp whoami --json",
+        extra=(
+            "Asks the whoami_endpoint the server lists in its OAuth metadata. A\n"
+            "server that lists none does not say who you are.\n"
+        ),
     )
     _add_url(p_whoami, "Server base URL (default: the login's)")
     _add_token(p_whoami)
@@ -150,8 +154,8 @@ def _cmd_logout(args: argparse.Namespace) -> int:
     url = server_base(url)
     if not oauth_cli.logout(cli_app(), url):
         print(
-            f"note: {url} did not confirm the sign-out; revoke 'rp CLI' on its Privacy "
-            "page if you need to",
+            f"note: {url} did not confirm the sign-out; revoke 'rp CLI' in your "
+            "account settings there if you need to",
             file=sys.stderr,
         )
     print(f"logged out of {url}; removed it from {credentials_path()}")
@@ -159,35 +163,36 @@ def _cmd_logout(args: argparse.Namespace) -> int:
 
 
 def _cmd_whoami(args: argparse.Namespace) -> int:
-    """Ask the server who the stored (or given) token is."""
-    from .auth.credentials import LoginError, whoami, with_token_refresh
+    """Ask the server's ``whoami_endpoint`` who the stored (or given) token is."""
+    from .auth.credentials import LoginError, whoami, whoami_endpoint, with_token_refresh
 
     url, token = _remote_target(args.url, args.token)
     if not url or not token:
         print("not logged in. Run:\n  rp login https://profiles.example.org", file=sys.stderr)
         return EXIT_USAGE
+    endpoint = whoami_endpoint(url)
+    if endpoint is None:
+        print(f"{url} does not say who a login is (no whoami_endpoint)", file=sys.stderr)
+        return EXIT_ERROR
     try:
-        record = with_token_refresh(token, lambda t: whoami(url, t))
+        record = with_token_refresh(token, lambda t: whoami(endpoint, t))
     except LoginError as e:
         print(f"whoami failed: {e}", file=sys.stderr)
         return EXIT_ERROR
     if args.as_json:
         print(json.dumps({"url": url, **record}, indent=2))
         return EXIT_OK
-    owner = record.get("owner") or {}
-    who = owner.get("name") or owner.get("orcid") or record.get("app") or "unknown"
+    owner = record.get("owner") if isinstance(record.get("owner"), dict) else record
+    who = owner.get("name") or owner.get("orcid") or "unknown"
     print(
         f"{url}: {who}"
         + (f" ({owner['orcid']})" if owner.get("orcid") and owner.get("name") else "")
     )
-    print(f"scopes: {', '.join(record.get('scopes') or []) or '-'}")
     profiles = record.get("profiles") or []
     if profiles:
         print("can push:")
         for prof in profiles:
-            print(f"  {prof.get('slug') or '-'}\t{prof.get('rid')}\t{prof.get('role')}")
-    elif owner:
-        print("can push: nothing yet (claim your profile on the server first)")
+            print(f"  {prof.get('slug') or '-'}\t{prof.get('rid')}\t{prof.get('role') or ''}")
     return EXIT_OK
 
 

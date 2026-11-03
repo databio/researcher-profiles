@@ -1,13 +1,11 @@
-"""``rp login`` / ``logout`` / ``whoami`` and the stored-credential precedence.
+"""``rp login`` / ``logout`` and the stored-credential precedence.
 
 ``rp login`` is a thin adapter over snapgate's shared OAuth client (vendored at
 ``researcher_profiles._vendor.snapgate_oauth_client``), signing in as the
 registered OAuth client ``rp-cli``. These tests check rp's wiring against the
-client's ``FakeAuthorizationServer`` (snapgate's rules, plus the device flow
-Prosopia offers); the client's own mechanics (PKCE, the loopback listener,
-locking, refresh rotation, the device grant) are tested in snapgate. The file
-also pins the agent ``ManagementClient`` wire contract from
-``cli/auth/agent.py``.
+client's ``FakeAuthorizationServer`` (snapgate's rules, plus a device flow);
+the client's own mechanics (PKCE, the loopback listener,
+locking, refresh rotation, the device grant) are tested in snapgate.
 """
 
 import json
@@ -15,7 +13,6 @@ import stat
 import time
 from unittest.mock import MagicMock
 
-import httpx
 import pytest
 
 from researcher_profiles._vendor.snapgate_oauth_client import Credential, CredentialKey
@@ -24,21 +21,10 @@ from researcher_profiles._vendor.snapgate_oauth_client import source as oauth_so
 from researcher_profiles._vendor.snapgate_oauth_client.testing import FakeAuthorizationServer
 from researcher_profiles.cli import main
 from researcher_profiles.cli.auth import credentials as creds
-from researcher_profiles.cli.auth.agent import (
-    AgentAPIError,
-    CredentialError,
-    InsufficientAccessError,
-    ManagementClient,
-    resolve_credential,
-)
-from researcher_profiles.cli.auth.agent import (
-    Credential as AgentCredential,
-)
 
 SERVER = "https://people.example.org"
 OTHER_SERVER = "https://other.example.org"
 SLUG = "jane-doe"
-_RealClient = httpx.Client
 WHOAMI = {
     "app": "agent_abc",
     "scopes": ["push_own", "read"],
@@ -87,21 +73,6 @@ def _desktop(monkeypatch):
 
 
 class TestConfigDir:
-    @pytest.fixture
-    def agent_env(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
-        monkeypatch.delenv("RESEARCHER_PROFILES_AGENT_KEY", raising=False)
-        monkeypatch.delenv("RESEARCHER_PROFILES_API_URL", raising=False)
-        monkeypatch.delenv("RESEARCHER_PROFILES_AUTH_HOST", raising=False)
-
-    def _write_toml(self, mode):
-        d = creds.config_dir()
-        d.mkdir(parents=True, exist_ok=True)
-        f = d / "credentials.toml"
-        f.write_text('default = "h"\n[hosts.h]\nkey = "rpa_x"\nurl = "https://x"\n')
-        f.chmod(mode)
-        return f
-
     def test_xdg(self, tmp_path, monkeypatch):
         monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
         assert creds.config_dir() == tmp_path / "researcher-profiles"
@@ -111,22 +82,8 @@ class TestConfigDir:
         monkeypatch.setenv("HOME", str(tmp_path))
         assert creds.config_dir() == tmp_path / ".config" / "researcher-profiles"
 
-    def test_both_files_share_folder(self, agent_env):
+    def test_credentials_live_in_the_config_dir(self):
         assert creds.credentials_path().parent == creds.config_dir()
-        with pytest.raises(CredentialError) as exc:
-            resolve_credential()
-        assert str(creds.config_dir() / "credentials.toml") in str(exc.value)
-
-    def test_agent_toml_resolves(self, agent_env):
-        f = self._write_toml(0o600)
-        cred = resolve_credential()
-        assert cred.key == "rpa_x"
-        assert str(f) in cred.source
-
-    def test_agent_toml_bad_permissions(self, agent_env):
-        self._write_toml(0o644)
-        with pytest.raises(CredentialError, match="chmod 600"):
-            resolve_credential()
 
 
 class TestPrecedence:
@@ -231,32 +188,39 @@ class TestCliWiring:
 
 @pytest.fixture
 def fake(monkeypatch):
-    """A Prosopia-like server (loopback and device flow), wired in as the OAuth
-    client's HTTP; the system browser is its stand-in; ``whoami`` (httpx) answers
-    its live access tokens, except any in ``fake.rejected``."""
+    """An OAuth server (loopback and device flow), wired in as the OAuth
+    client's HTTP; the system browser is its stand-in. Its metadata lists a
+    ``whoami_endpoint``, which answers its live access tokens."""
     server = FakeAuthorizationServer(
         SERVER, client_id="rp-cli", scope="profiles:push", device=True, iss=True
     )
     server.device_interval = 0
     server.approve_device(after_polls=1)
-    server.rejected = set()
+    server.whoami = True
     monkeypatch.setattr(oauth_cli, "UrllibHttp", lambda *a, **k: server)
     monkeypatch.setattr(oauth_source, "UrllibHttp", lambda *a, **k: server)
     monkeypatch.setattr(oauth_cli.webbrowser, "open", server.opener())
 
-    def handle(request: httpx.Request) -> httpx.Response:
-        token = request.headers.get("authorization", "").removeprefix("Bearer ")
-        if request.url.path != "/api/v1/manage/whoami":
-            return httpx.Response(404, json={"detail": "no such route"})
-        if not server.access_ok(token) or token in server.rejected:
-            return httpx.Response(401, json={"detail": "bad"})
-        return httpx.Response(200, json=WHOAMI)
+    def get_json(url, token=None, timeout=10.0):
+        if url == SERVER + "/.well-known/oauth-authorization-server":
+            return {
+                "issuer": SERVER,
+                **({"whoami_endpoint": SERVER + "/me"} if server.whoami else {}),
+            }
+        if url == SERVER + "/me" and token and server.access_ok(token):
+            return WHOAMI
+        return None
 
-    monkeypatch.setattr(
-        httpx,
-        "Client",
-        lambda *a, **kw: _RealClient(base_url=SERVER, transport=httpx.MockTransport(handle)),
-    )
+    def whoami(endpoint, token, timeout=30.0):
+        if endpoint != SERVER + "/me":
+            raise creds.LoginError(f"{endpoint}: whoami failed (404)")
+        if not server.access_ok(token) or token in server.rejected:
+            raise creds.TokenRejected("token rejected; run rp login again")
+        return WHOAMI
+
+    server.rejected = set()
+    monkeypatch.setattr(creds, "_get_json", get_json)
+    monkeypatch.setattr(creds, "whoami", whoami)
     return server
 
 
@@ -342,7 +306,13 @@ class TestLoginWiring:
         fake.fail_next(TransportError)
         assert main(["logout", SERVER]) == 0
         assert _stored() is None
-        assert "Privacy page" in capsys.readouterr().err
+        assert "did not confirm the sign-out" in capsys.readouterr().err
+
+    def test_a_server_without_a_whoami_endpoint_goes_unnamed(self, fake, capsys):
+        fake.whoami = False
+        assert main(["login", SERVER]) == 0
+        assert _stored().extra == {"orcid": None, "name": None}
+        assert "as you" in capsys.readouterr().err
 
     def test_whoami_refreshes_on_401_and_retries(self, fake, capsys):
         assert main(["login", SERVER]) == 0
@@ -351,6 +321,12 @@ class TestLoginWiring:
         assert main(["whoami"]) == 0
         assert "Jane A. Doe" in capsys.readouterr().out
         assert len(_refreshes(fake)) == 1 and _stored().access_token != old
+
+    def test_whoami_without_an_endpoint_says_so(self, fake, capsys):
+        assert main(["login", SERVER]) == 0
+        fake.whoami = False
+        assert main(["whoami"]) == 1
+        assert "no whoami_endpoint" in capsys.readouterr().err
 
     def test_push_refreshes_on_401_through_with_token_refresh(self, fake, monkeypatch, tmp_path):
         assert main(["login", SERVER]) == 0
@@ -363,14 +339,17 @@ class TestLoginWiring:
         (refresh,) = _refreshes(fake)
         assert "scope" not in refresh and "resource" not in refresh
 
-    def test_a_given_token_is_never_refreshed(self, fake, capsys):
+    def test_a_given_token_is_never_refreshed(self, fake, monkeypatch, tmp_path):
         assert main(["login", SERVER]) == 0
-        assert main(["whoami", "--token", "rpa_mine"]) == 1
+        spy = MagicMock(side_effect=PermissionError("401"))
+        monkeypatch.setattr("researcher_profiles.client.push_profile", spy)
+        assert main(["push", str(tmp_path), "--token", "rpa_mine"]) == 2  # refused, not retried
+        assert [c.kwargs["token"] for c in spy.call_args_list] == ["rpa_mine"]
         assert _refreshes(fake) == []
 
-    def test_a_login_that_ended_is_one_plain_error(self, fake, capsys):
+    def test_a_login_that_ended_is_one_plain_error(self, fake, capsys, tmp_path):
         _save(access_expires_at=int(time.time()) - 10)  # expired; the server knows no such token
-        assert main(["whoami"]) == 1
+        assert main(["push", str(tmp_path)]) == 1
         err = capsys.readouterr().err
         assert err.startswith("rp: Your rp login for https://people.example.org has ended")
         assert "Run `rp login` again." in err
@@ -394,167 +373,49 @@ class TestLoginWiring:
         assert _stored().extra["name"] == "Jane A. Doe"
 
 
-def _management_client() -> tuple[ManagementClient, MagicMock]:
-    """A management client with its one session replaced by a request recorder."""
-    client = ManagementClient(
-        AgentCredential(key="rpa_test", url="https://profiles.example.org", source="test")
-    )
-    session = MagicMock()
-    client._session = session
-    return client, session
+class TestWhoamiOverHttp:
+    """``whoami_endpoint`` and ``whoami`` against a real local HTTP server."""
 
+    @pytest.fixture
+    def http_server(self):
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
 
-class TestManagementClient:
-    """The management client preserves the profile-service wire contract."""
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *a):  # quiet
+                pass
 
-    @pytest.mark.parametrize(
-        "resource, method, args, kwargs, http_method, path, body",
-        [
-            ("identity", "whoami", (), {}, "get", "/api/v1/manage/agent/whoami", None),
-            ("profile", "get", (SLUG,), {}, "get", f"/api/v1/profiles/{SLUG}?view=full", None),
-            (
-                "profile",
-                "patch_metadata",
-                (SLUG, {"name": "Jane Q. Doe"}),
-                {"base_hash": "before"},
-                "patch",
-                f"/api/v1/profiles/{SLUG}/metadata",
-                {"name": "Jane Q. Doe", "base_hash": "before"},
-            ),
-            (
-                "profile",
-                "patch_visibility",
-                (SLUG,),
-                {
-                    "profile_visibility": "limited",
-                    "artifacts": [{"role": "soul", "visibility": "private"}],
-                },
-                "patch",
-                f"/api/v1/profiles/{SLUG}/visibility",
-                {
-                    "profile_visibility": "limited",
-                    "artifacts": [{"role": "soul", "visibility": "private"}],
-                },
-            ),
-            (
-                "profile",
-                "get_work",
-                (SLUG, "doe2016example"),
-                {},
-                "get",
-                f"/api/v1/profiles/{SLUG}/papers/doe2016example?view=full",
-                None,
-            ),
-            (
-                "profile",
-                "patch_work",
-                (SLUG, "doe2016example", {"doi": "10.1/x"}),
-                {"base_version": "before"},
-                "patch",
-                f"/api/v1/profiles/{SLUG}/works/doe2016example",
-                {"doi": "10.1/x", "base_version": "before"},
-            ),
-            (
-                "profile",
-                "add_work",
-                (SLUG, {"paper_id": "doe2026new", "name": "A new work", "type": "authored"}),
-                {},
-                "post",
-                f"/api/v1/profiles/{SLUG}/works",
-                {"paper_id": "doe2026new", "name": "A new work", "type": "authored"},
-            ),
-        ],
-        ids=[
-            "whoami",
-            "get",
-            "patch-metadata",
-            "patch-visibility",
-            "get-work",
-            "patch-work",
-            "add-work",
-        ],
-    )
-    def test_resource_methods_keep_their_request_shape(
-        self, resource, method, args, kwargs, http_method, path, body
-    ):
-        client, session = _management_client()
-        response = MagicMock(status_code=200, is_success=True)
-        response.json.return_value = {"ok": True}
-        getattr(session, http_method).return_value = response
+            def do_GET(self):
+                base = f"http://127.0.0.1:{self.server.server_port}"
+                if self.path == "/.well-known/oauth-authorization-server":
+                    body = {"issuer": base, "whoami_endpoint": base + "/me"}
+                elif self.path == "/me" and self.headers.get("Authorization") == "Bearer good":
+                    body = {"owner": {"name": "Jane A. Doe", "orcid": "0000-0002-1825-0097"}}
+                elif self.path == "/me":
+                    self.send_response(401)
+                    self.end_headers()
+                    return
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                data = json.dumps(body).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(data)
 
-        result = getattr(getattr(client, resource), method)(*args, **kwargs)
+        srv = HTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        yield f"http://127.0.0.1:{srv.server_port}"
+        srv.shutdown()
 
-        request = getattr(session, http_method)
-        url = f"https://profiles.example.org{path}"
-        if body is None:
-            request.assert_called_once_with(url)
-        else:
-            request.assert_called_once_with(url, json=body)
-        assert result == {"ok": True}
+    def test_endpoint_found_and_answers(self, http_server):
+        endpoint = creds.whoami_endpoint(http_server)
+        assert endpoint == http_server + "/me"
+        assert creds.whoami(endpoint, "good")["owner"]["name"] == "Jane A. Doe"
 
-    @pytest.mark.parametrize(
-        "resource, method, args, kwargs",
-        [
-            ("identity", "whoami", (), {}),
-            ("profile", "get", (SLUG,), {}),
-            ("profile", "patch_metadata", (SLUG, {"name": "Jane"}), {}),
-            ("profile", "add_work", (SLUG, {"paper_id": "doe2026new", "name": "New"}), {}),
-            ("profile", "patch_visibility", (SLUG,), {}),
-            ("profile", "get_work", (SLUG, "doe2016example"), {}),
-            ("profile", "patch_work", (SLUG, "doe2016example", {"doi": "10.1/x"}), {}),
-            ("profile", "delete_work", (SLUG, "doe2016example"), {}),
-        ],
-        ids=[
-            "whoami",
-            "get",
-            "patch-metadata",
-            "add-work",
-            "patch-visibility",
-            "get-work",
-            "patch-work",
-            "delete-work",
-        ],
-    )
-    def test_resource_methods_raise_insufficient_access(self, resource, method, args, kwargs):
-        client, session = _management_client()
-        response = MagicMock(status_code=403, is_success=False)
-        # The server's shape: FastAPI wraps the structured refusal in ``detail``.
-        response.json.return_value = {
-            "detail": {
-                "error": "insufficient_access",
-                "required": ["background", "summary"],
-                "missing": ["background"],
-                "needs_replace": [],
-                "hint": "This needs Write on background.",
-            }
-        }
-        session.get.return_value = response
-        session.patch.return_value = response
-        session.put.return_value = response
-        session.post.return_value = response
-        session.delete.return_value = response
-
-        with pytest.raises(InsufficientAccessError) as error:
-            getattr(getattr(client, resource), method)(*args, **kwargs)
-
-        assert error.value.missing == ["background"]
-        assert error.value.required == ["background", "summary"]
-        assert error.value.detail == "This needs Write on background."
-
-    def test_a_not_delegable_refusal_carries_its_hint(self):
-        client, session = _management_client()
-        response = MagicMock(status_code=403, is_success=False)
-        response.json.return_value = {
-            "detail": {
-                "error": "not_delegable",
-                "action": "visibility",
-                "hint": "Apps and API keys may not make this change.",
-            }
-        }
-        session.patch.return_value = response
-
-        with pytest.raises(AgentAPIError) as error:
-            client.profile.patch_visibility(SLUG, profile_visibility="limited")
-
-        assert not isinstance(error.value, InsufficientAccessError)
-        assert error.value.detail == "Apps and API keys may not make this change."
+    def test_a_401_is_token_rejected(self, http_server):
+        with pytest.raises(creds.TokenRejected):
+            creds.whoami(http_server + "/me", "bad")
+        assert isinstance(creds.TokenRejected("x"), PermissionError)

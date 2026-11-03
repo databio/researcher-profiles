@@ -222,8 +222,8 @@ treated as `lite`, with the discrepancy disclosed when it first matters.
 
 An interview-built profile is `full` with `provenance: self_published` and a
 `provenanceNote`; its expertise/SOUL contain no `[paper_id]` citations by
-design. No papers? Connect to Prosopia's MCP server and use the
-`interview_me` prompt.
+design. No papers? Connect to a profile server's MCP endpoint that offers an
+`interview_me` prompt and use it.
 
 ## Never
 

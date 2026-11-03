@@ -13,8 +13,7 @@ The rank lives on :class:`~._parts.CareerStage` (``current_rank`` plus
   push, merge, lens) applies: a self-reported stage is kept
   and only gains facts it lacks.
 
-The TypeScript mirror is ``prosopia/frontend/src/manage/currentRank.ts``;
-keep the two in sync.
+A host UI that ranks or labels career stages should mirror these constants.
 """
 
 from datetime import date

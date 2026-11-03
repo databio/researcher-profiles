@@ -69,31 +69,12 @@ def _add_url(parser: argparse.ArgumentParser, help_text: str) -> None:
     parser.add_argument("--url", default=None, help=help_text)
 
 
-def _add_host(parser: argparse.ArgumentParser) -> None:
-    """Register ``--host``: which entry of credentials.toml to authenticate as."""
-    parser.add_argument("--host", help="Host name in credentials.toml")
-
-
 def store_dir_for_ref(store, ref: str) -> Path:
-    """A slug's directory, else the one profile about a rid (``rp where``'s rule).
+    """A slug's or a rid's directory (``rp where``'s rule).
 
-    A rid is not a ref, so it goes through ``profiles_about``. Raises
-    ``ProfileNotFoundError`` when nothing matches, ``ValueError`` naming the
-    candidates when several profiles are about the rid.
+    Raises ``ProfileNotFoundError`` when nothing matches.
     """
-    from ..store import ProfileNotFoundError
-
-    try:
-        return store.path_for(ref)
-    except ProfileNotFoundError:
-        about = store.profiles_about(ref)
-        if len(about) == 1:
-            return store.path_for(about[0].slug)
-        if not about:
-            raise
-        raise ValueError(
-            f"{len(about)} profiles are about {ref}: {', '.join(r.slug for r in about)}"
-        ) from None
+    return store.path_for(ref)
 
 
 def profile_dir_for_ref(ref: str, root: str | None) -> Path | None:

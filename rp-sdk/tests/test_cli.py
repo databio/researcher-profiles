@@ -19,7 +19,6 @@ from types import SimpleNamespace
 import pytest
 
 from researcher_profiles.cli import _COMMANDS, build_parser, main
-from researcher_profiles.cli.auth.agent import AgentAPIError
 
 from .factories import break_papers, copy_fixture
 
@@ -52,9 +51,6 @@ VERBS_TOP = (
     "manifest",
     "sign",
     "sign-verify",
-    "agent",
-    "profile",
-    "work",
 )
 
 #: Every reachable parser path, including the two ``schema`` subcommands.
@@ -67,15 +63,6 @@ VERB_PATHS = tuple((v,) for v in VERBS_TOP) + (
     ("db", "pull"),
     ("db", "list"),
     ("db", "rm"),
-    ("agent", "whoami"),
-    ("agent", "config"),
-    ("profile", "pull"),
-    ("profile", "diff"),
-    ("profile", "push"),
-    ("profile", "visibility"),
-    ("work", "show"),
-    ("work", "set"),
-    ("work", "rm"),
 )
 VERB_IDS = [" ".join(p) for p in VERB_PATHS]
 
@@ -204,7 +191,7 @@ class TestParsing:
             ["site", "D", "-o", "O", "--force"],
             ["site", "D", "-o", "O", "-v"],
             ["definitely-not-a-verb"],
-            ["agent", "scopes"],
+            ["agent", "whoami"],
         ],
         ids=[
             "site-needs-out",
@@ -217,7 +204,7 @@ class TestParsing:
             "site-force-is-gone",
             "site-verbose-is-gone",
             "unknown-verb",
-            "agent-scopes-is-gone",
+            "agent-is-gone",
         ],
     )
     def test_usage_error_exits_two(self, argv):
@@ -1156,208 +1143,6 @@ class TestErrorHandling:
             assert fragment in err
 
 
-#: What a host's ``GET /api/v1/manage/agent/whoami`` answers, trimmed.
-WHOAMI = {
-    "principal": {"kind": "app", "label": "summary bot", "handle": "agent_1a2b3c"},
-    "owner": {"orcid": "0000-0002-1825-0097", "name": "Jane Doe"},
-    "profiles": [
-        {
-            "slug": "jane-doe",
-            "rid": "0000-0002-1825-0097",
-            "role": "owner",
-            "writes": ["paper_summary"],
-            "published": True,
-        }
-    ],
-    "parts": {"paper_summary": "write", "summary": "read", "cv": "read"},
-    "replace_profiles": False,
-    "never_delegable": [
-        {"act": "publish", "why": "Publishing is a decision by the person the profile describes."}
-    ],
-}
-
-
-_WORK = {
-    "paper_id": "smith2023protein",
-    "version": "0123456789abcdef",
-    "fields": {"paper_id": "smith2023protein", "doi": None, "datePublished": "2023"},
-}
-
-
-class FakeApi:
-    """A recording stand-in for ``ManagementClient``."""
-
-    def __init__(self):
-        self.calls: list = []
-        self.fail: Exception | None = None
-        self.detail: dict = {"metadata": {}}  # the ``profile.get`` reply
-        self.work: dict = _WORK  # the ``get_work`` reply
-        self.identity = SimpleNamespace(
-            whoami=lambda: self.calls.append("whoami") or dict(WHOAMI),
-        )
-        self.profile = SimpleNamespace(
-            get=self._get,
-            patch_visibility=self._patch_visibility,
-            get_work=lambda slug, pid: self.calls.append(("get", slug, pid)) or self.work,
-            patch_work=lambda slug, pid, patch, base_version=None: (
-                self.calls.append(("patch", slug, pid, patch, base_version))
-                or {"updated": sorted(patch)}
-            ),
-            delete_work=lambda slug, pid: self.calls.append(("delete", slug, pid)) or {},
-        )
-
-    def _get(self, slug):
-        self.calls.append(("get", slug))
-        return self.detail
-
-    def _patch_visibility(self, slug, **kw):
-        if self.fail:
-            raise self.fail
-        self.calls.append(("visibility", slug, kw))
-
-
-@pytest.fixture
-def fake_api(monkeypatch) -> FakeApi:
-    from researcher_profiles.cli.auth import agent
-
-    fake = FakeApi()
-    credential = agent.Credential("rpa_test", "https://example.test", "test", profile="jane-doe")
-    monkeypatch.setattr(agent, "resolve_credential", lambda **_: credential)
-    monkeypatch.setattr(agent, "ManagementClient", lambda _credential: fake)
-    return fake
-
-
-_P = "smith2023protein"
-_J = "jane-doe"
-
-
-class TestManagementDispatch:
-    """The CLI selects the ManagementClient resource, not its HTTP shape."""
-
-    @pytest.mark.parametrize(
-        ("argv", "fail", "code", "calls", "stream", "fragment"),
-        [
-            (["agent", "whoami", "--json"], None, 0, ["whoami"], "out", '"principal"'),
-            (["profile", "visibility", "get"], None, 0, [("get", _J)], "out", "visibility:"),
-            (
-                ["profile", "visibility", "set", "--tier", "limited"],
-                AgentAPIError(403, "denied"),
-                1,
-                [],
-                "err",
-                "Error: denied",
-            ),
-            # JSON where it parses; a citation with a colon stays a string
-            (
-                [
-                    "work",
-                    "set",
-                    _P,
-                    "datePublished=2023",
-                    "is_corresponding=true",
-                    "citation=Smith et al., Nature (2023)",
-                ],
-                None,
-                0,
-                [
-                    (
-                        "patch",
-                        _J,
-                        _P,
-                        {
-                            "datePublished": 2023,
-                            "is_corresponding": True,
-                            "citation": "Smith et al., Nature (2023)",
-                        },
-                        None,
-                    )
-                ],
-                "out",
-                "updated",
-            ),
-            (
-                ["work", "set", _P, "doi=10.1/x", "--if-match", "0123abcd"],
-                None,
-                0,
-                [("patch", _J, _P, {"doi": "10.1/x"}, "0123abcd")],
-                "out",
-                "updated",
-            ),
-            (  # --force drops the base version: last writer wins
-                ["work", "set", _P, "doi=10.1/x", "--force"],
-                None,
-                0,
-                [("patch", _J, _P, {"doi": "10.1/x"}, None)],
-                "out",
-                "updated",
-            ),
-            (
-                ["work", "set", _P, "doi=10.1/x", "--dry-run"],
-                None,
-                0,
-                [("get", _J, _P)],
-                "out",
-                "-> '10.1/x'",
-            ),
-            (["work", "set", _P, "doi"], None, 2, [], "err", "key=value"),
-            (["work", "show", _P, "--json"], None, 0, [("get", _J, _P)], "out", '"paper_id"'),
-            (["work", "rm", _P], None, 0, [("delete", _J, _P)], "out", None),
-        ],
-        ids=[
-            "agent-whoami-json",
-            "visibility-get",
-            "visibility-set-denied",
-            "work-set-typed",
-            "work-set-if-match",
-            "work-set-force",
-            "work-set-dry-run",
-            "work-bare-word",
-            "work-show",
-            "work-rm",
-        ],
-    )
-    def test_dispatch(self, fake_api, capsys, argv, fail, code, calls, stream, fragment):
-        fake_api.fail = fail
-        assert main(argv) == code
-        assert fake_api.calls == calls
-        if fragment:
-            assert fragment in getattr(capsys.readouterr(), stream)
-
-    def test_whoami_prints_the_parts_table(self, fake_api, capsys):
-        assert main(["agent", "whoami"]) == 0
-        out = capsys.readouterr().out
-        assert "Write:   paper_summary" in out
-        assert "Read:    cv, summary" in out
-        assert "None:    every other part" in out
-        assert "Replace whole profiles: off" in out
-        assert "jane-doe (owner, published): writes paper_summary" in out
-        assert "publish: Publishing is a decision" in out
-        assert "scope" not in out.lower() and "tier" not in out.lower()
-
-    def test_profile_pull_writes_the_full_view(self, fake_api, tmp_path, capsys):
-        """The full view carries the SOUL body inline; pull writes it, no second fetch."""
-        fake_api.detail = {
-            "slug": "jane-doe",
-            "rid": "0000-0002-1825-0097",
-            "view": "full",
-            "fields": {"name": "Jane Doe"},
-            "content_hash": "sha256:abc",
-            "soul": "I study barnacles.\n",
-        }
-
-        out = tmp_path / "profile.md"
-        assert main(["profile", "pull", "-o", str(out)]) == 0
-        body = out.read_text()
-        assert "I study barnacles." in body
-        assert "base_hash: sha256:abc" in body
-        assert "name: Jane Doe" in body
-
-        # a SOUL this key may not read must not write an empty body a later push would save
-        fake_api.detail["soul"] = None
-        assert main(["profile", "pull", "-o", str(out)]) == 0
-        assert "may not read the SOUL" in capsys.readouterr().err
-
-
 class TestPluginSeam:
     """How an installed distribution re-attaches its own verbs to ``rp``."""
 
@@ -1384,18 +1169,3 @@ class TestPluginSeam:
 
         monkeypatch.setattr("importlib.metadata.entry_points", lambda **kw: [_Boom()])
         assert main(cases.argv(["list", "--root", "{empty}"])) == 0
-
-
-def test_work_assignments_only_decode_typed_fields():
-    from researcher_profiles.cli._work import _parse_assignments
-
-    got = _parse_assignments(
-        ["name=1984", "title=NaN", "datePublished=2023", "is_corresponding=true", "summary=null"]
-    )
-    assert got == {
-        "name": "1984",
-        "title": "NaN",
-        "datePublished": 2023,
-        "is_corresponding": True,
-        "summary": "null",
-    }

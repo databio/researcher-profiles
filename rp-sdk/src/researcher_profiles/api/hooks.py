@@ -33,10 +33,13 @@ never a ``Request``, so service functions can run them without HTTP.
     used by an edit.
 ``resolve_ref(store, ref) -> ref | None``
     What a ref the store does not resolve means, for every read and edit
-    lookup: a host maps a pasted rid to the record it calls primary (a rid is
-    never a store ref). A ``None`` answer: the miss stands (404). No hook:
-    a rid with exactly one record about it names that record, else 404
-    (:func:`researcher_profiles.api.service.sole_record_about`).
+    lookup: on a store that keeps several records about one person, a host
+    maps a pasted rid to the record it calls primary. A ``None`` answer: the
+    miss stands (404). No hook: the store's own answer stands.
+``record_fields(profile) -> dict``
+    Extra top-level fields a host adds to a served profile record
+    (``GET /profiles/{slug}``), for example its own key for the record.
+    ``None``: none.
 """
 
 from __future__ import annotations
@@ -70,9 +73,10 @@ class Hooks:
     store_for: Optional[Callable[[Caller, Any], Any]] = None
     #: ``(store, ref) -> ref | None``: what a ref the store itself does not
     #: resolve means (a host maps a pasted rid to the record it calls primary).
-    #: A ``None`` answer keeps the miss. Consulted by every read and edit
-    #: lookup. Unset: a rid with exactly one record about it names that record.
+    #: A ``None`` answer keeps the miss. Consulted by every read and edit lookup.
     resolve_ref: Optional[Callable[[Any, str], Any]] = None
+    #: ``(profile) -> dict``: extra top-level fields for a served profile record.
+    record_fields: Optional[Callable[[Any], dict]] = None
 
 
 __all__ = ["Hooks"]

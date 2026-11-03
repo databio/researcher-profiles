@@ -163,8 +163,7 @@ The spec defines how to encode shareability. Implementations decide how to
 enforce it:
 
 - Local tools read `visibility` to decide what each audience's export holds
-- Registries (the kind the [management tier](dynamic-api.md#14-management-api)
-  serves) may add a consumer layer that shows different artifacts to different
+- Registries that host profiles for the people they describe may add a consumer layer that shows different artifacts to different
   users based on their role
 - Public hosts only receive `public` artifacts in the first place
 

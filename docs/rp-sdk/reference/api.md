@@ -103,21 +103,19 @@ by every command and every host that means it.
 | `RESEARCHER_PROFILES_ROOT` | The local profiles root (`rp install`, `rp list`, `rp seek`, `rp where`, ...), and the server's `--profiles-dir` default above. |
 | `RESEARCHER_PROFILES_REGISTRY_URL` | Default registry base URL(s) for `rp install` / `rp listr`. |
 | `RESEARCHER_PROFILES_DATABASE_URL` | Default SQL profile store URL for `rp db`, and the server's `--database-url` default above. |
-| `RESEARCHER_PROFILES_AGENT_KEY` | An agent's `rpa_` credential, for `rp agent` / `rp profile`. |
-| `RESEARCHER_PROFILES_API_URL` | The server an agent credential targets, alongside `RESEARCHER_PROFILES_AGENT_KEY`. |
-| `RESEARCHER_PROFILES_AUTH_HOST` | Which `[hosts.<name>]` block in `credentials.toml` to use, for `rp agent` / `rp profile`. |
-| `XDG_CONFIG_HOME` | Overrides where `credentials.json` / `credentials.toml` are read and written (default `~/.config`). |
+| `XDG_CONFIG_HOME` | Overrides where `credentials.json` is read and written (default `~/.config`). |
 
 See the [CLI reference](cli.md) for the commands that read these.
 
 ### Profile discovery and slugs
 
 - The server is built over a [`ProfileStore`](python-api.md#profilestore-researcher_profilesstore), and
-  every lookup goes through `store.get(ref)`: a slug, a former slug, or (on
-  SQL) a `profile_id`. Every route that takes a `{slug}` also accepts a
-  **rid**: the host's `hooks.resolve_ref` says which record it means, and
-  with no hook a rid names the one record about that person (several, or
-  none, is a 404).
+  every lookup goes through `store.get(ref)`: a slug, a former slug, a
+  **rid** (the one record about that person), or (on SQL) a record key. On a
+  store that keeps several records about one person
+  (`SqlProfileStore(one_profile_per_rid=False)`), the host's
+  `hooks.resolve_ref` says which record a bare rid means; with no hook such a
+  rid is a 404.
 - `FilesystemProfileStore` lists every direct subdirectory of its root that
   contains a `profile.jsonld`; the directory name becomes the slug. It loads
   profiles lazily via `ResearcherProfile.from_files(<dir>)` and holds them in an
@@ -471,8 +469,9 @@ without a restart.
 | `spliced` | integer | Manifest entries the server added back for kept files the incoming manifest did not list. Nonzero means the pushed document's manifest was incomplete. |
 | `manifest_counts` | object | `{role: count}` over the manifest the server holds *after* the commit: what a reader can now fetch. |
 | `mode` | string | The push mode that was applied: `replace`, `merge`, or `prune`. |
-| `kept_owner_fields` | array \| null | Fields the host kept from the owner's hand edits instead of taking the pushed value (Prosopia does this for any pusher but the owner or a co-owner). `null` when the host does not protect owner edits. |
-| `stripped_fields` | array \| null | Fields the host removed from the pushed document instead of refusing the push; `null` when the host strips nothing from pushes to this profile. |
+
+A host adds its own top-level fields by setting a dict on
+`request.state.push_response_extra` in its `app.state.push_gate`.
 
 ```bash
 tar -C /path/to/profiles/jane-doe -czf - . | curl -X PUT \
@@ -1151,8 +1150,7 @@ retries once on parse failure.
 
 Gated by the service's edit gate rather than by the consumer token (see
 [Authentication](#authentication)). On bare rp-sdk that falls back to the
-operator bearer token. A host that runs the
-[management tier](../../rp-spec/dynamic-api.md#14-management-api) sets
+operator bearer token. A host with accounts sets
 `app.state.hooks.edit_gate` and these become per-person and per-profile.
 
 | Method | Path | Description |
@@ -1367,13 +1365,12 @@ Because the LLM endpoints share the persona-prefix prompt cache *per profile*,
 alternating between profiles defeats the cache for the swapped-out persona. Batch
 all calls to one persona before switching where possible.
 
-## The management tier is not implemented here
+## Command-line login is not implemented here
 
-`rp login` calls the command-line login endpoints its server names in
-`/.well-known/oauth-authorization-server`, and `rp whoami`, `rp agent`, and
-`rp profile` call endpoints under `/api/v1/manage/`, all specified in
-[Management API](../../rp-spec/dynamic-api.md#14-management-api). The server in
-this package does not implement them: it has no accounts, no identity provider,
-and no key store, so it publishes no OAuth metadata and the client
-reports that the server offers no command-line login. Point those commands at a
-server that implements the management tier.
+`rp login` and `rp whoami` call the endpoints a server names in
+`/.well-known/oauth-authorization-server`, as specified in
+[Command-line login](../../rp-spec/dynamic-api.md#14-command-line-login). The
+server in this package does not implement them: it has no accounts, no
+identity provider, and no key store, so it publishes no OAuth metadata and the
+client reports that the server offers no command-line login. Point those
+commands at a server that offers it.

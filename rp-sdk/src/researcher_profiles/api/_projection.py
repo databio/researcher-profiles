@@ -41,9 +41,7 @@ logger = logging.getLogger(__name__)
 
 def _profile_summary(prof, viewer: ViewerTier) -> ProfileSummary:
     """Validate ``payloads.profile_summary_dict`` (shared with the static publisher) into the wire model."""
-    return ProfileSummary.model_validate(
-        {**profile_summary_dict(prof, viewer), "profile_id": getattr(prof, "profile_id", None)}
-    )
+    return ProfileSummary.model_validate(profile_summary_dict(prof, viewer))
 
 
 def metadata_payload(

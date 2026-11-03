@@ -27,14 +27,6 @@ const SKILLS: SkillDef[] = [
     install: "rp skill --install",
   },
   {
-    slug: "profile-agent",
-    title: "Edit as an agent",
-    blurb:
-      "Act as a scoped editor for a researcher's profile. You hold an agent key with named write scopes on one profile: edit metadata, update the expertise narrative, or manage publications on the owner's behalf through the registry API.",
-    prompt:
-      "Read <SKILL_URL>, then follow it to edit the researcher profile using my agent key.",
-  },
-  {
     slug: "publish-profile",
     title: "Publish a profile",
     blurb:

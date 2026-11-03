@@ -26,19 +26,12 @@ Three names, three jobs:
   row joins on it. It never changes, through a rename, a rid change or a
   replace.
 - ``rid`` (a canonical ORCID or a ``local:`` id) is the subject: who the
-  profile is about. It is not unique: a store may hold several records about
-  one person (one per owner, ``uq_rp_profiles_rid_owner``), and at most one of
-  them is that person's own (``is_self``, ``uq_rp_profiles_self_rid``).
+  profile is about. By default a store holds one record per person
+  (``SqlProfileStore(one_profile_per_rid=True)``); a host that keeps several
+  records about one person turns that off and says which one a bare rid
+  means. The column is indexed, not unique, so both work on one schema.
 - ``slug`` is the unique display handle a URL says. Renaming touches zero child
   rows, and the old slug keeps resolving through ``rp_slug_aliases``.
-
-Ownership
----------
-
-``owner_kind`` / ``owner_principal_id`` / ``is_self`` say who owns a record,
-as an :class:`Ownership`. The SDK leaves them nullable (a standalone store has
-no principals); a host that has principals makes them NOT NULL in its own
-migration.
 
 Document of record + derived projections
 ----------------------------------------
@@ -70,12 +63,10 @@ import json
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Iterator, Optional
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, LargeBinary, UniqueConstraint, false
-from sqlalchemy import text as sql_text
+from sqlalchemy import DateTime, ForeignKey, Integer, LargeBinary, UniqueConstraint
 from sqlmodel import JSON, Column, Field, SQLModel
 
 from ..schema.jsonld import canonical_dumps
-from .protocol import Ownership
 
 if TYPE_CHECKING:  # pragma: no cover
     from sqlalchemy.engine import Engine
@@ -91,7 +82,6 @@ __all__ = [
     "ChunkVectorRow",
     "ExpertiseTopicRow",
     "GrantRow",
-    "Ownership",
     "PaperRow",
     "ProfileRow",
     "ProfileVectorRow",
@@ -134,9 +124,9 @@ def content_hash_for(document: dict, soul: str) -> str:
 
 
 #: The ``rp_profiles`` columns a content write never touches: the record key,
-#: the subject, the handle and the owner. :meth:`ProfileRow.take_content` copies
-#: every other column.
-IDENTITY_COLUMNS = ("profile_id", "rid", "slug", "owner_kind", "owner_principal_id", "is_self")
+#: the subject and the handle. :meth:`ProfileRow.take_content` copies every
+#: other column.
+IDENTITY_COLUMNS = ("profile_id", "rid", "slug")
 
 
 class ProfileRow(SQLModel, table=True):
@@ -148,44 +138,14 @@ class ProfileRow(SQLModel, table=True):
     """
 
     __tablename__ = "rp_profiles"
-    __table_args__ = (
-        # At most one self profile per person, and per owner.
-        Index(
-            "uq_rp_profiles_self_rid",
-            "rid",
-            unique=True,
-            postgresql_where=sql_text("is_self"),
-            sqlite_where=sql_text("is_self"),
-        ),
-        Index(
-            "uq_rp_profiles_self_owner",
-            "owner_principal_id",
-            unique=True,
-            postgresql_where=sql_text("is_self"),
-            sqlite_where=sql_text("is_self"),
-        ),
-        # One record per owner per person, so ``profile_owned_by`` is well defined.
-        UniqueConstraint(
-            "rid", "owner_kind", "owner_principal_id", name="uq_rp_profiles_rid_owner"
-        ),
-    )
 
     #: The record key, assigned by the store. Every child row joins on it.
     profile_id: Optional[int] = Field(default=None, primary_key=True)
-    #: The subject: a canonical ORCID or a ``local:`` id. Not unique.
+    #: The subject: a canonical ORCID or a ``local:`` id. Indexed, not unique
+    #: (see the module docstring).
     rid: str = Field(index=True)
     #: Display handle. Unique within this store, never an identity claim.
     slug: str = Field(index=True, unique=True)
-
-    # the owner (see :class:`Ownership`; NULL in a store with no principals)
-
-    #: ``'user'`` or ``'team'``, in the host's vocabulary.
-    owner_kind: Optional[str] = Field(default=None, index=True)
-    #: The owning principal's id, in the host's principal table.
-    owner_principal_id: Optional[int] = Field(default=None, index=True)
-    #: Whether this is the owner's own profile (about the owner). Only a
-    #: ``'user'`` owner can have one.
-    is_self: bool = Field(default=False, sa_column_kwargs={"server_default": false()})
 
     # the record
 
@@ -272,7 +232,7 @@ class ProfileRow(SQLModel, table=True):
         """The one writer of ``document`` and every projection derived from it.
 
         Sets no identity column (:data:`IDENTITY_COLUMNS`): the caller supplies
-        ``profile_id``, ``rid``, ``slug`` and the owner, or copies the result
+        ``profile_id``, ``rid`` and ``slug``, or copies the result
         onto a live row with :meth:`take_content`. ``slug`` only names the
         profile in an error. ``meta`` supplies the projections; ``document`` is the
         exact serialized payload to store, defaulting to ``meta``'s canonical
@@ -303,13 +263,6 @@ class ProfileRow(SQLModel, table=True):
         for name in type(self).model_fields:
             if name not in IDENTITY_COLUMNS:
                 setattr(self, name, getattr(fresh, name))
-
-    @property
-    def owner(self) -> Optional[Ownership]:
-        """The row's owner, or ``None`` in a store with no principals."""
-        if self.owner_kind is None or self.owner_principal_id is None:
-            return None
-        return Ownership(self.owner_kind, self.owner_principal_id, bool(self.is_self))
 
 
 def _scalar_projection(meta: "ProfileDocument") -> dict:

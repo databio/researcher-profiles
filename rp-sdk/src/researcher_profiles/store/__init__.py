@@ -31,7 +31,6 @@ from .files import FilesystemProfileStore
 from .protocol import (
     DuplicateIdentityError,
     IngestResult,
-    Ownership,
     ProfileNotFoundError,
     ProfileRef,
     ProfileStore,
@@ -46,7 +45,6 @@ __all__ = [
     "build_store",
     "HttpProfileStore",
     "IngestResult",
-    "Ownership",
     "ProfileNotFoundError",
     "ProfileRef",
     "ProfileStore",

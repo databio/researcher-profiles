@@ -17,7 +17,6 @@ from researcher_profiles.errors import ProfileWriteError
 from researcher_profiles.privacy import effective_tiers
 from researcher_profiles.profile import edit
 from researcher_profiles.schema import PaperRecord, ProfileDocument
-from researcher_profiles.store import Ownership
 from researcher_profiles.store.db import (
     ArtifactRow,
     BuildStateRow,
@@ -141,14 +140,8 @@ class TestSchema:
         assert ["rid"] not in [
             u["column_names"] for u in insp.get_unique_constraints("rp_profiles")
         ]
-        names = {i["name"] for i in insp.get_indexes("rp_profiles")} | {
-            u["name"] for u in insp.get_unique_constraints("rp_profiles")
-        }
-        assert {
-            "uq_rp_profiles_self_rid",
-            "uq_rp_profiles_self_owner",
-            "uq_rp_profiles_rid_owner",
-        } <= names
+        columns = {c["name"] for c in insp.get_columns("rp_profiles")}
+        assert not {"owner_kind", "owner_principal_id", "is_self"} & columns
         rid_index = next(
             i for i in insp.get_indexes("rp_profiles") if i["name"] == "ix_rp_profiles_rid"
         )
@@ -379,58 +372,43 @@ class TestWrites:
 class TestIdentity:
     """``profile_id`` is the record; ``rid`` the subject; ``slug`` a unique, renameable handle."""
 
-    def test_two_records_about_one_person_both_load(self, empty_sql_store):
-        """One record per owner per person: a rid is no longer a key."""
-        store = empty_sql_store
-        store.create(_doc(ADA_ORCID, "Ada"), slug="ada", owner=Ownership("user", 1, is_self=True))
-        store.create(
-            _doc(ADA_ORCID, "Ada (curated)"), slug="ada-curated", owner=Ownership("team", 7)
-        )
-        about = store.profiles_about(ADA_ORCID)
-        assert [r.slug for r in about] == ["ada", "ada-curated"]  # the self profile first
-        assert store.get("ada-curated").name == "Ada (curated)"
-        assert store.self_profile_for(ADA_ORCID).slug == "ada"
-        assert store.profile_owned_by(ADA_ORCID, Ownership("team", 7)).slug == "ada-curated"
-        assert store.profile_owned_by(ADA_ORCID, Ownership("team", 8)) is None
+    def test_a_rid_is_a_ref(self, jane_store):
+        store, pid = jane_store
+        rid = store.get(pid).rid
+        assert store.get(rid).profile_id == pid
+        assert store.resolve_slug(rid) == "jane-doe"
+        assert store.exists(rid)
 
-    @pytest.mark.parametrize(
-        "second_owner",
-        [Ownership("user", 2, is_self=True), Ownership("user", 1, is_self=False)],
-        ids=["second-self-for-the-rid", "second-record-for-one-owner"],
-    )
-    def test_the_database_refuses_a_second_self_or_owner_record(
-        self, empty_sql_store, second_owner
-    ):
+    def test_a_second_record_about_one_person_is_refused_by_default(self, empty_sql_store):
         store = empty_sql_store
-        store.create(_doc(ADA_ORCID, "Ada"), slug="ada", owner=Ownership("user", 1, is_self=True))
+        store.create(_doc(ADA_ORCID, "Ada"), slug="ada")
         with pytest.raises(ProfileWriteError):
-            store.create(_doc(ADA_ORCID, "Ada again"), slug="ada-2", owner=second_owner)
+            store.create(_doc(ADA_ORCID, "Ada again"), slug="ada-2")
         assert store.list_slugs() == ["ada"]
 
-    @pytest.mark.parametrize(
-        "first_owner, second_owner",
-        [(Ownership("user", 1, is_self=True), Ownership("user", 2, is_self=True)), (None, None)],
-        ids=["second-self-profile", "second-record-without-owners"],
-    )
-    def test_a_put_that_would_be_a_second_record_is_a_write_error(
-        self, empty_sql_store, jane_doe, first_owner, second_owner
-    ):
-        """Without owners, NULLs never collide in the database: the store refuses, as a directory does."""
+    def test_a_put_that_would_be_a_second_record_is_a_write_error(self, empty_sql_store, jane_doe):
         store = empty_sql_store
-        store.put(jane_doe, owner=first_owner)
+        store.put(jane_doe)
         with pytest.raises(ProfileWriteError):
-            store.put(jane_doe, slug="jane-again", owner=second_owner)
+            store.put(jane_doe, slug="jane-again")
         assert store.list_slugs() == ["jane-doe"]
         assert len(store.profiles_about(jane_doe.rid)) == 1
 
-    def test_a_put_on_a_live_slug_keeps_the_record_and_its_owner(self, empty_sql_store, jane_doe):
+    def test_a_host_may_keep_several_records_about_one_person(self, empty_sql_store):
+        """``one_profile_per_rid=False``: both load; a bare rid names neither."""
+        store = SqlProfileStore(empty_sql_store.engine, one_profile_per_rid=False)
+        store.create(_doc(ADA_ORCID, "Ada"), slug="ada")
+        store.create(_doc(ADA_ORCID, "Ada (curated)"), slug="ada-curated")
+        about = store.profiles_about(ADA_ORCID)
+        assert [r.slug for r in about] == ["ada", "ada-curated"]
+        assert store.get("ada-curated").name == "Ada (curated)"
+        assert not store.exists(ADA_ORCID)
+
+    def test_a_put_on_a_live_slug_keeps_the_record(self, empty_sql_store, jane_doe):
         store = empty_sql_store
-        owner = Ownership("user", 3, is_self=True)
-        first = store.put(jane_doe, owner=owner)
-        second = store.put(jane_doe, owner=Ownership("user", 4))
+        first = store.put(jane_doe)
+        second = store.put(jane_doe)
         assert first == second
-        with store.session() as s:
-            assert s.get(ProfileRow, first).owner == owner
 
     def test_a_put_on_a_live_slug_with_another_rid_is_refused(self, jane_store, fixture_profile):
         store, pid = jane_store
@@ -541,9 +519,9 @@ class TestMerge:
     def test_a_merge_between_records_about_one_person_writes_no_rid_alias(
         self, empty_sql_store, tmp_path
     ):
-        store = empty_sql_store
-        store.create(_doc(ADA_ORCID, "Ada"), slug="ada", owner=Ownership("user", 1, is_self=True))
-        store.create(_doc(ADA_ORCID, "Ada old"), slug="ada-old", owner=Ownership("user", 2))
+        store = SqlProfileStore(empty_sql_store.engine, one_profile_per_rid=False)
+        store.create(_doc(ADA_ORCID, "Ada"), slug="ada")
+        store.create(_doc(ADA_ORCID, "Ada old"), slug="ada-old")
         seen = []
         store.add_pre_commit_hook(
             lambda ctx: (
@@ -562,7 +540,7 @@ class TestMerge:
 
     def test_a_convert_keeps_the_record_and_changes_the_rid(self, empty_sql_store, tmp_path):
         store = empty_sql_store
-        store.create(_doc(LEE_LOCAL, "Lee"), slug="lee", owner=Ownership("user", 1, is_self=True))
+        store.create(_doc(LEE_LOCAL, "Lee"), slug="lee")
         pid = store.profile_id_for("lee")
         seen = []
         store.add_pre_commit_hook(
@@ -578,44 +556,11 @@ class TestMerge:
         assert store.get(pid).rid == ADA_ORCID
         assert store.successor_rid(LEE_LOCAL) == ADA_ORCID
         assert [r.profile_id for r in store.profiles_about(LEE_LOCAL)] == [pid]
-        with store.session() as s:
-            assert s.get(ProfileRow, pid).owner == Ownership("user", 1, is_self=True)
-
-    def test_a_convert_onto_a_rid_with_a_self_profile_is_refused(self, empty_sql_store, tmp_path):
-        store = empty_sql_store
-        store.create(_doc(LEE_LOCAL, "Lee"), slug="lee", owner=Ownership("user", 1, is_self=True))
-        store.create(_doc(ADA_ORCID, "Ada"), slug="ada", owner=Ownership("user", 2, is_self=True))
-        with pytest.raises(ProfileWriteError):
-            self._merge(store, tmp_path, "lee", into=None, rid=ADA_ORCID, slug="lee")
-        assert store.get("lee").rid == LEE_LOCAL
+        assert store.get(LEE_LOCAL).profile_id == pid  # a retired rid is a ref too
 
 
-class TestOwnership:
-    """The owner columns: set at creation, from the call or the store's resolver."""
-
-    def test_create_lands_the_owner_columns(self, empty_sql_store):
-        store = empty_sql_store
-        prof = store.create(_doc(ADA_ORCID, "Ada"), slug="ada", owner=Ownership("user", 5, True))
-        with store.session() as s:
-            row = s.get(ProfileRow, prof.profile_id)
-            assert (row.owner_kind, row.owner_principal_id, row.is_self) == ("user", 5, True)
-
-    def test_the_resolver_is_asked_when_no_owner_is_given(self, empty_sql_store, tmp_path):
-        store = empty_sql_store
-        asked = []
-        store.owner_resolver = lambda: asked.append(1) or Ownership("user", 9)
-        store.create(_doc(ADA_ORCID, "Ada"), slug="ada")
-        result = store.commit_directory("lee", _staged(tmp_path, LEE_LOCAL, "Lee"))
-        store.create(
-            _doc("local:explicit-abc123", "Explicit"), slug="explicit", owner=Ownership("team", 2)
-        )
-        assert len(asked) == 2
-        with store.session() as s:
-            assert s.get(ProfileRow, result.profile_id).owner == Ownership("user", 9)
-
-    def test_a_self_profile_must_be_owned_by_a_user(self):
-        with pytest.raises(ValueError):
-            Ownership("team", 1, is_self=True)
+class TestCreateHooks:
+    """A host writes its own rows about a new record in the create's transaction."""
 
     def test_a_failing_create_hook_leaves_no_row(self, empty_sql_store):
         """The row is inserted on the unit's own session, so it rolls back with the unit."""
@@ -630,7 +575,7 @@ class TestOwnership:
 
         store.add_pre_commit_hook(_explode)
         with pytest.raises(WriteHookError):
-            store.create(_doc(ADA_ORCID, "Ada"), slug="ada", owner=Ownership("user", 1, True))
+            store.create(_doc(ADA_ORCID, "Ada"), slug="ada")
         assert store.list_slugs() == []
 
 

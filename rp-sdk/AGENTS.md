@@ -73,12 +73,12 @@ an index. Resolution order, highest first (every command uses the same one):
 ## Identity vs. name
 
 A rid is a person: an ORCID, or a minted `local:` id for someone without it.
-A store may hold several records about one person (the SQL store keys records
-by an integer `profile_id` and allows one per owner), so a rid is never a
-`ref`: `store.get`, `exists` and `resolve_slug` take a slug (or, on SQL, a
-`profile_id` / `#<id>`), and rid lookups are explicit (`store.profiles_about`,
-`store.self_profile_for`, `store.profile_owned_by`). A directory corpus holds
-one record per person.
+A store holds one record per person by default, so a rid is a `ref`:
+`store.get`, `exists` and `resolve_slug` take a slug or a rid (and, on SQL, a
+`profile_id` / `#<id>`). A host that keeps several records about one person
+(`SqlProfileStore(one_profile_per_rid=False)`) lists them with
+`store.profiles_about` and says which one a bare rid means through
+`hooks.resolve_ref`.
 
 The directory name is only a display handle. `voss-elena` and
 `0000-0002-1825-0097` are both valid directory names and both occur.

@@ -101,19 +101,14 @@ class TestStoreProtocol:
         assert both_stores.resolve_slug("jane-doe") == "jane-doe"
         assert both_stores.get("jane-doe").name == jane_doe.name
 
-    def test_a_rid_is_not_a_ref(self, both_stores, jane_doe):
-        """A store may hold several records about one person, so a rid is looked up, not resolved."""
-        with pytest.raises(ProfileNotFoundError):
-            both_stores.get(jane_doe.rid)
+    def test_a_rid_is_a_ref(self, both_stores, jane_doe):
+        """A rid names the one record about that person; ``profiles_about`` lists it."""
+        assert both_stores.get(jane_doe.rid).name == jane_doe.name
+        assert both_stores.resolve_slug(jane_doe.rid) == "jane-doe"
         (about,) = both_stores.profiles_about(jane_doe.rid)
         assert (about.rid, about.slug) == (jane_doe.rid, "jane-doe")
         assert both_stores.get(about.ref).name == jane_doe.name
         assert both_stores.profiles_about("0000-0002-9999-999X") == []
-
-    def test_the_self_profile_for_a_rid(self, fs_store, jane_doe):
-        """A directory corpus has no owners: its one profile about a person is that person's own."""
-        assert fs_store.self_profile_for(jane_doe.rid).slug == "jane-doe"
-        assert fs_store.self_profile_for("0000-0002-9999-999X") is None
 
     @pytest.mark.parametrize("method", ["resolve_slug", "get"])
     def test_a_miss_raises(self, both_stores, method):
@@ -726,9 +721,9 @@ class TestIdentityLookup:
 
     @pytest.mark.parametrize("ref", ["jane-doe", "RID", "nobody"], ids=["slug", "rid", "miss"])
     def test_path_for(self, fs_store, jane_doe, ref):
-        """A slug names a directory; a rid does not (``profiles_about`` looks it up)."""
+        """A slug or a rid names the directory."""
         ref = jane_doe.rid if ref == "RID" else ref
-        if ref in ("nobody", jane_doe.rid):
+        if ref == "nobody":
             with pytest.raises(ProfileNotFoundError):
                 fs_store.path_for(ref)
         else:

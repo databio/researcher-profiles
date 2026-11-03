@@ -32,7 +32,6 @@ from ..utils.slug import SLUG_RE  # noqa: F401  (re-exported)
 
 if TYPE_CHECKING:  # pragma: no cover
     from ..schema import ArtifactRef
-    from ..store import Ownership
 
 logger = logging.getLogger(__name__)
 
@@ -432,7 +431,6 @@ def ingest_archive(
     build_missing_index: bool = False,
     gate: "Callable[[str], None] | None" = None,
     mode: PushMode = "replace",
-    owner: "Ownership | Callable[[str], Ownership | None] | None" = None,
 ) -> IngestResult:
     """Validate, stage, and commit an uploaded profile tarball into ``store``.
 
@@ -444,11 +442,6 @@ def ingest_archive(
     The rid says who the profile is about, so any "may you write this
     profile" check has to see it. See ``app.state.push_gate``.
 
-    ``owner`` is who owns the record if this push creates it (a replace keeps
-    the record's owner): an :class:`~researcher_profiles.store.Ownership`, or
-    a callable handed the staged rid after ``gate`` passed. It goes to
-    ``commit_directory``, so the record and its owner commit together.
-
     Absence from the tarball is not automatically a deletion: :data:`PushMode`
     says what it means. Kept files are merged into staging before commit, so
     the store still sees one complete directory.
@@ -456,12 +449,8 @@ def ingest_archive(
     root = store.root
     with _staging_dir(root, slug) as staging:
         archive_names = extract_profile_archive(data, staging, include_fulltext=include_fulltext)
-        if gate is not None or callable(owner):
-            staged_rid = _staged_rid(staging)
-            if gate is not None:
-                gate(staged_rid)
-            if callable(owner):
-                owner = owner(staged_rid)
+        if gate is not None:
+            gate(_staged_rid(staging))
         kept_paths = _keep_omitted(store, slug, staging, archive_names, mode=mode)
         kept_flat = {rel for paths in kept_paths.values() for rel in paths}
         spliced = (
@@ -471,9 +460,7 @@ def ingest_archive(
         )
         if "seed_papers" in kept_paths:
             _reindex_kept_seeds(staging)
-        result = store.commit_directory(
-            slug, staging, owner=owner, build_missing_index=build_missing_index
-        )
+        result = store.commit_directory(slug, staging, build_missing_index=build_missing_index)
         result.kept = {cls: len(paths) for cls, paths in kept_paths.items()}
         result.spliced = spliced
         result.mode = mode

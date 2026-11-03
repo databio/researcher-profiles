@@ -40,7 +40,7 @@ from ..privacy import (
 )
 from ..profile.edit import EditError, WorkNotFoundError, paper_version
 from ..schema import PaperRecord, SeedPaperRecord, most_restrictive
-from ..store import DuplicateIdentityError, ProfileNotFoundError, ProfileStore
+from ..store import ProfileNotFoundError, ProfileStore
 from ..utils.paths import STORE_CACHE_DIRNAME
 from ._cursor import decode_cursor, encode_cursor
 from ._limits import BATCH_IDS_CAP, PAPERS_LIMIT, clamp
@@ -66,22 +66,6 @@ logger = logging.getLogger(__name__)
 def profile_missing(ref: str) -> NotFound:
     """The not-found for "no such profile" and for "not for you": the same sentence."""
     return NotFound(f"profile {ref!r} not found")
-
-
-def sole_record_about(store: ProfileStore, rid: str) -> Optional[Any]:
-    """The store ref of the one record about ``rid``, else ``None``.
-
-    The API's ref resolution when the host installs no ``hooks.resolve_ref``:
-    a pasted rid reaches a profile when exactly one record is about that
-    person. None, or several, is a miss (404). Several is not a 409: which
-    records exist is only told after the visibility check, per record, so an
-    ambiguous rid must not confirm that hidden records exist.
-    """
-    try:
-        about = store.profiles_about(rid)
-    except DuplicateIdentityError:  # a directory corpus with two records about one rid
-        return None
-    return about[0].ref if len(about) == 1 else None
 
 
 class Service:
@@ -175,17 +159,17 @@ class Service:
         return prof, viewer
 
     def lookup(self, store: ProfileStore, ref: str) -> Any:
-        """The profile ``ref`` names in ``store``: the store's own lookup, then
-        the host's ``hooks.resolve_ref`` for a ref the store does not resolve
-        (a host maps a pasted rid to the record it means). With no hook, a
-        rid with exactly one record about it names that record
-        (:func:`sole_record_about`). Raises ``ProfileNotFoundError``.
+        """The profile ``ref`` names in ``store``: the store's own lookup (a
+        slug or a rid), then the host's ``hooks.resolve_ref`` for a ref the
+        store does not resolve (a host that keeps several records about one
+        person maps a pasted rid to the record it means). Raises
+        ``ProfileNotFoundError``.
         """
         try:
             return store.get(ref)
         except (ProfileNotFoundError, KeyError):
             hook = self.hooks.resolve_ref
-            alt = hook(store, ref) if hook is not None else sole_record_about(store, ref)
+            alt = hook(store, ref) if hook is not None else None
             if alt is None:
                 raise
             return store.get(alt)
@@ -287,9 +271,14 @@ def get_profile(service: Service, caller: Caller, ref: str, *, view: View = "rec
     ``withheld``.
     """
     store, prof, viewer = service.read(caller, ref)
-    return profile_record(
+    record = profile_record(
         prof, viewer, view=view, proofs=service.proofs(prof.metadata.rid), store=store
     )
+    hook = service.hooks.record_fields
+    if hook is not None:
+        for name, value in (hook(prof) or {}).items():
+            setattr(record, name, value)
+    return record
 
 
 def works_visible(service: Service, caller: Caller, ref: str) -> tuple[Any, ViewerTier]:
