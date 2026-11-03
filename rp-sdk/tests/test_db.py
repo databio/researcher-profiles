@@ -647,6 +647,54 @@ class TestStoreHelpers:
         assert content_hash_for(document, jane_doe.soul) == jane_doe.content_hash()
 
 
+class TestReadCost:
+    """A profile handed out by ``get`` carries the document its row already held."""
+
+    @staticmethod
+    def _count(store):
+        from sqlalchemy import event
+
+        seen: list[str] = []
+
+        def on_execute(conn, cursor, statement, *args):  # noqa: ARG001
+            seen.append(statement)
+
+        event.listen(store.engine, "before_cursor_execute", on_execute)
+        return seen, lambda: event.remove(store.engine, "before_cursor_execute", on_execute)
+
+    def test_get_then_metadata_reads_the_row_once(self, jane_store):
+        store, pid = jane_store
+        seen, stop = self._count(store)
+        try:
+            assert store.get(pid).metadata.name
+        finally:
+            stop()
+        assert len(seen) == 1
+
+    def test_an_edit_is_seen_by_a_reread_on_the_same_object(self, jane_store):
+        store, pid = jane_store
+        prof = store.get(pid)
+        prof.edit.patch_metadata({"field": "Systems Biology"})
+        assert prof.metadata.field == "Systems Biology"
+        assert store.get(pid).metadata.field == "Systems Biology"
+
+    def test_get_many_is_one_read_and_skips_missing_ids(
+        self, empty_sql_store, fixture_profiles_root
+    ):
+        store = empty_sql_store
+        root = fixture_profiles_root("jane-doe", "john-smith")
+        pids = [store.import_directory(root / slug) for slug in ("jane-doe", "john-smith")]
+        seen, stop = self._count(store)
+        try:
+            got = store.get_many([*pids, 999_999])
+            names = {pid: prof.metadata.name for pid, prof in got.items()}
+        finally:
+            stop()
+        assert sorted(got) == sorted(pids)
+        assert names == {pid: store.get(pid).metadata.name for pid in pids}
+        assert len(seen) == 1
+
+
 class TestSoulOnlyVectors:
     """An interviewed trainee: a narrative, no papers. A refresh still indexes it."""
 

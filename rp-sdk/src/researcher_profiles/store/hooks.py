@@ -26,6 +26,21 @@ class _HookedStore:
         # so this hook is what moves the generation for it.
         self._post_commit_hooks.append(self._bump_generation_hook)
 
+    # --- reads --------------------------------------------------------------
+
+    def get_many(self, profile_ids: Iterable[int]) -> dict[int, ResearcherProfile]:
+        """The profiles among ``profile_ids``, one :meth:`get` each; misses are absent.
+
+        A backend that can read them at once (SQL) overrides this.
+        """
+        out: dict[int, ResearcherProfile] = {}
+        for pid in profile_ids:
+            try:
+                out[int(pid)] = self.get(int(pid))  # type: ignore[attr-defined]
+            except KeyError:  # ProfileNotFoundError is a KeyError
+                continue
+        return out
+
     # --- the write generation ------------------------------------------------
 
     @property

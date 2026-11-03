@@ -12,6 +12,7 @@ check of its own.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from contextlib import nullcontext
 from typing import Any, Literal, Optional
 
@@ -183,12 +184,32 @@ class Service:
             prof = self.lookup(store, ref)
         except (ProfileNotFoundError, KeyError) as e:
             raise profile_missing(ref) from e
+        viewer = self._admit_read(caller, prof)
+        if viewer is None:
+            raise profile_missing(ref)
+        return store, prof, viewer
+
+    def read_many(
+        self, caller: Caller, profile_ids: Iterable[int]
+    ) -> dict[int, tuple[Any, ViewerTier]]:
+        """:meth:`read` for many record keys at once: ``{id: (profile, viewer tier)}``.
+
+        One ``store.get_many`` on the caller's store view, then the same gate
+        :meth:`read` applies to each. A missing or hidden id is simply absent.
+        """
+        out: dict[int, tuple[Any, ViewerTier]] = {}
+        for pid, prof in self.store_for(caller).get_many(profile_ids).items():
+            viewer = self._admit_read(caller, prof)
+            if viewer is not None:
+                out[pid] = (prof, viewer)
+        return out
+
+    def _admit_read(self, caller: Caller, prof: Any) -> Optional[ViewerTier]:
+        """The caller's tier for ``prof`` when the read gate admits it, else ``None``."""
         # The live slug, not the ref sent: a retired slug or a host-resolved
         # ref (a rid) names the same record, and the tier is per record.
         ok, viewer = self.visible(caller, prof, prof.slug)
-        if not ok:
-            raise profile_missing(ref)
-        return store, prof, viewer
+        return viewer if ok else None
 
     def visible(
         self, caller: Caller, prof: Any, slug: Optional[str] = None

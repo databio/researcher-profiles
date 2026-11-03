@@ -212,6 +212,38 @@ class TestReads:
         assert e.value.code == "page_token_mismatch"
 
 
+class TestReadMany:
+    def test_matches_read_once_per_id(self, empty_sql_store, fixture_profiles_root):
+        store = empty_sql_store
+        root = fixture_profiles_root("jane-doe", "john-smith")
+        jane, john = (store.import_directory(root / slug) for slug in ("jane-doe", "john-smith"))
+        hidden = {"john-smith"}
+        hooks = Hooks(
+            profile_tier_floor=lambda caller, prof, slug: (
+                TierFloor("limited") if slug in hidden else None
+            )
+        )
+        service = Service(store, hooks)
+        ids = [jane, john, 999_999]
+
+        def one_by_one():
+            out = {}
+            for pid in ids:
+                try:
+                    _store, prof, viewer = service.read(Caller(), f"#{pid}")
+                except NotFound:
+                    continue
+                out[pid] = (prof.metadata, viewer)
+            return out
+
+        many = {
+            pid: (prof.metadata, viewer)
+            for pid, (prof, viewer) in service.read_many(Caller(), ids).items()
+        }
+        assert list(many) == [jane]
+        assert many == one_by_one()
+
+
 class TestStoreFor:
     def test_reads_use_the_view_and_edits_do_not(self, store, recorder):
         seen = []

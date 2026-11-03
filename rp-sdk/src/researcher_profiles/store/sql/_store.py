@@ -3,7 +3,7 @@
 import json
 import logging
 import weakref
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
@@ -52,6 +52,9 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from ...embeddings.protocol import VectorIndex
 
 logger = logging.getLogger(__name__)
+
+#: Ids per ``IN (...)`` clause; keeps every backend under its bound-parameter limit.
+_IN_CHUNK = 500
 
 #: What a ``ref`` may be: a slug (or a retired slug), a rid (or a retired rid),
 #: an integer ``profile_id`` (the record key), or ``"#<profile_id>"``.
@@ -335,10 +338,29 @@ class SqlProfileStore(_HookedStore, _AnalyticsAccessors):
         """Load one profile, backed by a :class:`SqlArtifactStorage` over its rows."""
         with self.session() as s:
             row = self._require_row(s, ref)
-            profile_id, slug, rid = int(row.profile_id), row.slug, row.rid
-        return self._admit(
-            ResearcherProfile(SqlArtifactStorage(self, profile_id, slug=slug, rid=rid), eager=eager)
+            return self._profile_from_row(row, eager=eager)
+
+    def _profile_from_row(self, row: ProfileRow, *, eager: bool = False) -> ResearcherProfile:
+        """A profile over ``row``, primed with the document already read."""
+        storage = SqlArtifactStorage(
+            self, int(row.profile_id), slug=row.slug, rid=row.rid, document=row.document
         )
+        return self._admit(ResearcherProfile(storage, eager=eager))
+
+    def get_many(self, profile_ids: Iterable[int]) -> dict[int, ResearcherProfile]:
+        """The live profiles among ``profile_ids``, keyed by id, in one read.
+
+        Each is built as :meth:`get` builds it. Missing ids are absent.
+        """
+        ids = sorted({int(i) for i in profile_ids})
+        rows: list[ProfileRow] = []
+        with self.session() as s:
+            for start in range(0, len(ids), _IN_CHUNK):
+                chunk = ids[start : start + _IN_CHUNK]
+                rows.extend(
+                    s.exec(select(ProfileRow).where(ProfileRow.profile_id.in_(chunk))).all()
+                )
+            return {int(r.profile_id): self._profile_from_row(r) for r in rows}
 
     # --- ingest -------------------------------------------------------------
 

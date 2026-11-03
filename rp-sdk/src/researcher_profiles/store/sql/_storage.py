@@ -59,8 +59,20 @@ class SqlArtifactStorage(ArtifactStorage):
     ``None``; capabilities that need one refuse.
     """
 
-    def __init__(self, store: "SqlProfileStore", profile_id: Optional[int], *, slug: str, rid: str):
+    def __init__(
+        self,
+        store: "SqlProfileStore",
+        profile_id: Optional[int],
+        *,
+        slug: str,
+        rid: str,
+        document: Optional[dict[str, Any]] = None,
+    ):
         self._store = store
+        #: The document the store already read with the row (``get``), used by
+        #: the first :meth:`load_document` outside a write unit instead of a
+        #: second read. Used once; any write clears it.
+        self._primed_document = document
         #: The record key. ``None`` only for a profile being created, until its
         #: first write unit inserts :attr:`pending_row`.
         self._profile_id = profile_id
@@ -186,9 +198,13 @@ class SqlArtifactStorage(ArtifactStorage):
         return doc
 
     def load_document(self) -> ProfileDocument:
-        with self._read() as s:
-            row = self._profile_row(s)
-            data = row.document or {}
+        primed, self._primed_document = self._primed_document, None
+        if primed is not None and self.session is None:
+            data = primed
+        else:
+            with self._read() as s:
+                row = self._profile_row(s)
+                data = row.document or {}
         try:
             return ProfileDocument.model_validate(data)
         except (ValidationError, ValueError) as e:
@@ -206,6 +222,7 @@ class SqlArtifactStorage(ArtifactStorage):
 
         ``data`` arrives already stamped, canonicalized and re-validated.
         """
+        self._primed_document = None
         s = self._require_session("profile.jsonld")
         row = self._profile_row(s)
         payload = dict(data)
@@ -577,6 +594,7 @@ class SqlArtifactStorage(ArtifactStorage):
         already carries its ``profile_id``; a database refusal (a second self
         profile for the rid or the owner) is a ``ProfileWriteError``.
         """
+        self._primed_document = None
         self.session = Session(self._store.engine)
         if self.pending_row is not None:
             row, self.pending_row = self.pending_row, None

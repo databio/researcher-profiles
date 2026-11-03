@@ -1,6 +1,7 @@
 """The store contract (:class:`ProfileStore`, :class:`VectorStore`) and the
 value and error types that cross it."""
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Protocol, runtime_checkable
@@ -218,6 +219,14 @@ class ProfileStore(Protocol):
 
         The returned profile carries every hook registered through
         :meth:`add_pre_commit_hook`, so any write through it fires them.
+        """
+        ...
+
+    def get_many(self, profile_ids: "Iterable[int]") -> dict[int, ResearcherProfile]:
+        """The profiles among the record keys ``profile_ids``, keyed by key.
+
+        Missing ids are absent. A backend may read them all at once (SQL does);
+        the shared default calls :meth:`get` once per id.
         """
         ...
 
