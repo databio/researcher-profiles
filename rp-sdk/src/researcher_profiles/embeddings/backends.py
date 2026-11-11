@@ -145,6 +145,28 @@ def set_fastembed_batch_size(batch_size: int | None) -> None:
     _FASTEMBED_BATCH_SIZE = batch_size
 
 
+#: onnxruntime's CPU memory arena for fastembed models. ``None`` keeps
+#: onnxruntime's default (on). Set with :func:`set_fastembed_mem_arena`.
+_FASTEMBED_MEM_ARENA: bool | None = None
+
+
+def set_fastembed_mem_arena(enabled: bool | None) -> None:
+    """Turn onnxruntime's CPU memory arena on or off for fastembed models.
+
+    The arena is a private pool that grows to fit the largest batch the model
+    has run and never shrinks, so a long-running process that embeds one big
+    batch keeps that memory for life. Off returns it after each batch, at a
+    small speed cost. ``None`` restores onnxruntime's default (on), which
+    suits bulk index builds.
+
+    Set this before the first embed. A model is loaded once per model name and
+    shared by the whole process, so a model already loaded keeps the setting
+    it was built with.
+    """
+    global _FASTEMBED_MEM_ARENA
+    _FASTEMBED_MEM_ARENA = enabled
+
+
 class FastEmbedBackend:
     """Local ONNX backend via fastembed. Same weights as ``st:``, no torch.
 
@@ -199,7 +221,10 @@ class FastEmbedBackend:
                             "torch; see also [st])"
                         ) from e
                     full_name = self._MODEL_MAP.get(self.model_name, self.model_name)
-                    cached = TextEmbedding(model_name=full_name)
+                    kw = {}
+                    if _FASTEMBED_MEM_ARENA is not None:
+                        kw["enable_cpu_mem_arena"] = _FASTEMBED_MEM_ARENA
+                    cached = TextEmbedding(model_name=full_name, **kw)
                     FastEmbedBackend._MODEL_CACHE[self.model_name] = cached
         self._model = cached
         return self._model

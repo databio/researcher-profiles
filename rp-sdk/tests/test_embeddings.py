@@ -309,6 +309,35 @@ class TestFastEmbedBackend:
         get_backend(f"fastembed:{model}").embed(["a"])
         assert seen == [expected]
 
+    @pytest.mark.parametrize(
+        ("arena", "expected"),
+        [(None, {}), (False, {"enable_cpu_mem_arena": False})],
+        ids=["unset-keeps-onnxruntime-default", "off"],
+    )
+    def test_mem_arena_reaches_the_model_only_when_set(self, monkeypatch, arena, expected):
+        import sys
+        import types
+
+        from researcher_profiles.embeddings import backends
+
+        seen = []
+
+        class TextEmbedding:
+            def __init__(self, model_name, **kw):
+                seen.append(kw)
+
+            def embed(self, texts, **kw):
+                return [[0.0] * 384 for _ in texts]
+
+        monkeypatch.setitem(
+            sys.modules, "fastembed", types.SimpleNamespace(TextEmbedding=TextEmbedding)
+        )
+        monkeypatch.setattr(backends.FastEmbedBackend, "_MODEL_CACHE", {})
+        monkeypatch.setattr(backends, "_FASTEMBED_MEM_ARENA", None)
+        backends.set_fastembed_mem_arena(arena)
+        backends.get_backend("fastembed:all-MiniLM-L6-v2").embed(["a"])
+        assert seen == [expected]
+
     def test_missing_fastembed_raises_with_extra_name(self, monkeypatch):
         import builtins
 
