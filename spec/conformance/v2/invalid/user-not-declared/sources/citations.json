@@ -1,0 +1,41 @@
+{
+  "total_papers_analyzed": 8,
+  "total_references_found": 42,
+  "frequently_cited": [
+    {
+      "author": "Doe",
+      "year": "2016",
+      "title_fragment": "ExampleOverlap: enrichment analysis of example region sets",
+      "cited_by": [
+        "doe2019methods",
+        "doe2021widgets",
+        "doe2023framework",
+        "doe2024atlas"
+      ],
+      "citation_count": 4,
+      "already_in_yaml": true
+    },
+    {
+      "author": "Roe",
+      "year": "2018",
+      "title_fragment": "A toolkit for reproducible example workflows",
+      "cited_by": [
+        "doe2021widgets",
+        "doe2023framework"
+      ],
+      "citation_count": 2,
+      "already_in_yaml": true
+    },
+    {
+      "author": "Foundational",
+      "year": "2010",
+      "title_fragment": "A foundational peak-calling method",
+      "cited_by": [
+        "doe2016example",
+        "doe2019methods"
+      ],
+      "citation_count": 2,
+      "already_in_yaml": false
+    }
+  ]
+}

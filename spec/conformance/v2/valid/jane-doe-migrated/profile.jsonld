@@ -1,0 +1,285 @@
+{
+  "@context": "https://profiles.databio.org/context/v2.jsonld",
+  "@type": "ProfilePage",
+  "@id": "urn:uuid:5f0c2a1e-8d3b-4c7a-9e21-6b4f0d9a7c35",
+  "conformsTo": "https://profiles.databio.org/context/v2.jsonld",
+  "dateModified": "2026-11-13T09:00:00Z",
+  "license": "https://creativecommons.org/licenses/by/4.0/",
+  "level": "full",
+  "identityResolution": {
+    "confidence": "high",
+    "note": "Synthetic disambiguation record. The fake ORCID 0000-0002-1825-0097 is used here only to exercise the schema; it does not refer to any real researcher. All names, affiliations, and identifiers in this fixture are invented for testing purposes."
+  },
+  "hasPart": [
+    {
+      "@type": "Collection",
+      "name": "Works",
+      "role": "works",
+      "encodingFormat": "application/ld+json",
+      "contentUrl": "sources/papers.jsonld",
+      "bytes": 7110,
+      "sha256": "0dbb401d8f3b23ab7a6e16f9f3caaa3059dd24361d2c36ac7eed801aac2b3561"
+    },
+    {
+      "@type": "DigitalDocument",
+      "name": "Citations",
+      "role": "citations",
+      "encodingFormat": "application/json",
+      "contentUrl": "sources/citations.json",
+      "bytes": 962,
+      "sha256": "2717c5b7b56d056efbe4942125ae7dd2fb26e15328c4bae9b2d5e94b77d14682"
+    },
+    {
+      "@type": "DigitalDocument",
+      "name": "Summary: doe2016example",
+      "role": "paper_summary",
+      "paperId": "doe2016example",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "sources/summaries/doe2016example.summary.md",
+      "bytes": 518,
+      "sha256": "1588e4926ba12721d5ef4e1ce7ddc1633e6ed9e7676dba65fe04117b433ffe28"
+    },
+    {
+      "@type": "DigitalDocument",
+      "name": "Summary: doe2019methods",
+      "role": "paper_summary",
+      "paperId": "doe2019methods",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "sources/summaries/doe2019methods.summary.md",
+      "bytes": 478,
+      "sha256": "ed054f30428d41399c978c0220ae230344185c0ef275ffc687f39bdee6d25b70"
+    },
+    {
+      "@type": "DigitalDocument",
+      "name": "Summary: doe2021widgets",
+      "role": "paper_summary",
+      "paperId": "doe2021widgets",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "sources/summaries/doe2021widgets.summary.md",
+      "bytes": 363,
+      "sha256": "8eb66d507831ad4ef15d3a7153f60da71bd2cf10e7e1680ab1c74d0d4f5190ef"
+    },
+    {
+      "@type": "DigitalDocument",
+      "name": "Summary: doe2023framework",
+      "role": "paper_summary",
+      "paperId": "doe2023framework",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "sources/summaries/doe2023framework.summary.md",
+      "bytes": 391,
+      "sha256": "65fb8ba6aae9b999bedc290d3d7231c70573500ff63875a72fc52c1bc89ceb90"
+    },
+    {
+      "@type": "DigitalDocument",
+      "name": "Summary: doe2024atlas",
+      "role": "paper_summary",
+      "paperId": "doe2024atlas",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "sources/summaries/doe2024atlas.summary.md",
+      "bytes": 247,
+      "sha256": "d0bc808d2715d4e001abd10d8abb9c6c7a7047d8468baf2cf5e99d71bb96b087"
+    },
+    {
+      "@type": "DigitalDocument",
+      "name": "Full text: doe2016example",
+      "role": "paper_fulltext",
+      "paperId": "doe2016example",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "sources/papers/doe2016example.md",
+      "bytes": 348,
+      "sha256": "bb141d862a559b481a913fe554050324b747818f012c72660095c8472d880a6e"
+    },
+    {
+      "@type": "DigitalDocument",
+      "name": "Full text: doe2019methods",
+      "role": "paper_fulltext",
+      "paperId": "doe2019methods",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "sources/papers/doe2019methods.md",
+      "bytes": 313,
+      "sha256": "59023de2d067c2e1fef972581250e3352fc742949e15c92da154227c04e6b52b"
+    },
+    {
+      "@type": "DigitalDocument",
+      "name": "SOUL",
+      "role": "soul",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "personality/SOUL.md",
+      "bytes": 1420,
+      "sha256": "4e96c92796587d57fbb7e5307ad164a1fb5bec405bd43512f21c30b0a5566675"
+    },
+    {
+      "@type": "DigitalDocument",
+      "name": "Expertise",
+      "role": "expertise",
+      "encodingFormat": "text/markdown",
+      "contentUrl": "personality/expertise.md",
+      "bytes": 1999,
+      "sha256": "0c26d413991f12b3ecbad8c642f6d703d493c57474399b3f33251de93e32bb4e"
+    }
+  ],
+  "mainEntity": {
+    "@type": "Person",
+    "@id": "https://orcid.org/0000-0002-1825-0097",
+    "name": "Jane A. Doe",
+    "rid": "0000-0002-1825-0097",
+    "identifier": [
+      {
+        "@type": "PropertyValue",
+        "propertyID": "openalex",
+        "value": "A0000000001"
+      }
+    ],
+    "sameAs": [
+      "https://scholar.example.edu/citations?user=EXAMPLE01"
+    ],
+    "field": "Computational Biology",
+    "subfields": [
+      "synthetic data science",
+      "example region analysis",
+      "reproducible workflows",
+      "widget embeddings"
+    ],
+    "interests": [
+      "vector-representations-of-example-regions",
+      "sample-metadata-interoperability",
+      "consensus-region-construction",
+      "ai-readiness-of-example-data"
+    ],
+    "notInterests": [
+      "wet-lab-protocol-development",
+      "single-sample-routine-analysis"
+    ],
+    "researchOutputs": [
+      {
+        "name": "WidgetTool",
+        "url": "https://widgettool.example.org",
+        "type": "software"
+      },
+      {
+        "name": "ExamplePipeline",
+        "url": "https://examplepipeline.example.org",
+        "type": "software"
+      },
+      {
+        "name": "Portable Example Projects (PEP)",
+        "url": "https://pep.example.org",
+        "type": "standard"
+      }
+    ],
+    "career": [
+      {
+        "role": "Associate Professor, Example Sciences",
+        "institution": "Example University",
+        "startYear": 2022
+      },
+      {
+        "role": "Assistant Professor, Center for Example Genomics",
+        "endYear": 2022,
+        "institution": "Example University",
+        "startYear": 2016
+      }
+    ],
+    "training": [
+      {
+        "advisor": "Alex Mentor",
+        "degree": "PhD",
+        "institution": "Example University",
+        "kind": "degree",
+        "endYear": 2013
+      },
+      {
+        "advisor": "Robin Advisor",
+        "degree": "Postdoc",
+        "institution": "Placeholder Research Institute",
+        "kind": "postdoc",
+        "endYear": 2016
+      }
+    ],
+    "paperStats": {
+      "corresponding": 3,
+      "first": 4,
+      "last": 3,
+      "middle": 1,
+      "total": 8,
+      "unknown": 0,
+      "yearMax": 2025,
+      "yearMin": 2016
+    },
+    "affiliation": {
+      "name": "Example University"
+    },
+    "summary": {
+      "text": "Jane Doe is a computational biologist who develops synthetic methods and standards for analyzing example region data. Her group builds infrastructure for reproducible analysis including a sample metadata standard, a reference asset manager, and analysis pipelines, with recent emphasis on vector representations of example regions."
+    },
+    "expertise": [
+      {
+        "text": "example-region-set-analysis"
+      },
+      {
+        "text": "example-pipeline-development"
+      },
+      {
+        "text": "sample-metadata-standardization"
+      },
+      {
+        "text": "reference-asset-management"
+      },
+      {
+        "text": "widget-embeddings-for-genomics"
+      },
+      {
+        "text": "reproducible-workflow-design"
+      }
+    ],
+    "critiques": [
+      {
+        "text": "inconsistent-metadata-impedes-data-reuse"
+      },
+      {
+        "text": "ad-hoc-universe-selection-harms-analysis"
+      }
+    ],
+    "methodologicalCommitments": [
+      {
+        "text": "portable-encapsulated-project-standards"
+      },
+      {
+        "text": "content-addressable-reference-assets"
+      },
+      {
+        "text": "principled-consensus-over-naive-union"
+      }
+    ],
+    "recurringPositions": [
+      {
+        "text": "metadata-sharing-is-as-important-as-data-sharing"
+      },
+      {
+        "text": "naive-union-consensus-loses-boundary-information"
+      }
+    ],
+    "intellectualLineage": [
+      {
+        "text": "example-consortium"
+      },
+      {
+        "text": "foundational-peak-calling-methods"
+      }
+    ],
+    "collaborators": [
+      {
+        "name": "John B. Smith"
+      },
+      {
+        "name": "Robin Roe"
+      },
+      {
+        "name": "Casey Poe"
+      },
+      {
+        "name": "Morgan Noor"
+      }
+    ]
+  }
+}
