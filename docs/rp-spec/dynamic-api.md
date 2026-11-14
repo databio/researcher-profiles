@@ -942,7 +942,19 @@ registered **public client**: `client_id` is `rp-cli`, it has no secret, and a
 server that offers command-line login MUST know it. A server MUST answer any
 other `client_id` at these endpoints with `invalid_client`. The client asks
 for the scope `profiles:push`: upload whole profiles the person may write, and
-read what the person may read. Where this section is silent,
+read what the person may read. A client that needs something else names the
+scopes it needs instead, space-separated:
+
+| Scope | Grants |
+|-------|--------|
+| `profiles:read` | Read what the person may read. Every other scope implies it |
+| `profiles:push` | Upload whole profiles the person may write (the default) |
+| `profiles:feed` | Read the literature feed of profiles the person owns |
+| `profiles:persona` | The persona endpoints (`ask`, `review`, `innovate`, `riff`) on profiles the person may read |
+
+A request with no `scope` asks for `profiles:push`. A server MUST show the
+person what was asked for before they approve, and MUST answer an unknown
+scope with `invalid_scope`. A server MAY support only `profiles:push`. Where this section is silent,
 [RFC 6749](https://www.rfc-editor.org/rfc/rfc6749),
 [RFC 8628](https://www.rfc-editor.org/rfc/rfc8628) and RFC 8252 apply.
 
@@ -980,7 +992,8 @@ the system browser at the `authorization_endpoint` with:
 | `redirect_uri` | yes | `http://127.0.0.1:<port>/callback` (or `http://[::1]:<port>/callback`) |
 | `code_challenge`, `code_challenge_method` | yes | PKCE; the method MUST be `S256` |
 | `state` | yes | An unguessable value the client checks on return |
-| `scope` | no | `profiles:push` (the default) |
+| `scope` | no | Scopes from the table above; `profiles:push` (the default) |
+| `resource` | no | [RFC 8707](https://www.rfc-editor.org/rfc/rfc8707). The server's origin; the reference server also accepts its REST API (`<origin>/api/v1`) |
 | `label` | no | Extension. Display name for this machine. A client SHOULD send the hostname |
 
 The server registers `http://127.0.0.1/callback` and `http://[::1]/callback`
@@ -1037,7 +1050,7 @@ Start a login (RFC 8628 §3.1).
 | Field | Required | Description |
 |-------|----------|-------------|
 | `client_id` | yes | `rp-cli` |
-| `scope` | no | `profiles:push` (the default). Any other value is `invalid_scope` |
+| `scope` | no | Scopes from the table above; `profiles:push` (the default). An unknown scope is `invalid_scope` |
 | `label` | no | Extension. Display name for this machine on the approval page. A client SHOULD send the hostname. Servers SHOULD trim it and MAY truncate it. |
 
 **Response 200** (RFC 8628 §3.2):
