@@ -1,8 +1,9 @@
 """Validate a v2 profile directory against the rules in issues #4-#7.
 
 Errors make the profile invalid. Warnings report things a reader should know
-but that are allowed, such as a file edited after it was labelled (its hash no
-longer matches, so its `method` reads as unknown).
+but that are allowed, such as a part changed after it was labelled (its hash no
+longer matches, so its `method` reads as unknown) or a record left over for a
+part that is gone.
 """
 
 from __future__ import annotations
@@ -13,29 +14,35 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from . import slug
+from . import provenance, sections
 from .common import (
-    ANCHOR_ROLES,
     CACHE_ROLES,
     CONFIDENCE,
     DATETIME_RE,
-    DEFAULTABLE,
     GENERATOR_RE,
+    KEYED_LISTS,
     METHODS,
     ORCID_RE,
+    PAPER_ROLES,
+    PROSE_ROLES,
+    PROVENANCE_FIELDS,
+    PROVENANCE_ROLE,
+    RECORD_FIELDS,
     SINGLE_FILE_ROLES,
     V2_CONTEXT,
+    entry_key,
     is_iri,
     sha256_file,
+    value_sha256,
 )
 
 _UUID_URN = re.compile(r"^urn:uuid:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 _LOCAL_RID = re.compile(r"^local:[a-z0-9-]+-[0-9a-f]{6}$")
-_DATETIME_KEYS = ("dateModified", "generatedAt", "fetchedAt", "verifiedAt")
+_DATETIME_KEYS = ("dateModified", "generatedAt", "fetchedAt", "verifiedAt", "at")
 
 _PAGE_KEYS = {
     "@context", "@type", "@id", "conformsTo", "dateModified", "license", "level", "visibility",
-    "rp:sectionVisibility", "publisher", "synthetic", "note", "proof", "verifiedAt", "partDefaults",
+    "rp:sectionVisibility", "publisher", "synthetic", "note", "proof", "verifiedAt",
     "identityResolution", "excluded", "hasPart", "mainEntity", "synthesisInputsDigest",
 }  # fmt: skip
 
@@ -45,6 +52,14 @@ _V1_KEYS = {
     "methodological_commitments", "recurring_positions", "intellectual_lineage", "hasCitationGraph",
     "hasEmbeddingIndex", "expertiseCitesPaperIds", "assertedAt",
 }  # fmt: skip
+
+TEXT_LISTS = (
+    "expertise",
+    "critiques",
+    "methodologicalCommitments",
+    "recurringPositions",
+    "intellectualLineage",
+)
 
 _REF_KINDS = ("paper", "url", "file")
 
@@ -65,10 +80,8 @@ class _V:
         self.root = root
         self.served = served
         self.findings: list[Finding] = []
-        self.defaults: dict[str, Any] = {}
         self.paper_ids: set[str] = set()
         self.roles: dict[str, list[dict]] = {}
-        self.anchors_by_role: dict[str, set[str]] = {}
 
     def err(self, code: str, where: str, msg: str) -> None:
         self.findings.append(Finding("error", code, where, msg))
@@ -78,13 +91,7 @@ class _V:
 
     # ---------------------------------------------------------------- provenance
 
-    def effective(self, part: dict, key: str) -> Any:
-        return part[key] if key in part else self.defaults.get(key)
-
-    def provenance(self, part: dict, where: str, *, allow_inherits: bool) -> None:
-        if "method" in part and part["method"] is not None and part["method"] not in METHODS:
-            self.err("method", where, f"unknown method {part['method']!r}")
-        gen = part.get("generator")
+    def generator_form(self, gen: Any, where: str) -> None:
         if (
             gen is not None
             and gen != "user"
@@ -95,7 +102,22 @@ class _V:
                 where,
                 f"generator {gen!r} is not `user` or `<tool>@<version>[/<model>]`",
             )
-        method, generator = self.effective(part, "method"), self.effective(part, "generator")
+
+    def provenance(
+        self,
+        part: dict,
+        where: str,
+        *,
+        allow_inherits: bool,
+        method: Any = None,
+        generator: Any = None,
+    ) -> None:
+        """Check one record. `method` and `generator` are its effective (inherited) values."""
+        if "method" in part and part["method"] is not None and part["method"] not in METHODS:
+            self.err("method", where, f"unknown method {part['method']!r}")
+        self.generator_form(part.get("generator"), where)
+        method = part.get("method", method)
+        generator = part.get("generator", generator)
         if generator == "user" and method != "declared":
             self.err("user-not-declared", where, "a part with generator `user` must be `declared`")
         if method == "declared" and generator not in ("user", None):
@@ -122,7 +144,7 @@ class _V:
             self.err(
                 "inherits-placement",
                 where,
-                "inheritsVisibility is allowed only on manifest entries and anchor records",
+                "inheritsVisibility is allowed only on records for files and their sections",
             )
         kind = kinds[0]
         if kind == "paper":
@@ -139,12 +161,14 @@ class _V:
                 )
             elif role not in self.roles and not self.served:
                 self.err("ref-file", where, f"no manifest entry with role {role!r}")
-            if (
-                "anchor" in ref
-                and role in self.anchors_by_role
-                and ref["anchor"] not in self.anchors_by_role[role]
-            ):
-                self.err("ref-anchor", where, f"no heading {ref['anchor']!r} in {role}")
+
+    def no_inline(self, item: Any, where: str) -> None:
+        if isinstance(item, dict):
+            for k in (*PROVENANCE_FIELDS, "assertedAt"):
+                if k in item:
+                    self.err(
+                        "inline-provenance", f"{where}.{k}", f"{k!r} belongs in provenance.json"
+                    )
 
     # ---------------------------------------------------------------- walkers
 
@@ -206,13 +230,6 @@ def validate_v2(profile_dir: Path | str, *, served: bool = False) -> list[Findin
     if "synthetic" in page and not isinstance(page["synthetic"], bool):
         v.err("synthetic", "synthetic", "synthetic is true or false")
 
-    defaults = page.get("partDefaults") or {}
-    if not isinstance(defaults, dict) or any(k not in DEFAULTABLE for k in defaults):
-        v.err("partDefaults", "partDefaults", f"partDefaults may hold only {DEFAULTABLE}")
-        defaults = {}
-    v.defaults = defaults
-    v.provenance(defaults, "partDefaults", allow_inherits=False)
-
     person = page.get("mainEntity")
     if not isinstance(person, dict) or person.get("@type") != "Person":
         v.err("mainEntity", "mainEntity", "mainEntity is a Person")
@@ -262,15 +279,18 @@ def validate_v2(profile_dir: Path | str, *, served: bool = False) -> list[Findin
                 v.err("v1-key", f"works[{i}]", "paper record still has v1 keys")
         v.paper_ids = seen
 
-    # ---- anchors per prose file (needed before references resolve)
-    scans: dict[str, slug.SectionScan] = {}
-    for role in ANCHOR_ROLES:
+    # ---- prose sections
+    scans: dict[str, sections.SectionScan] = {}
+    for role in PROSE_ROLES:
         for e in v.roles.get(role, []):
             path = root / e["contentUrl"] if e.get("contentUrl") else None
             if path and path.exists():
-                s = slug.scan(path.read_text(errors="replace"))
+                s = sections.scan(path.read_text(errors="replace"))
                 scans[role] = s
-                v.anchors_by_role[role] = {sec.anchor for sec in s.sections}
+                for d in s.duplicates:
+                    v.err("section-duplicate", role, f"two level-2 headings read {d!r}")
+                if s.empty:
+                    v.err("section-empty", role, "a level-2 heading has no text")
 
     # ---- manifest
     for i, e in enumerate(entries):
@@ -278,6 +298,9 @@ def validate_v2(profile_dir: Path | str, *, served: bool = False) -> list[Findin
         role = e.get("role")
         if role in CACHE_ROLES:
             v.err("cache-part", where, "local caches are not listed as parts")
+        for k in (*PROVENANCE_FIELDS, "anchors"):
+            if k in e:
+                v.err("inline-provenance", f"{where}.{k}", f"{k!r} belongs in provenance.json")
         url = e.get("contentUrl")
         if not url:
             if served and role:
@@ -289,67 +312,16 @@ def validate_v2(profile_dir: Path | str, *, served: bool = False) -> list[Findin
             if not served:
                 v.err("missing-file", where, f"{url} does not exist")
             continue
-        v.provenance(e, where, allow_inherits=True)
-        if v.effective(e, "method") is not None and not e.get("sha256"):
-            v.err("sha256-required", where, "an entry with a method has a sha256")
-        if e.get("sha256") and sha256_file(path) != e["sha256"]:
-            v.warn(
-                "edited",
-                where,
-                "the file changed after it was labelled; its method reads as unknown",
-            )
         if role == "paper_summary" and path.read_bytes().startswith(b"---\n"):
             v.err("front-matter", where, "summaries carry no front matter in v2")
-        if "anchors" in e:
-            if role not in ANCHOR_ROLES:
-                v.err("anchors-role", where, f"only {ANCHOR_ROLES} carry anchors")
-                continue
-            s = scans.get(role)
-            if s is None:
-                continue
-            for d in s.duplicates:
-                v.err("anchor-duplicate", where, f"two headings share the anchor {d!r}")
-            for h in s.empty:
-                v.err("anchor-empty", where, f"heading {h!r} has an empty anchor")
-            by_anchor = {sec.anchor: sec for sec in s.sections}
-            recorded = set()
-            for j, rec in enumerate(e["anchors"]):
-                aw = f"{where}.anchors[{j}]"
-                a = rec.get("anchor")
-                recorded.add(a)
-                if a not in by_anchor:
-                    v.err("anchor-unmatched", aw, f"no heading with anchor {a!r}")
-                    continue
-                v.provenance(rec, aw, allow_inherits=True)
-                if v.effective(rec, "method") is not None and not rec.get("sha256"):
-                    v.err("sha256-required", aw, "an anchor record with a method has a sha256")
-                if rec.get("sha256") and rec["sha256"] != by_anchor[a].sha256:
-                    v.warn(
-                        "edited",
-                        aw,
-                        "the section changed after it was labelled; its method reads as unknown",
-                    )
-            for a in by_anchor:
-                if a not in recorded:
-                    v.err("anchor-unrecorded", where, f"heading {a!r} has no anchor record")
 
-    # ---- inline parts
-    if isinstance(person.get("summary"), dict):
-        v.provenance(person["summary"], "mainEntity.summary", allow_inherits=False)
-    elif "summary" in person:
-        v.err("summary", "mainEntity.summary", "summary is {text, <provenance>}")
-    for key in (
-        "expertise",
-        "critiques",
-        "methodologicalCommitments",
-        "recurringPositions",
-        "intellectualLineage",
-    ):
+    # ---- inline content: no provenance keys, plain-string text entries
+    if "summary" in person and not isinstance(person["summary"], str):
+        v.err("summary", "mainEntity.summary", "summary is a string")
+    for key in TEXT_LISTS:
         for i, item in enumerate(person.get(key) or []):
-            if not (isinstance(item, dict) and "text" in item):
-                v.err("text-part", f"mainEntity.{key}[{i}]", "an entry is {text, <provenance>}")
-            else:
-                v.provenance(item, f"mainEntity.{key}[{i}]", allow_inherits=False)
+            if not isinstance(item, str):
+                v.err("text-entry", f"mainEntity.{key}[{i}]", "an entry is a string")
     for i, c in enumerate(person.get("collaborators") or []):
         if not (isinstance(c, dict) and c.get("name")):
             v.err(
@@ -357,19 +329,35 @@ def validate_v2(profile_dir: Path | str, *, served: bool = False) -> list[Findin
                 f"mainEntity.collaborators[{i}]",
                 "a collaborator is an object with a name",
             )
-        else:
-            v.provenance(c, f"mainEntity.collaborators[{i}]", allow_inherits=False)
-    for i, it in enumerate(person.get("rp:researchInterests") or []):
-        v.provenance(it, f"mainEntity.rp:researchInterests[{i}]", allow_inherits=False)
+    for key in ("collaborators", "rp:researchInterests"):
+        for i, item in enumerate(person.get(key) or []):
+            v.no_inline(item, f"mainEntity.{key}[{i}]")
     cs = person.get("careerStage")
     if isinstance(cs, dict):
-        v.provenance(cs, "mainEntity.careerStage", allow_inherits=False)
+        v.no_inline(cs, "mainEntity.careerStage")
         if cs.get("confidence") is not None and cs["confidence"] not in CONFIDENCE:
             v.err(
                 "confidence",
                 "mainEntity.careerStage.confidence",
                 f"confidence is one of {CONFIDENCE}",
             )
+
+    # ---- the provenance file
+    prov_entries = v.roles.get(PROVENANCE_ROLE) or []
+    if not prov_entries:
+        if not served:
+            v.err("no-provenance-file", "hasPart", "the manifest lists provenance.json")
+    else:
+        url = prov_entries[0].get("contentUrl")
+        path = root / url if url else None
+        if path and path.exists():
+            try:
+                prov = json.loads(path.read_text())
+            except json.JSONDecodeError as e:
+                v.err("unreadable", url, str(e))
+            else:
+                _check_provenance(v, prov, page, person, scans, served)
+
     ir = page.get("identityResolution")
     if isinstance(ir, dict):
         v.provenance(ir, "identityResolution", allow_inherits=False)
@@ -398,6 +386,128 @@ def validate_v2(profile_dir: Path | str, *, served: bool = False) -> list[Findin
                 "v1-key", f"{where}.anchor", "v1 `anchor` is `identityResolution` on the page in v2"
             )
     return v.findings
+
+
+def _check_provenance(
+    v: _V, prov: Any, page: dict, person: dict, scans: dict, served: bool
+) -> None:
+    where0 = "provenance.json"
+    if not isinstance(prov, dict):
+        v.err("record", where0, "the provenance file is one record (an object)")
+        return
+    if prov.get("about") != page.get("@id"):
+        v.err("about", f"{where0}.about", "about is the page @id")
+    if prov.get("conformsTo") != V2_CONTEXT:
+        v.err("conformsTo", f"{where0}.conformsTo", f"expected {V2_CONTEXT}")
+    for k in prov:
+        if k not in (*RECORD_FIELDS, "about", "conformsTo"):
+            v.err("record-key", f"{where0}.{k}", f"{k!r} is not a record field")
+    v.provenance(prov, where0, allow_inherits=False)
+    for k in ("derivedFrom", "sha256", "edits"):
+        if k in prov:
+            v.err("record-key", f"{where0}.{k}", f"the root record has no {k}")
+
+    files = {
+        e.get("role"): e for e in page.get("hasPart", []) if e.get("role") in SINGLE_FILE_ROLES
+    }
+    paper_files = {
+        (e.get("paperId"), PAPER_ROLES[e["role"]]): e
+        for e in page.get("hasPart", [])
+        if e.get("role") in PAPER_ROLES and e.get("paperId")
+    }
+    root_dir = v.root
+
+    def actual_hash(path: tuple[str, ...]) -> str | None | bool:
+        """The current hash of the part at `path`; None if it has none; False if it is gone."""
+        branch = path[0]
+        if branch == "profile":
+            field = path[1]
+            if field not in person:
+                return False
+            if len(path) == 2:
+                return value_sha256(person[field])
+            value = person[field]
+            if not isinstance(value, list):
+                return False
+            for entry in value:
+                if entry_key(field, entry) == path[2]:
+                    return value_sha256(entry)
+            return False
+        if branch == "files":
+            e = files.get(path[1])
+            if e is None:
+                return False
+            fpath = root_dir / e["contentUrl"] if e.get("contentUrl") else None
+            if len(path) == 2:
+                return sha256_file(fpath) if fpath and fpath.exists() else None
+            s = scans.get(path[1])
+            if s is None:
+                return False
+            sec = s.by_heading().get(path[2])
+            return sec.sha256 if sec else False
+        if branch == "papers":
+            if path[1] not in v.paper_ids:
+                return False
+            if len(path) == 2:
+                return None
+            e = paper_files.get((path[1], path[2]))
+            if e is None:
+                return False
+            fpath = root_dir / e["contentUrl"] if e.get("contentUrl") else None
+            return sha256_file(fpath) if fpath and fpath.exists() else None
+        return False
+
+    for path, rec in provenance.walk(prov):
+        where = where0 + "." + ".".join(path)
+        depth_ok = (
+            (path[0] == "profile" and len(path) <= 3)
+            or (path[0] == "files" and len(path) <= 3)
+            or (
+                path[0] == "papers"
+                and (len(path) <= 2 or (len(path) == 3 and path[2] in ("summary", "fulltext")))
+            )
+        )
+        if path[0] not in ("profile", "files", "papers") or not depth_ok:
+            v.err("record-path", where, "no part has this address")
+            continue
+        for k in rec:
+            if k not in RECORD_FIELDS:
+                v.err("record-key", f"{where}.{k}", f"{k!r} is not a record field")
+        if len(path) == 1:
+            continue  # a branch: holds only parts
+        method = provenance.effective(prov, path, "method")
+        generator = provenance.effective(prov, path, "generator")
+        allow = path[0] == "files"
+        v.provenance(rec, where, allow_inherits=allow, method=method, generator=generator)
+        for j, ed in enumerate(rec.get("edits") or []):
+            ew = f"{where}.edits[{j}]"
+            if not isinstance(ed, dict) or set(ed) - {"by", "at", "sha256"} or not ed.get("by"):
+                v.err("edit", ew, "an edit is {by, at, sha256}")
+                continue
+            v.generator_form(ed["by"], ew)
+        content_keyed = path[0] == "profile" and len(path) == 3 and path[1] not in KEYED_LISTS
+        current = actual_hash(path)
+        grouping = set(rec) <= {"parts"}  # only groups sub-records: labels nothing itself
+        if current is False:
+            if not served:
+                v.warn("leftover-record", where, "no part has this key any more")
+            continue
+        if grouping:
+            continue
+        if (
+            method is not None
+            and not rec.get("sha256")
+            and not content_keyed
+            and current is not None
+        ):
+            v.err("sha256-required", where, "a record with a method has a sha256")
+        if rec.get("sha256") and current and rec["sha256"] != current:
+            v.warn(
+                "edited",
+                where,
+                "the part changed after it was labelled; its method reads as unknown",
+            )
+    v.datetimes(prov, where0)
 
 
 def is_valid(findings: list[Finding]) -> bool:

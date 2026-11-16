@@ -116,6 +116,16 @@
       "contentUrl": "personality/expertise.md",
       "bytes": 1999,
       "sha256": "0c26d413991f12b3ecbad8c642f6d703d493c57474399b3f33251de93e32bb4e"
+    },
+    {
+      "@type": "DigitalDocument",
+      "name": "Provenance",
+      "role": "provenance",
+      "encodingFormat": "application/json",
+      "contentUrl": "provenance.json",
+      "visibility": "public",
+      "bytes": 206,
+      "sha256": "786cbaf2e0c24a67992cb3ddc6a4d166f92e999f1814224801c18f4bd5ae99a2"
     }
   ],
   "mainEntity": {
@@ -209,63 +219,31 @@
     "affiliation": {
       "name": "Example University"
     },
-    "summary": {
-      "text": "Jane Doe is a computational biologist who develops synthetic methods and standards for analyzing example region data. Her group builds infrastructure for reproducible analysis including a sample metadata standard, a reference asset manager, and analysis pipelines, with recent emphasis on vector representations of example regions."
-    },
+    "summary": "Jane Doe is a computational biologist who develops synthetic methods and standards for analyzing example region data. Her group builds infrastructure for reproducible analysis including a sample metadata standard, a reference asset manager, and analysis pipelines, with recent emphasis on vector representations of example regions.",
     "expertise": [
-      {
-        "text": "example-region-set-analysis"
-      },
-      {
-        "text": "example-pipeline-development"
-      },
-      {
-        "text": "sample-metadata-standardization"
-      },
-      {
-        "text": "reference-asset-management"
-      },
-      {
-        "text": "widget-embeddings-for-genomics"
-      },
-      {
-        "text": "reproducible-workflow-design"
-      }
+      "example-region-set-analysis",
+      "example-pipeline-development",
+      "sample-metadata-standardization",
+      "reference-asset-management",
+      "widget-embeddings-for-genomics",
+      "reproducible-workflow-design"
     ],
     "critiques": [
-      {
-        "text": "inconsistent-metadata-impedes-data-reuse"
-      },
-      {
-        "text": "ad-hoc-universe-selection-harms-analysis"
-      }
+      "inconsistent-metadata-impedes-data-reuse",
+      "ad-hoc-universe-selection-harms-analysis"
     ],
     "methodologicalCommitments": [
-      {
-        "text": "portable-encapsulated-project-standards"
-      },
-      {
-        "text": "content-addressable-reference-assets"
-      },
-      {
-        "text": "principled-consensus-over-naive-union"
-      }
+      "portable-encapsulated-project-standards",
+      "content-addressable-reference-assets",
+      "principled-consensus-over-naive-union"
     ],
     "recurringPositions": [
-      {
-        "text": "metadata-sharing-is-as-important-as-data-sharing"
-      },
-      {
-        "text": "naive-union-consensus-loses-boundary-information"
-      }
+      "metadata-sharing-is-as-important-as-data-sharing",
+      "naive-union-consensus-loses-boundary-information"
     ],
     "intellectualLineage": [
-      {
-        "text": "example-consortium"
-      },
-      {
-        "text": "foundational-peak-calling-methods"
-      }
+      "example-consortium",
+      "foundational-peak-calling-methods"
     ],
     "collaborators": [
       {

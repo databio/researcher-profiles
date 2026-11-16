@@ -1,8 +1,11 @@
 """`rp migrate`: rewrite a v1 profile directory as v2 (issues #4-#7), offline.
 
 Migration fills in only what the v1 data says. It never invents a generator, a
-`declared` label or a fetch date. Everything v1 doesn't record is left out,
-which v2 reads as unknown. The source directory is never modified.
+`declared` label or a fetch date. It writes `provenance.json` with a root record
+whose `method`, `generator` and `generatedAt` are null (v1 records no build), and
+moves the provenance v1 does record into records there. A record it writes sets
+all three fields, null where v1 says nothing, so a later build's root values never
+reach it. The source directory is never modified.
 """
 
 from __future__ import annotations
@@ -15,13 +18,18 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from . import provenance
 from .common import (
     CACHE_ROLES,
     GENERATOR_RE,
+    PAPER_ROLES,
+    SINGLE_FILE_ROLES,
     V2_CONTEXT,
     camel,
+    entry_key,
     normalize_datetime,
     sha256_bytes,
+    value_sha256,
 )
 
 
@@ -68,6 +76,23 @@ def _now() -> str:
 
 def _drop_none(d: dict) -> dict:
     return {k: v for k, v in d.items() if v is not None}
+
+
+def _record(
+    method: Any = None, generator: Any = None, generated_at: Any = None, **rest: Any
+) -> dict:
+    """A record that states all three inherited fields, null where v1 says nothing."""
+    rec = {"method": method, "generator": generator, "generatedAt": generated_at}
+    rec.update({k: v for k, v in rest.items() if v is not None})
+    return rec
+
+
+def _generator(value: Any, rep: _Report, what: str) -> str | None:
+    if value == "user" or (isinstance(value, str) and GENERATOR_RE.match(value)):
+        return value
+    if value is not None:
+        rep.count(f"{what} generator not convertible (left unknown)")
+    return None
 
 
 class _Report:
@@ -173,12 +198,6 @@ def _migrate_papers_doc(doc: dict, rep: _Report) -> tuple[dict, dict[str, str]]:
 # --------------------------------------------------------------------------- person
 
 
-def _text_part(value: Any) -> dict:
-    if isinstance(value, dict):
-        return value  # already a part
-    return {"text": value}
-
-
 def _collaborator(c: Any, rep: _Report) -> dict:
     if isinstance(c, str):
         if " - " in c or " — " in c:
@@ -224,14 +243,18 @@ def _span(entry: dict) -> dict:
     return out
 
 
-def _career_stage(cs: dict) -> dict:
+def _career_stage(cs: dict) -> tuple[dict, dict | None]:
+    """The v2 career stage and its record (from v1 `source`), or None when v1 has no source."""
     out: dict[str, Any] = {}
     note_parts = []
+    rec = None
     for k, v in cs.items():
         if k == "as_of":
             out["asOf"] = v
         elif k == "source":
-            out["method"] = {"self_reported": "declared", "inferred": "inferred"}.get(v, v)
+            rec = _record({"self_reported": "declared", "inferred": "inferred"}.get(v))
+            if rec["method"] == "declared":
+                rec["generator"] = "user"
         elif k in ("evidence", "notes"):
             if v:
                 note_parts.append(v)
@@ -241,40 +264,40 @@ def _career_stage(cs: dict) -> dict:
             out[camel(k)] = v
     if note_parts:
         out["note"] = "\n\n".join(note_parts)
-    return out
+    return out, rec
 
 
-def _interest(entry: dict, oa_map: dict[str, str], rep: _Report) -> dict:
+def _interest(entry: dict, oa_map: dict[str, str], rep: _Report) -> tuple[dict, dict]:
+    """The v2 interest (content only) and its record."""
     out: dict[str, Any] = {}
+    method = generator = generated_at = None
+    refs: list[dict] = []
     for k, v in entry.items():
         if k == "assertedAt":
-            out["generatedAt"] = normalize_datetime(v) or v
+            generated_at = normalize_datetime(v) or v
         elif k == "generator":
-            if v == "user" or (isinstance(v, str) and GENERATOR_RE.match(v)):
-                out["generator"] = v
-            else:
-                rep.count("interest generator not convertible (left unknown)")
+            generator = _generator(v, rep, "interest")
+        elif k == "method":
+            method = "declared" if v == "self_reported" else v
         elif k == "evidence":
-            refs = []
             for w in (v or {}).get("papers", []) or []:
                 pid = oa_map.get(str(w).rsplit("/", 1)[-1])
                 if pid:
                     refs.append({"paper": pid})
                 else:
                     rep.drop("interest evidence id with no matching paper")
-            if refs:
-                out["derivedFrom"] = refs
             if (v or {}).get("share") is not None:
                 out["paperShare"] = v["share"]
         else:
             out[k] = v
     concept = entry.get("concept") or {}
     if concept.get("system"):
-        out["method"] = "imported"
+        method = "imported"
         rep.count("interests relabelled imported")
-    if out.get("method") == "self_reported":
-        out["method"] = "declared"
-    return out
+    rec = _record(method, generator, generated_at, derivedFrom=refs or None)
+    if method is not None:
+        rec["sha256"] = value_sha256(out)
+    return out, rec
 
 
 def _identity_resolution(anchor: dict) -> dict:
@@ -364,10 +387,12 @@ def migrate_profile(
 
     # papers first: interest evidence resolves through them
     oa_map: dict[str, str] = {}
+    paper_ids: set[str] = set()
     works = next((e for e in manifest if e.get("role") == "works"), None)
     if works and (src / works["contentUrl"]).exists():
         wdoc = json.loads((src / works["contentUrl"]).read_text())
         wdoc2, oa_map = _migrate_papers_doc(wdoc, rep)
+        paper_ids = {r["paperId"] for r in wdoc2["hasPart"] if r.get("paperId")}
         _write_json(dst / works["contentUrl"], wdoc2)
 
     # --- person
@@ -378,13 +403,17 @@ def migrate_profile(
     old_id = doc.get("@id")
     if old_id and old_id != person.get("@id"):
         rep.drop("Person @id that is not the ORCID IRI")
+    pfile = provenance.new_root("", method=None, generator=None, generatedAt=None)
     for k in _PERSON_KEYS:
         if k in doc:
             v = doc[k]
             if k in ("career", "training"):
                 v = [_span(e) for e in v or []]
             elif k == "rp:researchInterests":
-                v = [_interest(e, oa_map, rep) for e in v or []]
+                pairs = [_interest(e, oa_map, rep) for e in v or []]
+                v = [p[0] for p in pairs]
+                for entry, rec in pairs:
+                    provenance.ensure(pfile, ("profile", k, entry_key(k, entry))).update(rec)
                 rep.count("interests", len(v))
             elif k == "researchOutputs":
                 v = [_research_output(o) if isinstance(o, dict) else o for o in v or []]
@@ -393,20 +422,27 @@ def migrate_profile(
         aff = doc["affiliation"]
         person["affiliation"] = {"name": aff} if isinstance(aff, str) else aff
     if "summary" in doc:
-        person["summary"] = _text_part(doc["summary"])
+        s = doc["summary"]
+        person["summary"] = s.get("text") if isinstance(s, dict) else s
     for k in _TEXT_LISTS:
         if k in doc:
-            person[camel(k)] = [_text_part(x) for x in doc[k] or []]
+            person[camel(k)] = [x.get("text") if isinstance(x, dict) else x for x in doc[k] or []]
     if "collaborators" in doc:
         person["collaborators"] = [_collaborator(c, rep) for c in doc["collaborators"] or []]
     if "career_stage" in doc and doc["career_stage"]:
-        person["careerStage"] = _career_stage(doc["career_stage"])
+        cs, rec = _career_stage(doc["career_stage"])
+        person["careerStage"] = cs
+        if rec is not None:
+            if rec["method"] is not None:
+                rec["sha256"] = value_sha256(cs)
+            provenance.ensure(pfile, ("profile", "careerStage")).update(rec)
 
     # --- page
     if page_id:
         pid = page_id if page_id.startswith("urn:uuid:") else f"urn:uuid:{page_id}"
     else:
         pid = f"urn:uuid:{uuid.uuid4()}"
+    pfile["about"] = pid
     page: dict[str, Any] = {
         "@context": V2_CONTEXT,
         "@type": "ProfilePage",
@@ -450,6 +486,7 @@ def migrate_profile(
             continue
         entry = dict(e)
         path = dst / url if url else None
+        rec = _entry_record(entry, paper_ids, rep)
         if role == "paper_summary" and path and path.exists():
             body, fm = _strip_front_matter(path.read_text(errors="replace"))
             path.write_text(body)
@@ -458,7 +495,8 @@ def migrate_profile(
             if fm.get("source_hash"):
                 entry["inputsDigest"] = fm["source_hash"]
             if normalize_datetime(fm.get("written_at")):
-                entry["generatedAt"] = normalize_datetime(fm["written_at"])
+                rec = rec or _record()
+                rec["generatedAt"] = normalize_datetime(fm["written_at"])
             rep.count("summaries")
             if fm:
                 rep.count("summaries with front matter")
@@ -475,10 +513,56 @@ def migrate_profile(
             data = path.read_bytes()
             entry["bytes"] = len(data)
             entry["sha256"] = sha256_bytes(data)
+            if rec is not None and rec.get("method") is not None:
+                rec["sha256"] = entry["sha256"]
+        if rec is not None:
+            where = _file_path(entry)
+            if where:
+                provenance.ensure(pfile, where).update(rec)
+            else:
+                rep.drop("provenance on a file with no record address")
         entries.append(entry)
     page["hasPart"] = entries
     page["mainEntity"] = person
 
     _write_json(dst / "profile.jsonld", page)
-    rep.count("manifest entries", len(entries))
+    provenance.save(dst, pfile)
+    rep.count("manifest entries", len(entries) + 1)
     return {"page_id": pid, **rep.as_dict()}
+
+
+def _file_path(entry: dict) -> tuple[str, ...] | None:
+    """Where a manifest entry's record lives in the provenance file."""
+    role = entry.get("role")
+    if role in PAPER_ROLES and entry.get("paperId"):
+        return ("papers", entry["paperId"], PAPER_ROLES[role])
+    if role in SINGLE_FILE_ROLES:
+        return ("files", role)
+    return None
+
+
+def _entry_record(entry: dict, paper_ids: set[str], rep: _Report) -> dict | None:
+    """Take any provenance off a v1 manifest entry and return it as a record.
+
+    v1 `derivedFrom` values are roles or paper ids, and every one inherits
+    visibility, so each becomes a typed reference with `inheritsVisibility`.
+    """
+    fields = {
+        k: entry.pop(k) for k in ("method", "generator", "generatedAt", "derivedFrom") if k in entry
+    }
+    if not fields:
+        return None
+    refs = []
+    for v in fields.get("derivedFrom") or []:
+        if isinstance(v, str) and v in paper_ids:
+            refs.append({"paper": v, "inheritsVisibility": True})
+        elif isinstance(v, str) and v in SINGLE_FILE_ROLES:
+            refs.append({"file": v, "inheritsVisibility": True})
+        else:
+            rep.drop("v1 derivedFrom value that names no paper or single-file role")
+    return _record(
+        fields.get("method"),
+        _generator(fields.get("generator"), rep, "file"),
+        normalize_datetime(fields.get("generatedAt")),
+        derivedFrom=refs or None,
+    )
