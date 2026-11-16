@@ -9,6 +9,7 @@
     {"dir": "invalid/duplicate-heading", "valid": false, "errors": ["anchor-duplicate"]},
     {"dir": "invalid/user-not-declared", "valid": false, "errors": ["user-not-declared"]},
     {"dir": "invalid/v1-key", "valid": false, "errors": ["v1-key"]},
-    {"dir": "invalid/datetime-offset", "valid": false, "errors": ["datetime"]}
+    {"dir": "invalid/datetime-offset", "valid": false, "errors": ["datetime"]},
+    {"dir": "invalid/duplicate-paperId", "valid": false, "errors": ["duplicate-paperId"], "description": "Two paper records share a paperId"}
   ]
 }

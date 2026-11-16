@@ -139,6 +139,15 @@ def main():
     def offset_datetime(d, page):  # noqa: ARG001
         page["dateModified"] = "2026-11-20T10:02:00+00:00"
 
+    def dup_paper_id(d, page):
+        works = d / next(e for e in page["hasPart"] if e["role"] == "works")["contentUrl"]
+        doc = json.loads(works.read_text())
+        doc["hasPart"][1]["paperId"] = doc["hasPart"][0]["paperId"]
+        works.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n")
+        entry = next(e for e in page["hasPart"] if e["role"] == "works")
+        entry["sha256"] = sha(works)
+        entry["bytes"] = works.stat().st_size
+
     for name, fn in (
         ("no-dateModified", no_date),
         ("method-without-sha256", method_no_sha),
@@ -146,6 +155,7 @@ def main():
         ("user-not-declared", user_inferred),
         ("v1-key", v1_key),
         ("datetime-offset", offset_datetime),
+        ("duplicate-paperId", dup_paper_id),
     ):
         make_invalid(rb, name, fn)
 

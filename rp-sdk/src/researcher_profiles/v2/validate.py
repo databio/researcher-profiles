@@ -252,7 +252,11 @@ def validate_v2(profile_dir: Path | str, *, served: bool = False) -> list[Findin
             if not p:
                 v.err("paperId", f"works[{i}]", "a paper record has a paperId")
             elif p in seen:
-                v.warn("duplicate-paperId", f"works[{i}]", f"paperId {p!r} appears twice")
+                v.err(
+                    "duplicate-paperId",
+                    f"works[{i}]",
+                    f"paperId {p!r} appears twice; ids are unique within a profile",
+                )
             seen.add(p)
             if "paper_id" in r or "first_author" in r:
                 v.err("v1-key", f"works[{i}]", "paper record still has v1 keys")

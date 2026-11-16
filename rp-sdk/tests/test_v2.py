@@ -10,6 +10,7 @@ import pytest
 
 from researcher_profiles.v2 import V2_CONTEXT, migrate_profile, slug, validate_v2
 from researcher_profiles.v2 import anchors as v2_anchors
+from researcher_profiles.v2 import paperid as v2_paperid
 from researcher_profiles.v2.common import normalize_datetime
 from researcher_profiles.v2.migrate import MigrationError
 from researcher_profiles.v2.validate import is_valid
@@ -272,3 +273,55 @@ def test_v2_conformance_case(case):
     assert is_valid(findings) == case["valid"], [f for f in findings if f.level == "error"]
     assert set(case.get("errors", [])) <= codes(findings)
     assert set(case.get("warnings", [])) <= codes(findings, "warning")
+
+
+class TestPaperId:
+    def test_usual_id_skips_stopwords_and_abstract_numbers(self):
+        assert v2_paperid.candidates("Díez", 2021, "The Colon Transcriptome Explorer")[0] == (
+            "diez2021colon"
+        )
+        assert v2_paperid.candidates("Taha", 2025, "Abstract A065: Community engagement")[0] == (
+            "taha2025community"
+        )
+
+    def test_collision_adds_title_words_and_keeps_the_short_id(self):
+        taken = {"doe2020whole"}
+        pid = v2_paperid.mint_paper_id("Doe", 2020, "Whole proteome GPS predictions", taken)
+        assert pid == "doe2020whole-proteome"
+        taken.add(pid)
+        assert (
+            v2_paperid.mint_paper_id("Doe", 2020, "Whole proteome NetworKIN predictions", taken)
+            == "doe2020whole-proteome-networkin"
+        )
+
+    def test_same_title_is_one_work(self):
+        with pytest.raises(v2_paperid.SameWork):
+            v2_paperid.mint_paper_id(
+                "Doe", 2020, "New pipeline", {"doe2020new", "doe2020new-pipeline"}
+            )
+
+    def test_assignment_keeps_existing_ids_and_does_not_depend_on_input_order(self):
+        def recs():
+            return [
+                {"paperId": "doe2020atlas", "name": "Atlas of example cells", "_surname": "Doe"},
+                {"name": "Atlas of proteome sites", "datePublished": "2020", "_surname": "Doe"},
+                {"name": "Atlas of chromatin states", "datePublished": "2020", "_surname": "Doe"},
+                {
+                    "name": "Atlas of example cells",
+                    "datePublished": "2020",
+                    "_surname": "Doe",
+                    "@id": "https://doi.org/10.1101/x",
+                },
+            ]
+
+        a = recs()
+        same_a = v2_paperid.assign_paper_ids(a)
+        b = list(reversed(recs()))
+        v2_paperid.assign_paper_ids(b)
+        assert a[0]["paperId"] == "doe2020atlas"
+        assert {r.get("paperId") for r in a} == {r.get("paperId") for r in b}
+        assert {a[1]["paperId"], a[2]["paperId"]} == {
+            "doe2020atlas-proteome",
+            "doe2020atlas-chromatin",
+        }
+        assert same_a == [(3, 0)] and "paperId" not in a[3]
