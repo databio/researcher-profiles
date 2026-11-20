@@ -191,6 +191,8 @@ def _cmd_index(args: argparse.Namespace) -> int:
             "A backend spec is 'kind:model', where kind is one of:\n"
             "  st:<model>      sentence-transformers, run locally\n"
             "  fastembed:<model>  ONNX via fastembed, run locally, no torch\n"
+            "  tei:<model>     a TEI server (RESEARCHER_PROFILES_EMBEDDING_DENSE_URL); "
+            "stored as fastembed:<model>\n"
             "  openai:<model>  OpenAI embeddings\n"
             "  voyage:<model>  Voyage embeddings\n"
             "  rp index <profile> --backend st:all-MiniLM-L6-v2",

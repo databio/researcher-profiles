@@ -8,6 +8,7 @@ import pytest
 
 from researcher_profiles import ResearcherProfile
 from researcher_profiles.api import _semantic
+from researcher_profiles.embeddings import same_space
 from researcher_profiles.embeddings.cache import SqliteEmbeddingIndex
 
 from .factories import (
@@ -15,12 +16,14 @@ from .factories import (
     build_profile_dir,
     patch_embedding_backends,
     refresh_manifest,
+    use_tei_env,
 )
 
 SLUG = "ada-lovelace"
 OTHER = "grace-hopper"
 TOKEN = "op-token"
 OP = {"Authorization": f"Bearer {TOKEN}"}
+_FASTEMBED_LABEL = "fastembed:all-MiniLM-L6-v2"
 
 
 class _SlowBackend(ConceptBackend):
@@ -158,11 +161,73 @@ class TestSameSpace:
             ("fastembed:sentence-transformers/all-MiniLM-L6-v2", "st:all-MiniLM-L6-v2", True),
             ("openai:text-embedding-3-small", "st:all-MiniLM-L6-v2", False),
             ("st:all-mpnet-base-v2", "st:all-MiniLM-L6-v2", False),
+            ("tei:all-MiniLM-L6-v2", "fastembed:all-MiniLM-L6-v2", True),
+            ("tei:all-MiniLM-L6-v2", "st:all-MiniLM-L6-v2", True),
+            ("tei:sentence-transformers/all-MiniLM-L6-v2", "fastembed:all-MiniLM-L6-v2", True),
+            ("tei:all-mpnet-base-v2", "fastembed:all-MiniLM-L6-v2", False),
+            ("tei:x", "openai:x", False),
         ],
-        ids=["st-vs-fastembed", "hf-org-prefix", "different-provider", "different-model"],
+        ids=[
+            "st-vs-fastembed",
+            "hf-org-prefix",
+            "different-provider",
+            "different-model",
+            "tei-vs-fastembed",
+            "tei-vs-st",
+            "tei-hf-org-prefix",
+            "tei-different-model",
+            "tei-vs-paid-api",
+        ],
     )
     def test_one_space(self, a, b, same):
-        assert _semantic.same_space(a, b) is same
+        assert same_space(a, b) is same
+
+
+def _build_fastembed_corpus(dest: Path) -> None:
+    """The semantic corpus, indexed under the fastembed label with 384-d concept vectors."""
+    encoder = ConceptBackend(name=_FASTEMBED_LABEL, dim=384)
+    with pytest.MonkeyPatch.context() as mp:
+        patch_embedding_backends(mp, encoder)
+        cv = "# CV\n\n## Lab\n\nNuclei membrane lysis protocol.\n"
+        _profile(dest, SLUG, "0000-0001-2345-6789", backend=encoder, cv=cv)
+        _profile(dest, OTHER, "0000-0002-1825-0097", backend=encoder)
+
+
+class TestTeiOverFastembedVectors:
+    """A ``tei:`` query encoder searches vectors stored as ``fastembed:``; nothing loads locally."""
+
+    @pytest.fixture
+    def tei_client(
+        self, golden, tmp_path, monkeypatch, tei_server, empty_sql_store, make_api_client
+    ):
+        corpus = shutil.copytree(
+            golden("semantic-fastembed", _build_fastembed_corpus), tmp_path / "corpus"
+        )
+        for slug in (SLUG, OTHER):
+            empty_sql_store.put(ResearcherProfile.from_files(corpus / slug))
+        tei_server.encoder = ConceptBackend(name="tei:all-MiniLM-L6-v2", dim=384)
+        use_tei_env(monkeypatch)
+        return make_api_client(empty_sql_store, token=TOKEN, tier_from_header=True)
+
+    def test_hybrid_ranking_and_search(self, tei_client, tei_server):
+        assert tei_client.app.state.store.backend_spec == _FASTEMBED_LABEL
+        ranked, mode, note = _rank(tei_client, "how genes get switched on")
+        assert (mode, note) == ("hybrid", None)
+        assert ranked[0][0] == "leroy2020enh"
+
+        r = tei_client.post(
+            f"/api/v1/profiles/{SLUG}/search",
+            json={"query": "chromatin accessibility"},
+            headers={**OP, "X-Tier": "private"},
+        )
+        assert r.status_code == 200, r.text
+        hits = r.json()["hits"]
+        assert hits and all(h["text"] for h in hits)
+        assert [r.inputs for r in tei_server.requests if r.route == "embed"] == [
+            ["how genes get switched on"],
+            ["chromatin accessibility"],
+        ]
+        assert tei_server.local_loads == []
 
 
 class TestSearchRouteOnSqlStore:

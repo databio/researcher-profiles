@@ -26,6 +26,7 @@ from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
 from typing import Any, Iterable, Mapping, Optional
 
+from ..embeddings.backends import same_space
 from ..embeddings.chunking import RANK_ONLY_SOURCE_TYPES
 from ..privacy import ViewerTier, chunk_source_tiers, tier_allows
 from ._projection import _visible_hits
@@ -292,29 +293,6 @@ def warm_encoder(store) -> bool:
     return vec is not None
 
 
-_SAME_WEIGHTS_PREFIXES = ("st", "fastembed")
-
-
-def same_space(encoder_name: str | None, index_spec: str | None) -> bool:
-    """Whether a query from ``encoder_name`` may be compared with ``index_spec`` vectors.
-
-    True when the names are equal, or when both are the same model under the
-    ``st:`` and ``fastembed:`` prefixes (the same weights; ``/match`` already
-    treats them as one space).
-    """
-    if not encoder_name or not index_spec:
-        return False
-    if encoder_name == index_spec:
-        return True
-
-    def split(spec: str) -> tuple[str, str]:
-        prefix, _, model = spec.partition(":")
-        return prefix.lower(), model.split("/")[-1].lower()
-
-    (pa, ma), (pb, mb) = split(encoder_name), split(index_spec)
-    return pa in _SAME_WEIGHTS_PREFIXES and pb in _SAME_WEIGHTS_PREFIXES and ma == mb and bool(ma)
-
-
 # ---------------------------------------------------------------------------
 # Semantic hits, tier-filtered
 # ---------------------------------------------------------------------------
@@ -576,7 +554,6 @@ __all__ = [
     "join_notes",
     "profile_vectors",
     "rrf",
-    "same_space",
     "search_chunks",
     "semantic_hits",
     "source_readable",

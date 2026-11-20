@@ -11,7 +11,11 @@ from typing import Any
 
 import numpy as np
 
-from ..embeddings import IndexNotBuiltError, MissingEmbeddingBackendError
+from ..embeddings import (
+    EmbeddingBackendUnavailableError,
+    IndexNotBuiltError,
+    MissingEmbeddingBackendError,
+)
 from ..embeddings.profile_vec import _resolve_backend
 from ..errors import CapabilityUnavailableError
 from ..utils.clock import now_iso
@@ -85,7 +89,9 @@ def compute_calibration(profile) -> dict[str, Any]:
     for q in BACKGROUND_QUERIES:
         try:
             scores.append(_score_for_query(profile, q))
-        except IndexNotBuiltError:
+        # An outage is not a score: zeros would be cached until the scorer
+        # version changes. The caller falls back to the raw score instead.
+        except (IndexNotBuiltError, EmbeddingBackendUnavailableError):
             raise
         except (MissingEmbeddingBackendError, ValueError) as e:
             # A zero here is not neutral: it drags the mean and the standard

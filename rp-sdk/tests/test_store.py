@@ -532,7 +532,10 @@ class TestCreateAppOverAStore:
     def test_match_fails_loud_when_the_embedding_backend_is_unavailable(
         self, indexed_sql_store, make_api_client, monkeypatch
     ):
-        """A broken query encoder must 5xx: a 200 with an empty ranking looks like "nobody matched"."""
+        """A broken query encoder is a 503: a 200 with an empty ranking looks like "nobody matched".
+
+        The detail is fixed text, since an encoder's own message can carry a URL.
+        """
         from researcher_profiles.embeddings.backends import MissingEmbeddingBackendError
 
         def _boom(spec=None):
@@ -549,10 +552,9 @@ class TestCreateAppOverAStore:
 
         c = make_api_client(indexed_sql_store)
         r = c.post("/api/v1/match", json={"query": "chromatin accessibility genomics"})
-        assert r.status_code >= 500, f"expected a loud failure, got {r.status_code} {r.text!r}"
+        assert r.status_code == 503, f"expected a loud failure, got {r.status_code} {r.text!r}"
         detail = r.json()["detail"]
-        assert "embedding" in detail.lower()
-        assert "sentence-transformers" in detail
+        assert detail == "matching unavailable: the query encoder is not available"
 
     def test_sql_match_ranks_stored_vectors_and_sees_writes(
         self, indexed_sql_store, make_api_client

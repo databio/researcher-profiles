@@ -14,6 +14,7 @@ from .factories import (
     FIXTURE_DIR,
     ConceptBackend,
     FakeBackend,
+    TeiEmulator,
     add_fulltext_pdf,
     copy_fixture,
     new_sql_store,
@@ -186,6 +187,46 @@ def fake_backend(use_backend) -> FakeBackend:
 def concept_backend(use_backend) -> ConceptBackend:
     """Every backend lookup resolves to one meaning-aware ``ConceptBackend``."""
     return use_backend(ConceptBackend())
+
+
+@pytest.fixture
+def tei_server(monkeypatch) -> TeiEmulator:
+    """A TEI server double behind every ``tei:`` backend; no network, no real sleeps.
+
+    Clears the ``RESEARCHER_PROFILES_EMBEDDING_*`` variables (``use_tei_env``
+    sets them), routes the shared clients to the emulator, records retry waits
+    on a fake clock, and empties the query-encoder caches. Do not combine with
+    ``fake_backend`` / ``concept_backend``: they replace ``get_backend``.
+    """
+    import os
+
+    import httpx
+
+    from researcher_profiles.api import _semantic
+    from researcher_profiles.embeddings import backends
+
+    for name in list(os.environ):
+        if name.startswith("RESEARCHER_PROFILES_EMBEDDING_"):
+            monkeypatch.delenv(name)
+    emulator = TeiEmulator()
+    backends.reset_tei_connections()
+    monkeypatch.setattr(backends, "_TEI_TRANSPORT", httpx.MockTransport(emulator))
+    monkeypatch.setattr(backends, "_sleep", emulator.sleep)
+    monkeypatch.setattr(backends, "_monotonic", emulator.clock)
+    monkeypatch.setattr(_semantic, "_backends", {})
+    monkeypatch.setattr(_semantic, "_query_cache", {})
+
+    # In tei: mode no local model may load; callers catch Exception around
+    # loads, so the refusal is also recorded and asserted at teardown.
+    def _refuse(self):
+        emulator.local_loads.append(self.name)
+        raise RuntimeError(f"tei mode tried to load the local model {self.name!r}")
+
+    for cls in (backends.FastEmbedBackend, backends.SentenceTransformerBackend):
+        monkeypatch.setattr(cls, "_load", _refuse)
+    yield emulator
+    backends.reset_tei_connections()
+    assert not emulator.local_loads, f"local model loaded in tei mode: {emulator.local_loads}"
 
 
 # ---------------------------------------------------------------------------

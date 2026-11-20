@@ -39,17 +39,22 @@ class VectorIndex(Protocol):
 
     @property
     def backend_spec(self) -> str:
-        """The embedding model these vectors came out of, e.g. ``st:all-MiniLM-L6-v2``.
+        """The label stored with these vectors, e.g. ``st:all-MiniLM-L6-v2``.
 
         Cosine similarity across models is meaningless (spec section 7), so
-        every consumer that mixes two indexes checks this first.
+        every consumer that mixes two indexes checks this first, with
+        :func:`~researcher_profiles.embeddings.backends.same_space` rather than
+        string equality: a ``tei:`` encoder's vectors are stored as
+        ``fastembed:``, and the same weights under ``st:`` share the space.
         """
         ...
 
     def search(self, query: str, k: int = 5) -> Sequence[VectorHit]:
         """Chunk-level semantic search over free text, best first.
 
-        Takes text so the index embeds it with its own backend.
+        Takes text so the index embeds it with the encoder this process uses
+        for the index's space
+        (:func:`~researcher_profiles.embeddings.backends.encoder_for`).
         """
         ...
 

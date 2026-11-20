@@ -79,7 +79,10 @@ app = create_app(SqlProfileStore("postgresql://user@host/db"))
 | `RESEARCHER_PROFILES_PORT` | optional | Default port. |
 | `ANTHROPIC_API_KEY` | required for `ask`/`review`/`innovate`/`riff` | Read by the Anthropic SDK at call time. Not validated at startup; a missing key surfaces as a 500 from the affected endpoint. |
 | `RESEARCHER_PROFILES_REFUSAL_THRESHOLD` | optional | Float in `[0, 1]`, default `0.4`. Top-search-score below this makes `ask`/`review` refuse when `strict_corpus=true`. |
-| `RESEARCHER_PROFILES_EMBEDDING_BACKEND` | optional | Embedding backend spec used when opening or rebuilding an index. |
+| `RESEARCHER_PROFILES_EMBEDDING_BACKEND` | optional | Embedding backend spec used when opening or rebuilding an index. `tei:<model>` (for example `tei:all-MiniLM-L6-v2`) embeds on a TEI server such as Embed API; its vectors are stored as `fastembed:<model>`. |
+| `RESEARCHER_PROFILES_EMBEDDING_DENSE_URL` | required for the `tei` embedding backend | TEI base URL for one model, for example `https://embed.databio.org/tei/all-MiniLM-L6-v2`. Never read from a backend spec. |
+| `RESEARCHER_PROFILES_EMBEDDING_API_KEY` | optional | Bearer key for the `tei` backend. Without it requests go unauthenticated, and Embed API answers 401. Never logged. |
+| `RESEARCHER_PROFILES_EMBEDDING_TIMEOUT` | optional | Seconds one `tei` batch request (at most 64 texts) may take, retry waits included. Default 60. A one-text call (a query) gets `min(5, this)`. |
 | `RESEARCHER_PROFILES_DISABLE_INDEX` | optional | If `"1"`, disables index builds. |
 | `RESEARCHER_PROFILES_MAX_UPLOAD_MB` | optional | Size cap (MB) for `PUT /api/v1/profiles/{slug}` pushes. Default 50. |
 | `RESEARCHER_PROFILES_MATCH_MIN_RANKED_FRACTION` | optional | Float, default `0` (disabled). Minimum `ranked_profiles / total_profiles` `/match` must clear before it fails with a 503 instead of returning a suspiciously thin result. |

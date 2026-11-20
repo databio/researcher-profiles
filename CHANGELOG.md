@@ -9,6 +9,13 @@ and the parts follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### rp-sdk
+
+- Added the `tei:` embedding backend and the `[tei]` extra. Its vectors are
+  stored as `fastembed:<model>`.
+- `same_space` moved to `researcher_profiles.embeddings`.
+- `/match` embeds the query once and answers 503 when the encoder is down.
+
 ## [0.3.0] - 2026-11-03
 
 ### rp-sdk 0.3.0

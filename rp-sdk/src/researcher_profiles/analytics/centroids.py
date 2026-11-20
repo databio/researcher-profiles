@@ -210,7 +210,11 @@ class CentroidManager:
         """The backend queries are embedded with, resolved once and kept.
 
         The environment override wins, then the store's detected index
-        backend, then whatever the first profile resolves to.
+        backend, then whatever the first profile resolves to. The env encoder
+        may have a different name from the stored label in the same space (a
+        ``tei:`` encoder over ``fastembed:`` vectors); the matrix checks only
+        dimensions, and :func:`~researcher_profiles.embeddings.backends.same_space`
+        is the name check.
         """
         if self._backend is None:
             env = os.environ.get("RESEARCHER_PROFILES_EMBEDDING_BACKEND")

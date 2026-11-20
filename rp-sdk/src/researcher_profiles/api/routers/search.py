@@ -137,6 +137,8 @@ def match_profiles(
             topic_alpha=body.topic_alpha,
             viewer=lambda prof: service.visible(caller, prof)[1],
         )
+    except _encoder_errors() as e:
+        raise _encoder_unavailable(e) from e
     # Boundary: the whole store-wide match stack.
     except Exception as e:
         logger.exception("match failed for query %r", body.query)
@@ -326,6 +328,8 @@ def match_reviewers(
             topk_chunks=topk_chunks,
             normalize=body.normalize,
         )
+    except _encoder_errors() as e:
+        raise _encoder_unavailable(e) from e
     # Boundary: the match stack plus the derived graph.
     except Exception as e:
         logger.exception("reviewer match failed for query %r", body.query)
@@ -435,6 +439,30 @@ def graph_neighbors(
             )
             for n in neighbors
         ],
+    )
+
+
+def _encoder_errors() -> tuple[type[BaseException], ...]:
+    """The query encoder's failures, when the embedding stack is importable.
+
+    Resolved only while an exception is being matched, so a core-only
+    install never imports the embedding package for it.
+    """
+    try:
+        from ...embeddings.backends import MissingEmbeddingBackendError
+    except ImportError:
+        return ()
+    return (MissingEmbeddingBackendError,)
+
+
+def _encoder_unavailable(e: BaseException) -> HTTPException:
+    """The 503 for a query encoder that cannot embed now (missing, misconfigured or down).
+
+    The detail is fixed text: an exception message can carry a URL.
+    """
+    logger.warning("match: the query encoder is not available: %s", e)
+    return HTTPException(
+        status_code=503, detail="matching unavailable: the query encoder is not available"
     )
 
 

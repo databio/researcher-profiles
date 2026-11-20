@@ -33,6 +33,7 @@ Optional extras attach to the second command, for example
 | `vectors` | On-disk vector store and the cross-profile analytics math (`sqlite-vec`, `numpy`) |
 | `st` | Local sentence-transformers encoder (pulls torch) |
 | `fastembed` | Local ONNX encoder, same models as `st`, without torch |
+| `tei` | Remote encoder over the TEI API (httpx); vectors stored as fastembed |
 | `openai` / `voyage` | Remote embedding backends |
 | `client` | `ApiArtifactStorage` and `StaticArtifactStorage` HTTP backends |
 | `api` | The FastAPI server |

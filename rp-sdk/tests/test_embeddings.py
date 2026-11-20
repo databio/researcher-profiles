@@ -30,7 +30,14 @@ from researcher_profiles.models.results import Topic
 from researcher_profiles.profile import topics as topics_mod
 from researcher_profiles.utils.paths import cache_dir
 
-from .factories import FakeBackend, build_profile_dir, write_profile
+from .factories import (
+    TEI_URL,
+    FakeBackend,
+    build_profile_dir,
+    tei_answer,
+    use_tei_env,
+    write_profile,
+)
 
 
 @pytest.fixture
@@ -368,6 +375,438 @@ class TestFastEmbedBackend:
         assert len(vectors) == 2
         assert all(len(v) == 384 for v in vectors)
         assert backend.dim == 384
+
+
+_TEI_MODEL = "all-MiniLM-L6-v2"
+_FASTEMBED_LABEL = "fastembed:all-MiniLM-L6-v2"
+_SECRET = "ems_SECRET123"
+
+
+def _tei(**kw):
+    """A ``TEIBackend`` for all-MiniLM-L6-v2 at the emulator's URL."""
+    from researcher_profiles.embeddings import TEIBackend
+
+    return TEIBackend(_TEI_MODEL, **{"url": TEI_URL, **kw})
+
+
+class TestTEIBackend:
+    """``tei:``: a remote encoder over the TEI API. Every request goes to ``tei_server``."""
+
+    @pytest.mark.parametrize(
+        ("spec", "batch_size", "timeout"),
+        [
+            ("tei:all-MiniLM-L6-v2", 64, 60.0),
+            ({"backend": "tei", "model": _TEI_MODEL, "batch_size": 16, "timeout": 30}, 16, 30.0),
+        ],
+        ids=["string", "dict"],
+    )
+    def test_spec_resolves(self, tei_server, monkeypatch, spec, batch_size, timeout):
+        from researcher_profiles.embeddings import get_backend, stored_name_of
+
+        use_tei_env(monkeypatch)
+        backend = get_backend(spec)
+        assert (backend.name, backend.stored_name, backend.dim) == (
+            "tei:all-MiniLM-L6-v2",
+            _FASTEMBED_LABEL,
+            384,
+        )
+        assert (backend.url, backend.batch_size, backend.timeout) == (TEI_URL, batch_size, timeout)
+        # The label written next to its vectors is fastembed's; others keep their own.
+        assert stored_name_of(backend) == _FASTEMBED_LABEL
+        assert stored_name_of(FakeBackend()) == "fake:tiny"
+
+    @pytest.mark.parametrize(
+        ("url", "env", "spec", "kwargs", "error", "match"),
+        [
+            (None, {}, "tei:all-MiniLM-L6-v2", {}, "config", "EMBEDDING_DENSE_URL"),
+            ("embed.test/tei/x", {}, "tei:all-MiniLM-L6-v2", {}, "config", "http"),
+            (
+                TEI_URL,
+                {"RESEARCHER_PROFILES_EMBEDDING_TIMEOUT": "abc"},
+                "tei:all-MiniLM-L6-v2",
+                {},
+                "config",
+                "EMBEDDING_TIMEOUT",
+            ),
+            (TEI_URL, {}, {"backend": "tei", "url": TEI_URL}, {}, ValueError, "url or api_key"),
+            (TEI_URL, {}, {"backend": "tei", "api_key": "k"}, {}, ValueError, "url or api_key"),
+            (TEI_URL, {}, "tei:all-MiniLM-L6-v2", {"batch_size": 100}, ValueError, "1 to 64"),
+        ],
+        ids=[
+            "no-url",
+            "url-without-scheme",
+            "bad-env-timeout",
+            "url-in-spec-dict",
+            "key-in-spec-dict",
+            "batch-over-64",
+        ],
+    )
+    def test_spec_refused(self, tei_server, monkeypatch, url, env, spec, kwargs, error, match):
+        """No request is sent, and a spec dict (it can come from a profile) never sets the URL or key."""
+        from researcher_profiles.embeddings import EmbeddingBackendConfigError, get_backend
+
+        if url:
+            monkeypatch.setenv("RESEARCHER_PROFILES_EMBEDDING_DENSE_URL", url)
+        for name, value in env.items():
+            monkeypatch.setenv(name, value)
+        expected = EmbeddingBackendConfigError if error == "config" else error
+        with pytest.raises(expected, match=match):
+            get_backend(spec, **kwargs)
+        assert tei_server.requests == []
+
+    @pytest.mark.parametrize(
+        ("env_key", "arg_key", "sent"),
+        [
+            ("ems_env", None, "Bearer ems_env"),
+            ("ems_env", "ems_arg", "Bearer ems_arg"),
+            (None, None, None),
+        ],
+        ids=["env-key", "argument-wins", "no-key-no-header"],
+    )
+    def test_request_shape(self, tei_server, monkeypatch, env_key, arg_key, sent):
+        """``POST <base>/embed`` with ``{"inputs", "truncate": true}``; never ``normalize``."""
+        from researcher_profiles.embeddings import TEIBackend
+
+        use_tei_env(monkeypatch, key=env_key, url="https://elsewhere.test/tei/all-MiniLM-L6-v2")
+        backend = TEIBackend(_TEI_MODEL, url=TEI_URL, api_key=arg_key)
+        assert backend.embed(["a", "b"]) == FakeBackend(dim=384).embed(["a", "b"])
+        info, embed = tei_server.requests
+        assert (info.method, info.url) == ("GET", f"{TEI_URL}/info")
+        assert (embed.method, embed.url) == ("POST", f"{TEI_URL}/embed")
+        assert embed.body == {"inputs": ["a", "b"], "truncate": True}
+        assert embed.headers.get("authorization") == sent
+
+    def test_batches_of_at_most_64_in_order(self, tei_server, monkeypatch):
+        from researcher_profiles.embeddings import backends
+
+        texts = [f"text {i}" for i in range(150)]
+        monkeypatch.setattr(backends, "_FASTEMBED_BATCH_SIZE", None)
+        backends.set_fastembed_batch_size(8)  # fastembed's knob never reaches tei
+        out = _tei().embed(texts)
+        assert out == FakeBackend(dim=384).embed(texts)
+        sent = [r.inputs for r in tei_server.requests if r.route == "embed"]
+        assert [len(b) for b in sent] == [64, 64, 22]
+        assert [t for b in sent for t in b] == texts
+
+    @pytest.mark.parametrize(
+        ("env_timeout", "texts", "read_timeout"),
+        [
+            (None, ["q"], 5.0),
+            (None, ["a", "b"], 60.0),
+            ("12", ["a", "b"], 12.0),
+            ("2", ["q"], 2.0),
+        ],
+        ids=["query-5s", "batch-60s", "batch-from-env", "query-capped-by-env"],
+    )
+    def test_timeouts(self, tei_server, monkeypatch, env_timeout, texts, read_timeout):
+        if env_timeout:
+            monkeypatch.setenv("RESEARCHER_PROFILES_EMBEDDING_TIMEOUT", env_timeout)
+        _tei().embed(texts)
+        (embed,) = [r for r in tei_server.requests if r.route == "embed"]
+        assert embed.timeout["read"] == read_timeout
+
+    def test_one_shared_client_per_process(self, tei_server, monkeypatch):
+        """Instances share one client and one ``/info`` check; a forked child builds its own."""
+        from researcher_profiles.embeddings import backends, get_backend
+
+        use_tei_env(monkeypatch)
+        get_backend("tei:all-MiniLM-L6-v2").embed(["a"])
+        get_backend("tei:all-MiniLM-L6-v2").embed(["b"])
+        assert tei_server.routes() == ["info", "embed", "embed"]
+        parent = backends._tei_connection(TEI_URL, None)
+        assert backends._tei_connection(TEI_URL, None) is parent
+        monkeypatch.setattr(backends.os, "getpid", lambda: parent.pid + 1)
+        child = backends._tei_connection(TEI_URL, None)
+        assert child is not parent and child.http is not parent.http
+
+    @pytest.mark.parametrize(
+        ("answers", "sleeps"),
+        [
+            ([tei_answer(429, headers={"Retry-After": "1"})], [1.0]),
+            ([tei_answer(503, headers={"Retry-After": "1"})], [1.0]),
+            ([tei_answer(429)], [1.0]),
+        ],
+        ids=["busy-429", "unhealthy-503", "no-retry-after-waits-1s"],
+    )
+    def test_retries_after_the_wait_the_server_asks(self, tei_server, answers, sleeps):
+        tei_server.embed_queue = list(answers)
+        assert _tei().embed(["q"]) == FakeBackend(dim=384).embed(["q"])
+        assert tei_server.sleeps == sleeps
+
+    @pytest.mark.parametrize(
+        ("retry_after", "texts", "match", "max_slept"),
+        [
+            ("3600", ["q"], "quota", 0.0),
+            ("1", ["q"], "busy", 5.0),
+            ("1", ["a", "b"], "busy", 60.0),
+            ("6", ["q"], "busy", 0.0),
+        ],
+        ids=["daily-quota-fails-at-once", "query-gives-up", "batch-gives-up", "wait-over-budget"],
+    )
+    def test_gives_up_within_the_budget(self, tei_server, retry_after, texts, match, max_slept):
+        from researcher_profiles.embeddings import EmbeddingBackendUnavailableError
+
+        tei_server.embed_default = tei_answer(429, headers={"Retry-After": retry_after})
+        with pytest.raises(EmbeddingBackendUnavailableError, match=match):
+            _tei().embed(texts)
+        assert sum(tei_server.sleeps) <= max_slept
+        if max_slept == 0.0:
+            assert tei_server.sleeps == []
+
+    @pytest.mark.parametrize("status", [401, 403], ids=["bad-key", "key-may-not-use-model"])
+    def test_a_rejected_key_is_remembered(self, tei_server, status):
+        """After a 401/403 the process sends nothing more with that key."""
+        from researcher_profiles.embeddings import EmbeddingBackendConfigError
+
+        tei_server.embed_default = tei_answer(
+            status, json_body={"error": "This key cannot use model", "error_type": "Validation"}
+        )
+        backend = _tei(api_key="ems_bad")
+        with pytest.raises(
+            EmbeddingBackendConfigError, match="RESEARCHER_PROFILES_EMBEDDING_API_KEY"
+        ):
+            backend.embed(["q"])
+        sent = len(tei_server.requests)
+        with pytest.raises(EmbeddingBackendConfigError):
+            backend.embed(["q"])
+        with pytest.raises(EmbeddingBackendConfigError):
+            _tei(api_key="ems_bad").check()
+        assert len(tei_server.requests) == sent
+
+    @pytest.mark.parametrize(
+        ("answer", "error"),
+        [
+            (
+                tei_answer(404, json_body={"error": "no model", "error_type": "Validation"}),
+                "config",
+            ),
+            (
+                tei_answer(422, json_body={"error": "batch too big", "error_type": "Validation"}),
+                "config",
+            ),
+            (
+                tei_answer(424, json_body={"error": "Inference failed", "error_type": "Backend"}),
+                "down",
+            ),
+            (tei_answer(500), "down"),
+            ("ConnectError", "down"),
+            ("ReadTimeout", "down"),
+            (tei_answer(200, json_body={"vectors": []}), "down"),
+            (tei_answer(200, json_body=[[0.1] * 384, [0.2] * 384]), "down"),
+        ],
+        ids=[
+            "404-no-model",
+            "422-refused",
+            "424-backend",
+            "500",
+            "connect-error",
+            "read-timeout",
+            "not-a-list",
+            "wrong-row-count",
+        ],
+    )
+    def test_error_mapping(self, tei_server, answer, error):
+        import httpx
+
+        from researcher_profiles.embeddings import (
+            EmbeddingBackendConfigError,
+            EmbeddingBackendUnavailableError,
+            MissingEmbeddingBackendError,
+        )
+
+        tei_server.embed_default = getattr(httpx, answer) if isinstance(answer, str) else answer
+        expected = (
+            EmbeddingBackendConfigError if error == "config" else EmbeddingBackendUnavailableError
+        )
+        with pytest.raises(expected) as e:
+            _tei().embed(["q"])
+        # Both families are still "the encoder is not usable" to existing handlers.
+        assert isinstance(e.value, MissingEmbeddingBackendError)
+        assert TEI_URL in str(e.value)
+
+    def test_check_reports_the_server(self, tei_server, caplog):
+        import logging
+
+        from researcher_profiles.embeddings import check_backend
+
+        backend = _tei()
+        with caplog.at_level(logging.INFO, logger="researcher_profiles.embeddings.backends"):
+            info = backend.check()
+        assert (info.model_id, info.dtype, info.max_input_length, info.dim) == (
+            "sentence-transformers/all-MiniLM-L6-v2",
+            "float32",
+            256,
+            384,
+        )
+        assert "sentence-transformers/all-MiniLM-L6-v2" in caplog.text
+        assert tei_server.routes() == ["info", "embed"]  # the model check, then a probe
+        assert check_backend(FakeBackend()) is True
+
+    @pytest.mark.parametrize(
+        ("info", "encoder"),
+        [
+            ({"served_model_name": "all-mpnet-base-v2", "model_id": "x/all-mpnet-base-v2"}, None),
+            ({"model_type": {"embedding": {"pooling": "splade"}}}, None),
+            ({"model_type": {"classifier": {}}}, None),
+            ({"model_dtype": "int8"}, None),
+            ({"max_input_length": 512}, None),
+            ({}, FakeBackend(dim=768)),
+        ],
+        ids=["other-model", "splade", "not-embedding", "int8", "truncates-at-512", "768-d-probe"],
+    )
+    def test_check_refuses_another_model_and_remembers(self, tei_server, info, encoder):
+        from researcher_profiles.embeddings import EmbeddingModelMismatchError
+
+        tei_server.info.update(info)
+        if encoder is not None:
+            tei_server.encoder = encoder
+        backend = _tei()
+        with pytest.raises(EmbeddingModelMismatchError):
+            backend.check()
+        sent = len(tei_server.requests)
+        with pytest.raises(EmbeddingModelMismatchError):
+            backend.embed(["q"])
+        assert len(tei_server.requests) == sent
+
+    def test_check_raises_on_a_rejected_key(self, tei_server):
+        from researcher_profiles.embeddings import EmbeddingBackendConfigError
+
+        tei_server.info_answer = tei_answer(401)
+        with pytest.raises(EmbeddingBackendConfigError, match="API_KEY"):
+            _tei().check()
+
+    @pytest.mark.parametrize(
+        "answer", [tei_answer(503), "ConnectError"], ids=["503", "connect-error"]
+    )
+    def test_check_is_none_while_the_server_is_down(self, tei_server, caplog, answer):
+        import logging
+
+        import httpx
+
+        from researcher_profiles.embeddings import check_backend
+
+        tei_server.info_answer = getattr(httpx, answer) if isinstance(answer, str) else answer
+        with caplog.at_level(logging.WARNING, logger="researcher_profiles.embeddings.backends"):
+            assert _tei().check() is None
+            assert check_backend(_tei()) is False
+        assert "unreachable at startup" in caplog.text
+
+    def test_check_lowers_the_batch_to_the_keys_limit(self, tei_server):
+        tei_server.info["max_client_batch_size"] = 32
+        backend = _tei()
+        backend.check()
+        assert backend.batch_size == 32
+        backend.embed([f"t{i}" for i in range(40)])
+        assert [len(r.inputs) for r in tei_server.requests if r.route == "embed"][1:] == [32, 8]
+
+    def test_a_process_that_never_checks_sends_info_once(self, tei_server):
+        """The model is checked before any vector is used, once per process and URL."""
+        backend = _tei()
+        for text in ("a", "b", "c"):
+            backend.embed([text])
+        _tei().embed(["d", "e"])
+        assert tei_server.routes() == ["info", "embed", "embed", "embed", "embed"]
+
+    def test_the_key_never_leaks(self, tei_server, caplog):
+        import logging
+
+        import httpx
+
+        from researcher_profiles.embeddings import backends
+
+        backend = _tei(api_key=_SECRET)
+        messages = [repr(backend)]
+        with caplog.at_level(logging.DEBUG):
+            backend.embed(["q"])
+            for answer in (tei_answer(401), tei_answer(404), httpx.ConnectError):
+                backends.reset_tei_connections()
+                tei_server.embed_default = answer
+                try:
+                    _tei(api_key=_SECRET).embed(["q"])
+                except Exception as e:  # noqa: BLE001 - every failure's message is checked
+                    messages.append(str(e))
+        assert len(messages) == 4
+        assert tei_server.requests[-1].headers["authorization"] == f"Bearer {_SECRET}"
+        assert not [m for m in messages + [caplog.text] if _SECRET in m]
+
+
+class TestTeiOverFastembedLabels:
+    """A ``tei:`` encoder reads and writes ``fastembed:`` indexes; nothing stored says ``tei:``."""
+
+    @staticmethod
+    def _flat(texts):
+        vecs = np.asarray(FakeBackend(dim=384).embed(texts), dtype="<f4")
+        blob = vecs.tobytes()
+        index = {
+            "backend_spec": _FASTEMBED_LABEL,
+            "file": "fastembed-all-minilm-l6-v2.bin",
+            "dtype": "float32",
+            "byte_order": "little",
+            "dim": 384,
+            "count": len(texts),
+            "layout": "row_major",
+            "normalized": False,
+            "metric": "cosine",
+            "row_key": "chunk_index",
+            "rows": list(range(len(texts))),
+            "sha256": hashlib.sha256(blob).hexdigest(),
+        }
+        chunks = [
+            {"source_type": "paper_summary", "source_id": f"p{i}", "chunk_index": 0}
+            for i in range(len(texts))
+        ]
+        return FlatEmbeddingIndex.from_bytes(
+            json.dumps(index).encode(), blob, json.dumps(chunks).encode()
+        )
+
+    def test_flat_index_searched_with_tei(self, tei_server, monkeypatch):
+        texts = ["region sets", "chromatin maps", "protein folding"]
+        hits = self._flat(texts).search_text("chromatin maps", _tei(), k=1)
+        assert (hits[0].source_id, hits[0].cosine) == ("p1", 1.0)
+
+        use_tei_env(monkeypatch)
+        before = len(tei_server.requests)
+        hits = self._flat(texts).search("protein folding", k=1)
+        assert (hits[0].source_id, hits[0].cosine) == ("p2", 1.0)
+        assert tei_server.requests[before:][-1].inputs == ["protein folding"]
+
+    def test_sqlite_index_searched_with_tei(self, tei_server, monkeypatch, synthetic_profile):
+        SqliteEmbeddingIndex(synthetic_profile).build_index(
+            backend=FakeBackend(name=_FASTEMBED_LABEL, dim=384)
+        )
+        use_tei_env(monkeypatch)
+        hits = SqliteEmbeddingIndex(synthetic_profile).search("region universes", k=3)
+        assert hits and all(h.text for h in hits)
+        assert [r.inputs for r in tei_server.requests if r.route == "embed"] == [
+            ["region universes"]
+        ]
+
+    def test_tei_updates_a_fastembed_index_in_place(self, tei_server, synthetic_profile):
+        """No ``--force``, nothing re-embedded, and the label stays fastembed's."""
+        first = build_index(synthetic_profile, backend=FakeBackend(name=_FASTEMBED_LABEL, dim=384))
+        report = build_index(synthetic_profile, backend=_tei())
+        assert (report.added, report.updated, report.skipped) == (0, 0, first.added)
+        assert report.backend_name == _FASTEMBED_LABEL
+        assert tei_server.requests == []
+        meta = read_index_meta_path(cache_dir(synthetic_profile) / "embeddings.sqlite")
+        assert meta["backend_name"] == _FASTEMBED_LABEL
+
+    def test_a_tei_built_index_and_export_say_fastembed(self, tei_server, synthetic_profile):
+        report = build_index(synthetic_profile, backend=_tei())
+        assert report.added > 0 and report.backend_name == _FASTEMBED_LABEL
+        result = write_flat_export(synthetic_profile)
+        meta = read_index_meta_path(cache_dir(synthetic_profile) / "embeddings.sqlite")
+        index = json.loads(result.index_path.read_text())
+        assert (meta["backend_name"], index["backend_spec"], result.blob_path.name) == (
+            _FASTEMBED_LABEL,
+            _FASTEMBED_LABEL,
+            "fastembed-all-minilm-l6-v2.bin",
+        )
+        emb = synthetic_profile / "embeddings"
+        assert not [f.name for f in emb.iterdir() if "tei" in f.name]
+        assert "tei" not in (emb / "index.json").read_text()
+        assert not [k for k, v in meta.items() if "tei:" in v]
+        assert max(len(r.inputs) for r in tei_server.requests if r.route == "embed") <= 64
 
 
 class TestProfileCentroid:

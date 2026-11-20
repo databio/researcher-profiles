@@ -27,7 +27,7 @@ from ._sqlite import (
     serialize_vec,
     write_index_meta,
 )
-from .backends import EmbeddingBackend, get_backend
+from .backends import EmbeddingBackend, encoder_for, get_backend, same_space, stored_name_of
 from .chunking import (
     PAPER_CHUNK_TYPES,
     Chunk,
@@ -281,7 +281,10 @@ class SqliteEmbeddingIndex:
 
         existing_backend = existing_meta.get("backend_name")
         existing_dim = existing_meta.get("embedding_dim")
-        mismatch = (existing_backend and existing_backend != be.name) or (
+        # Exact on the stored label: a tei: encoder writes fastembed:, so it
+        # updates a fastembed: index in place, while st: still refuses.
+        label = stored_name_of(be)
+        mismatch = (existing_backend and existing_backend != label) or (
             existing_dim and int(existing_dim) != int(be.dim)
         )
         if not mismatch:
@@ -289,7 +292,7 @@ class SqliteEmbeddingIndex:
         if not force:
             raise IndexBackendMismatchError(
                 f"Index was built with backend={existing_backend!r} "
-                f"(dim={existing_dim}); requested backend={be.name!r} "
+                f"(dim={existing_dim}); requested backend={label!r} "
                 f"(dim={be.dim}). Pass force=True to rebuild."
             )
         self.db_path.unlink()
@@ -434,11 +437,11 @@ class SqliteEmbeddingIndex:
                 "No chunks to index for %s and no existing DB; skipping",
                 self.profile_dir.name,
             )
-            return IndexReport(backend_name=be.name)
+            return IndexReport(backend_name=stored_name_of(be))
 
         existing_meta = self._prepare_db(be, force=force)
         conn = connect_vec(self.db_path, create_parents=True)
-        report = IndexReport(backend_name=be.name)
+        report = IndexReport(backend_name=stored_name_of(be))
         try:
             ensure_schema(conn, dim=be.dim)
             if force and existing_meta:
@@ -450,7 +453,7 @@ class SqliteEmbeddingIndex:
                 conn,
                 {
                     "schema_version": self.SCHEMA_VERSION,
-                    "backend_name": be.name,
+                    "backend_name": stored_name_of(be),
                     "embedding_dim": str(be.dim),
                     "created_at": existing_meta.get("created_at", now_iso()),
                 },
@@ -468,13 +471,15 @@ class SqliteEmbeddingIndex:
 
         report.duration_s = round(time.monotonic() - start, 3)
         logger.info(
-            "Indexed profile %s: added=%d updated=%d skipped=%d removed=%d backend=%s duration=%.2fs",
+            "Indexed profile %s: added=%d updated=%d skipped=%d removed=%d backend=%s "
+            "encoder=%s duration=%.2fs",
             self.profile_dir.name,
             report.added,
             report.updated,
             report.skipped,
             report.removed,
             report.backend_name,
+            be.name,
             report.duration_s,
         )
         return report
@@ -570,14 +575,14 @@ class SqliteEmbeddingIndex:
             raise IndexNotBuiltError(
                 f"Index at {self.db_path} is missing backend metadata; rebuild it."
             )
-        # Reuse the cached backend when the name matches (models are heavy).
-        if self._cached_backend is not None and self._cached_backend.name == meta.get(
-            "backend_name"
+        # Reuse the cached backend when it is in the index's space (models are heavy).
+        if self._cached_backend is not None and same_space(
+            self._cached_backend.name, meta.get("backend_name")
         ):
             be = self._cached_backend
         else:
             try:
-                be = get_backend(meta["backend_name"])
+                be = encoder_for(meta["backend_name"])
             # Re-raised; this only closes the connection.
             except Exception:
                 logger.debug(

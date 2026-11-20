@@ -33,6 +33,7 @@ import io
 import json
 import shutil
 import tarfile
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
@@ -411,18 +412,20 @@ class ConceptBackend:
     :class:`FakeBackend`'s hash vectors cannot give.
     """
 
-    def __init__(self, name: str = "fake:concept"):
+    def __init__(self, name: str = "fake:concept", dim: int = 8):
         import re
 
         self.name = name
-        self.dim = 8
+        #: At least 8; dimensions past the eighth stay zero, so a wider
+        #: ConceptBackend can stand in for a real model's vector size.
+        self.dim = max(8, dim)
         self._word = {w: d for d, ws in CONCEPT_WORDS.items() for w in ws.split()}
         self._tok = re.compile(r"\w+")
 
     def embed(self, texts):
         out = []
         for t in texts:
-            v = [0.0] * 8
+            v = [0.0] * self.dim
             v[7] = 0.1
             for w in self._tok.findall(t.lower()):
                 if w in self._word:
@@ -449,6 +452,140 @@ def patch_embedding_backends(mp, backend):
         mp.setattr(mod, "get_backend", lambda spec=None, **kw: backend)
     mp.setattr(semantic, "_query_backend", lambda store: backend)
     return backend
+
+
+#: The base URL every ``tei:`` test backend talks to (never resolved: the
+#: transport is a :class:`TeiEmulator`).
+TEI_URL = "https://embed.test/tei/all-MiniLM-L6-v2"
+
+#: Embed API's real ``GET /info`` body for all-MiniLM-L6-v2 (``routers/tei.py``).
+TEI_INFO = {
+    "model_id": "sentence-transformers/all-MiniLM-L6-v2",
+    "model_sha": None,
+    "model_dtype": "float32",
+    "served_model_name": "all-MiniLM-L6-v2",
+    "model_type": {"embedding": {"pooling": "mean"}},
+    "max_concurrent_requests": 0,
+    "max_input_length": 256,
+    "max_batch_tokens": 256 * 32,
+    "max_batch_requests": None,
+    "max_client_batch_size": 64,
+    "auto_truncate": True,
+    "tokenization_workers": 1,
+    "version": "0.0.0",
+    "sha": None,
+    "docker_label": None,
+}
+
+
+@dataclass
+class TeiRequest:
+    """One request a :class:`TeiEmulator` received."""
+
+    method: str
+    #: ``"info"`` or ``"embed"``: the route under the base URL.
+    route: str
+    url: str
+    #: The ``inputs`` sent to ``/embed`` (``[]`` for ``/info``).
+    inputs: list
+    body: Any
+    headers: dict
+    #: ``request.extensions["timeout"]``: ``{"connect", "read", "write", "pool"}``.
+    timeout: dict
+
+
+class TeiEmulator:
+    """A TEI server (Embed API's per-model route) for ``httpx.MockTransport``.
+
+    ``GET /info`` answers :data:`TEI_INFO` (with ``info`` overrides), and
+    ``POST /embed`` answers ``encoder.embed(inputs)`` (384-d hash vectors by
+    default). Every request is recorded in :attr:`requests`.
+
+    Scripted answers replace the normal ones. Each is an ``httpx.Response``
+    factory ``(request) -> Response``, or an ``httpx`` exception class to
+    raise: :attr:`embed_queue` answers the next ``/embed`` requests in order,
+    then :attr:`embed_default` (``None``: real vectors) answers the rest;
+    :attr:`info_answer` (``None``: the body) answers every ``/info``.
+
+    :meth:`sleep` and :meth:`clock` stand in for the backend's ``_sleep`` and
+    ``_monotonic``: time moves only when the backend sleeps, and every wait is
+    kept in :attr:`sleeps`.
+    """
+
+    def __init__(self, encoder=None, *, info: Mapping[str, Any] | None = None):
+        self.encoder = encoder if encoder is not None else FakeBackend(dim=384)
+        self.info = {**TEI_INFO, **(info or {})}
+        self.requests: list[TeiRequest] = []
+        self.embed_queue: list = []
+        self.embed_default = None
+        self.info_answer = None
+        self.sleeps: list[float] = []
+        self.now = 1000.0
+        #: Names of local backends that tried to load a model (the
+        #: ``tei_server`` fixture refuses and records them).
+        self.local_loads: list[str] = []
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+    def clock(self) -> float:
+        return self.now
+
+    def routes(self) -> list[str]:
+        """The route of every request so far, in order."""
+        return [r.route for r in self.requests]
+
+    def __call__(self, request):
+        import httpx
+
+        body = json.loads(request.content) if request.content else None
+        route = request.url.path.rstrip("/").rsplit("/", 1)[-1]
+        inputs = list(body.get("inputs") or []) if isinstance(body, dict) else []
+        self.requests.append(
+            TeiRequest(
+                method=request.method,
+                route=route,
+                url=str(request.url),
+                inputs=inputs,
+                body=body,
+                headers=dict(request.headers),
+                timeout=dict(request.extensions.get("timeout") or {}),
+            )
+        )
+        if route == "info" and request.method == "GET":
+            answer = self.info_answer
+            if answer is None:
+                return httpx.Response(200, json=self.info)
+        elif route == "embed" and request.method == "POST":
+            answer = self.embed_queue.pop(0) if self.embed_queue else self.embed_default
+            if answer is None:
+                return httpx.Response(200, json=self.encoder.embed(inputs))
+        else:
+            return httpx.Response(404, json={"error": "Not Found", "error_type": "Validation"})
+        if isinstance(answer, type) and issubclass(answer, Exception):
+            raise answer("emulated failure", request=request)
+        return answer(request)
+
+
+def tei_answer(status: int, *, json_body: Any = None, headers: Mapping[str, str] | None = None):
+    """A :class:`TeiEmulator` answer factory: ``status`` with an optional JSON body."""
+
+    def _answer(request):
+        import httpx
+
+        kw = {"json": json_body} if json_body is not None else {}
+        return httpx.Response(status, headers=dict(headers or {}), **kw)
+
+    return _answer
+
+
+def use_tei_env(mp, *, key: str | None = None, url: str = TEI_URL) -> None:
+    """Set the environment a ``tei:all-MiniLM-L6-v2`` process runs with."""
+    mp.setenv("RESEARCHER_PROFILES_EMBEDDING_BACKEND", "tei:all-MiniLM-L6-v2")
+    mp.setenv("RESEARCHER_PROFILES_EMBEDDING_DENSE_URL", url)
+    if key is not None:
+        mp.setenv("RESEARCHER_PROFILES_EMBEDDING_API_KEY", key)
 
 
 def fake_llm_response(

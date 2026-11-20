@@ -243,6 +243,30 @@ the `[vectors,st]` extras.
     options:
       heading_level: 3
 
+The `tei:` backend embeds on a remote TEI server (the `[tei]` extra). Its
+vectors are stored under the `fastembed:<model>` label, so reads compare labels
+with `same_space` and pick the process's encoder with `encoder_for`.
+
+::: researcher_profiles.embeddings.backends.TEIBackend
+    options:
+      heading_level: 3
+
+::: researcher_profiles.embeddings.backends.check_backend
+    options:
+      heading_level: 3
+
+::: researcher_profiles.embeddings.backends.stored_name_of
+    options:
+      heading_level: 3
+
+::: researcher_profiles.embeddings.backends.same_space
+    options:
+      heading_level: 3
+
+::: researcher_profiles.embeddings.backends.encoder_for
+    options:
+      heading_level: 3
+
 `researcher_profiles.profile.index.IndexManager` is what `prof.index` hands
 back: `build`, `search`, `search_similar`, `embedding`. Distinct from
 `analytics.IndexFleetManager` (above), which operates over every profile in a
@@ -263,6 +287,18 @@ root rather than one profile's own index.
 ### Exceptions
 
 ::: researcher_profiles.embeddings.backends.MissingEmbeddingBackendError
+    options:
+      heading_level: 4
+
+::: researcher_profiles.embeddings.backends.EmbeddingBackendConfigError
+    options:
+      heading_level: 4
+
+::: researcher_profiles.embeddings.backends.EmbeddingModelMismatchError
+    options:
+      heading_level: 4
+
+::: researcher_profiles.embeddings.backends.EmbeddingBackendUnavailableError
     options:
       heading_level: 4
 

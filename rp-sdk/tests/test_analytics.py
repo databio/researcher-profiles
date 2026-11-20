@@ -24,7 +24,7 @@ from researcher_profiles.generative import calibration as cal
 from researcher_profiles.store import FilesystemProfileStore, ProfileNotFoundError
 from researcher_profiles.utils.paths import cache_dir
 
-from .factories import write_papers, write_profile
+from .factories import tei_answer, write_papers, write_profile
 
 # --------------------------------------------------------------------------
 # The roster the analytics compute over
@@ -715,6 +715,120 @@ class TestSqlStoreInvalidation:
 
 
 # --------------------------------------------------------------------------
+# /match with a remote (tei:) query encoder over fastembed vectors
+# --------------------------------------------------------------------------
+
+_FASTEMBED_LABEL = "fastembed:all-MiniLM-L6-v2"
+_TEI_QUERY = "chromatin accessibility and region set enrichment"
+
+
+def _fastembed_indexed(root: Path, *, ingest_into=None) -> list[str]:
+    """Two profiles indexed under the fastembed label with 384-d vectors; their slugs.
+
+    ``ingest_into`` (a SQL store) also gets each one ``put``, which shreds the
+    index into vector rows. Built with every backend lookup patched, so no
+    ``tei:`` request is made.
+    """
+    from researcher_profiles import ResearcherProfile
+    from researcher_profiles.embeddings.cache import SqliteEmbeddingIndex
+
+    from .factories import FakeBackend, build_profile_dir, patch_embedding_backends
+
+    encoder = FakeBackend(name=_FASTEMBED_LABEL, dim=384)
+    slugs = {"ada-lovelace": "0000-0001-2345-6789", "grace-hopper": "0000-0002-1825-0097"}
+    with pytest.MonkeyPatch.context() as mp:
+        patch_embedding_backends(mp, encoder)
+        for slug, rid in slugs.items():
+            d = build_profile_dir(root / slug, name=slug.replace("-", " ").title(), rid=rid)
+            SqliteEmbeddingIndex(d).build_index(backend=encoder)
+            if ingest_into is not None:
+                ingest_into.put(ResearcherProfile.from_files(d))
+    return list(slugs)
+
+
+class TestMatchWithTeiEncoder:
+    """``tei:`` over ``fastembed:`` vectors on the SQL store: one embed per ``/match``,
+    labels unchanged by a re-index, and an outage is a 503."""
+
+    @pytest.fixture
+    def tei_store(self, tmp_path, monkeypatch, tei_server, empty_sql_store):
+        from .factories import use_tei_env
+
+        slugs = _fastembed_indexed(tmp_path / "profiles", ingest_into=empty_sql_store)
+        use_tei_env(monkeypatch)
+        return empty_sql_store, slugs
+
+    @staticmethod
+    def _labels(store) -> set[str]:
+        from sqlmodel import select
+
+        from researcher_profiles.store.db import ChunkVectorRow, ProfileVectorRow
+
+        with store.session() as s:
+            rows = [*s.exec(select(ChunkVectorRow)), *s.exec(select(ProfileVectorRow))]
+        return {r.backend_spec for r in rows}
+
+    def _match(self, client):
+        # Not include_chunks: on the SQL store that 500s (FlatHit has no text),
+        # a separate, older bug. The chunk evidence is checked in Python.
+        return client.post("/api/v1/match", json={"query": _TEI_QUERY})
+
+    def test_match_embeds_the_query_once(self, tei_store, tei_server, make_api_client):
+        store, _slugs = tei_store
+        r = self._match(make_api_client(store))
+        assert r.status_code == 200, r.text
+        assert len(r.json()["matches"]) == 2
+        assert tei_server.routes() == ["info", "embed"]
+        assert tei_server.requests[-1].inputs == [_TEI_QUERY]
+
+        ranked = store.match.rank(_TEI_QUERY, k=2, normalize=False, diversify=False)
+        assert ranked[0].evidence.top_chunks, "the chunk re-rank did not run"
+        assert tei_server.routes() == ["info", "embed", "embed"]
+
+    def test_a_tei_reindex_keeps_the_fastembed_label(self, tei_store, tei_server, make_api_client):
+        store, slugs = tei_store
+        assert self._labels(store) == {_FASTEMBED_LABEL}
+        assert store.refresh_vectors(slugs[0]) is True
+        assert self._labels(store) == {_FASTEMBED_LABEL}
+        assert store.backend_spec == _FASTEMBED_LABEL
+        batches = [len(r.inputs) for r in tei_server.requests if r.route == "embed"]
+        assert batches and max(batches) <= 64
+
+        client = make_api_client(store)
+        r = self._match(client)
+        assert r.status_code == 200, r.text
+        assert {m["slug"] for m in r.json()["matches"]} == set(slugs)
+        for slug in slugs:
+            r = client.post(f"/api/v1/profiles/{slug}/search", json={"query": _TEI_QUERY})
+            assert r.status_code == 200, r.text
+            assert r.json()["hits"]
+
+    @pytest.mark.parametrize(
+        "answer", [tei_answer(503), "ConnectError"], ids=["503", "connect-error"]
+    )
+    def test_an_outage_is_a_503_not_a_500(self, tei_store, tei_server, make_api_client, answer):
+        import httpx
+
+        from researcher_profiles.api._semantic import NOTE_NO_ENCODER
+
+        store, slugs = tei_store
+        failure = getattr(httpx, answer) if isinstance(answer, str) else answer
+        tei_server.info_answer = tei_server.embed_default = failure
+        before = self._labels(store), store.vector_index(slugs[0]).vectors.copy()
+
+        client = make_api_client(store)
+        r = self._match(client)
+        assert r.status_code == 503, r.text
+        assert r.json()["detail"] == "matching unavailable: the query encoder is not available"
+        r = client.post(f"/api/v1/profiles/{slugs[0]}/search", json={"query": _TEI_QUERY})
+        assert (r.status_code, r.json()["detail"]) == (503, NOTE_NO_ENCODER)
+
+        assert store.refresh_vectors(slugs[0]) is False
+        after = self._labels(store), store.vector_index(slugs[0]).vectors
+        assert after[0] == before[0] and np.array_equal(after[1], before[1])
+
+
+# --------------------------------------------------------------------------
 # Score calibration
 # --------------------------------------------------------------------------
 
@@ -775,3 +889,18 @@ class TestCalibration:
             (meta / "calibration.json").write_text(json.dumps(payload), encoding="utf-8")
         loaded = cal.load_calibration(_FakeProfile(tmp_path))
         assert (loaded and loaded["mean"]) == mean
+
+    def test_an_encoder_outage_writes_no_calibration(self, tmp_path, monkeypatch, tei_server):
+        """Zeros scored during an outage would be cached until the scorer version changes."""
+        from researcher_profiles import ResearcherProfile
+        from researcher_profiles.embeddings import EmbeddingBackendUnavailableError
+
+        from .factories import use_tei_env
+
+        slug = _fastembed_indexed(tmp_path)[0]
+        use_tei_env(monkeypatch)
+        tei_server.info_answer = tei_answer(503)
+        prof = ResearcherProfile.from_files(tmp_path / slug)
+        with pytest.raises(EmbeddingBackendUnavailableError):
+            cal.compute_calibration(prof)
+        assert not (cache_dir(tmp_path / slug) / "calibration.json").exists()

@@ -36,6 +36,7 @@ from ..utils.paths import cache_dir
 if TYPE_CHECKING:  # pragma: no cover
     from .backends import EmbeddingBackend
 from ._sqlite import connect_vec, ensure_schema, read_index_meta, serialize_vec, write_index_meta
+from .backends import encoder_for, same_space
 from .profile_vec import blend_centroid
 
 logger = logging.getLogger(__name__)
@@ -509,29 +510,34 @@ class FlatEmbeddingIndex:
         return mat / norms
 
     def search(self, query: str, k: int = 5) -> list[FlatHit]:
-        """Embed ``query`` with this index's own backend, then search."""
+        """Embed ``query`` with the encoder this process uses for the index's space, then search."""
         return self.search_text(query, self.backend, k=k)
 
     @property
     def backend(self) -> "EmbeddingBackend":
-        """The backend this index's vectors came out of, constructed on demand."""
-        if self._backend is None:
-            from .backends import get_backend
+        """The encoder for this index's space, constructed on demand (:func:`~.backends.encoder_for`).
 
-            self._backend = get_backend(self.backend_spec)
+        ``RESEARCHER_PROFILES_EMBEDDING_BACKEND`` wins when it is in the same
+        space as ``backend_spec`` (a ``tei:`` encoder over ``fastembed:``
+        vectors); otherwise the backend the stored label names.
+        """
+        if self._backend is None:
+            self._backend = encoder_for(self.backend_spec)
         return self._backend
 
     def search_text(self, query: str, backend, k: int = 5) -> list[FlatHit]:
         """Embed ``query`` with an explicitly given ``backend`` then search.
 
-        Refuses when ``backend.name != backend_spec``. Cosine similarity across
+        Refuses unless ``backend.name`` is in the same space as ``backend_spec``
+        (:func:`~.backends.same_space`: equal, or the same weights under
+        ``st:``, ``fastembed:`` or ``tei:``). Cosine similarity across
         embedding models is meaningless (spec section 7).
         """
-        if getattr(backend, "name", None) != self.backend_spec:
+        name = getattr(backend, "name", None)
+        if not same_space(name, self.backend_spec):
             raise ValueError(
-                f"backend {getattr(backend, 'name', None)!r} does not match "
-                f"index backend_spec {self.backend_spec!r}; refusing cross-model "
-                "similarity"
+                f"backend {name!r} is not in the vector space of index backend_spec "
+                f"{self.backend_spec!r}; refusing cross-model similarity"
             )
         if not query or not query.strip():
             return []

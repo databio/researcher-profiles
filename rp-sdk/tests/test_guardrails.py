@@ -292,6 +292,59 @@ _MATCH_PATH_WITHOUT_SKLEARN = (
     "assert 'scipy' not in sys.modules, 'scipy was imported by the match path'\n"
 )
 
+# In tei: mode (prosopia and winnow on a small host) no local model library may load, whatever
+# is installed for rollback: the query, a flat index labelled fastembed:, and the API's
+# encoder all go to the TEI server. The transport is an inline httpx.MockTransport.
+_TEI_MODE_IS_REMOTE_ONLY = (
+    "import hashlib, json, os, sys\n"
+    "import httpx\n"
+    "import numpy as np\n"
+    "os.environ['RESEARCHER_PROFILES_EMBEDDING_BACKEND'] = 'tei:all-MiniLM-L6-v2'\n"
+    "os.environ['RESEARCHER_PROFILES_EMBEDDING_DENSE_URL'] = 'https://embed.test/tei/all-MiniLM-L6-v2'\n"
+    "from researcher_profiles.api import _semantic\n"
+    "from researcher_profiles.embeddings import backends\n"
+    "from researcher_profiles.embeddings.flat import FlatEmbeddingIndex\n"
+    "INFO = {'model_id': 'sentence-transformers/all-MiniLM-L6-v2', 'model_dtype': 'float32',\n"
+    "        'served_model_name': 'all-MiniLM-L6-v2', 'max_input_length': 256,\n"
+    "        'model_type': {'embedding': {'pooling': 'mean'}}, 'max_client_batch_size': 64}\n"
+    "def vec(text):\n"
+    "    v = [0.0] * 384\n"
+    "    v[len(text) % 384] = 1.0\n"
+    "    return v\n"
+    "def handle(request):\n"
+    "    if request.url.path.endswith('/info'):\n"
+    "        return httpx.Response(200, json=INFO)\n"
+    "    return httpx.Response(200, json=[vec(t) for t in json.loads(request.content)['inputs']])\n"
+    "backends._TEI_TRANSPORT = httpx.MockTransport(handle)\n"
+    "assert len(backends.get_backend('tei:all-MiniLM-L6-v2').embed(['q'])[0]) == 384\n"
+    "vecs = np.asarray([vec('q'), vec('ab')], dtype='<f4')\n"
+    "blob = vecs.tobytes()\n"
+    "index = {'backend_spec': 'fastembed:all-MiniLM-L6-v2', 'file': 'f.bin', 'dtype': 'float32',\n"
+    "         'byte_order': 'little', 'dim': 384, 'count': 2, 'layout': 'row_major',\n"
+    "         'normalized': False, 'metric': 'cosine', 'row_key': 'chunk_index',\n"
+    "         'rows': [0, 1], 'sha256': hashlib.sha256(blob).hexdigest()}\n"
+    "chunks = [{'source_type': 'paper_summary', 'source_id': f'p{i}', 'chunk_index': 0}\n"
+    "          for i in range(2)]\n"
+    "idx = FlatEmbeddingIndex.from_bytes(json.dumps(index).encode(), blob, json.dumps(chunks).encode())\n"
+    "assert idx.search('q', k=1)[0].source_id == 'p0'\n"
+    "class Store:\n"
+    "    backend_spec = 'fastembed:all-MiniLM-L6-v2'\n"
+    "qvec, name, note = _semantic.encode(Store(), 'q')\n"
+    "assert qvec is not None, note  # encode swallows failures, so check it answered\n"
+    + _RESTORE_IMPORT
+    + "loaded = {'fastembed', 'onnxruntime', 'torch', 'sentence_transformers', 'transformers'}\n"
+    "loaded &= {m.split('.')[0] for m in sys.modules}\n"
+    "assert not loaded, f'tei mode imported {sorted(loaded)}'\n"
+)
+
+# httpx is the [tei] extra's only addition: naming a local backend must not import it.
+_LOCAL_SPEC_WITHOUT_HTTPX = (
+    "import sys\n"
+    "import researcher_profiles.embeddings.backends as backends\n"
+    "backends.get_backend('fastembed:all-MiniLM-L6-v2')\n"
+    "assert 'httpx' not in sys.modules, 'httpx was imported for a fastembed spec'\n"
+)
+
 _VECTOR_MODS = {"numpy", "sqlite_vec"}
 
 FRESH_INTERPRETER_CASES = [
@@ -317,6 +370,15 @@ FRESH_INTERPRETER_CASES = [
         id="sql-store-without-vector-extras",
     ),
     pytest.param(_MATCH_PATH_WITHOUT_SKLEARN, id="match-path-without-sklearn"),
+    pytest.param(
+        _guard(
+            {"fastembed", "onnxruntime", "torch", "sentence_transformers", "transformers"},
+            "tei mode",
+        )
+        + _TEI_MODE_IS_REMOTE_ONLY,
+        id="tei-mode-loads-no-local-model",
+    ),
+    pytest.param(_LOCAL_SPEC_WITHOUT_HTTPX, id="local-spec-without-httpx"),
 ]
 
 

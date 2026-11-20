@@ -15,7 +15,7 @@ import numpy as np
 from pydantic import ValidationError
 
 from ..embeddings._sqlite import IndexNotBuiltError
-from ..embeddings.backends import MissingEmbeddingBackendError
+from ..embeddings.backends import MissingEmbeddingBackendError, same_space
 from ..embeddings.chunking import PAPER_CHUNK_TYPES, RANK_ONLY_SOURCE_TYPES
 from ..errors import CapabilityUnavailableError, ProfileError
 from ..generative.calibration import ensure_calibration, normalize_score
@@ -269,7 +269,7 @@ class MatchManager:
     ) -> Match:
         """Score one surviving profile and gather the evidence behind that score."""
         try:
-            hits = self._visible_top_hits(prof, text, topk_chunks, viewer)
+            hits = self._visible_top_hits(prof, text, qvec, topk_chunks, viewer)
         except (IndexNotBuiltError, MissingEmbeddingBackendError):
             # No vectors: no chunk evidence, centroid score only.
             hits = []
@@ -296,6 +296,7 @@ class MatchManager:
         self,
         prof: ResearcherProfile,
         text: str,
+        qvec,
         k: int,
         viewer: Callable[[ResearcherProfile], ViewerTier] | None,
     ) -> list:
@@ -305,13 +306,26 @@ class MatchManager:
         out, so hidden chunks never displace visible ones from the top ``k``.
         Rank-only chunks (interest seed papers) are never evidence: they are
         not the researcher's own work.
+
+        ``qvec`` is the query vector :meth:`rank` already embedded. An index
+        that searches by vector (the SQL and HTTP stores) reuses it when it is
+        in the same space and size, so a ``/match`` embeds its query once
+        instead of once per candidate; any other index embeds ``text`` itself.
         """
         index = self._store.vector_index(prof.slug)
+        encoder = getattr(self._store.centroids.backend, "name", None)
+        by_vector = (
+            hasattr(index, "search_vector")
+            and same_space(encoder, index.backend_spec)
+            and int(qvec.shape[0]) == int(index.dim)
+        )
         tier = viewer(prof) if viewer is not None else None
         md = getattr(prof, "metadata", None)
         fetch = max(k, 1)
         while True:
-            hits = list(index.search(text, k=fetch))
+            hits = list(
+                index.search_vector(qvec, k=fetch) if by_vector else index.search(text, k=fetch)
+            )
             visible = [h for h in hits if h.source_type not in RANK_ONLY_SOURCE_TYPES]
             if tier is not None:
                 tiers = chunk_source_tiers(md, {(h.source_type, h.source_id) for h in visible})

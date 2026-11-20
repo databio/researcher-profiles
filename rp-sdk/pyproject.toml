@@ -51,8 +51,9 @@ dependencies = [
 #   pip install torch --index-url https://download.pytorch.org/whl/cpu
 #   pip install -e "./rp-sdk[api,vectors,st]"
 #
-# A deployment that embeds remotely instead installs [api,vectors,openai]
-# (or [...,voyage]) and never touches torch. A CPU-only deployment that wants
+# A deployment that embeds remotely instead installs [api,vectors,tei] (a TEI
+# server such as Embed API), or [api,vectors,openai] (or [...,voyage]), and
+# never touches torch. A CPU-only deployment that wants
 # a local encoder without torch installs [api,vectors,fastembed] instead of
 # [...,st] with the same weights and no CUDA libraries. Index vectors are
 # tied to the backend that built them; switching encoders means reindexing.
@@ -80,6 +81,14 @@ st = [
 fastembed = [
     "researcher-profiles[vectors]",
     "fastembed>=0.7.4",
+]
+# Remote encoder over the Hugging Face TEI API: one base URL per model, e.g.
+# https://embed.databio.org/tei/all-MiniLM-L6-v2. Embed API runs fastembed with
+# the same model files, so its vectors are stored as fastembed:<model>.
+# Never imports torch, onnxruntime or fastembed.
+tei = [
+    "researcher-profiles[vectors]",
+    "httpx>=0.27",
 ]
 # HTTP client tier: RemoteResearcherProfile and remote rank_against.
 client = [
@@ -130,11 +139,12 @@ signing = [
 # `sql` is in here so the suite exercises the profile store on SQLite by
 # default, with no find_spec() skip guards. `topics` is in here for the same
 # reason: the match/rank tests cluster expertise via scikit-learn, and without
-# it they fail at collection rather than skip.
+# it they fail at collection rather than skip. `tei` is in here so the TEI
+# backend tests run against the supported install.
 # `jsonschema` is a test-only dependency: nothing under src/ imports it, but
 # the schema and spec-doc tests validate documents with it.
 dev = [
-    "researcher-profiles[api,vectors,client,signing,sql,topics]",
+    "researcher-profiles[api,vectors,client,tei,signing,sql,topics]",
     "jsonschema>=4.21",
     "pytest",
     "pytest-cov",
