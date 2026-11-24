@@ -258,7 +258,7 @@ class ResearcherProfile:
         ``engine_or_url`` is a SQLAlchemy ``Engine`` or a connection URL; ``ref``
         is a rid or a slug (rid wins, as everywhere)::
 
-            prof = ResearcherProfile.from_db("postgresql://…/rp", "jane-doe")
+            prof = ResearcherProfile.from_db("postgresql+psycopg://…/rp", "jane-doe")
         """
         from ..store.sql import SqlProfileStore
 

@@ -72,7 +72,7 @@ def create_app(
         create_app(FilesystemProfileStore("~/researcher-profiles"))
 
         from researcher_profiles.store.sql import SqlProfileStore   # [sql]
-        create_app(SqlProfileStore("postgresql://user@host/db"))
+        create_app(SqlProfileStore("postgresql+psycopg://user@host/db"))
 
     Every read resolves a viewer tier through
     ``app.state.hooks.viewer_resolver`` and projects its response. See

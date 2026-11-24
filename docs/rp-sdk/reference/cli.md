@@ -366,15 +366,15 @@ with no URL exits `2` (invalid usage). Every command prints which database it
 acted on.
 
 ```console
-$ export RESEARCHER_PROFILES_DATABASE_URL="postgresql://user@host/db"
+$ export RESEARCHER_PROFILES_DATABASE_URL="postgresql+psycopg://user@host/db"
 $ rp db init
-created the rp_* tables on postgresql://user@host/db
+created the rp_* tables on postgresql+psycopg://user@host/db
 $ rp db push --all
 jane-doe                 0000-0002-1825-0097
 john-smith               0000-0004-4600-113X
-pushed 2 profile(s) to postgresql://user@host/db
+pushed 2 profile(s) to postgresql+psycopg://user@host/db
 $ rp db pull jane-doe --to ./pulled
-pulled jane-doe (0000-0002-1825-0097) from postgresql://user@host/db -> pulled
+pulled jane-doe (0000-0002-1825-0097) from postgresql+psycopg://user@host/db -> pulled
 ```
 
 Exit `2` when a reference matches nothing in the store or when no database URL

@@ -114,6 +114,6 @@ def resolve_database_url(explicit: str | None = None) -> str:
     raise DatabaseUrlNotConfigured(
         "no profile-store database URL is configured. Supply one, highest "
         "precedence first:\n"
-        "  1. --database-url postgresql://user@host/db\n"
+        "  1. --database-url postgresql+psycopg://user@host/db\n"
         f"  2. ${DATABASE_URL_ENV_VAR}"
     )

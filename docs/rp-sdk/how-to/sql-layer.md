@@ -78,7 +78,7 @@ free as `rm -rf .build/`: every profile still loads after it.
 ```python
 from researcher_profiles import SqlProfileStore
 
-store = SqlProfileStore("postgresql://user@host/db")
+store = SqlProfileStore("postgresql+psycopg://user@host/db")
 store.create_all()
 ```
 
@@ -90,7 +90,7 @@ evolution is the deployer's responsibility; this package ships no migrations.
 ```python
 from researcher_profiles import ResearcherProfile, SqlProfileStore
 
-store = SqlProfileStore("postgresql://user@host/db")
+store = SqlProfileStore("postgresql+psycopg://user@host/db")
 rid = store.put(ResearcherProfile.from_files("path/to/jane-doe"))
 ```
 
@@ -110,7 +110,7 @@ uses.
 
 ```python
 prof = store.get("jane-doe")  # a rid or a slug; rid wins
-prof = ResearcherProfile.from_db("postgresql://user@host/db", "jane-doe")
+prof = ResearcherProfile.from_db("postgresql+psycopg://user@host/db", "jane-doe")
 
 prof.name, prof.level, prof.papers, prof.soul, prof.summaries["doe2019methods"]
 ```
@@ -201,7 +201,7 @@ does too).
 from researcher_profiles.api.app import create_app
 from researcher_profiles.store.sql import SqlProfileStore
 
-app = create_app(SqlProfileStore("postgresql://user@host/db"), token="...")
+app = create_app(SqlProfileStore("postgresql+psycopg://user@host/db"), token="...")
 ```
 
 or from the shell, `python -m researcher_profiles.api --database-url ...` (also
@@ -237,7 +237,7 @@ there.
 ## From the command line
 
 ```bash
-export RESEARCHER_PROFILES_DATABASE_URL="postgresql://user@host/db"
+export RESEARCHER_PROFILES_DATABASE_URL="postgresql+psycopg://user@host/db"
 
 rp db init                                # create the rp_* tables
 rp db push --all                          # load every profile in the cache

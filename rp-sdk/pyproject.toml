@@ -103,10 +103,11 @@ sql = [
 # the test suite runs the store on, and it is enough for everything except
 # type portability and NULL-in-unique-constraint semantics: the
 # RESEARCHER_PROFILES_TEST_DATABASE_URL integration test in tests/integration/ catches those.
-# `psycopg2-binary` is the driver the integration test assumes.
+# The driver is psycopg 3, so Postgres URLs start `postgresql+psycopg://`
+# (a bare `postgresql://` makes SQLAlchemy look for psycopg2).
 postgres = [
     "researcher-profiles[sql]",
-    "psycopg2-binary",
+    "psycopg>=3.3,<4",
 ]
 # KMeans clustering: store.match.cluster() and topics.py only. It is not
 # part of the server tiers: the match/search path never clusters, and

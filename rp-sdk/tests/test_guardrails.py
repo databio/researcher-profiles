@@ -189,7 +189,7 @@ _NO_SQLALCHEMY = (
     "from researcher_profiles.store import ProfileStore, FilesystemProfileStore\n"
     "from researcher_profiles.cli import build_parser\n"
     "build_parser(load_plugins=False)\n"
-    "heavy = {'sqlalchemy', 'sqlmodel', 'psycopg2'} & {m.split('.')[0] for m in sys.modules}\n"
+    "heavy = {'sqlalchemy', 'sqlmodel', 'psycopg', 'psycopg2'} & {m.split('.')[0] for m in sys.modules}\n"
     "assert not heavy, f'eagerly imported: {sorted(heavy)}'\n"
     "assert callable(ResearcherProfile.from_db), 'from_db must exist without the import'\n"
     "assert 'sqlalchemy' not in sys.modules, 'naming from_db pulled sqlalchemy'\n"

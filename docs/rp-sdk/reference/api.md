@@ -65,7 +65,7 @@ app = create_app(FilesystemProfileStore("/path/to/profiles"), token="...")
 ```python
 from researcher_profiles.store.sql import SqlProfileStore  # [sql]
 
-app = create_app(SqlProfileStore("postgresql://user@host/db"))
+app = create_app(SqlProfileStore("postgresql+psycopg://user@host/db"))
 ```
 
 ### Environment variables

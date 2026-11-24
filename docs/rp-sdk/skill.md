@@ -143,7 +143,7 @@ documents next, paper summaries on demand. Most questions are then answered from
 ## Store profiles in a database
 
 ```bash
-export RESEARCHER_PROFILES_DATABASE_URL="postgresql://user@host/db"
+export RESEARCHER_PROFILES_DATABASE_URL="postgresql+psycopg://user@host/db"
 rp db init
 rp db push --all --include-binary     # --include-binary carries the search index
 rp db list
