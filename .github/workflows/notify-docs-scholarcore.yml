@@ -1,7 +1,7 @@
-name: Notify village docs (scholarcore)
+name: Notify databio docs (scholarcore)
 
 # scholarcore ships from this monorepo but is its own spoke of
-# village.databio.org, mounted at /scholarcore/, so it gets its own notifier
+# docs.databio.org, mounted at /scholarcore/, so it gets its own notifier
 # with its own path filter. A change under docs/ must not claim scholarcore
 # changed, and vice versa.
 
@@ -17,7 +17,7 @@ jobs:
   notify:
     uses: databio/actions/.github/workflows/notify-doc-hub.yml@master
     with:
-      site: village
+      site: databio
       spoke: scholarcore
     secrets:
       DOCS_DISPATCH_TOKEN: ${{ secrets.DOCS_DISPATCH_TOKEN }}

@@ -1,6 +1,6 @@
-name: Notify village docs (researcher-profiles)
+name: Notify databio docs (researcher-profiles)
 
-# The researcher-profiles spoke of village.databio.org is this repo's docs/
+# The researcher-profiles spoke of docs.databio.org is this repo's docs/
 # tree. This repo hosts a SECOND spoke, scholarcore, with its own notifier in
 # notify-docs-scholarcore.yml — hence the per-spoke filenames.
 #
@@ -22,7 +22,7 @@ jobs:
   notify:
     uses: databio/actions/.github/workflows/notify-doc-hub.yml@master
     with:
-      site: village
+      site: databio
       spoke: researcher-profiles
     secrets:
       DOCS_DISPATCH_TOKEN: ${{ secrets.DOCS_DISPATCH_TOKEN }}
